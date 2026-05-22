@@ -21,18 +21,9 @@ export class SqliteStore {
     }
 
     try {
-      const wasmPath = path.join(
-        this.extensionPath,
-        'node_modules',
-        'sql.js',
-        'dist',
-        'sql-wasm.wasm'
-      );
-
-      // Initialize the sql.js engine with the local wasm file
-      this.SQL = await initSqlJs({
-        locateFile: () => wasmPath,
-      });
+      // 在 Node.js 环境下，可以直接无需任何参数地初始化 sql.js
+      // 它会自动加载其同包目录下的 sql-wasm.wasm，避免绝对路径跨平台或解包导致定位失败的问题
+      this.SQL = await initSqlJs();
 
       if (fs.existsSync(this.dbFilePath)) {
         const fileBuffer = fs.readFileSync(this.dbFilePath);

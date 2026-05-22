@@ -366,10 +366,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Solopreneur Roadmap</title>
-  <!-- Load Inter Font -->
+  <!-- Load Inter & Outfit Fonts Asynchronously (Prevent network blocks on slow connections) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" media="print" onload="this.media='all'">
+  <noscript>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+  </noscript>
   
   <style>
     :root {
@@ -386,7 +389,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     body {
       margin: 0;
       padding: 0;
-      font-family: 'Inter', sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
       background: var(--vscode-editor-background, var(--bg-dark));
       color: var(--text-main);
       overflow-x: hidden;
