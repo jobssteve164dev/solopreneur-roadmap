@@ -156,3 +156,26 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.equal(elements['settings-panel'].style.display, 'flex');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
 });
+
+test('agent command builder uses Codex exec and preserves Antigravity run path', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__buildAgentCommand = buildAgentCommand;',
+      'module.exports.__shellQuote = shellQuote;'
+    ].join('\n')
+  );
+
+  assert.equal(
+    extensionModule.__buildAgentCommand('codex', 'Ship the MVP', '/workspace/app'),
+    "'codex' exec -C '/workspace/app' 'Ship the MVP'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommand('codex-cli', "Don't skip tests", '/workspace/app'),
+    "'codex-cli' exec -C '/workspace/app' 'Don'\\''t skip tests'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
+    "'antigravity-cli' run --task 'Build landing page'"
+  );
+});

@@ -6,4 +6,6 @@ tsconfig.json
 src/
 .github/
 docs/
+test/
+PROJECT_MEMORY.md
 scratch_test_sql.js

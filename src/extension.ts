@@ -252,6 +252,22 @@ function sendNodesToWebview() {
   }
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedPrompt = shellQuote(agentPrompt);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+  }
+
+  return `${quotedCli} run --task ${quotedPrompt}`;
+}
+
 /**
  * Executes a CLI agent in the integrated terminal.
  */
@@ -265,6 +281,12 @@ async function handleRunAgent(nodeId: string) {
 
   if (!node) {
     vscode.window.showErrorMessage(`Node ${nodeId} not found`);
+    return;
+  }
+
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!workspaceRoot) {
+    vscode.window.showErrorMessage('Please open a workspace/folder before running an Agent task.');
     return;
   }
 
@@ -288,6 +310,7 @@ async function handleRunAgent(nodeId: string) {
     terminal = vscode.window.createTerminal({
       name: 'Solopreneur Agent Console',
       iconPath: new vscode.ThemeIcon('robot'),
+      cwd: workspaceRoot,
     });
   }
 
@@ -295,17 +318,20 @@ async function handleRunAgent(nodeId: string) {
 
   // Build Sentinel Injection JSON
   // When command finishes, it writes execution status and node ID to `.agent_status.json` in the workspace root
-  const statusFile = '.agent_status.json';
-  
+  const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
+
   // Command execution with sentinel file generation on success or fail
-  // We use standard bash chain operators (command && echo success || echo failed)
-  const escapedPrompt = node.agentPrompt.replace(/"/g, '\\"');
-  const agentCommand = `${agentCli} run --task "${escapedPrompt}"`;
-  
-  const finalCommand = `echo '{"nodeId": "${nodeId}", "status": "Running", "command": "${agentCli}"}' > ${statusFile} && ` +
-    `(${agentCommand}) && ` +
-    `echo '{"nodeId": "${nodeId}", "status": "Completed", "command": "${agentCli}"}' > ${statusFile} || ` +
-    `echo '{"nodeId": "${nodeId}", "status": "Failed", "command": "${agentCli}"}' > ${statusFile}`;
+  const agentCommand = buildAgentCommand(agentCli, node.agentPrompt, workspaceRoot);
+  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli });
+  const completedStatus = JSON.stringify({ nodeId, status: 'Completed', command: agentCli });
+  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli });
+  const quotedStatusFile = shellQuote(statusFilePath);
+
+  const finalCommand = `printf %s ${shellQuote(runningStatus)} > ${quotedStatusFile} && ` +
+    `(${agentCommand}); status=$?; ` +
+    `if [ $status -eq 0 ]; then ` +
+    `printf %s ${shellQuote(completedStatus)} > ${quotedStatusFile}; ` +
+    `else printf %s ${shellQuote(failedStatus)} > ${quotedStatusFile}; fi`;
 
   // Log command launch to database
   syncEngine.logAgentExecution(
