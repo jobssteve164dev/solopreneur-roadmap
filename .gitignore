@@ -3,6 +3,7 @@ out/
 .env
 .env.local
 .solopreneur/
+.agent_status.json
 *.vsix
 *.log
 .DS_Store
