@@ -1,15 +1,21 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
 import { SyncEngine } from './db/syncEngine';
 import { RoadmapNode } from './db/types';
+import { SolopreneurSidebarProvider } from './sidebarProvider';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
 let watcher: vscode.FileSystemWatcher | null = null;
+let sidebarProvider: SolopreneurSidebarProvider | null = null;
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Solopreneur Roadmaps extension is now active!');
+
+  // Try early initialization if workspace is open
+  await ensureSyncEngine(context);
 
   // Register command to show roadmap webview
   const showRoadmapDisposable = vscode.commands.registerCommand(
@@ -19,20 +25,76 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(showRoadmapDisposable);
+
+  // Register settings saved broadcast command to keep Sidebar and Webview synced
+  const settingsSavedDisposable = vscode.commands.registerCommand(
+    'solopreneur.settingsSavedBroadcast',
+    () => {
+      if (sidebarProvider) {
+        sidebarProvider.sendSettings();
+      }
+      if (activePanel) {
+        const config = vscode.workspace.getConfiguration('solopreneur');
+        activePanel.webview.postMessage({
+          command: 'settingsLoaded',
+          settings: {
+            apiProvider: config.get('apiProvider') || 'Gemini',
+            apiKey: config.get('apiKey') || '',
+            cliPath: config.get('cliPath') || 'antigravity-cli'
+          }
+        });
+      }
+    }
+  );
+  context.subscriptions.push(settingsSavedDisposable);
+
+  // Setup wrapper for SyncEngine to allow safe initialization later
+  const syncEngineWrapper = {
+    getNodes: () => {
+      return syncEngine ? syncEngine.getNodes() : [];
+    }
+  } as any;
+
+  // Register Sidebar Webview View Provider
+  sidebarProvider = new SolopreneurSidebarProvider(
+    context.extensionUri,
+    syncEngineWrapper,
+    async (nodeId) => {
+      const ready = await ensureSyncEngine(context);
+      if (ready) {
+        await handleRunAgent(nodeId);
+      }
+    },
+    async (prompt) => {
+      const ready = await ensureSyncEngine(context);
+      if (ready) {
+        await handleGenerateRoadmap(prompt);
+      }
+    }
+  );
+
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      SolopreneurSidebarProvider.viewType,
+      sidebarProvider
+    )
+  );
 }
 
-async function openRoadmapPanel(context: vscode.ExtensionContext) {
-  // Check if workspace is open
+/**
+ * Ensures the sync engine is initialized if a workspace is open.
+ */
+async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boolean> {
+  if (syncEngine) {
+    return true;
+  }
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders) {
-    vscode.window.showErrorMessage('Please open a workspace/folder before launching the Roadmap!');
-    return;
+    return false;
   }
-
   const workspaceRoot = workspaceFolders[0].uri.fsPath;
   const solopreneurDir = path.join(workspaceRoot, '.solopreneur');
 
-  // Create .solopreneur data directory if it doesn't exist
   if (!fs.existsSync(solopreneurDir)) {
     fs.mkdirSync(solopreneurDir, { recursive: true });
   }
@@ -40,17 +102,29 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
 
-  // Initialize Sync Engine
-  if (!syncEngine) {
-    syncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
-  }
-
+  syncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
   try {
     await syncEngine.initAndSync();
+    setupFileSentinelWatcher(workspaceRoot);
+    // Refresh sidebar when successfully initialized
+    if (sidebarProvider) {
+      sidebarProvider.sendNodesToWebview();
+    }
+    return true;
   } catch (error) {
     vscode.window.showErrorMessage(`Failed to initialize Roadmap database: ${error}`);
+    return false;
+  }
+}
+
+async function openRoadmapPanel(context: vscode.ExtensionContext) {
+  const initialized = await ensureSyncEngine(context);
+  if (!initialized) {
+    vscode.window.showErrorMessage('Please open a workspace/folder before launching the Roadmap!');
     return;
   }
+
+  const workspaceRoot = vscode.workspace.workspaceFolders![0].uri.fsPath;
 
   // If panel already exists, reveal it
   if (activePanel) {
@@ -95,6 +169,48 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
         case 'generateRoadmap':
           await handleGenerateRoadmap(message.prompt);
           break;
+
+        case 'getSettings':
+          if (activePanel) {
+            const config = vscode.workspace.getConfiguration('solopreneur');
+            activePanel.webview.postMessage({
+              command: 'settingsLoaded',
+              settings: {
+                apiProvider: config.get('apiProvider') || 'Gemini',
+                apiKey: config.get('apiKey') || '',
+                cliPath: config.get('cliPath') || 'antigravity-cli'
+              }
+            });
+          }
+          break;
+
+        case 'updateSettings':
+          const config = vscode.workspace.getConfiguration('solopreneur');
+          await config.update('apiProvider', message.apiProvider, vscode.ConfigurationTarget.Global);
+          await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
+          await config.update('cliPath', message.cliPath, vscode.ConfigurationTarget.Global);
+          vscode.window.showInformationMessage('Solopreneur settings saved successfully!');
+          // Broadcast to sync both Webviews
+          vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+          break;
+
+        case 'testCli':
+          const exec = require('child_process').exec;
+          exec(`${message.cliPath} --version`, (error: any, stdout: string, stderr: string) => {
+            const success = !error;
+            let msg = error ? error.message : (stdout.trim() || stderr.trim());
+            if (!success) {
+              msg = 'Command not found or failed';
+            }
+            if (activePanel) {
+              activePanel.webview.postMessage({
+                command: 'cliTestResult',
+                success,
+                message: msg
+              });
+            }
+          });
+          break;
       }
     },
     undefined,
@@ -122,12 +238,17 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
  * Sends current node and edge states back to the Webview frontend.
  */
 function sendNodesToWebview() {
-  if (activePanel && syncEngine) {
+  if (syncEngine) {
     const nodes = syncEngine.getNodes();
-    activePanel.webview.postMessage({
-      command: 'nodesUpdated',
-      nodes: nodes,
-    });
+    if (activePanel) {
+      activePanel.webview.postMessage({
+        command: 'nodesUpdated',
+        nodes: nodes,
+      });
+    }
+    if (sidebarProvider) {
+      sidebarProvider.sendNodesToWebview();
+    }
   }
 }
 
@@ -135,7 +256,7 @@ function sendNodesToWebview() {
  * Executes a CLI agent in the integrated terminal.
  */
 async function handleRunAgent(nodeId: string) {
-  if (!syncEngine || !activePanel) {
+  if (!syncEngine) {
     return;
   }
 
@@ -145,6 +266,16 @@ async function handleRunAgent(nodeId: string) {
   if (!node) {
     vscode.window.showErrorMessage(`Node ${nodeId} not found`);
     return;
+  }
+
+  // Resolve CLI path from config if applicable
+  const config = vscode.workspace.getConfiguration('solopreneur');
+  const configuredCliPath = config.get<string>('cliPath') || 'antigravity-cli';
+
+  // Use configured CLI path if the node specifies the default antigravity-cli/codex-cli
+  let agentCli = node.agentCli;
+  if (agentCli === 'antigravity-cli' || agentCli === 'codex-cli') {
+    agentCli = configuredCliPath;
   }
 
   // Update node status to Running
@@ -169,17 +300,17 @@ async function handleRunAgent(nodeId: string) {
   // Command execution with sentinel file generation on success or fail
   // We use standard bash chain operators (command && echo success || echo failed)
   const escapedPrompt = node.agentPrompt.replace(/"/g, '\\"');
-  const agentCommand = `${node.agentCli} run --task "${escapedPrompt}"`;
+  const agentCommand = `${agentCli} run --task "${escapedPrompt}"`;
   
-  const finalCommand = `echo '{"nodeId": "${nodeId}", "status": "Running", "command": "${node.agentCli}"}' > ${statusFile} && ` +
+  const finalCommand = `echo '{"nodeId": "${nodeId}", "status": "Running", "command": "${agentCli}"}' > ${statusFile} && ` +
     `(${agentCommand}) && ` +
-    `echo '{"nodeId": "${nodeId}", "status": "Completed", "command": "${node.agentCli}"}' > ${statusFile} || ` +
-    `echo '{"nodeId": "${nodeId}", "status": "Failed", "command": "${node.agentCli}"}' > ${statusFile}`;
+    `echo '{"nodeId": "${nodeId}", "status": "Completed", "command": "${agentCli}"}' > ${statusFile} || ` +
+    `echo '{"nodeId": "${nodeId}", "status": "Failed", "command": "${agentCli}"}' > ${statusFile}`;
 
   // Log command launch to database
   syncEngine.logAgentExecution(
     nodeId,
-    node.agentCli,
+    agentCli,
     agentCommand,
     'Launched command in integrated terminal',
     'Running'
@@ -221,7 +352,7 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
         return; // Ignored states
       }
 
-      if (syncEngine && activePanel) {
+      if (syncEngine) {
         // Update node status
         const completedAt = status === 'Completed' ? new Date().toISOString() : '';
         syncEngine.updateNode(nodeId, {
@@ -259,14 +390,105 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
 }
 
 /**
+ * Helper to make robust, zero-dependency https POST requests
+ */
+function httpsRequest(url: string, options: https.RequestOptions, postData?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const requestOptions: https.RequestOptions = {
+      hostname: parsedUrl.hostname,
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: options.method || 'GET',
+      headers: options.headers || {}
+    };
+
+    const req = https.request(requestOptions, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(data);
+        } else {
+          reject(new Error(`HTTP Error ${res.statusCode}: ${data}`));
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      reject(err);
+    });
+
+    if (postData) {
+      req.write(postData);
+    }
+    req.end();
+  });
+}
+
+function cleanAndParseJson(text: string): any {
+  let cleaned = text.trim();
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```[a-zA-Z0-9]*\n?/, '');
+    cleaned = cleaned.replace(/\n?```$/, '');
+  }
+  cleaned = cleaned.trim();
+  if (!cleaned.startsWith('[')) {
+    const match = cleaned.match(/\[\s*\{[\s\S]*\}\s*\]/);
+    if (match) {
+      cleaned = match[0];
+    }
+  }
+  return JSON.parse(cleaned);
+}
+
+/**
  * Handles AI Generation of the Roadmap using LLM API
  */
 async function handleGenerateRoadmap(prompt: string) {
-  if (!syncEngine || !activePanel) {
+  if (!syncEngine) {
     return;
   }
 
-  vscode.window.withProgress(
+  const config = vscode.workspace.getConfiguration('solopreneur');
+  const apiProvider = config.get<string>('apiProvider') || 'Gemini';
+  const apiKey = config.get<string>('apiKey') || '';
+  const cliPath = config.get<string>('cliPath') || 'antigravity-cli';
+
+  if (apiProvider !== 'VS Code Copilot (Native)' && !apiKey) {
+    vscode.window.showErrorMessage(`API Key is missing for ${apiProvider}. Please open settings (⚙️) and enter your API Key!`);
+    return;
+  }
+
+  const systemInstruction = `You are Solopreneur AI, a master software architect and product manager.
+Your task is to generate a visual software roadmap as a JSON array of tasks based on the user's project description.
+
+Return ONLY a valid JSON array of roadmap nodes. Do NOT wrap it in HTML, do NOT add any markdown formatting (like \`\`\`json), and do NOT include any introductory or concluding text. Your entire response must be a single parseable JSON array.
+
+Each node in the array must strictly conform to the following JSON structure:
+{
+  "id": "unique_string_number_e.g_1_2_3",
+  "title": "Short concise task title",
+  "description": "Clear explanation of what needs to be done",
+  "stage": "Business Planning" | "Brand & Setup" | "Product & MVP" | "Marketing & Growth",
+  "dependencies": "comma_separated_dependency_ids_or_empty_string",
+  "agentCli": "${cliPath}",
+  "agentPrompt": "The specific instruction prompt to send to the AI agent to execute this task"
+}
+
+Guidelines:
+1. Break down the project roadmap strictly into standard stages representing the 4 pillars of Cofounder-2:
+   - "Business Planning": Market analysis, competitive analysis, business vision definition, strategy roadmaps.
+   - "Brand & Setup": Visual brand VI, domain suggestions, LLC administrative incorporation paperwork, organizational charts.
+   - "Product & MVP": Project scaffolds, backend schemas, premium React frontend layouts, staging server deployments.
+   - "Marketing & Growth": outbound pipeline lead generation, SEO copy writing, client conversion tracking.
+2. Create a logical progression of 4 to 6 tasks.
+3. Make sure dependencies are correctly set. For example, "2" depends on "1", "3" depends on "2", etc.
+4. Set "agentCli" to the exact string: "${cliPath}".
+5. Create extremely descriptive "agentPrompt" prompts so that when the agent is executed, it has enough detail to build the subsystem correctly.`;
+
+  await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
       title: 'Generating your project roadmap with AI...',
@@ -274,81 +496,125 @@ async function handleGenerateRoadmap(prompt: string) {
     },
     async (progress) => {
       try {
-        // Simulating AI delay. In real production, this integrates with the VS Code LLM/Copilot API
-        // or direct Gemini API key endpoints. Let's build a mock generator that mimics a real LLM payload
-        await new Promise((resolve) => setTimeout(resolve, 3000));
+        let responseText = '';
 
-        const now = new Date().toISOString();
-        const customNodes: RoadmapNode[] = [
-          {
-            id: '1',
-            title: `Kickoff: ${prompt}`,
-            description: `Defining specifications and product requirements for ${prompt}.`,
-            stage: 'Ideation',
-            dependencies: '',
-            agentCli: 'antigravity-cli',
-            agentPrompt: `Generate specification document for: ${prompt}`,
-            status: 'Pending',
-            createdAt: now,
-            completedAt: '',
-          },
-          {
-            id: '2',
-            title: 'Technical Architecture & Setup',
-            description: 'Determine directory structure and initialize configuration.',
-            stage: 'Architecture',
-            dependencies: '1',
-            agentCli: 'antigravity-cli',
-            agentPrompt: `Setup standard configuration files and boilerplate folders for ${prompt}`,
-            status: 'Pending',
-            createdAt: now,
-            completedAt: '',
-          },
-          {
-            id: '3',
-            title: 'Core Business Service Layer',
-            description: 'Implement core classes and service modules.',
-            stage: 'Backend',
-            dependencies: '2',
-            agentCli: 'antigravity-cli',
-            agentPrompt: `Write core classes for: ${prompt}`,
-            status: 'Pending',
-            createdAt: now,
-            completedAt: '',
-          },
-          {
-            id: '4',
-            title: 'UI Design Mockup & Polish',
-            description: 'Create interactive screens and responsive views.',
-            stage: 'Frontend',
-            dependencies: '3',
-            agentCli: 'cursor-cli',
-            agentPrompt: `Generate index.html and style.css for client panel of ${prompt}`,
-            status: 'Pending',
-            createdAt: now,
-            completedAt: '',
-          },
-          {
-            id: '5',
-            title: 'Testing & Integrity Checks',
-            description: 'Validate input fields, test api routes, and ensure error handling.',
-            stage: 'Testing',
-            dependencies: '4',
-            agentCli: 'research',
-            agentPrompt: 'Audit code logic and run standard integrity sweeps.',
-            status: 'Pending',
-            createdAt: now,
-            completedAt: '',
+        if (apiProvider === 'VS Code Copilot (Native)') {
+          const models = await vscode.lm.selectChatModels();
+          if (models.length === 0) {
+            throw new Error('No Copilot Chat models available. Please ensure GitHub Copilot Chat extension is active.');
           }
-        ];
+          const model = models.find((m) => m.id.includes('gpt-4') || m.id.includes('gemini')) || models[0];
+          const messages = [
+            new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, `${systemInstruction}\n\nProject Description: ${prompt}`)
+          ];
+          const response = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
+          for await (const chunk of response.text) {
+            responseText += chunk;
+          }
+        } else if (apiProvider === 'Gemini') {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+          const postData = JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    text: `User Project Description: ${prompt}`
+                  }
+                ]
+              }
+            ],
+            systemInstruction: {
+              parts: [
+                {
+                  text: systemInstruction
+                }
+              ]
+            },
+            generationConfig: {
+              responseMimeType: "application/json"
+            }
+          });
+
+          const responseStr = await httpsRequest(
+            url,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              }
+            },
+            postData
+          );
+
+          const resJson = JSON.parse(responseStr);
+          if (resJson.candidates && resJson.candidates[0] && resJson.candidates[0].content && resJson.candidates[0].content.parts[0]) {
+            responseText = resJson.candidates[0].content.parts[0].text;
+          } else {
+            throw new Error('Invalid response structure received from Gemini API');
+          }
+        } else if (apiProvider === 'OpenAI') {
+          const url = 'https://api.openai.com/v1/chat/completions';
+          const postData = JSON.stringify({
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'system',
+                content: systemInstruction
+              },
+              {
+                role: 'user',
+                content: `Project Description: ${prompt}`
+              }
+            ]
+          });
+
+          const responseStr = await httpsRequest(
+            url,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+              }
+            },
+            postData
+          );
+
+          const resJson = JSON.parse(responseStr);
+          if (resJson.choices && resJson.choices[0] && resJson.choices[0].message) {
+            responseText = resJson.choices[0].message.content;
+          } else {
+            throw new Error('Invalid response structure received from OpenAI API');
+          }
+        }
+
+        const cleanJson = cleanAndParseJson(responseText);
+        if (!Array.isArray(cleanJson)) {
+          throw new Error('LLM did not return a valid array of roadmap tasks');
+        }
+
+        // Map response to proper RoadmapNode types
+        const now = new Date().toISOString();
+        const customNodes: RoadmapNode[] = cleanJson.map((node: any, idx: number) => ({
+          id: node.id || String(idx + 1),
+          title: node.title || `Task ${idx + 1}`,
+          description: node.description || '',
+          stage: node.stage || 'Business Planning',
+          dependencies: node.dependencies || '',
+          agentCli: node.agentCli || cliPath,
+          agentPrompt: node.agentPrompt || '',
+          status: 'Pending',
+          createdAt: now,
+          completedAt: '',
+        }));
 
         if (syncEngine) {
           syncEngine.setNodes(customNodes);
           sendNodesToWebview();
           vscode.window.showInformationMessage('AI Roadmap generated successfully!');
         }
-      } catch (error) {
-        vscode.window.showErrorMessage(`Failed to generate roadmap: ${error}`);
+      } catch (error: any) {
+        vscode.window.showErrorMessage(`Failed to generate roadmap: ${error.message || error}`);
       }
     }
   );
@@ -427,6 +693,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     .controls {
       display: flex;
+      align-items: center;
       gap: 12px;
     }
 
@@ -552,12 +819,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       align-self: flex-start;
     }
 
-    .stage-Ideation { color: #818cf8; }
-    .stage-Research { color: #f472b6; }
-    .stage-Architecture { color: #fbbf24; }
-    .stage-Backend { color: #34d399; }
-    .stage-Frontend { color: #38bdf8; }
-    .stage-Launch { color: #a78bfa; }
+    .stage-Business-Planning { color: #818cf8; }
+    .stage-Brand---Setup { color: #f472b6; }
+    .stage-Product---MVP { color: #38bdf8; }
+    .stage-Marketing---Growth { color: #34d399; }
 
     .node-content {
       flex: 1;
@@ -635,6 +900,174 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       background: rgba(255,255,255,0.02);
       color: var(--text-muted);
     }
+
+    /* Settings Overlay Styles */
+    .settings-overlay {
+      position: absolute;
+      top: 75px;
+      right: 24px;
+      width: 320px;
+      background: rgba(15, 17, 26, 0.95);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border-glass);
+      border-radius: 12px;
+      padding: 16px;
+      z-index: 100;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+      animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes slide-down {
+      from { transform: translateY(-10px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    .settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border-glass);
+      padding-bottom: 8px;
+    }
+
+    .settings-header h3 {
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      margin: 0;
+      font-weight: 800;
+      color: #00e5ff;
+    }
+
+    .btn-close-settings {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 20px;
+      font-weight: bold;
+      padding: 0 4px;
+    }
+
+    .btn-close-settings:hover {
+      color: #ff1744;
+    }
+
+    .settings-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .settings-lbl-title {
+      font-size: 9.5px;
+      text-transform: uppercase;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+
+    .settings-input, .settings-select {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-glass);
+      border-radius: 6px;
+      padding: 8px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 12px;
+      outline: none;
+    }
+
+    .settings-input:focus, .settings-select:focus {
+      border-color: #00e5ff;
+    }
+
+    .settings-select option {
+      background: #0f111a;
+      color: #e2e8f0;
+    }
+
+    .settings-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .settings-action-btn {
+      flex: 1;
+      padding: 8px;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      transition: all 0.2s;
+    }
+
+    .settings-action-btn.test-btn {
+      border: 1px solid var(--border-glass);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-main);
+    }
+
+    .settings-action-btn.test-btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .settings-action-btn.save-btn {
+      background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
+      color: #000;
+    }
+
+    .settings-action-btn.save-btn:hover {
+      box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+    }
+
+    .cli-badge {
+      margin-top: 8px;
+      font-size: 11px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      font-weight: 600;
+      text-align: center;
+      line-height: 1.3;
+    }
+
+    .cli-badge.success {
+      background: rgba(0, 230, 118, 0.1);
+      color: #00e676;
+      border: 1px solid rgba(0, 230, 118, 0.15);
+    }
+
+    .cli-badge.error {
+      background: rgba(255, 23, 68, 0.1);
+      color: #ff1744;
+      border: 1px solid rgba(255, 23, 68, 0.15);
+    }
+
+    .btn-gear {
+      background: none;
+      border: none;
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 20px;
+      padding: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    .btn-gear:hover {
+      color: #00e5ff;
+      transform: rotate(30deg) scale(1.1);
+    }
   </style>
 </head>
 <body>
@@ -644,6 +1077,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="controls">
         <input type="text" id="ai-prompt" placeholder="Describe your solopreneur project...">
         <button id="btn-generate">Generate AI Roadmap</button>
+        <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
       </div>
     </header>
 
@@ -653,14 +1087,89 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
   </div>
 
+  <!-- Settings Panel Overlay -->
+  <div class="settings-overlay" id="settings-panel">
+    <div class="settings-header">
+      <h3>⚙️ Solopreneur Settings</h3>
+      <button class="btn-close-settings" id="btn-close-settings">×</button>
+    </div>
+
+    <div class="settings-field">
+      <label class="settings-lbl-title">AI Provider</label>
+      <select class="settings-select" id="setting-provider">
+        <option value="Gemini">Gemini</option>
+        <option value="OpenAI">OpenAI</option>
+        <option value="VS Code Copilot (Native)">VS Code Copilot (Native)</option>
+      </select>
+    </div>
+
+    <div class="settings-field" id="api-key-container">
+      <label class="settings-lbl-title">API Key</label>
+      <input type="password" class="settings-input" id="setting-key" placeholder="Enter API Key...">
+      <div style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Required for standalone providers (Gemini or OpenAI). Not needed for VS Code Copilot (Native).
+      </div>
+    </div>
+
+    <div class="settings-field">
+      <label class="settings-lbl-title">CLI Command or Path</label>
+      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. antigravity-cli">
+      <div style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Name of globally installed CLI (e.g. <code>antigravity-cli</code> or <code>codex-cli</code>) or the absolute path to its executable.
+      </div>
+    </div>
+
+    <div class="settings-actions">
+      <button class="settings-action-btn test-btn" id="btn-test-cli">⚡ Test CLI</button>
+      <button class="settings-action-btn save-btn" id="btn-save-settings">💾 Save</button>
+    </div>
+    <div class="cli-badge" id="cli-test-badge" style="display:none;"></div>
+  </div>
+
   <script>
     const vscode = acquireVsCodeApi();
     const canvas = document.getElementById('canvas');
     const btnGenerate = document.getElementById('btn-generate');
     const aiPromptInput = document.getElementById('ai-prompt');
 
-    // Request nodes on load
+    // Settings Panel elements
+    const btnToggleSettings = document.getElementById('btn-toggle-settings');
+    const btnCloseSettings = document.getElementById('btn-close-settings');
+    const settingsPanel = document.getElementById('settings-panel');
+    const settingProvider = document.getElementById('setting-provider');
+    const settingKey = document.getElementById('setting-key');
+    const apiKeyContainer = document.getElementById('api-key-container');
+    const settingCliPath = document.getElementById('setting-clipath');
+    const btnTestCli = document.getElementById('btn-test-cli');
+    const btnSaveSettings = document.getElementById('btn-save-settings');
+    const cliTestBadge = document.getElementById('cli-test-badge');
+
+    // Toggle Settings panel visibility
+    btnToggleSettings.addEventListener('click', () => {
+      if (settingsPanel.style.display === 'flex') {
+        settingsPanel.style.display = 'none';
+      } else {
+        settingsPanel.style.display = 'flex';
+        vscode.postMessage({ command: 'getSettings' });
+      }
+    });
+
+    btnCloseSettings.addEventListener('click', () => {
+      settingsPanel.style.display = 'none';
+      cliTestBadge.style.display = 'none';
+    });
+
+    settingProvider.addEventListener('change', () => {
+      if (settingProvider.value === 'VS Code Copilot (Native)') {
+        apiKeyContainer.style.display = 'none';
+      } else {
+        apiKeyContainer.style.display = 'flex';
+      }
+    });
+
+    // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
+    vscode.postMessage({ command: 'getSettings' });
 
     // Handle messages from Extension Host
     window.addEventListener('message', event => {
@@ -669,7 +1178,54 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         case 'nodesUpdated':
           renderRoadmap(message.nodes);
           break;
+        case 'settingsLoaded':
+          settingProvider.value = message.settings.apiProvider || 'Gemini';
+          settingKey.value = message.settings.apiKey || '';
+          settingCliPath.value = message.settings.cliPath || 'antigravity-cli';
+
+          if (settingProvider.value === 'VS Code Copilot (Native)') {
+            apiKeyContainer.style.display = 'none';
+          } else {
+            apiKeyContainer.style.display = 'flex';
+          }
+          break;
+        case 'cliTestResult':
+          cliTestBadge.style.display = 'block';
+          if (message.success) {
+            cliTestBadge.className = 'cli-badge success';
+            cliTestBadge.textContent = 'Connection OK: ' + message.message;
+          } else {
+            cliTestBadge.className = 'cli-badge error';
+            cliTestBadge.textContent = 'Connection Failed: ' + message.message;
+          }
+          break;
       }
+    });
+
+    // Save configurations
+    btnSaveSettings.addEventListener('click', () => {
+      vscode.postMessage({
+        command: 'updateSettings',
+        apiProvider: settingProvider.value,
+        apiKey: settingKey.value.trim(),
+        cliPath: settingCliPath.value.trim()
+      });
+      settingsPanel.style.display = 'none';
+      cliTestBadge.style.display = 'none';
+    });
+
+    // Test CLI path
+    btnTestCli.addEventListener('click', () => {
+      cliTestBadge.style.display = 'block';
+      cliTestBadge.className = 'cli-badge';
+      cliTestBadge.style.background = 'rgba(255,255,255,0.05)';
+      cliTestBadge.style.color = 'var(--text-muted)';
+      cliTestBadge.textContent = 'Testing connection...';
+
+      vscode.postMessage({
+        command: 'testCli',
+        cliPath: settingCliPath.value.trim()
+      });
     });
 
     btnGenerate.addEventListener('click', () => {
@@ -702,11 +1258,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const row = document.createElement('div');
         row.className = 'node-row';
 
+        const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
+
         row.innerHTML = \`
           <div class="node-card status-\${node.status}">
             <div class="node-content">
               <div style="display: flex; gap: 8px; align-items: center;">
-                <span class="node-badge stage-\${node.stage}">\${node.stage}</span>
+                <span class="node-badge stage-\${cleanStage}">\${node.stage}</span>
                 <span class="node-title">\${node.title}</span>
               </div>
               <div class="node-desc">\${node.description}</div>
@@ -716,12 +1274,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             </div>
             <div class="node-actions">
               <span class="status-badge \${node.status}">\${node.status}</span>
-              <button class="btn-run" onclick="triggerRun('\${node.id}')">
+              <button class="btn-run" data-run-node-id="\${node.id}">
                 ⚡ Run Agent
               </button>
             </div>
           </div>
         \`;
+        const runButton = row.querySelector('[data-run-node-id]');
+        if (runButton) {
+          runButton.addEventListener('click', () => {
+            triggerRun(node.id);
+          });
+        }
         canvas.appendChild(row);
       });
     }

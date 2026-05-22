@@ -2,7 +2,7 @@
   "name": "solopreneur-roadmap",
   "displayName": "Solopreneur AI Roadmap & Agent Orchestrator",
   "description": "Visual AI Roadmaps and Agent orchestration for solopreneurs in VS Code.",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
   "repository": {
@@ -42,6 +42,32 @@
           "name": "Solopreneur Roadmap"
         }
       ]
+    },
+    "configuration": {
+      "title": "Solopreneur AI Roadmap Settings",
+      "properties": {
+        "solopreneur.apiProvider": {
+          "type": "string",
+          "default": "Gemini",
+          "enum": [
+            "Gemini",
+            "OpenAI",
+            "VS Code Copilot (Native)"
+          ],
+          "description": "The AI provider used to generate visual roadmaps."
+        },
+        "solopreneur.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Your API key for the selected standalone AI provider (Gemini or OpenAI).",
+          "scope": "application"
+        },
+        "solopreneur.cliPath": {
+          "type": "string",
+          "default": "antigravity-cli",
+          "description": "The command name or absolute path of your local Codex / Antigravity CLI executable."
+        }
+      }
     }
   },
   "scripts": {
@@ -49,6 +75,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
+    "test": "node --test test/*.test.js",
     "build-webview": "echo 'No webview build configured yet'"
   },
   "dependencies": {
