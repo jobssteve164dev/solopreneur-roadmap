@@ -142,8 +142,6 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   const { elements, postedMessages } = runScriptWithMinimalDom(script, [
     'canvas',
-    'btn-generate',
-    'ai-prompt',
     'project-select',
     'btn-add-project',
     'btn-toggle-settings',
@@ -175,6 +173,8 @@ test('full roadmap webview exposes node conversation history and language settin
   const script = extractLastScript(html);
 
   assert.match(html, /id="setting-language"/);
+  assert.doesNotMatch(html, /id="ai-prompt"/);
+  assert.doesNotMatch(html, /id="btn-generate"/);
   assert.match(script, /getNodeConversations/);
   assert.match(script, /nodeConversationsLoaded/);
   assert.match(script, /Start Agent Conversation|发起 Agent 对话/);

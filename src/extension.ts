@@ -1636,8 +1636,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="controls">
         <select class="project-select" id="project-select"></select>
         <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
-        <input type="text" id="ai-prompt" placeholder="Describe your solopreneur project...">
-        <button id="btn-generate">Generate AI Roadmap</button>
         <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
       </div>
     </header>
@@ -1698,8 +1696,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   <script>
     const vscode = acquireVsCodeApi();
     const canvas = document.getElementById('canvas');
-    const btnGenerate = document.getElementById('btn-generate');
-    const aiPromptInput = document.getElementById('ai-prompt');
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
 
@@ -1724,8 +1720,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       zh: {
         title: '🎯 独立项目 AI 路线图',
         addProject: '添加项目文件夹',
-        promptPlaceholder: '描述你的项目想法...',
-        generate: '生成 AI 路线图',
         settingsTitle: '⚙️ 设置',
         language: '界面语言',
         provider: 'AI 服务',
@@ -1753,8 +1747,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       en: {
         title: '🎯 Solopreneur AI Roadmap',
         addProject: 'Add project folder',
-        promptPlaceholder: 'Describe your solopreneur project...',
-        generate: 'Generate AI Roadmap',
         settingsTitle: '⚙️ Solopreneur Settings',
         language: 'Language',
         provider: 'AI Provider',
@@ -1797,8 +1789,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function applyLanguage() {
       setText('app-title', t('title'));
       btnAddProject.title = t('addProject');
-      aiPromptInput.placeholder = t('promptPlaceholder');
-      btnGenerate.textContent = t('generate');
       setText('settings-title', t('settingsTitle'));
       setText('label-language', t('language'));
       setText('label-provider', t('provider'));
@@ -1917,17 +1907,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         command: 'testCli',
         cliPath: settingCliPath.value.trim()
       });
-    });
-
-    btnGenerate.addEventListener('click', () => {
-      const prompt = aiPromptInput.value.trim();
-      if (!prompt) return;
-      
-      vscode.postMessage({
-        command: 'generateRoadmap',
-        prompt: prompt
-      });
-      aiPromptInput.value = '';
     });
 
     projectSelect.addEventListener('change', () => {
