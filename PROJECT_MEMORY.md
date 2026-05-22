@@ -16,6 +16,9 @@
 - Git workspace change summaries are captured under `.solopreneur/agent-runs/<nodeId>/changes.txt`.
 - The sidebar and full roadmap panel share the same `SyncEngine` instance and both receive node updates through `sendNodesToWebview()`.
 - The sidebar provider must be registered before storage initialization starts. Storage initialization runs in the background so SQLite or workspace setup cannot leave the contributed view stuck on VS Code's Loading state.
+- User settings are stored in `ExtensionContext.globalState` first, then mirrored to VS Code configuration. Do not rely only on `workspace.getConfiguration().update()` because code-server/global settings can be unavailable or stale across window reloads.
+- Project folders are tracked in `ExtensionContext.globalState` under the Solopreneur project list. The active `SyncEngine` follows the selected project path, not necessarily the first VS Code workspace folder.
+- The sidebar and full roadmap panel both expose a project dropdown plus an add-folder action so users can switch between multiple local projects.
 
 ## CLI Orchestration Contract
 

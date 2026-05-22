@@ -4,6 +4,17 @@ import * as fs from 'fs';
 import * as childProcess from 'child_process';
 import { SyncEngine } from './db/syncEngine';
 
+interface SolopreneurSettings {
+  apiProvider: string;
+  apiKey: string;
+  cliPath: string;
+}
+
+interface SolopreneurProject {
+  name: string;
+  path: string;
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -47,7 +58,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _extensionUri: vscode.Uri,
     private readonly _syncEngine: SyncEngine,
     private readonly _onRunAgent: (nodeId: string) => Promise<void>,
-    private readonly _onGenerateRoadmap: (prompt: string) => Promise<void>
+    private readonly _onGenerateRoadmap: (prompt: string) => Promise<void>,
+    private readonly _getSettings: () => SolopreneurSettings,
+    private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>,
+    private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string },
+    private readonly _selectProject: (projectPath: string) => Promise<void>,
+    private readonly _addProject: () => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -84,10 +100,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           this.sendSettings();
           break;
         case 'updateSettings':
-          const config = vscode.workspace.getConfiguration('solopreneur');
-          await config.update('apiProvider', data.apiProvider, vscode.ConfigurationTarget.Global);
-          await config.update('apiKey', data.apiKey, vscode.ConfigurationTarget.Global);
-          await config.update('cliPath', data.cliPath, vscode.ConfigurationTarget.Global);
+          await this._updateSettings({
+            apiProvider: data.apiProvider,
+            apiKey: data.apiKey,
+            cliPath: data.cliPath
+          });
           vscode.window.showInformationMessage('Solopreneur settings saved successfully!');
           // Broadcast to sync both Webviews
           this.sendSettings();
@@ -110,12 +127,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             });
           });
           break;
+        case 'getProjects':
+          this.sendProjects();
+          break;
+        case 'selectProject':
+          await this._selectProject(data.projectPath);
+          break;
+        case 'addProject':
+          await this._addProject();
+          break;
       }
     });
 
     // Request initial data push
     this.sendNodesToWebview();
     this.sendSettings();
+    this.sendProjects();
   }
 
   /**
@@ -136,14 +163,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
    */
   public sendSettings() {
     if (this._view) {
-      const config = vscode.workspace.getConfiguration('solopreneur');
       this._view.webview.postMessage({
         command: 'settingsLoaded',
-        settings: {
-          apiProvider: config.get('apiProvider') || 'Gemini',
-          apiKey: config.get('apiKey') || '',
-          cliPath: config.get('cliPath') || 'antigravity-cli'
-        }
+        settings: this._getSettings()
+      });
+    }
+  }
+
+  public sendProjects() {
+    if (this._view) {
+      this._view.webview.postMessage({
+        command: 'projectsLoaded',
+        projects: this._getProjects()
       });
     }
   }
@@ -298,6 +329,35 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .settings-input:focus, .settings-select:focus {
       border-color: #00e5ff;
+    }
+
+    .project-switcher {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .project-select {
+      flex: 1;
+      min-width: 0;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-glass);
+      border-radius: 4px;
+      padding: 5px 6px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 11px;
+      outline: none;
+    }
+
+    .btn-project-add {
+      width: 28px;
+      border: 1px solid var(--border-glass);
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-main);
+      cursor: pointer;
+      font-weight: 800;
     }
 
     .settings-actions {
@@ -594,6 +654,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
   </div>
 
+  <div class="project-switcher">
+    <select class="project-select" id="project-select"></select>
+    <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
+  </div>
+
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
@@ -672,6 +737,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnGenerate = document.getElementById('btn-generate-sidebar');
     const aiPromptInput = document.getElementById('ai-prompt-sidebar');
     const btnOpenFull = document.getElementById('btn-open-full');
+    const projectSelect = document.getElementById('project-select');
+    const btnAddProject = document.getElementById('btn-add-project');
 
     // Settings elements
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
@@ -711,6 +778,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
+    vscode.postMessage({ command: 'getProjects' });
 
     // Handle messages
     window.addEventListener('message', event => {
@@ -730,6 +798,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           } else {
             apiKeyContainer.style.display = 'flex';
           }
+          break;
+
+        case 'projectsLoaded':
+          renderProjects(message.projects.projects, message.projects.selectedProjectPath);
           break;
 
         case 'cliTestResult':
@@ -785,6 +857,39 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     btnOpenFull.addEventListener('click', () => {
       vscode.postMessage({ command: 'showFullRoadmap' });
     });
+
+    projectSelect.addEventListener('change', () => {
+      vscode.postMessage({
+        command: 'selectProject',
+        projectPath: projectSelect.value
+      });
+    });
+
+    btnAddProject.addEventListener('click', () => {
+      vscode.postMessage({ command: 'addProject' });
+    });
+
+    function renderProjects(projects, selectedProjectPath) {
+      projectSelect.innerHTML = '';
+      if (!projects || projects.length === 0) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'Choose project folder';
+        projectSelect.appendChild(option);
+        return;
+      }
+
+      projects.forEach(project => {
+        const option = document.createElement('option');
+        option.value = project.path;
+        option.textContent = project.name;
+        option.title = project.path;
+        if (project.path === selectedProjectPath) {
+          option.selected = true;
+        }
+        projectSelect.appendChild(option);
+      });
+    }
 
     function renderSidebar(nodes) {
       tasksList.innerHTML = '';

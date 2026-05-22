@@ -92,6 +92,11 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     {},
     { getNodes: () => [] },
     async () => {},
+    async () => {},
+    () => ({ apiProvider: 'Gemini', apiKey: '', cliPath: 'codex' }),
+    async () => {},
+    () => ({ projects: [{ name: 'app', path: '/workspace/app' }], selectedProjectPath: '/workspace/app' }),
+    async () => {},
     async () => {}
   );
   const html = provider._getHtmlForWebview({});
@@ -106,6 +111,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-generate-sidebar',
     'ai-prompt-sidebar',
     'btn-open-full',
+    'project-select',
+    'btn-add-project',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -138,6 +145,8 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'canvas',
     'btn-generate',
     'ai-prompt',
+    'project-select',
+    'btn-add-project',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',

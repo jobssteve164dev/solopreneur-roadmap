@@ -11,6 +11,22 @@ let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
 let watcher: vscode.FileSystemWatcher | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
+let activeProjectRoot: string | null = null;
+
+interface SolopreneurSettings {
+  apiProvider: string;
+  apiKey: string;
+  cliPath: string;
+}
+
+interface SolopreneurProject {
+  name: string;
+  path: string;
+}
+
+const settingsKey = 'solopreneur.settings';
+const projectsKey = 'solopreneur.projects';
+const selectedProjectKey = 'solopreneur.selectedProjectPath';
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Solopreneur Roadmaps extension is now active!');
@@ -30,16 +46,16 @@ export async function activate(context: vscode.ExtensionContext) {
     () => {
       if (sidebarProvider) {
         sidebarProvider.sendSettings();
+        sidebarProvider.sendProjects();
       }
       if (activePanel) {
-        const config = vscode.workspace.getConfiguration('solopreneur');
         activePanel.webview.postMessage({
           command: 'settingsLoaded',
-          settings: {
-            apiProvider: config.get('apiProvider') || 'Gemini',
-            apiKey: config.get('apiKey') || '',
-            cliPath: config.get('cliPath') || 'antigravity-cli'
-          }
+          settings: getPersistedSettings(context)
+        });
+        activePanel.webview.postMessage({
+          command: 'projectsLoaded',
+          projects: getProjectState(context)
         });
       }
     }
@@ -60,14 +76,25 @@ export async function activate(context: vscode.ExtensionContext) {
     async (nodeId) => {
       const ready = await ensureSyncEngine(context);
       if (ready) {
-        await handleRunAgent(nodeId);
+        await handleRunAgent(context, nodeId);
       }
     },
     async (prompt) => {
       const ready = await ensureSyncEngine(context);
       if (ready) {
-        await handleGenerateRoadmap(prompt);
+        await handleGenerateRoadmap(context, prompt);
       }
+    },
+    () => getPersistedSettings(context),
+    async (settings) => {
+      await updatePersistedSettings(context, settings);
+    },
+    () => getProjectState(context),
+    async (projectPath) => {
+      await selectProject(context, projectPath);
+    },
+    async () => {
+      await addProjectFromDialog(context);
     }
   );
 
@@ -82,19 +109,151 @@ export async function activate(context: vscode.ExtensionContext) {
   void ensureSyncEngine(context);
 }
 
+function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSettings {
+  const config = vscode.workspace.getConfiguration('solopreneur');
+  const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  return {
+    apiProvider: saved.apiProvider || config.get('apiProvider') || 'Gemini',
+    apiKey: saved.apiKey || config.get('apiKey') || '',
+    cliPath: saved.cliPath || config.get('cliPath') || 'antigravity-cli'
+  };
+}
+
+async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
+  const nextSettings: SolopreneurSettings = {
+    apiProvider: settings.apiProvider || 'Gemini',
+    apiKey: settings.apiKey || '',
+    cliPath: settings.cliPath || 'antigravity-cli'
+  };
+  await context.globalState.update(settingsKey, nextSettings);
+
+  const config = vscode.workspace.getConfiguration('solopreneur');
+  await config.update('apiProvider', nextSettings.apiProvider, vscode.ConfigurationTarget.Global);
+  await config.update('apiKey', nextSettings.apiKey, vscode.ConfigurationTarget.Global);
+  await config.update('cliPath', nextSettings.cliPath, vscode.ConfigurationTarget.Global);
+}
+
+function projectName(projectPath: string): string {
+  return path.basename(projectPath) || projectPath;
+}
+
+function getWorkspaceRoot(): string {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+}
+
+function getProjects(context: vscode.ExtensionContext): SolopreneurProject[] {
+  const savedProjects = context.globalState.get<SolopreneurProject[]>(projectsKey) || [];
+  const workspaceRoot = getWorkspaceRoot();
+  const projects = [...savedProjects];
+
+  if (workspaceRoot && !projects.some((project) => project.path === workspaceRoot)) {
+    projects.unshift({
+      name: projectName(workspaceRoot),
+      path: workspaceRoot
+    });
+  }
+
+  return projects.filter((project, index, all) =>
+    project.path && all.findIndex((candidate) => candidate.path === project.path) === index
+  );
+}
+
+function getSelectedProjectPath(context: vscode.ExtensionContext): string {
+  const projects = getProjects(context);
+  const savedSelected = context.globalState.get<string>(selectedProjectKey) || '';
+  if (savedSelected && projects.some((project) => project.path === savedSelected)) {
+    return savedSelected;
+  }
+  return projects[0]?.path || '';
+}
+
+function getProjectState(context: vscode.ExtensionContext): { projects: SolopreneurProject[]; selectedProjectPath: string } {
+  const projects = getProjects(context);
+  return {
+    projects,
+    selectedProjectPath: getSelectedProjectPath(context)
+  };
+}
+
+async function saveProjects(context: vscode.ExtensionContext, projects: SolopreneurProject[]): Promise<void> {
+  await context.globalState.update(projectsKey, projects);
+}
+
+async function selectProject(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
+  const projects = getProjects(context);
+  if (!projects.some((project) => project.path === projectPath)) {
+    vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+    return;
+  }
+
+  await context.globalState.update(selectedProjectKey, projectPath);
+  syncEngine = null;
+  activeProjectRoot = null;
+  if (watcher) {
+    watcher.dispose();
+    watcher = null;
+  }
+  await ensureSyncEngine(context);
+  sendProjectsToWebviews(context);
+  sendNodesToWebview();
+}
+
+async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
+  const result = await vscode.window.showOpenDialog({
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: 'Use This Folder'
+  });
+
+  const folder = result?.[0]?.fsPath;
+  if (!folder) {
+    return;
+  }
+
+  const projects = getProjects(context);
+  if (!projects.some((project) => project.path === folder)) {
+    projects.push({
+      name: projectName(folder),
+      path: folder
+    });
+    await saveProjects(context, projects);
+  }
+
+  await context.globalState.update(selectedProjectKey, folder);
+  syncEngine = null;
+  activeProjectRoot = null;
+  await ensureSyncEngine(context);
+  sendProjectsToWebviews(context);
+  sendNodesToWebview();
+}
+
+function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
+  const projects = getProjectState(context);
+  if (activePanel) {
+    activePanel.webview.postMessage({
+      command: 'projectsLoaded',
+      projects
+    });
+  }
+  if (sidebarProvider) {
+    sidebarProvider.sendProjects();
+  }
+}
+
 /**
  * Ensures the sync engine is initialized if a workspace is open.
  */
 async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boolean> {
-  if (syncEngine) {
+  const projectRoot = getSelectedProjectPath(context);
+  if (syncEngine && activeProjectRoot === projectRoot) {
     return true;
   }
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders) {
+
+  if (!projectRoot) {
     return false;
   }
-  const workspaceRoot = workspaceFolders[0].uri.fsPath;
-  const solopreneurDir = path.join(workspaceRoot, '.solopreneur');
+  const solopreneurDir = path.join(projectRoot, '.solopreneur');
 
   if (!fs.existsSync(solopreneurDir)) {
     fs.mkdirSync(solopreneurDir, { recursive: true });
@@ -106,10 +265,12 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   syncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
   try {
     await syncEngine.initAndSync();
-    setupFileSentinelWatcher(workspaceRoot);
+    activeProjectRoot = projectRoot;
+    setupFileSentinelWatcher(projectRoot);
     // Refresh sidebar when successfully initialized
     if (sidebarProvider) {
       sidebarProvider.sendNodesToWebview();
+      sidebarProvider.sendProjects();
     }
     return true;
   } catch (error) {
@@ -121,11 +282,11 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
 async function openRoadmapPanel(context: vscode.ExtensionContext) {
   const initialized = await ensureSyncEngine(context);
   if (!initialized) {
-    vscode.window.showErrorMessage('Please open a workspace/folder before launching the Roadmap!');
+    vscode.window.showErrorMessage('Choose a project folder before launching the Roadmap.');
     return;
   }
 
-  const workspaceRoot = vscode.workspace.workspaceFolders![0].uri.fsPath;
+  const projectRoot = getSelectedProjectPath(context);
 
   // If panel already exists, reveal it
   if (activePanel) {
@@ -164,35 +325,46 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'runAgent':
-          await handleRunAgent(message.nodeId);
+          await handleRunAgent(context, message.nodeId);
           break;
 
         case 'generateRoadmap':
-          await handleGenerateRoadmap(message.prompt);
+          await handleGenerateRoadmap(context, message.prompt);
           break;
 
         case 'getSettings':
           if (activePanel) {
-            const config = vscode.workspace.getConfiguration('solopreneur');
             activePanel.webview.postMessage({
               command: 'settingsLoaded',
-              settings: {
-                apiProvider: config.get('apiProvider') || 'Gemini',
-                apiKey: config.get('apiKey') || '',
-                cliPath: config.get('cliPath') || 'antigravity-cli'
-              }
+              settings: getPersistedSettings(context)
             });
           }
           break;
 
         case 'updateSettings':
-          const config = vscode.workspace.getConfiguration('solopreneur');
-          await config.update('apiProvider', message.apiProvider, vscode.ConfigurationTarget.Global);
-          await config.update('apiKey', message.apiKey, vscode.ConfigurationTarget.Global);
-          await config.update('cliPath', message.cliPath, vscode.ConfigurationTarget.Global);
+          await updatePersistedSettings(context, {
+            apiProvider: message.apiProvider,
+            apiKey: message.apiKey,
+            cliPath: message.cliPath
+          });
           vscode.window.showInformationMessage('Solopreneur settings saved successfully!');
           // Broadcast to sync both Webviews
           vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+          break;
+
+        case 'getProjects':
+          activePanel?.webview.postMessage({
+            command: 'projectsLoaded',
+            projects: getProjectState(context)
+          });
+          break;
+
+        case 'selectProject':
+          await selectProject(context, message.projectPath);
+          break;
+
+        case 'addProject':
+          await addProjectFromDialog(context);
           break;
 
         case 'testCli':
@@ -219,7 +391,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
   );
 
   // Set up File Sentinel Watcher for agent completion (.agent_status.json)
-  setupFileSentinelWatcher(workspaceRoot);
+  setupFileSentinelWatcher(projectRoot);
 
   // Clean up when panel is closed
   activePanel.onDidDispose(
@@ -417,7 +589,7 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
 /**
  * Executes a CLI agent in the integrated terminal.
  */
-async function handleRunAgent(nodeId: string) {
+async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string) {
   if (!syncEngine) {
     return;
   }
@@ -441,15 +613,14 @@ async function handleRunAgent(nodeId: string) {
     return;
   }
 
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const workspaceRoot = activeProjectRoot || '';
   if (!workspaceRoot) {
-    vscode.window.showErrorMessage('Please open a workspace/folder before running an Agent task.');
+    vscode.window.showErrorMessage('Choose a project folder before running an Agent task.');
     return;
   }
 
   // Resolve CLI path from config if applicable
-  const config = vscode.workspace.getConfiguration('solopreneur');
-  const configuredCliPath = config.get<string>('cliPath') || 'antigravity-cli';
+  const configuredCliPath = getPersistedSettings(context).cliPath;
   const agentCli = resolveAgentCli(node.agentCli, configuredCliPath);
 
   if (!commandExists(agentCli)) {
@@ -628,15 +799,15 @@ function cleanAndParseJson(text: string): any {
 /**
  * Handles AI Generation of the Roadmap using LLM API
  */
-async function handleGenerateRoadmap(prompt: string) {
+async function handleGenerateRoadmap(context: vscode.ExtensionContext, prompt: string) {
   if (!syncEngine) {
     return;
   }
 
-  const config = vscode.workspace.getConfiguration('solopreneur');
-  let apiProvider = config.get<string>('apiProvider') || 'Gemini';
-  const apiKey = config.get<string>('apiKey') || '';
-  const cliPath = resolveAgentCli('antigravity-cli', config.get<string>('cliPath') || 'antigravity-cli');
+  const savedSettings = getPersistedSettings(context);
+  let apiProvider = savedSettings.apiProvider;
+  const apiKey = savedSettings.apiKey;
+  const cliPath = resolveAgentCli('antigravity-cli', savedSettings.cliPath);
 
   if (apiProvider !== 'VS Code Copilot (Native)' && !apiKey) {
     if ((vscode as any).lm && (vscode as any).lm.selectChatModels) {
@@ -887,6 +1058,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       align-items: center;
       gap: 12px;
+    }
+
+    .project-select {
+      width: 180px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border-glass);
+      border-radius: 6px;
+      padding: 8px;
+      color: var(--text-main);
+      font-family: inherit;
+      outline: none;
+    }
+
+    .btn-project-add {
+      padding: 8px 10px;
+      min-width: 34px;
     }
 
     input[type="text"] {
@@ -1267,6 +1454,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <header>
       <h1>🎯 Solopreneur AI Roadmap</h1>
       <div class="controls">
+        <select class="project-select" id="project-select"></select>
+        <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
         <input type="text" id="ai-prompt" placeholder="Describe your solopreneur project...">
         <button id="btn-generate">Generate AI Roadmap</button>
         <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
@@ -1323,6 +1512,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const canvas = document.getElementById('canvas');
     const btnGenerate = document.getElementById('btn-generate');
     const aiPromptInput = document.getElementById('ai-prompt');
+    const projectSelect = document.getElementById('project-select');
+    const btnAddProject = document.getElementById('btn-add-project');
 
     // Settings Panel elements
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
@@ -1362,6 +1553,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
+    vscode.postMessage({ command: 'getProjects' });
 
     // Handle messages from Extension Host
     window.addEventListener('message', event => {
@@ -1380,6 +1572,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           } else {
             apiKeyContainer.style.display = 'flex';
           }
+          break;
+        case 'projectsLoaded':
+          renderProjects(message.projects.projects, message.projects.selectedProjectPath);
           break;
         case 'cliTestResult':
           cliTestBadge.style.display = 'block';
@@ -1430,6 +1625,39 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
       aiPromptInput.value = '';
     });
+
+    projectSelect.addEventListener('change', () => {
+      vscode.postMessage({
+        command: 'selectProject',
+        projectPath: projectSelect.value
+      });
+    });
+
+    btnAddProject.addEventListener('click', () => {
+      vscode.postMessage({ command: 'addProject' });
+    });
+
+    function renderProjects(projects, selectedProjectPath) {
+      projectSelect.innerHTML = '';
+      if (!projects || projects.length === 0) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'Choose project folder';
+        projectSelect.appendChild(option);
+        return;
+      }
+
+      projects.forEach(project => {
+        const option = document.createElement('option');
+        option.value = project.path;
+        option.textContent = project.name;
+        option.title = project.path;
+        if (project.path === selectedProjectPath) {
+          option.selected = true;
+        }
+        projectSelect.appendChild(option);
+      });
+    }
 
     function renderRoadmap(nodes) {
       // Clear canvas keeping the flow line
