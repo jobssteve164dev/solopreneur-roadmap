@@ -233,6 +233,14 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
   syncEngine = null;
   activeProjectRoot = null;
   await ensureSyncEngine(context);
+  const projectIdea = await vscode.window.showInputBox({
+    title: '告诉 Solopreneur 这个项目的想法',
+    prompt: '用于生成定制路线图。留空则使用默认路线图。',
+    placeHolder: '例如：给独立咨询顾问使用的轻量 CRM，先做本地优先的 MVP...'
+  });
+  if (projectIdea && projectIdea.trim()) {
+    await handleGenerateRoadmap(context, projectIdea.trim());
+  }
   sendProjectsToWebviews(context);
   sendNodesToWebview();
 }
@@ -329,6 +337,16 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
         case 'updateNode':
           if (syncEngine) {
             syncEngine.updateNode(message.nodeId, message.updates);
+            sendNodesToWebview();
+          }
+          break;
+
+        case 'completeNode':
+          if (syncEngine) {
+            syncEngine.updateNode(message.nodeId, {
+              status: 'Completed',
+              completedAt: new Date().toISOString()
+            });
             sendNodesToWebview();
           }
           break;
@@ -504,7 +522,28 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
-function buildAgentConversationPrompt(node: RoadmapNode, userMessage: string, workspaceRoot: string): string {
+function summarizeRecentConversations(conversations: { timestamp: string; agentCli: string; output: string; status: string }[]): string {
+  if (conversations.length === 0) {
+    return '暂无历史对话。';
+  }
+
+  return conversations.slice(0, 10).map((conversation, index) => {
+    const output = (conversation.output || '').replace(/\s+/g, ' ').trim();
+    const clipped = output.length > 700 ? `${output.slice(0, 700)}...` : output;
+    return [
+      `#${index + 1} ${conversation.timestamp || ''} ${conversation.agentCli || ''} ${conversation.status || ''}`.trim(),
+      clipped || '无可用输出摘要。'
+    ].join('\n');
+  }).join('\n\n');
+}
+
+function buildAgentConversationPrompt(
+  node: RoadmapNode,
+  userMessage: string,
+  workspaceRoot: string,
+  recentConversations: { timestamp: string; agentCli: string; output: string; status: string }[] = [],
+  completionDecisionFilePath = ''
+): string {
   const supplement = userMessage.trim()
     ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
     : '';
@@ -517,16 +556,23 @@ function buildAgentConversationPrompt(node: RoadmapNode, userMessage: string, wo
     `环节：${node.title}`,
     `阶段：${node.stage}`,
     `环节说明：${node.description}`,
+    `当前环节状态：${node.status}`,
     '',
     '本次任务：',
     node.agentPrompt,
     supplement,
     '',
+    '该环节最近 10 轮 Agent 对话剪影：',
+    summarizeRecentConversations(recentConversations),
+    '',
     '闭环要求：',
     '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。',
     '2. 不要等待用户二次确认；如果任务过大，先交付一个可验证的小闭环，并在输出末尾说明下一次建议继续做什么。',
     '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
-    '4. 完成后正常退出 CLI 进程。扩展会根据进程退出码和状态文件更新路线图卡片。'
+    '4. 完成后正常退出 CLI 进程。扩展会根据进程退出码记录本轮对话是否成功。',
+    completionDecisionFilePath
+      ? `5. 如果你判断整个路线图环节已经达到完成标准，请写入文件 ${completionDecisionFilePath}，内容必须是 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续对话，不要写这个文件。`
+      : '5. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。'
   ].join('\n');
 }
 
@@ -534,17 +580,20 @@ function buildAgentShellScript(
   agentCommand: string,
   workspaceRoot: string,
   nodeId: string,
-  agentCli: string
+  agentCli: string,
+  completionDecisionFilePath?: string
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
   const outputFilePath = path.join(runDir, 'output.log');
   const changesFilePath = path.join(runDir, 'changes.txt');
-  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli, outputFilePath, changesFilePath });
-  const completedStatus = JSON.stringify({ nodeId, status: 'Completed', command: agentCli, outputFilePath, changesFilePath });
-  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli, outputFilePath, changesFilePath });
+  const decisionFilePath = completionDecisionFilePath || path.join(runDir, 'completion.json');
+  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli, outputFilePath, changesFilePath, completionDecisionFilePath: decisionFilePath });
+  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', command: agentCli, outputFilePath, changesFilePath, completionDecisionFilePath: decisionFilePath });
+  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli, outputFilePath, changesFilePath, completionDecisionFilePath: decisionFilePath });
   const script = [
     `mkdir -p ${shellQuote(runDir)}`,
+    `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
     `(${agentCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
     `status=\${PIPESTATUS[0]}`,
@@ -695,9 +744,18 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   terminal.show(true);
 
   // Command execution with sentinel file generation on success or fail
-  const conversationPrompt = buildAgentConversationPrompt(node, userMessage, workspaceRoot);
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
+  const completionDecisionFilePath = path.join(runDir, 'completion.json');
+  const recentConversations = syncEngine.getAgentExecutions(nodeId).slice(0, 10);
+  const conversationPrompt = buildAgentConversationPrompt(
+    node,
+    userMessage,
+    workspaceRoot,
+    recentConversations,
+    completionDecisionFilePath
+  );
   const agentCommand = buildAgentCommand(agentCli, conversationPrompt, workspaceRoot);
-  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli);
+  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli, completionDecisionFilePath);
 
   // Log command launch to database
   syncEngine.logAgentExecution(
@@ -725,15 +783,29 @@ function processAgentStatusFile(statusFilePath: string): void {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, status, command, outputFilePath, changesFilePath } = statusData;
+    const { nodeId, status, command, outputFilePath, changesFilePath, completionDecisionFilePath } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
     }
 
-    const completedAt = status === 'Completed' ? new Date().toISOString() : '';
+    let nextStatus = status as RoadmapNode['status'];
+    let completionReason = '';
+    if (status === 'In Progress' && completionDecisionFilePath && fs.existsSync(completionDecisionFilePath)) {
+      try {
+        const completionDecision = JSON.parse(fs.readFileSync(completionDecisionFilePath, 'utf8'));
+        if (completionDecision.markCompleted === true) {
+          nextStatus = 'Completed';
+          completionReason = completionDecision.reason || 'Agent marked this roadmap step complete.';
+        }
+      } catch (error) {
+        completionReason = 'Agent completion decision file could not be parsed.';
+      }
+    }
+
+    const completedAt = nextStatus === 'Completed' ? new Date().toISOString() : '';
     syncEngine.updateNode(nodeId, {
-      status,
+      status: nextStatus,
       completedAt,
     });
 
@@ -741,23 +813,25 @@ function processAgentStatusFile(statusFilePath: string): void {
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
     const executionSummary = [
       `Sentinel captured state: ${status}`,
+      `Roadmap step state: ${nextStatus}`,
+      completionReason ? `Completion decision: ${completionReason}` : '',
       `Workspace changes:`,
       changedFilesSummary,
       outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
     syncEngine.logAgentExecution(
       nodeId,
       command || 'Unknown CLI',
       'Completed execution in terminal',
       executionSummary,
-      status
+      nextStatus
     );
 
     sendNodesToWebview();
-    if (status === 'Completed' && changedFilesSummary === 'No workspace file changes detected.') {
+    if (nextStatus === 'Completed' && changedFilesSummary === 'No workspace file changes detected.') {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
     } else {
-      vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${status}`);
+      vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${nextStatus}`);
     }
 
     setTimeout(() => {
@@ -874,32 +948,33 @@ async function handleGenerateRoadmap(context: vscode.ExtensionContext, prompt: s
     }
   }
 
-  const systemInstruction = `You are Solopreneur AI, a master software architect and product manager.
-Your task is to generate a visual software roadmap as a JSON array of tasks based on the user's project description.
+  const systemInstruction = `You are Solopreneur AI, a product strategist and software delivery planner for solo builders.
+Your task is to generate a customized local-first project roadmap as a JSON array of tasks based on the user's project idea and requirements.
 
 Return ONLY a valid JSON array of roadmap nodes. Do NOT wrap it in HTML, do NOT add any markdown formatting (like \`\`\`json), and do NOT include any introductory or concluding text. Your entire response must be a single parseable JSON array.
 
 Each node in the array must strictly conform to the following JSON structure:
 {
   "id": "unique_string_number_e.g_1_2_3",
-  "title": "Short concise task title",
-  "description": "Clear explanation of what needs to be done",
-  "stage": "Business Planning" | "Brand & Setup" | "Product & MVP" | "Marketing & Growth",
+  "title": "Short concise task title in Chinese",
+  "description": "Clear explanation in Chinese of what outcome this roadmap step should achieve",
+  "stage": "商业规划" | "品牌与设置" | "产品与 MVP" | "营销与增长",
   "dependencies": "comma_separated_dependency_ids_or_empty_string",
   "agentCli": "${cliPath}",
-  "agentPrompt": "The specific instruction prompt to send to the AI agent to execute this task"
+  "agentPrompt": "A concrete Chinese instruction prompt to send to the AI agent for this step"
 }
 
 Guidelines:
-1. Break down the project roadmap strictly into standard stages representing the 4 pillars of Cofounder-2:
-   - "Business Planning": Market analysis, competitive analysis, business vision definition, strategy roadmaps.
-   - "Brand & Setup": Visual brand VI, domain suggestions, LLC administrative incorporation paperwork, organizational charts.
-   - "Product & MVP": Project scaffolds, backend schemas, premium React frontend layouts, staging server deployments.
-   - "Marketing & Growth": outbound pipeline lead generation, SEO copy writing, client conversion tracking.
-2. Create a logical progression of 4 to 6 tasks.
-3. Make sure dependencies are correctly set. For example, "2" depends on "1", "3" depends on "2", etc.
+1. The roadmap must always follow this clear framework, customized to the user's idea:
+   - "商业规划": target user, promise, market position, MVP boundary, risks, acceptance criteria.
+   - "品牌与设置": naming/voice, README/project docs, workspace structure, lightweight operating assets.
+   - "产品与 MVP": implementation plan, first vertical slice, local run path, verification commands.
+   - "营销与增长": launch checklist, initial copy, distribution experiment, measurable next action.
+2. Create a logical progression of 4 to 6 tasks. Each task should be small enough to support multiple Agent conversations.
+3. Make sure dependencies are correctly set. For example, "2" depends on "1", "3" depends on "2", etc. Dependencies should reflect actual prerequisite outcomes.
 4. Set "agentCli" to the exact string: "${cliPath}".
-5. Create extremely descriptive "agentPrompt" prompts so that when the agent is executed, it has enough detail to build the subsystem correctly.`;
+5. Create descriptive but action-oriented "agentPrompt" prompts. Each prompt should ask the agent to write or modify concrete local project files and run narrow verification where relevant.
+6. Do not generate vague consulting tasks. Every roadmap step must have a visible local deliverable.`;
 
   await vscode.window.withProgress(
     {
@@ -1012,7 +1087,7 @@ Guidelines:
           id: node.id || String(idx + 1),
           title: node.title || `Task ${idx + 1}`,
           description: node.description || '',
-          stage: node.stage || 'Business Planning',
+          stage: node.stage || '商业规划',
           dependencies: node.dependencies || '',
           agentCli: node.agentCli || cliPath,
           agentPrompt: node.agentPrompt || '',
@@ -1225,6 +1300,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       border-left: 5px solid #00e5ff;
       animation: pulse-border 2s infinite;
     }
+    .node-card.status-In-Progress {
+      border-left: 5px solid #facc15;
+      box-shadow: 0 0 15px rgba(250, 204, 21, 0.08);
+    }
     .node-card.status-Completed {
       border-left: 5px solid #00e676;
       box-shadow: 0 0 15px rgba(0, 230, 118, 0.1);
@@ -1333,6 +1412,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     .status-badge.Pending { background: rgba(100, 116, 139, 0.15); color: #94a3b8; }
     .status-badge.Running { background: rgba(0, 229, 255, 0.15); color: #00e5ff; }
+    .status-badge.In-Progress { background: rgba(250, 204, 21, 0.15); color: #facc15; }
     .status-badge.Completed { background: rgba(0, 230, 118, 0.15); color: #00e676; }
     .status-badge.Failed { background: rgba(255, 23, 68, 0.15); color: #ff1744; }
 
@@ -1731,7 +1811,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
-        emptyRoadmap: '还没有路线图。先描述项目想法，然后生成路线图。',
+        emptyRoadmap: '还没有路线图。请添加项目文件夹，或重新打开当前项目。',
         startConversation: '发起 Agent 对话',
         conversationHistory: 'Agent 对话历史',
         noConversations: '这个环节还没有 Agent 对话。',
@@ -1742,7 +1822,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         testing: '正在测试连接...',
         connectionOk: '连接正常：',
         connectionFailed: '连接失败：',
-        status: { Pending: '待处理', Running: '进行中', Completed: '已完成', Failed: '失败' }
+        markComplete: '完成环节',
+        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败' }
       },
       en: {
         title: '🎯 Solopreneur AI Roadmap',
@@ -1758,7 +1839,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
-        emptyRoadmap: 'No roadmap yet. Describe your project and generate a roadmap.',
+        emptyRoadmap: 'No roadmap yet. Add a project folder or reopen the current project.',
         startConversation: 'Start Agent Conversation',
         conversationHistory: 'Agent Conversation History',
         noConversations: 'No Agent conversations for this step yet.',
@@ -1769,7 +1850,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         testing: 'Testing connection...',
         connectionOk: 'Connection OK: ',
         connectionFailed: 'Connection Failed: ',
-        status: { Pending: 'Pending', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
+        markComplete: 'Complete Step',
+        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
       }
     };
 
@@ -1779,6 +1861,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     function statusText(status) {
       return (i18n[currentLanguage].status || {})[status] || status;
+    }
+
+    function statusClass(status) {
+      return String(status || '').replace(/[^a-zA-Z0-9]/g, '-');
     }
 
     function setText(id, value) {
@@ -1991,7 +2077,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         \` : '';
 
         row.innerHTML = \`
-          <div class="node-card status-\${node.status} \${expanded ? 'expanded' : 'collapsed'}" data-node-card-id="\${escapeHtml(node.id)}">
+          <div class="node-card status-\${statusClass(node.status)} \${expanded ? 'expanded' : 'collapsed'}" data-node-card-id="\${escapeHtml(node.id)}">
             <div class="node-summary">
               <div class="node-content">
                 <div class="node-headline">
@@ -2002,7 +2088,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 \${promptHtml}
               </div>
               <div class="node-actions">
-                <span class="status-badge \${node.status}">\${statusText(node.status)}</span>
+                <span class="status-badge \${statusClass(node.status)}">\${statusText(node.status)}</span>
+                \${node.status !== 'Completed' ? \`<button class="btn-run" data-complete-node-id="\${escapeHtml(node.id)}">\${t('markComplete')}</button>\` : ''}
               </div>
             </div>
           </div>
@@ -2023,6 +2110,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
             triggerRun(node.id, input ? input.value : '');
             if (input) input.value = '';
+          });
+        }
+        const completeButton = row.querySelector('[data-complete-node-id]');
+        if (completeButton) {
+          completeButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            vscode.postMessage({ command: 'completeNode', nodeId: node.id });
           });
         }
         row.querySelectorAll('[data-conversation-id]').forEach(item => {
@@ -2054,7 +2148,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 <span class="conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
                 <span class="conversation-time">\${escapeHtml(when)}</span>
               </div>
-              <span class="status-badge \${escapeHtml(conversation.status || '')}">\${statusText(conversation.status)}</span>
+              <span class="status-badge \${statusClass(conversation.status)}">\${statusText(conversation.status)}</span>
             </div>
             \${open ? \`
               <div class="conversation-detail">

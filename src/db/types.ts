@@ -6,7 +6,7 @@ export interface RoadmapNode {
   dependencies: string; // Comma-separated list of node IDs
   agentCli: string;
   agentPrompt: string;
-  status: 'Pending' | 'Running' | 'Completed' | 'Failed';
+  status: 'Pending' | 'In Progress' | 'Running' | 'Completed' | 'Failed';
   createdAt: string;
   completedAt: string;
 }

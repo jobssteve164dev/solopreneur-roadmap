@@ -181,6 +181,8 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /Agent Conversation History|Agent 对话历史/);
   assert.match(script, /conversationPlaceholder/);
   assert.match(script, /data-send-node-id/);
+  assert.match(script, /completeNode/);
+  assert.match(script, /Complete Step|完成环节/);
 });
 
 test('sidebar keeps project creation focused on the project switcher', () => {
@@ -244,6 +246,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('/workspace/app'));
   assert.ok(shellScript.finalCommand.includes('status --short'));
   assert.ok(shellScript.finalCommand.includes('.agent_status.json'));
+  assert.ok(shellScript.finalCommand.includes('In Progress'));
+  assert.ok(shellScript.finalCommand.includes('markCompleted'));
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
 
   const prompt = extensionModule.__buildAgentConversationPrompt(
@@ -251,12 +255,25 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       title: 'Build onboarding',
       stage: '产品与 MVP',
       description: 'Create the first usable onboarding path.',
-      agentPrompt: 'Implement the first slice.'
+      agentPrompt: 'Implement the first slice.',
+      status: 'In Progress'
     },
     'Use a small smoke test.',
-    '/workspace/app'
+    '/workspace/app',
+    [
+      {
+        timestamp: '2026-05-22T00:00:00.000Z',
+        agentCli: 'codex',
+        output: 'Created README and ran npm test.',
+        status: 'In Progress'
+      }
+    ],
+    '/workspace/app/.solopreneur/agent-runs/2/completion.json'
   );
   assert.match(prompt, /Use a small smoke test/);
+  assert.match(prompt, /最近 10 轮 Agent 对话剪影/);
+  assert.match(prompt, /Created README and ran npm test/);
+  assert.match(prompt, /markCompleted/);
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /Solopreneur Roadmap/);
 });

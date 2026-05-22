@@ -533,6 +533,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     /* Status Indicators */
     .node-card.status-Pending { border-left: 3px solid #64748b; }
     .node-card.status-Running { border-left: 3px solid #00e5ff; animation: pulse-border 1.5s infinite; }
+    .node-card.status-In-Progress { border-left: 3px solid #facc15; }
     .node-card.status-Completed { border-left: 3px solid #00e676; }
     .node-card.status-Failed { border-left: 3px solid #ff1744; }
 
@@ -584,6 +585,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .status-lbl.Pending { color: #94a3b8; }
     .status-lbl.Running { color: #00e5ff; }
+    .status-lbl.In-Progress { color: #facc15; }
     .status-lbl.Completed { color: #00e676; }
     .status-lbl.Failed { color: #ff1744; }
 
@@ -777,7 +779,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         testing: '正在测试连接...',
         connectionOk: '连接正常：',
         connectionFailed: '连接失败：',
-        status: { Pending: '待处理', Running: '进行中', Completed: '已完成', Failed: '失败' }
+        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败' }
       },
       en: {
         title: '🎯 Solopreneur Control Panel',
@@ -800,7 +802,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         testing: 'Testing connection...',
         connectionOk: 'Connection OK: ',
         connectionFailed: 'Connection Failed: ',
-        status: { Pending: 'Pending', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
+        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
       }
     };
 
@@ -810,6 +812,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function statusText(status) {
       return (i18n[currentLanguage].status || {})[status] || status;
+    }
+
+    function statusClass(status) {
+      return String(status || '').replace(/[^a-zA-Z0-9]/g, '-');
     }
 
     function setText(id, value) {
@@ -1004,7 +1010,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
       nodes.forEach(node => {
         const card = document.createElement('div');
-        card.className = 'node-card status-' + node.status;
+        card.className = 'node-card status-' + statusClass(node.status);
         card.addEventListener('click', (e) => {
           // Prevent triggers clicking the run button itself
           if (e.target.closest('button')) return;
@@ -1013,7 +1019,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         });
 
         // Small run button if applicable
-        const actionHtml = (node.status === 'Pending' || node.status === 'Failed')
+        const actionHtml = (node.status === 'Pending' || node.status === 'Failed' || node.status === 'In Progress')
           ? '<button class="btn-run-small" data-run-node-id="' + node.id + '">⚡ ' + t('run') + '</button>'
           : '';
 
@@ -1025,7 +1031,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <span class="node-badge stage-\${cleanStage}">\${node.stage}</span>
           </div>
           <div class="node-action-bar">
-            <span class="status-lbl \${node.status}">\${statusText(node.status)}</span>
+            <span class="status-lbl \${statusClass(node.status)}">\${statusText(node.status)}</span>
             \${actionHtml}
           </div>
         \`;

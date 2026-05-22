@@ -24,6 +24,9 @@
 - Project switcher areas should stay focused on project switching and adding folders. Do not reintroduce sidebar-level or full-header roadmap generation prompts; task-specific agent input belongs inside expanded roadmap node cards.
 - Agent execution closure uses both the `.agent_status.json` watcher and a polling fallback. This prevents completed CLI runs from leaving node cards stuck in `Running` when VS Code misses a file watcher event.
 - Agent run prompts are wrapped with Solopreneur task context, the user's per-run supplement, and explicit closure instructions so the CLI knows to deliver a small verifiable result and exit cleanly.
+- After selecting a new project folder, Solopreneur asks for an optional project idea. If provided, AI roadmap generation uses a fixed four-stage framework (`商业规划` / `品牌与设置` / `产品与 MVP` / `营销与增长`) while customizing node titles, descriptions, dependencies, and agent prompts to the user's idea. Empty input keeps the default roadmap.
+- Roadmap step completion is no longer equivalent to one successful Agent run. Successful CLI exit moves the step to `In Progress` unless the Agent writes the agreed completion decision JSON. Users can always close the loop manually through the step card's complete button.
+- Each new Agent conversation receives up to the latest 10 execution-log summaries for that node so the CLI can continue from previous work.
 
 ## CLI Orchestration Contract
 
