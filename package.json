@@ -4,6 +4,7 @@
   "description": "Visual AI Roadmaps and Agent orchestration for solopreneurs in VS Code.",
   "version": "0.0.1",
   "publisher": "SZLK",
+  "icon": "resources/logo.png",
   "engines": {
     "vscode": "^1.75.0"
   },
