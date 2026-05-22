@@ -35,5 +35,5 @@
 
 ## Packaging And Local Install
 
-- `vsce package --no-dependencies` builds `solopreneur-roadmap-<version>.vsix`.
+- Local or Marketplace VSIX builds must include runtime dependencies. Use `vsce package` / `vsce publish`, not `--no-dependencies`, because the extension imports `papaparse` and `sql.js` at activation time.
 - `.vscodeignore` intentionally excludes source, docs, tests, env files, and project memory from the shipped extension.
