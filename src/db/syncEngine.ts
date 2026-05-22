@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import { CsvStore } from './csvStore';
 import { SqliteStore } from './sqliteStore';
-import { RoadmapNode, RoadmapEdge } from './types';
+import { AgentConversation, RoadmapNode, RoadmapEdge } from './types';
 
 export class SyncEngine {
   private csvStore: CsvStore;
@@ -93,6 +93,13 @@ export class SyncEngine {
     status: string
   ): void {
     this.sqliteStore.logExecution(nodeId, agentCli, command, output, status);
+  }
+
+  /**
+   * Reads the agent conversation history for a single roadmap node.
+   */
+  public getAgentExecutions(nodeId: string): AgentConversation[] {
+    return this.sqliteStore.getExecutionLogs(nodeId);
   }
 
   /**

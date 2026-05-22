@@ -8,6 +8,7 @@ interface SolopreneurSettings {
   apiProvider: string;
   apiKey: string;
   cliPath: string;
+  language: string;
 }
 
 interface SolopreneurProject {
@@ -103,7 +104,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           await this._updateSettings({
             apiProvider: data.apiProvider,
             apiKey: data.apiKey,
-            cliPath: data.cliPath
+            cliPath: data.cliPath,
+            language: data.language
           });
           vscode.window.showInformationMessage('Solopreneur settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -650,7 +652,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="header-container">
-    <h2>🎯 Solopreneur Control Panel</h2>
+    <h2 id="sidebar-title">🎯 Solopreneur Control Panel</h2>
     <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
   </div>
 
@@ -662,12 +664,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
-      <h3>⚙️ Solopreneur Settings</h3>
+      <h3 id="settings-title">⚙️ Solopreneur Settings</h3>
       <button class="btn-close-settings" id="btn-close-settings">×</button>
+    </div>
+
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-language">Language</label>
+      <select class="settings-select" id="setting-language">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
     </div>
     
     <div class="settings-field">
-      <label class="settings-lbl-title">AI Provider</label>
+      <label class="settings-lbl-title" id="label-provider">AI Provider</label>
       <select class="settings-select" id="setting-provider">
         <option value="Gemini">Gemini</option>
         <option value="OpenAI">OpenAI</option>
@@ -676,24 +686,24 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field" id="api-key-container">
-      <label class="settings-lbl-title">API Key</label>
+      <label class="settings-lbl-title" id="label-api-key">API Key</label>
       <input type="password" class="settings-input" id="setting-key" placeholder="Enter API Key...">
-      <div style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+      <div id="help-api-key" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
         Required for standalone providers (Gemini or OpenAI). Not needed for VS Code Copilot (Native).
       </div>
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title">CLI Command or Path</label>
+      <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
       <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. antigravity-cli">
-      <div style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+      <div id="help-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
         Name of globally installed CLI (e.g. <code>antigravity-cli</code> or <code>codex-cli</code>) or the absolute path to its executable.
       </div>
     </div>
 
     <div class="settings-actions">
-      <button class="settings-action-btn test-btn" id="btn-test-cli">⚡ Test CLI</button>
-      <button class="settings-action-btn save-btn" id="btn-save-settings">💾 Save</button>
+      <button class="settings-action-btn test-btn" id="btn-test-cli">⚡ <span id="text-test-cli">Test CLI</span></button>
+      <button class="settings-action-btn save-btn" id="btn-save-settings">💾 <span id="text-save-settings">Save</span></button>
     </div>
     <div class="cli-badge" id="cli-test-badge" style="display:none;"></div>
   </div>
@@ -701,7 +711,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   <!-- Progress Widget -->
   <div class="progress-widget">
     <div class="progress-header">
-      <span>Roadmap Sync Progress</span>
+      <span id="progress-label">Roadmap Sync Progress</span>
       <span id="progress-text">0/0 Tasks</span>
     </div>
     <div class="progress-bar-bg">
@@ -725,7 +735,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   <!-- Footer CTA -->
   <div class="sidebar-footer">
     <button class="btn-large" id="btn-open-full">
-      🖥️ Open Visual Roadmap Graph
+      🖥️ <span id="text-open-full">Open Visual Roadmap Graph</span>
     </button>
   </div>
 
@@ -748,9 +758,100 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingKey = document.getElementById('setting-key');
     const apiKeyContainer = document.getElementById('api-key-container');
     const settingCliPath = document.getElementById('setting-clipath');
+    const settingLanguage = document.getElementById('setting-language');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
+    let currentLanguage = 'zh';
+    let currentNodes = [];
+    const currentProjects = { projects: [], selectedProjectPath: '' };
+    const i18n = {
+      zh: {
+        title: '🎯 独立项目控制台',
+        settingsTitle: '⚙️ 设置',
+        language: '界面语言',
+        provider: 'AI 服务',
+        apiKey: 'API Key',
+        apiKeyPlaceholder: '输入 API Key...',
+        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 VS Code Copilot 时不需要。',
+        cliPath: 'Agent CLI 命令或路径',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 antigravity-cli、codex）或可执行文件绝对路径。',
+        testCli: '测试 CLI',
+        save: '保存',
+        chooseProject: '选择项目文件夹',
+        progress: '路线图进度',
+        tasks: '个任务',
+        promptPlaceholder: '生成新的项目路线图...',
+        generate: '生成',
+        openFull: '打开路线图大图',
+        empty: '还没有路线图。输入项目想法来生成计划。',
+        run: '对话',
+        testing: '正在测试连接...',
+        connectionOk: '连接正常：',
+        connectionFailed: '连接失败：',
+        status: { Pending: '待处理', Running: '进行中', Completed: '已完成', Failed: '失败' }
+      },
+      en: {
+        title: '🎯 Solopreneur Control Panel',
+        settingsTitle: '⚙️ Solopreneur Settings',
+        language: 'Language',
+        provider: 'AI Provider',
+        apiKey: 'API Key',
+        apiKeyPlaceholder: 'Enter API Key...',
+        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for VS Code Copilot.',
+        cliPath: 'CLI Command or Path',
+        cliPathHelp: 'Name of a globally installed CLI such as antigravity-cli or codex, or an absolute executable path.',
+        testCli: 'Test CLI',
+        save: 'Save',
+        chooseProject: 'Choose project folder',
+        progress: 'Roadmap Sync Progress',
+        tasks: 'Tasks',
+        promptPlaceholder: 'Generate new project tasks...',
+        generate: 'Generate',
+        openFull: 'Open Visual Roadmap Graph',
+        empty: 'No tasks in roadmap. Enter a prompt above to generate your plan.',
+        run: 'Run',
+        testing: 'Testing connection...',
+        connectionOk: 'Connection OK: ',
+        connectionFailed: 'Connection Failed: ',
+        status: { Pending: 'Pending', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
+      }
+    };
+
+    function t(key) {
+      return i18n[currentLanguage][key] || i18n.en[key] || key;
+    }
+
+    function statusText(status) {
+      return (i18n[currentLanguage].status || {})[status] || status;
+    }
+
+    function setText(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
+
+    function applyLanguage() {
+      setText('sidebar-title', t('title'));
+      btnToggleSettings.title = t('settingsTitle');
+      btnAddProject.title = t('chooseProject');
+      setText('settings-title', t('settingsTitle'));
+      setText('label-language', t('language'));
+      setText('label-provider', t('provider'));
+      setText('label-api-key', t('apiKey'));
+      settingKey.placeholder = t('apiKeyPlaceholder');
+      setText('help-api-key', t('apiKeyHelp'));
+      setText('label-cli-path', t('cliPath'));
+      setText('help-cli-path', t('cliPathHelp'));
+      setText('text-test-cli', t('testCli'));
+      setText('text-save-settings', t('save'));
+      setText('progress-label', t('progress'));
+      aiPromptInput.placeholder = t('promptPlaceholder');
+      btnGenerate.textContent = t('generate');
+      setText('text-open-full', t('openFull'));
+      renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
+      renderSidebar(currentNodes);
+    }
 
     // Toggle settings panel
     btnToggleSettings.addEventListener('click', () => {
@@ -775,6 +876,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
     });
 
+    settingLanguage.addEventListener('change', () => {
+      currentLanguage = settingLanguage.value;
+      applyLanguage();
+    });
+
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
@@ -785,6 +891,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const message = event.data;
       switch (message.command) {
         case 'nodesUpdated':
+          currentNodes = message.nodes || [];
           renderSidebar(message.nodes);
           break;
 
@@ -792,15 +899,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           settingProvider.value = message.settings.apiProvider || 'Gemini';
           settingKey.value = message.settings.apiKey || '';
           settingCliPath.value = message.settings.cliPath || 'antigravity-cli';
+          settingLanguage.value = message.settings.language || 'zh';
+          currentLanguage = settingLanguage.value;
           
           if (settingProvider.value === 'VS Code Copilot (Native)') {
             apiKeyContainer.style.display = 'none';
           } else {
             apiKeyContainer.style.display = 'flex';
           }
+          applyLanguage();
           break;
 
         case 'projectsLoaded':
+          currentProjects.projects = message.projects.projects || [];
+          currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
           break;
 
@@ -808,10 +920,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           cliTestBadge.style.display = 'block';
           if (message.success) {
             cliTestBadge.className = 'cli-badge success';
-            cliTestBadge.textContent = 'Connection OK: ' + message.message;
+            cliTestBadge.textContent = t('connectionOk') + message.message;
           } else {
             cliTestBadge.className = 'cli-badge error';
-            cliTestBadge.textContent = 'Connection Failed: ' + message.message;
+            cliTestBadge.textContent = t('connectionFailed') + message.message;
           }
           break;
       }
@@ -823,7 +935,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         command: 'updateSettings',
         apiProvider: settingProvider.value,
         apiKey: settingKey.value.trim(),
-        cliPath: settingCliPath.value.trim()
+        cliPath: settingCliPath.value.trim(),
+        language: settingLanguage.value
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -835,7 +948,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       cliTestBadge.className = 'cli-badge';
       cliTestBadge.style.background = 'rgba(255,255,255,0.05)';
       cliTestBadge.style.color = 'var(--text-muted)';
-      cliTestBadge.textContent = 'Testing connection...';
+      cliTestBadge.textContent = t('testing');
 
       vscode.postMessage({
         command: 'testCli',
@@ -874,7 +987,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!projects || projects.length === 0) {
         const option = document.createElement('option');
         option.value = '';
-        option.textContent = 'Choose project folder';
+        option.textContent = t('chooseProject');
         projectSelect.appendChild(option);
         return;
       }
@@ -900,11 +1013,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         emptyState.style.fontSize = '11px';
         emptyState.style.textAlign = 'center';
         emptyState.style.padding = '20px 0';
-        emptyState.textContent = 'No tasks in roadmap. Enter a prompt above to generate your plan!';
+        emptyState.textContent = t('empty');
         tasksList.appendChild(emptyState);
 
         progressBar.style.width = '0%';
-        progressText.textContent = '0 / 0 Tasks';
+        progressText.textContent = '0 / 0 ' + t('tasks');
         return;
       }
 
@@ -914,7 +1027,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const percent = Math.round((completed / total) * 100);
 
       progressBar.style.width = percent + '%';
-      progressText.textContent = completed + ' / ' + total + ' Tasks (' + percent + '%)';
+      progressText.textContent = completed + ' / ' + total + ' ' + t('tasks') + ' (' + percent + '%)';
 
       nodes.forEach(node => {
         const card = document.createElement('div');
@@ -928,7 +1041,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         // Small run button if applicable
         const actionHtml = (node.status === 'Pending' || node.status === 'Failed')
-          ? '<button class="btn-run-small" data-run-node-id="' + node.id + '">⚡ Run</button>'
+          ? '<button class="btn-run-small" data-run-node-id="' + node.id + '">⚡ ' + t('run') + '</button>'
           : '';
 
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
@@ -939,7 +1052,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <span class="node-badge stage-\${cleanStage}">\${node.stage}</span>
           </div>
           <div class="node-action-bar">
-            <span class="status-lbl \${node.status}">\${node.status}</span>
+            <span class="status-lbl \${node.status}">\${statusText(node.status)}</span>
             \${actionHtml}
           </div>
         \`;

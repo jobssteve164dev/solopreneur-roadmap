@@ -69,6 +69,15 @@
           "type": "string",
           "default": "antigravity-cli",
           "description": "The command name or absolute path of your local Codex / Antigravity CLI executable."
+        },
+        "solopreneur.language": {
+          "type": "string",
+          "default": "zh",
+          "enum": [
+            "zh",
+            "en"
+          ],
+          "description": "The display language used by Solopreneur Roadmap webviews."
         }
       }
     }

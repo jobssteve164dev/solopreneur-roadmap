@@ -17,6 +17,7 @@ interface SolopreneurSettings {
   apiProvider: string;
   apiKey: string;
   cliPath: string;
+  language: string;
 }
 
 interface SolopreneurProject {
@@ -115,7 +116,8 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   return {
     apiProvider: saved.apiProvider || config.get('apiProvider') || 'Gemini',
     apiKey: saved.apiKey || config.get('apiKey') || '',
-    cliPath: saved.cliPath || config.get('cliPath') || 'antigravity-cli'
+    cliPath: saved.cliPath || config.get('cliPath') || 'antigravity-cli',
+    language: saved.language || config.get('language') || 'zh'
   };
 }
 
@@ -123,7 +125,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   const nextSettings: SolopreneurSettings = {
     apiProvider: settings.apiProvider || 'Gemini',
     apiKey: settings.apiKey || '',
-    cliPath: settings.cliPath || 'antigravity-cli'
+    cliPath: settings.cliPath || 'antigravity-cli',
+    language: settings.language === 'en' ? 'en' : 'zh'
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -131,6 +134,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('apiProvider', nextSettings.apiProvider, vscode.ConfigurationTarget.Global);
   await config.update('apiKey', nextSettings.apiKey, vscode.ConfigurationTarget.Global);
   await config.update('cliPath', nextSettings.cliPath, vscode.ConfigurationTarget.Global);
+  await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
 }
 
 function projectName(projectPath: string): string {
@@ -345,11 +349,22 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await updatePersistedSettings(context, {
             apiProvider: message.apiProvider,
             apiKey: message.apiKey,
-            cliPath: message.cliPath
+            cliPath: message.cliPath,
+            language: message.language
           });
           vscode.window.showInformationMessage('Solopreneur settings saved successfully!');
           // Broadcast to sync both Webviews
           vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+          break;
+
+        case 'getNodeConversations':
+          if (syncEngine && activePanel) {
+            activePanel.webview.postMessage({
+              command: 'nodeConversationsLoaded',
+              nodeId: message.nodeId,
+              conversations: syncEngine.getAgentExecutions(message.nodeId)
+            });
+          }
           break;
 
         case 'getProjects':
@@ -1152,6 +1167,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       padding: 20px;
       display: flex;
       gap: 16px;
+      flex-direction: column;
       transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
       position: relative;
       cursor: pointer;
@@ -1210,6 +1226,35 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       gap: 6px;
     }
 
+    .node-summary {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      justify-content: space-between;
+    }
+
+    .node-headline {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .node-expand-icon {
+      color: var(--text-muted);
+      font-size: 12px;
+      margin-right: 2px;
+    }
+
+    .node-expanded-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 10px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border-glass);
+    }
+
     .node-title {
       font-size: 16px;
       font-weight: 700;
@@ -1238,6 +1283,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       flex-direction: column;
       justify-content: space-between;
       align-items: flex-end;
+      gap: 10px;
     }
 
     .status-badge {
@@ -1278,6 +1324,85 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       opacity: 0.5;
       background: rgba(255,255,255,0.02);
       color: var(--text-muted);
+    }
+
+    .conversation-panel {
+      background: rgba(0, 0, 0, 0.16);
+      border: 1px solid var(--border-glass);
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    .conversation-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 8px;
+    }
+
+    .conversation-empty {
+      color: var(--text-muted);
+      font-size: 12px;
+      padding: 8px 0;
+    }
+
+    .conversation-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .conversation-item {
+      border: 1px solid var(--border-glass);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      overflow: hidden;
+    }
+
+    .conversation-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .conversation-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .conversation-cli {
+      color: #38bdf8;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .conversation-time {
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+
+    .conversation-detail {
+      border-top: 1px solid var(--border-glass);
+      padding: 10px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .conversation-detail pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 260px;
+      overflow: auto;
+      margin: 6px 0 0;
+      font-size: 11px;
+      color: #cbd5e1;
     }
 
     /* Settings Overlay Styles */
@@ -1452,7 +1577,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 <body>
   <div class="app-container">
     <header>
-      <h1>🎯 Solopreneur AI Roadmap</h1>
+      <h1 id="app-title">🎯 Solopreneur AI Roadmap</h1>
       <div class="controls">
         <select class="project-select" id="project-select"></select>
         <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
@@ -1471,12 +1596,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
-      <h3>⚙️ Solopreneur Settings</h3>
+      <h3 id="settings-title">⚙️ Solopreneur Settings</h3>
       <button class="btn-close-settings" id="btn-close-settings">×</button>
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title">AI Provider</label>
+      <label class="settings-lbl-title" id="label-language">Language</label>
+      <select class="settings-select" id="setting-language">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-provider">AI Provider</label>
       <select class="settings-select" id="setting-provider">
         <option value="Gemini">Gemini</option>
         <option value="OpenAI">OpenAI</option>
@@ -1485,24 +1618,24 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field" id="api-key-container">
-      <label class="settings-lbl-title">API Key</label>
+      <label class="settings-lbl-title" id="label-api-key">API Key</label>
       <input type="password" class="settings-input" id="setting-key" placeholder="Enter API Key...">
-      <div style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+      <div id="help-api-key" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
         Required for standalone providers (Gemini or OpenAI). Not needed for VS Code Copilot (Native).
       </div>
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title">CLI Command or Path</label>
+      <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
       <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. antigravity-cli">
-      <div style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+      <div id="help-cli-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
         Name of globally installed CLI (e.g. <code>antigravity-cli</code> or <code>codex-cli</code>) or the absolute path to its executable.
       </div>
     </div>
 
     <div class="settings-actions">
-      <button class="settings-action-btn test-btn" id="btn-test-cli">⚡ Test CLI</button>
-      <button class="settings-action-btn save-btn" id="btn-save-settings">💾 Save</button>
+      <button class="settings-action-btn test-btn" id="btn-test-cli">⚡ <span id="text-test-cli">Test CLI</span></button>
+      <button class="settings-action-btn save-btn" id="btn-save-settings">💾 <span id="text-save-settings">Save</span></button>
     </div>
     <div class="cli-badge" id="cli-test-badge" style="display:none;"></div>
   </div>
@@ -1523,9 +1656,105 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingKey = document.getElementById('setting-key');
     const apiKeyContainer = document.getElementById('api-key-container');
     const settingCliPath = document.getElementById('setting-clipath');
+    const settingLanguage = document.getElementById('setting-language');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
+    let currentLanguage = 'zh';
+    let currentNodes = [];
+    let expandedNodeId = '';
+    let activeConversationId = '';
+    const nodeConversations = {};
+    const i18n = {
+      zh: {
+        title: '🎯 独立项目 AI 路线图',
+        addProject: '添加项目文件夹',
+        promptPlaceholder: '描述你的项目想法...',
+        generate: '生成 AI 路线图',
+        settingsTitle: '⚙️ 设置',
+        language: '界面语言',
+        provider: 'AI 服务',
+        apiKey: 'API Key',
+        apiKeyPlaceholder: '输入 API Key...',
+        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 VS Code Copilot 时不需要。',
+        cliPath: 'Agent CLI 命令或路径',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 antigravity-cli、codex）或可执行文件绝对路径。',
+        testCli: '测试 CLI',
+        save: '保存',
+        chooseProject: '选择项目文件夹',
+        emptyRoadmap: '还没有路线图。先描述项目想法，然后生成路线图。',
+        startConversation: '发起 Agent 对话',
+        conversationHistory: 'Agent 对话历史',
+        noConversations: '这个环节还没有 Agent 对话。',
+        command: '命令',
+        output: '输出',
+        testing: '正在测试连接...',
+        connectionOk: '连接正常：',
+        connectionFailed: '连接失败：',
+        status: { Pending: '待处理', Running: '进行中', Completed: '已完成', Failed: '失败' }
+      },
+      en: {
+        title: '🎯 Solopreneur AI Roadmap',
+        addProject: 'Add project folder',
+        promptPlaceholder: 'Describe your solopreneur project...',
+        generate: 'Generate AI Roadmap',
+        settingsTitle: '⚙️ Solopreneur Settings',
+        language: 'Language',
+        provider: 'AI Provider',
+        apiKey: 'API Key',
+        apiKeyPlaceholder: 'Enter API Key...',
+        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for VS Code Copilot.',
+        cliPath: 'CLI Command or Path',
+        cliPathHelp: 'Name of a globally installed CLI such as antigravity-cli or codex, or an absolute executable path.',
+        testCli: 'Test CLI',
+        save: 'Save',
+        chooseProject: 'Choose project folder',
+        emptyRoadmap: 'No roadmap yet. Describe your project and generate a roadmap.',
+        startConversation: 'Start Agent Conversation',
+        conversationHistory: 'Agent Conversation History',
+        noConversations: 'No Agent conversations for this step yet.',
+        command: 'Command',
+        output: 'Output',
+        testing: 'Testing connection...',
+        connectionOk: 'Connection OK: ',
+        connectionFailed: 'Connection Failed: ',
+        status: { Pending: 'Pending', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
+      }
+    };
+
+    function t(key) {
+      return i18n[currentLanguage][key] || i18n.en[key] || key;
+    }
+
+    function statusText(status) {
+      return (i18n[currentLanguage].status || {})[status] || status;
+    }
+
+    function setText(id, value) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
+
+    function applyLanguage() {
+      setText('app-title', t('title'));
+      btnAddProject.title = t('addProject');
+      aiPromptInput.placeholder = t('promptPlaceholder');
+      btnGenerate.textContent = t('generate');
+      setText('settings-title', t('settingsTitle'));
+      setText('label-language', t('language'));
+      setText('label-provider', t('provider'));
+      setText('label-api-key', t('apiKey'));
+      settingKey.placeholder = t('apiKeyPlaceholder');
+      setText('help-api-key', t('apiKeyHelp'));
+      setText('label-cli-path', t('cliPath'));
+      setText('help-cli-path', t('cliPathHelp'));
+      setText('text-test-cli', t('testCli'));
+      setText('text-save-settings', t('save'));
+      renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
+      renderRoadmap(currentNodes);
+    }
+
+    const currentProjects = { projects: [], selectedProjectPath: '' };
 
     // Toggle Settings panel visibility
     btnToggleSettings.addEventListener('click', () => {
@@ -1550,6 +1779,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
     });
 
+    settingLanguage.addEventListener('change', () => {
+      currentLanguage = settingLanguage.value;
+      applyLanguage();
+    });
+
     // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
@@ -1560,30 +1794,40 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const message = event.data;
       switch (message.command) {
         case 'nodesUpdated':
+          currentNodes = message.nodes || [];
           renderRoadmap(message.nodes);
           break;
         case 'settingsLoaded':
           settingProvider.value = message.settings.apiProvider || 'Gemini';
           settingKey.value = message.settings.apiKey || '';
           settingCliPath.value = message.settings.cliPath || 'antigravity-cli';
+          settingLanguage.value = message.settings.language || 'zh';
+          currentLanguage = settingLanguage.value;
 
           if (settingProvider.value === 'VS Code Copilot (Native)') {
             apiKeyContainer.style.display = 'none';
           } else {
             apiKeyContainer.style.display = 'flex';
           }
+          applyLanguage();
           break;
         case 'projectsLoaded':
+          currentProjects.projects = message.projects.projects || [];
+          currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
+          break;
+        case 'nodeConversationsLoaded':
+          nodeConversations[message.nodeId] = message.conversations || [];
+          renderRoadmap(currentNodes);
           break;
         case 'cliTestResult':
           cliTestBadge.style.display = 'block';
           if (message.success) {
             cliTestBadge.className = 'cli-badge success';
-            cliTestBadge.textContent = 'Connection OK: ' + message.message;
+            cliTestBadge.textContent = t('connectionOk') + message.message;
           } else {
             cliTestBadge.className = 'cli-badge error';
-            cliTestBadge.textContent = 'Connection Failed: ' + message.message;
+            cliTestBadge.textContent = t('connectionFailed') + message.message;
           }
           break;
       }
@@ -1595,7 +1839,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         command: 'updateSettings',
         apiProvider: settingProvider.value,
         apiKey: settingKey.value.trim(),
-        cliPath: settingCliPath.value.trim()
+        cliPath: settingCliPath.value.trim(),
+        language: settingLanguage.value
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -1607,7 +1852,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       cliTestBadge.className = 'cli-badge';
       cliTestBadge.style.background = 'rgba(255,255,255,0.05)';
       cliTestBadge.style.color = 'var(--text-muted)';
-      cliTestBadge.textContent = 'Testing connection...';
+      cliTestBadge.textContent = t('testing');
 
       vscode.postMessage({
         command: 'testCli',
@@ -1642,7 +1887,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (!projects || projects.length === 0) {
         const option = document.createElement('option');
         option.value = '';
-        option.textContent = 'Choose project folder';
+        option.textContent = t('chooseProject');
         projectSelect.appendChild(option);
         return;
       }
@@ -1659,17 +1904,26 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     }
 
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function renderRoadmap(nodes) {
       // Clear canvas keeping the flow line
       const flowLine = canvas.querySelector('.flow-line');
       canvas.innerHTML = '';
       canvas.appendChild(flowLine);
 
-      if (nodes.length === 0) {
+      if (!nodes || nodes.length === 0) {
         const placeholder = document.createElement('div');
         placeholder.style.color = 'var(--text-muted)';
         placeholder.style.marginTop = '40px';
-        placeholder.textContent = 'No nodes generated. Describe your project above and click Generate!';
+        placeholder.textContent = t('emptyRoadmap');
         canvas.appendChild(placeholder);
         return;
       }
@@ -1679,35 +1933,109 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         row.className = 'node-row';
 
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
+        const expanded = expandedNodeId === node.id;
+        const conversations = nodeConversations[node.id] || [];
+        const promptHtml = expanded ? \`
+          <div class="node-expanded-body">
+            <div class="node-desc">\${escapeHtml(node.description)}</div>
+            <div class="node-agent-prompt">
+              <strong>\${escapeHtml(node.agentCli)}:</strong> \${escapeHtml(node.agentPrompt)}
+            </div>
+            <div class="conversation-panel">
+              <div class="conversation-title">\${t('conversationHistory')}</div>
+              \${renderConversations(node.id, conversations)}
+            </div>
+          </div>
+        \` : '';
 
         row.innerHTML = \`
-          <div class="node-card status-\${node.status}">
-            <div class="node-content">
-              <div style="display: flex; gap: 8px; align-items: center;">
-                <span class="node-badge stage-\${cleanStage}">\${node.stage}</span>
-                <span class="node-title">\${node.title}</span>
+          <div class="node-card status-\${node.status} \${expanded ? 'expanded' : 'collapsed'}" data-node-card-id="\${escapeHtml(node.id)}">
+            <div class="node-summary">
+              <div class="node-content">
+                <div class="node-headline">
+                  <span class="node-expand-icon">\${expanded ? '▾' : '▸'}</span>
+                  <span class="node-badge stage-\${cleanStage}">\${escapeHtml(node.stage)}</span>
+                  <span class="node-title">\${escapeHtml(node.title)}</span>
+                </div>
+                \${promptHtml}
               </div>
-              <div class="node-desc">\${node.description}</div>
-              <div class="node-agent-prompt">
-                <strong>\${node.agentCli}:</strong> \${node.agentPrompt}
+              <div class="node-actions">
+                <span class="status-badge \${node.status}">\${statusText(node.status)}</span>
+                <button class="btn-run" data-run-node-id="\${escapeHtml(node.id)}">
+                  ⚡ \${t('startConversation')}
+                </button>
               </div>
-            </div>
-            <div class="node-actions">
-              <span class="status-badge \${node.status}">\${node.status}</span>
-              <button class="btn-run" data-run-node-id="\${node.id}">
-                ⚡ Run Agent
-              </button>
             </div>
           </div>
         \`;
+        const card = row.querySelector('[data-node-card-id]');
+        if (card) {
+          card.addEventListener('click', (event) => {
+            if (event.target.closest('button') || event.target.closest('[data-conversation-id]')) {
+              return;
+            }
+            toggleNode(node.id);
+          });
+        }
         const runButton = row.querySelector('[data-run-node-id]');
         if (runButton) {
-          runButton.addEventListener('click', () => {
+          runButton.addEventListener('click', (event) => {
+            event.stopPropagation();
             triggerRun(node.id);
           });
         }
+        row.querySelectorAll('[data-conversation-id]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            activeConversationId = activeConversationId === item.getAttribute('data-conversation-id')
+              ? ''
+              : item.getAttribute('data-conversation-id');
+            renderRoadmap(currentNodes);
+          });
+        });
         canvas.appendChild(row);
       });
+    }
+
+    function renderConversations(nodeId, conversations) {
+      if (!conversations || conversations.length === 0) {
+        return '<div class="conversation-empty">' + t('noConversations') + '</div>';
+      }
+
+      const items = conversations.map(conversation => {
+        const conversationId = nodeId + ':' + conversation.id;
+        const open = activeConversationId === conversationId;
+        const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
+        return \`
+          <div class="conversation-item" data-conversation-id="\${escapeHtml(conversationId)}">
+            <div class="conversation-row">
+              <div class="conversation-meta">
+                <span class="conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
+                <span class="conversation-time">\${escapeHtml(when)}</span>
+              </div>
+              <span class="status-badge \${escapeHtml(conversation.status || '')}">\${statusText(conversation.status)}</span>
+            </div>
+            \${open ? \`
+              <div class="conversation-detail">
+                <strong>\${t('command')}</strong>
+                <pre>\${escapeHtml(conversation.command)}</pre>
+                <strong>\${t('output')}</strong>
+                <pre>\${escapeHtml(conversation.output)}</pre>
+              </div>
+            \` : ''}
+          </div>
+        \`;
+      }).join('');
+      return '<div class="conversation-list">' + items + '</div>';
+    }
+
+    function toggleNode(nodeId) {
+      expandedNodeId = expandedNodeId === nodeId ? '' : nodeId;
+      activeConversationId = '';
+      if (expandedNodeId && !nodeConversations[nodeId]) {
+        vscode.postMessage({ command: 'getNodeConversations', nodeId });
+      }
+      renderRoadmap(currentNodes);
     }
 
     function triggerRun(nodeId) {

@@ -17,6 +17,16 @@ export interface RoadmapEdge {
   target: string;
 }
 
+export interface AgentConversation {
+  id: number;
+  nodeId: string;
+  timestamp: string;
+  agentCli: string;
+  command: string;
+  output: string;
+  status: string;
+}
+
 export interface ProjectState {
   nodes: RoadmapNode[];
   edges: RoadmapEdge[];

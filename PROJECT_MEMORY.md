@@ -19,6 +19,8 @@
 - User settings are stored in `ExtensionContext.globalState` first, then mirrored to VS Code configuration. Do not rely only on `workspace.getConfiguration().update()` because code-server/global settings can be unavailable or stale across window reloads.
 - Project folders are tracked in `ExtensionContext.globalState` under the Solopreneur project list. The active `SyncEngine` follows the selected project path, not necessarily the first VS Code workspace folder.
 - The sidebar and full roadmap panel both expose a project dropdown plus an add-folder action so users can switch between multiple local projects.
+- Full roadmap node cards are collapsed by default. Expanding a node reads that node's SQLite `execution_logs` and presents each agent run as a conversation-like history item with command/output details, so users manage agent work from the roadmap step instead of treating each step as a one-shot dispatch.
+- Display language is a persisted user setting (`solopreneur.language`, `zh` or `en`) and must be applied consistently in both the sidebar and full roadmap webviews.
 
 ## CLI Orchestration Contract
 
@@ -35,6 +37,7 @@
 
 - `npm test` compiles the extension and runs Node tests from `test/*.test.js`.
 - `test/webview-regression.test.js` verifies the final generated Webview scripts parse, the settings gear opens the settings panel, CLI command construction keeps Codex and Antigravity paths distinct, runner scripts capture output/changes, and local roadmap fallback keeps dependency order.
+- Regression coverage also checks that the full roadmap webview exposes node conversation history wiring and the language selector.
 
 ## Packaging And Local Install
 

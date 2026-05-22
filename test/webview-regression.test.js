@@ -93,7 +93,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     { getNodes: () => [] },
     async () => {},
     async () => {},
-    () => ({ apiProvider: 'Gemini', apiKey: '', cliPath: 'codex' }),
+    () => ({ apiProvider: 'Gemini', apiKey: '', cliPath: 'codex', language: 'zh' }),
     async () => {},
     () => ({ projects: [{ name: 'app', path: '/workspace/app' }], selectedProjectPath: '/workspace/app' }),
     async () => {},
@@ -118,6 +118,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'settings-panel',
     'setting-provider',
     'setting-key',
+    'setting-language',
     'api-key-container',
     'setting-clipath',
     'btn-test-cli',
@@ -152,6 +153,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'settings-panel',
     'setting-provider',
     'setting-key',
+    'setting-language',
     'api-key-container',
     'setting-clipath',
     'btn-test-cli',
@@ -164,6 +166,21 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   assert.equal(elements['settings-panel'].style.display, 'flex');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
+});
+
+test('full roadmap webview exposes node conversation history and language setting', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml({}, { extensionPath: projectRoot });
+  const script = extractLastScript(html);
+
+  assert.match(html, /id="setting-language"/);
+  assert.match(script, /getNodeConversations/);
+  assert.match(script, /nodeConversationsLoaded/);
+  assert.match(script, /Start Agent Conversation|发起 Agent 对话/);
+  assert.match(script, /Agent Conversation History|Agent 对话历史/);
 });
 
 test('agent command builder uses Codex exec and preserves Antigravity run path', () => {

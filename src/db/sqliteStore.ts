@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import initSqlJs from 'sql.js';
-import { RoadmapNode } from './types';
+import { AgentConversation, RoadmapNode } from './types';
 
 export class SqliteStore {
   private db: initSqlJs.Database | null = null;
@@ -184,6 +184,32 @@ export class SqliteStore {
       ]
     );
     this.save();
+  }
+
+  /**
+   * Retrieves execution history for a roadmap node, newest first.
+   */
+  public getExecutionLogs(nodeId: string): AgentConversation[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT id, nodeId, timestamp, agentCli, command, output, status
+      FROM execution_logs
+      WHERE nodeId = ?
+      ORDER BY id DESC
+    `);
+    const logs: AgentConversation[] = [];
+    try {
+      stmt.bind([nodeId]);
+      while (stmt.step()) {
+        logs.push(stmt.getAsObject() as unknown as AgentConversation);
+      }
+    } finally {
+      stmt.free();
+    }
+    return logs;
   }
 
   /**
