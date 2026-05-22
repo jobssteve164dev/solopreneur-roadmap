@@ -21,6 +21,9 @@
 - The sidebar and full roadmap panel both expose a project dropdown plus an add-folder action so users can switch between multiple local projects.
 - Full roadmap node cards are collapsed by default. Expanding a node reads that node's SQLite `execution_logs` and presents each agent run as a conversation-like history item with command/output details, so users manage agent work from the roadmap step instead of treating each step as a one-shot dispatch.
 - Display language is a persisted user setting (`solopreneur.language`, `zh` or `en`) and must be applied consistently in both the sidebar and full roadmap webviews.
+- The sidebar project area should stay focused on project switching and adding folders. Do not reintroduce a sidebar-level roadmap generation prompt; task-specific agent input belongs inside expanded roadmap node cards.
+- Agent execution closure uses both the `.agent_status.json` watcher and a polling fallback. This prevents completed CLI runs from leaving node cards stuck in `Running` when VS Code misses a file watcher event.
+- Agent run prompts are wrapped with Solopreneur task context, the user's per-run supplement, and explicit closure instructions so the CLI knows to deliver a small verifiable result and exit cleanly.
 
 ## CLI Orchestration Contract
 
@@ -38,6 +41,7 @@
 - `npm test` compiles the extension and runs Node tests from `test/*.test.js`.
 - `test/webview-regression.test.js` verifies the final generated Webview scripts parse, the settings gear opens the settings panel, CLI command construction keeps Codex and Antigravity paths distinct, runner scripts capture output/changes, and local roadmap fallback keeps dependency order.
 - Regression coverage also checks that the full roadmap webview exposes node conversation history wiring and the language selector.
+- Regression coverage checks that the sidebar project creation flow stays focused on the project switcher and that agent prompts include user supplements plus closure instructions.
 
 ## Packaging And Local Install
 

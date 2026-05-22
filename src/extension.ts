@@ -10,6 +10,7 @@ import { SolopreneurSidebarProvider } from './sidebarProvider';
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
 let watcher: vscode.FileSystemWatcher | null = null;
+let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let activeProjectRoot: string | null = null;
 
@@ -77,7 +78,7 @@ export async function activate(context: vscode.ExtensionContext) {
     async (nodeId) => {
       const ready = await ensureSyncEngine(context);
       if (ready) {
-        await handleRunAgent(context, nodeId);
+        await handleRunAgent(context, nodeId, '');
       }
     },
     async (prompt) => {
@@ -196,6 +197,10 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   if (watcher) {
     watcher.dispose();
     watcher = null;
+  }
+  if (statusPoller) {
+    clearInterval(statusPoller);
+    statusPoller = null;
   }
   await ensureSyncEngine(context);
   sendProjectsToWebviews(context);
@@ -329,7 +334,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'runAgent':
-          await handleRunAgent(context, message.nodeId);
+          await handleRunAgent(context, message.nodeId, message.userMessage || '');
           break;
 
         case 'generateRoadmap':
@@ -416,6 +421,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
         watcher.dispose();
         watcher = null;
       }
+      if (statusPoller) {
+        clearInterval(statusPoller);
+        statusPoller = null;
+      }
     },
     null,
     context.subscriptions
@@ -495,6 +504,32 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
+function buildAgentConversationPrompt(node: RoadmapNode, userMessage: string, workspaceRoot: string): string {
+  const supplement = userMessage.trim()
+    ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
+    : '';
+
+  return [
+    '你正在 Solopreneur Roadmap 的一个路线图环节中工作。',
+    '请把这次调用当成该环节的一次 agent 对话，而不是必须一次性完成整个环节。',
+    '',
+    `项目目录：${workspaceRoot}`,
+    `环节：${node.title}`,
+    `阶段：${node.stage}`,
+    `环节说明：${node.description}`,
+    '',
+    '本次任务：',
+    node.agentPrompt,
+    supplement,
+    '',
+    '闭环要求：',
+    '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。',
+    '2. 不要等待用户二次确认；如果任务过大，先交付一个可验证的小闭环，并在输出末尾说明下一次建议继续做什么。',
+    '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
+    '4. 完成后正常退出 CLI 进程。扩展会根据进程退出码和状态文件更新路线图卡片。'
+  ].join('\n');
+}
+
 function buildAgentShellScript(
   agentCommand: string,
   workspaceRoot: string,
@@ -548,52 +583,52 @@ function getChangedFilesSummary(filePath: string): string {
 
 function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
   const now = new Date().toISOString();
-  const safePrompt = prompt.trim() || 'New solopreneur project';
+  const safePrompt = prompt.trim() || '新的独立开发项目';
   return [
     {
       id: '1',
-      title: 'Define the product promise',
-      description: `Turn "${safePrompt}" into a concrete offer, target user, success metric, and first release boundary.`,
-      stage: 'Business Planning',
+      title: '明确产品承诺',
+      description: `把“${safePrompt}”整理成清晰的目标用户、核心承诺、成功指标和第一版边界。`,
+      stage: '商业规划',
       dependencies: '',
       agentCli: cliPath,
-      agentPrompt: `Create a concise product brief for "${safePrompt}". Write it to docs/product-brief.md with target users, core promise, MVP boundary, risks, and acceptance criteria.`,
+      agentPrompt: `为“${safePrompt}”创建一份简洁的产品简报，写入 docs/product-brief.md，包含目标用户、核心承诺、MVP 边界、风险和验收标准。`,
       status: 'Pending',
       createdAt: now,
       completedAt: '',
     },
     {
       id: '2',
-      title: 'Create the implementation plan',
-      description: 'Convert the product brief into a build sequence with files, milestones, and verification commands.',
-      stage: 'Product & MVP',
+      title: '制定实现计划',
+      description: '把产品简报转成可执行的构建顺序、关键文件、里程碑和验证命令。',
+      stage: '产品与 MVP',
       dependencies: '1',
       agentCli: cliPath,
-      agentPrompt: `Read docs/product-brief.md and create docs/implementation-plan.md for "${safePrompt}". Include milestones, expected files, verification commands, and a small first vertical slice.`,
+      agentPrompt: `阅读 docs/product-brief.md，为“${safePrompt}”创建 docs/implementation-plan.md，包含里程碑、预期文件、验证命令和第一个最小可用切片。`,
       status: 'Pending',
       createdAt: now,
       completedAt: '',
     },
     {
       id: '3',
-      title: 'Build the first vertical slice',
-      description: 'Implement the smallest usable product path and leave runnable verification notes.',
-      stage: 'Product & MVP',
+      title: '构建第一个可用切片',
+      description: '实现最小可用产品路径，并留下可运行、可验证的交付说明。',
+      stage: '产品与 MVP',
       dependencies: '2',
       agentCli: cliPath,
-      agentPrompt: `Implement the first vertical slice described in docs/implementation-plan.md. Keep changes local to this workspace, update README.md with how to run it, and run the narrowest relevant verification command.`,
+      agentPrompt: '实现 docs/implementation-plan.md 中定义的第一个垂直切片。改动保持在当前工作区内，更新 README.md 的运行方式，并执行最窄的相关验证命令。',
       status: 'Pending',
       createdAt: now,
       completedAt: '',
     },
     {
       id: '4',
-      title: 'Prepare launch assets',
-      description: 'Create basic launch copy and a handoff checklist grounded in the shipped slice.',
-      stage: 'Marketing & Growth',
+      title: '准备发布素材',
+      description: '基于已经交付的切片，准备基础发布文案、检查清单和下一步增长动作。',
+      stage: '营销与增长',
       dependencies: '3',
       agentCli: cliPath,
-      agentPrompt: `Create docs/launch-checklist.md for "${safePrompt}" based on the current files. Include positioning copy, release checklist, known gaps, and the next measurable growth action.`,
+      agentPrompt: `基于当前文件，为“${safePrompt}”创建 docs/launch-checklist.md，包含定位文案、发布检查清单、已知缺口和下一个可衡量增长动作。`,
       status: 'Pending',
       createdAt: now,
       completedAt: '',
@@ -604,7 +639,7 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
 /**
  * Executes a CLI agent in the integrated terminal.
  */
-async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string) {
+async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string) {
   if (!syncEngine) {
     return;
   }
@@ -660,7 +695,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string) 
   terminal.show(true);
 
   // Command execution with sentinel file generation on success or fail
-  const agentCommand = buildAgentCommand(agentCli, node.agentPrompt, workspaceRoot);
+  const conversationPrompt = buildAgentConversationPrompt(node, userMessage, workspaceRoot);
+  const agentCommand = buildAgentCommand(agentCli, conversationPrompt, workspaceRoot);
   const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli);
 
   // Log command launch to database
@@ -668,93 +704,95 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string) 
     nodeId,
     agentCli,
     agentCommand,
-    'Launched command in integrated terminal',
+    userMessage.trim()
+      ? `Launched command in integrated terminal\n\nUser supplement:\n${userMessage.trim()}`
+      : 'Launched command in integrated terminal',
     'Running'
   );
 
   terminal.sendText(finalCommand);
 }
 
+function processAgentStatusFile(statusFilePath: string): void {
+  if (!fs.existsSync(statusFilePath)) {
+    return;
+  }
+
+  try {
+    const fileContent = fs.readFileSync(statusFilePath, 'utf8').trim();
+    if (!fileContent) {
+      return;
+    }
+
+    const statusData = JSON.parse(fileContent);
+    const { nodeId, status, command, outputFilePath, changesFilePath } = statusData;
+
+    if (!nodeId || !status || status === 'Running' || !syncEngine) {
+      return;
+    }
+
+    const completedAt = status === 'Completed' ? new Date().toISOString() : '';
+    syncEngine.updateNode(nodeId, {
+      status,
+      completedAt,
+    });
+
+    const outputTail = getOutputTail(outputFilePath);
+    const changedFilesSummary = getChangedFilesSummary(changesFilePath);
+    const executionSummary = [
+      `Sentinel captured state: ${status}`,
+      `Workspace changes:`,
+      changedFilesSummary,
+      outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
+    ].join('\n\n');
+    syncEngine.logAgentExecution(
+      nodeId,
+      command || 'Unknown CLI',
+      'Completed execution in terminal',
+      executionSummary,
+      status
+    );
+
+    sendNodesToWebview();
+    if (status === 'Completed' && changedFilesSummary === 'No workspace file changes detected.') {
+      vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
+    } else {
+      vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${status}`);
+    }
+
+    setTimeout(() => {
+      if (fs.existsSync(statusFilePath)) {
+        fs.unlinkSync(statusFilePath);
+      }
+    }, 1000);
+  } catch (e) {
+    // JSON might be partially written; watcher or poller will retry.
+  }
+}
+
 /**
- * Sets up a file system watcher to detect agent status changes written to .agent_status.json
+ * Sets up watcher plus polling fallback for agent status changes.
  */
 function setupFileSentinelWatcher(workspaceRoot: string) {
   if (watcher) {
     watcher.dispose();
   }
+  if (statusPoller) {
+    clearInterval(statusPoller);
+    statusPoller = null;
+  }
 
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
 
-  // Watch `.agent_status.json` for modifications or creation
   watcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(workspaceRoot, '.agent_status.json')
   );
 
-  const handleSentinelChange = () => {
-    if (!fs.existsSync(statusFilePath)) {
-      return;
-    }
-
-    try {
-      const fileContent = fs.readFileSync(statusFilePath, 'utf8').trim();
-      if (!fileContent) {
-        return; // Empty file (created but not written yet)
-      }
-
-      const statusData = JSON.parse(fileContent);
-      const { nodeId, status, command, outputFilePath, changesFilePath } = statusData;
-
-      if (!nodeId || !status || status === 'Running') {
-        return; // Ignored states
-      }
-
-      if (syncEngine) {
-        // Update node status
-        const completedAt = status === 'Completed' ? new Date().toISOString() : '';
-        syncEngine.updateNode(nodeId, {
-          status: status,
-          completedAt: completedAt,
-        });
-
-        // Log to SQL
-        const outputTail = getOutputTail(outputFilePath);
-        const changedFilesSummary = getChangedFilesSummary(changesFilePath);
-        const executionSummary = [
-          `Sentinel captured state: ${status}`,
-          `Workspace changes:`,
-          changedFilesSummary,
-          outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
-        ].join('\n\n');
-        syncEngine.logAgentExecution(
-          nodeId,
-          command || 'Unknown CLI',
-          'Completed execution in terminal',
-          executionSummary,
-          status
-        );
-
-        // Notify Webview
-        sendNodesToWebview();
-        if (status === 'Completed' && changedFilesSummary === 'No workspace file changes detected.') {
-          vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
-        } else {
-          vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${status}`);
-        }
-
-        // Remove sentinel file after read to clean up workspace
-        setTimeout(() => {
-          if (fs.existsSync(statusFilePath)) {
-            fs.unlinkSync(statusFilePath);
-          }
-        }, 1000);
-      }
-    } catch (e) {
-      // JSON might be partially written, ignore and wait for completed write
-    }
-  };
-
+  const handleSentinelChange = () => processAgentStatusFile(statusFilePath);
   watcher.onDidChange(handleSentinelChange);
   watcher.onDidCreate(handleSentinelChange);
+  statusPoller = setInterval(handleSentinelChange, 2000);
+  handleSentinelChange();
 }
 
 /**
@@ -1333,6 +1371,23 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       padding: 10px;
     }
 
+    .conversation-compose {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .conversation-compose input {
+      flex: 1;
+      width: auto;
+      min-width: 0;
+    }
+
+    .btn-send-conversation {
+      min-width: 78px;
+      white-space: nowrap;
+    }
+
     .conversation-title {
       font-size: 12px;
       font-weight: 700;
@@ -1686,6 +1741,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         startConversation: '发起 Agent 对话',
         conversationHistory: 'Agent 对话历史',
         noConversations: '这个环节还没有 Agent 对话。',
+        conversationPlaceholder: '补充这次要 Agent 注意的要求...',
+        send: '发送',
         command: '命令',
         output: '输出',
         testing: '正在测试连接...',
@@ -1713,6 +1770,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         startConversation: 'Start Agent Conversation',
         conversationHistory: 'Agent Conversation History',
         noConversations: 'No Agent conversations for this step yet.',
+        conversationPlaceholder: 'Add guidance for this Agent run...',
+        send: 'Send',
         command: 'Command',
         output: 'Output',
         testing: 'Testing connection...',
@@ -1941,6 +2000,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             <div class="node-agent-prompt">
               <strong>\${escapeHtml(node.agentCli)}:</strong> \${escapeHtml(node.agentPrompt)}
             </div>
+            <div class="conversation-compose">
+              <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}">
+              <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}">\${t('send')}</button>
+            </div>
             <div class="conversation-panel">
               <div class="conversation-title">\${t('conversationHistory')}</div>
               \${renderConversations(node.id, conversations)}
@@ -1961,9 +2024,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
               </div>
               <div class="node-actions">
                 <span class="status-badge \${node.status}">\${statusText(node.status)}</span>
-                <button class="btn-run" data-run-node-id="\${escapeHtml(node.id)}">
-                  ⚡ \${t('startConversation')}
-                </button>
               </div>
             </div>
           </div>
@@ -1971,17 +2031,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const card = row.querySelector('[data-node-card-id]');
         if (card) {
           card.addEventListener('click', (event) => {
-            if (event.target.closest('button') || event.target.closest('[data-conversation-id]')) {
+            if (event.target.closest('button') || event.target.closest('input') || event.target.closest('[data-conversation-id]')) {
               return;
             }
             toggleNode(node.id);
           });
         }
-        const runButton = row.querySelector('[data-run-node-id]');
-        if (runButton) {
-          runButton.addEventListener('click', (event) => {
+        const sendButton = row.querySelector('[data-send-node-id]');
+        if (sendButton) {
+          sendButton.addEventListener('click', (event) => {
             event.stopPropagation();
-            triggerRun(node.id);
+            const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
+            triggerRun(node.id, input ? input.value : '');
+            if (input) input.value = '';
           });
         }
         row.querySelectorAll('[data-conversation-id]').forEach(item => {
@@ -2038,10 +2100,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       renderRoadmap(currentNodes);
     }
 
-    function triggerRun(nodeId) {
+    function cssEscape(value) {
+      if (window.CSS && window.CSS.escape) {
+        return window.CSS.escape(value);
+      }
+      return String(value).replace(/"/g, '\\"');
+    }
+
+    function triggerRun(nodeId, userMessage) {
       vscode.postMessage({
         command: 'runAgent',
-        nodeId: nodeId
+        nodeId: nodeId,
+        userMessage: userMessage || ''
       });
     }
   </script>
@@ -2052,5 +2122,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 export function deactivate() {
   if (watcher) {
     watcher.dispose();
+  }
+  if (statusPoller) {
+    clearInterval(statusPoller);
   }
 }

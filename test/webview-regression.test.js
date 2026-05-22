@@ -108,8 +108,6 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'tasks-list',
     'progress-bar',
     'progress-text',
-    'btn-generate-sidebar',
-    'ai-prompt-sidebar',
     'btn-open-full',
     'project-select',
     'btn-add-project',
@@ -181,6 +179,32 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /nodeConversationsLoaded/);
   assert.match(script, /Start Agent Conversation|发起 Agent 对话/);
   assert.match(script, /Agent Conversation History|Agent 对话历史/);
+  assert.match(script, /conversationPlaceholder/);
+  assert.match(script, /data-send-node-id/);
+});
+
+test('sidebar keeps project creation focused on the project switcher', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const provider = new SolopreneurSidebarProvider(
+    {},
+    { getNodes: () => [] },
+    async () => {},
+    async () => {},
+    () => ({ apiProvider: 'Gemini', apiKey: '', cliPath: 'codex', language: 'zh' }),
+    async () => {},
+    () => ({ projects: [{ name: 'app', path: '/workspace/app' }], selectedProjectPath: '/workspace/app' }),
+    async () => {},
+    async () => {}
+  );
+  const html = provider._getHtmlForWebview({});
+
+  assert.match(html, /id="project-select"/);
+  assert.match(html, /id="btn-add-project"/);
+  assert.doesNotMatch(html, /ai-prompt-sidebar/);
+  assert.doesNotMatch(html, /btn-generate-sidebar/);
 });
 
 test('agent command builder uses Codex exec and preserves Antigravity run path', () => {
@@ -189,7 +213,9 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     [
       'module.exports.__buildAgentCommand = buildAgentCommand;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
+      'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
     ].join('\n')
   );
@@ -218,6 +244,21 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('/workspace/app'));
   assert.ok(shellScript.finalCommand.includes('status --short'));
   assert.ok(shellScript.finalCommand.includes('.agent_status.json'));
+  assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
+
+  const prompt = extensionModule.__buildAgentConversationPrompt(
+    {
+      title: 'Build onboarding',
+      stage: '产品与 MVP',
+      description: 'Create the first usable onboarding path.',
+      agentPrompt: 'Implement the first slice.'
+    },
+    'Use a small smoke test.',
+    '/workspace/app'
+  );
+  assert.match(prompt, /Use a small smoke test/);
+  assert.match(prompt, /正常退出 CLI 进程/);
+  assert.match(prompt, /Solopreneur Roadmap/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {

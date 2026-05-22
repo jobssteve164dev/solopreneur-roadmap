@@ -719,14 +719,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
-  <!-- AI Prompt Generator -->
-  <div class="ai-generator">
-    <div class="ai-input-group">
-      <input type="text" id="ai-prompt-sidebar" class="ai-input" placeholder="Generate new project tasks...">
-      <button id="btn-generate-sidebar" class="ai-btn">Generate</button>
-    </div>
-  </div>
-
   <!-- Tasks List -->
   <div class="node-list-container" id="tasks-list">
     <!-- Items are dynamically injected here -->
@@ -744,8 +736,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const tasksList = document.getElementById('tasks-list');
     const progressBar = document.getElementById('progress-bar');
     const progressText = document.getElementById('progress-text');
-    const btnGenerate = document.getElementById('btn-generate-sidebar');
-    const aiPromptInput = document.getElementById('ai-prompt-sidebar');
     const btnOpenFull = document.getElementById('btn-open-full');
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
@@ -781,8 +771,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         chooseProject: '选择项目文件夹',
         progress: '路线图进度',
         tasks: '个任务',
-        promptPlaceholder: '生成新的项目路线图...',
-        generate: '生成',
         openFull: '打开路线图大图',
         empty: '还没有路线图。输入项目想法来生成计划。',
         run: '对话',
@@ -806,8 +794,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         chooseProject: 'Choose project folder',
         progress: 'Roadmap Sync Progress',
         tasks: 'Tasks',
-        promptPlaceholder: 'Generate new project tasks...',
-        generate: 'Generate',
         openFull: 'Open Visual Roadmap Graph',
         empty: 'No tasks in roadmap. Enter a prompt above to generate your plan.',
         run: 'Run',
@@ -846,8 +832,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       setText('progress-label', t('progress'));
-      aiPromptInput.placeholder = t('promptPlaceholder');
-      btnGenerate.textContent = t('generate');
       setText('text-open-full', t('openFull'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderSidebar(currentNodes);
@@ -954,17 +938,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         command: 'testCli',
         cliPath: settingCliPath.value.trim()
       });
-    });
-
-    btnGenerate.addEventListener('click', () => {
-      const prompt = aiPromptInput.value.trim();
-      if (!prompt) return;
-
-      vscode.postMessage({
-        command: 'generateRoadmap',
-        prompt: prompt
-      });
-      aiPromptInput.value = '';
     });
 
     btnOpenFull.addEventListener('click', () => {

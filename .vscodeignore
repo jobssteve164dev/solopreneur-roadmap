@@ -8,6 +8,7 @@ src/
 docs/
 test/
 .solopreneur/
+.agent_status.json
 *.vsix
 PROJECT_MEMORY.md
 scratch_test_sql.js
