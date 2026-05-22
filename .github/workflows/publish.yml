@@ -7,8 +7,9 @@ on:
   workflow_dispatch: # 支持手动点击触发发布
 
 jobs:
-  publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
