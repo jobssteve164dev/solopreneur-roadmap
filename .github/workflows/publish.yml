@@ -1,0 +1,31 @@
+name: Publish VS Code Extension
+
+on:
+  push:
+    tags:
+      - 'v*' # 当推送形如 v1.0.0 的版本标签时触发发布
+  workflow_dispatch: # 支持在 GitHub Web 界面上手动点击触发发布
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Compile Extension
+        run: npm run compile
+
+      - name: Publish to Marketplace
+        run: npx @vscode/vsce publish
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
