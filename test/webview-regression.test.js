@@ -162,6 +162,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     'out/extension.js',
     [
       'module.exports.__buildAgentCommand = buildAgentCommand;',
+      'module.exports.__buildAgentShellScript = buildAgentShellScript;',
+      'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__shellQuote = shellQuote;'
     ].join('\n')
   );
@@ -178,4 +180,32 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
     "'antigravity-cli' run --task 'Build landing page'"
   );
+
+  const shellScript = extensionModule.__buildAgentShellScript(
+    "'codex' exec -C '/workspace/app' 'Ship the MVP'",
+    '/workspace/app',
+    '2',
+    'codex'
+  );
+  assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/output.log'));
+  assert.ok(shellScript.finalCommand.includes("git -C"));
+  assert.ok(shellScript.finalCommand.includes('/workspace/app'));
+  assert.ok(shellScript.finalCommand.includes('status --short'));
+  assert.ok(shellScript.finalCommand.includes('.agent_status.json'));
+});
+
+test('local roadmap fallback produces runnable dependent tasks', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildLocalRoadmap = buildLocalRoadmap;'
+  );
+  const nodes = extensionModule.__buildLocalRoadmap('AI CRM for freelancers', 'codex');
+
+  assert.equal(nodes.length, 4);
+  assert.equal(nodes[0].dependencies, '');
+  assert.equal(nodes[1].dependencies, '1');
+  assert.equal(nodes[2].dependencies, '2');
+  assert.equal(nodes[3].dependencies, '3');
+  assert.ok(nodes.every((node) => node.agentCli === 'codex'));
+  assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/product-brief.md')));
 });

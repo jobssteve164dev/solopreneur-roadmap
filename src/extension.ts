@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
+import * as childProcess from 'child_process';
 import { SyncEngine } from './db/syncEngine';
 import { RoadmapNode } from './db/types';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
@@ -13,9 +14,6 @@ let sidebarProvider: SolopreneurSidebarProvider | null = null;
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Solopreneur Roadmaps extension is now active!');
-
-  // Try early initialization if workspace is open
-  await ensureSyncEngine(context);
 
   // Register command to show roadmap webview
   const showRoadmapDisposable = vscode.commands.registerCommand(
@@ -79,6 +77,9 @@ export async function activate(context: vscode.ExtensionContext) {
       sidebarProvider
     )
   );
+
+  // Initialize storage in the background after the UI provider is registered.
+  void ensureSyncEngine(context);
 }
 
 /**
@@ -195,8 +196,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'testCli':
-          const exec = require('child_process').exec;
-          exec(`${message.cliPath} --version`, (error: any, stdout: string, stderr: string) => {
+          const cliToTest = resolveAgentCli('antigravity-cli', message.cliPath || '');
+          childProcess.execFile(cliToTest, ['--version'], (error: any, stdout: string, stderr: string) => {
             const success = !error;
             let msg = error ? error.message : (stdout.trim() || stderr.trim());
             if (!success) {
@@ -256,6 +257,45 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function commandExists(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (path.isAbsolute(trimmed) || trimmed.includes(path.sep)) {
+    return fs.existsSync(trimmed);
+  }
+
+  const result = childProcess.spawnSync('sh', ['-lc', `command -v ${shellQuote(trimmed)}`], {
+    stdio: 'ignore'
+  });
+  return result.status === 0;
+}
+
+function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
+  const requestedCli = (agentCli || '').trim();
+  const configuredCli = (configuredCliPath || '').trim();
+  const defaultCliNames = new Set(['', 'antigravity-cli', 'codex-cli']);
+  const preferredCli = defaultCliNames.has(requestedCli) ? configuredCli : requestedCli;
+  const candidates = [
+    preferredCli,
+    requestedCli,
+    configuredCli,
+    'codex',
+    'antigravity-cli',
+    'codex-cli'
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (commandExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return preferredCli || 'codex';
+}
+
 function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
@@ -266,6 +306,112 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
+}
+
+function buildAgentShellScript(
+  agentCommand: string,
+  workspaceRoot: string,
+  nodeId: string,
+  agentCli: string
+): { finalCommand: string; outputFilePath: string; changesFilePath: string } {
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
+  const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
+  const outputFilePath = path.join(runDir, 'output.log');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli, outputFilePath, changesFilePath });
+  const completedStatus = JSON.stringify({ nodeId, status: 'Completed', command: agentCli, outputFilePath, changesFilePath });
+  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli, outputFilePath, changesFilePath });
+  const script = [
+    `mkdir -p ${shellQuote(runDir)}`,
+    `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
+    `(${agentCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
+    `status=\${PIPESTATUS[0]}`,
+    `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
+    `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
+  ].join('; ');
+
+  return {
+    finalCommand: `bash -lc ${shellQuote(script)}`,
+    outputFilePath,
+    changesFilePath
+  };
+}
+
+function getOutputTail(filePath: string): string {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return '';
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8').trim();
+  if (content.length <= 4000) {
+    return content;
+  }
+
+  return content.slice(-4000);
+}
+
+function getChangedFilesSummary(filePath: string): string {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return 'No git workspace changes were detected or this workspace is not a Git repository.';
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8').trim();
+  return content || 'No workspace file changes detected.';
+}
+
+function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
+  const now = new Date().toISOString();
+  const safePrompt = prompt.trim() || 'New solopreneur project';
+  return [
+    {
+      id: '1',
+      title: 'Define the product promise',
+      description: `Turn "${safePrompt}" into a concrete offer, target user, success metric, and first release boundary.`,
+      stage: 'Business Planning',
+      dependencies: '',
+      agentCli: cliPath,
+      agentPrompt: `Create a concise product brief for "${safePrompt}". Write it to docs/product-brief.md with target users, core promise, MVP boundary, risks, and acceptance criteria.`,
+      status: 'Pending',
+      createdAt: now,
+      completedAt: '',
+    },
+    {
+      id: '2',
+      title: 'Create the implementation plan',
+      description: 'Convert the product brief into a build sequence with files, milestones, and verification commands.',
+      stage: 'Product & MVP',
+      dependencies: '1',
+      agentCli: cliPath,
+      agentPrompt: `Read docs/product-brief.md and create docs/implementation-plan.md for "${safePrompt}". Include milestones, expected files, verification commands, and a small first vertical slice.`,
+      status: 'Pending',
+      createdAt: now,
+      completedAt: '',
+    },
+    {
+      id: '3',
+      title: 'Build the first vertical slice',
+      description: 'Implement the smallest usable product path and leave runnable verification notes.',
+      stage: 'Product & MVP',
+      dependencies: '2',
+      agentCli: cliPath,
+      agentPrompt: `Implement the first vertical slice described in docs/implementation-plan.md. Keep changes local to this workspace, update README.md with how to run it, and run the narrowest relevant verification command.`,
+      status: 'Pending',
+      createdAt: now,
+      completedAt: '',
+    },
+    {
+      id: '4',
+      title: 'Prepare launch assets',
+      description: 'Create basic launch copy and a handoff checklist grounded in the shipped slice.',
+      stage: 'Marketing & Growth',
+      dependencies: '3',
+      agentCli: cliPath,
+      agentPrompt: `Create docs/launch-checklist.md for "${safePrompt}" based on the current files. Include positioning copy, release checklist, known gaps, and the next measurable growth action.`,
+      status: 'Pending',
+      createdAt: now,
+      completedAt: '',
+    }
+  ];
 }
 
 /**
@@ -284,6 +430,17 @@ async function handleRunAgent(nodeId: string) {
     return;
   }
 
+  const unmetDependencies = (node.dependencies || '')
+    .split(',')
+    .map((dep) => dep.trim())
+    .filter(Boolean)
+    .filter((dep) => nodes.find((candidate) => candidate.id === dep)?.status !== 'Completed');
+
+  if (unmetDependencies.length > 0) {
+    vscode.window.showErrorMessage(`Complete prerequisite task(s) first: ${unmetDependencies.join(', ')}`);
+    return;
+  }
+
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
     vscode.window.showErrorMessage('Please open a workspace/folder before running an Agent task.');
@@ -293,11 +450,11 @@ async function handleRunAgent(nodeId: string) {
   // Resolve CLI path from config if applicable
   const config = vscode.workspace.getConfiguration('solopreneur');
   const configuredCliPath = config.get<string>('cliPath') || 'antigravity-cli';
+  const agentCli = resolveAgentCli(node.agentCli, configuredCliPath);
 
-  // Use configured CLI path if the node specifies the default antigravity-cli/codex-cli
-  let agentCli = node.agentCli;
-  if (agentCli === 'antigravity-cli' || agentCli === 'codex-cli') {
-    agentCli = configuredCliPath;
+  if (!commandExists(agentCli)) {
+    vscode.window.showErrorMessage(`Agent CLI not found: ${agentCli}. Set Solopreneur CLI Command or Path to an installed executable such as codex.`);
+    return;
   }
 
   // Update node status to Running
@@ -316,22 +473,9 @@ async function handleRunAgent(nodeId: string) {
 
   terminal.show(true);
 
-  // Build Sentinel Injection JSON
-  // When command finishes, it writes execution status and node ID to `.agent_status.json` in the workspace root
-  const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
-
   // Command execution with sentinel file generation on success or fail
   const agentCommand = buildAgentCommand(agentCli, node.agentPrompt, workspaceRoot);
-  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli });
-  const completedStatus = JSON.stringify({ nodeId, status: 'Completed', command: agentCli });
-  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli });
-  const quotedStatusFile = shellQuote(statusFilePath);
-
-  const finalCommand = `printf %s ${shellQuote(runningStatus)} > ${quotedStatusFile} && ` +
-    `(${agentCommand}); status=$?; ` +
-    `if [ $status -eq 0 ]; then ` +
-    `printf %s ${shellQuote(completedStatus)} > ${quotedStatusFile}; ` +
-    `else printf %s ${shellQuote(failedStatus)} > ${quotedStatusFile}; fi`;
+  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli);
 
   // Log command launch to database
   syncEngine.logAgentExecution(
@@ -372,7 +516,7 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
       }
 
       const statusData = JSON.parse(fileContent);
-      const { nodeId, status, command } = statusData;
+      const { nodeId, status, command, outputFilePath, changesFilePath } = statusData;
 
       if (!nodeId || !status || status === 'Running') {
         return; // Ignored states
@@ -387,17 +531,29 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
         });
 
         // Log to SQL
+        const outputTail = getOutputTail(outputFilePath);
+        const changedFilesSummary = getChangedFilesSummary(changesFilePath);
+        const executionSummary = [
+          `Sentinel captured state: ${status}`,
+          `Workspace changes:`,
+          changedFilesSummary,
+          outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
+        ].join('\n\n');
         syncEngine.logAgentExecution(
           nodeId,
           command || 'Unknown CLI',
           'Completed execution in terminal',
-          `Sentinel captured state: ${status}`,
+          executionSummary,
           status
         );
 
         // Notify Webview
         sendNodesToWebview();
-        vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${status}`);
+        if (status === 'Completed' && changedFilesSummary === 'No workspace file changes detected.') {
+          vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
+        } else {
+          vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${status}`);
+        }
 
         // Remove sentinel file after read to clean up workspace
         setTimeout(() => {
@@ -478,13 +634,20 @@ async function handleGenerateRoadmap(prompt: string) {
   }
 
   const config = vscode.workspace.getConfiguration('solopreneur');
-  const apiProvider = config.get<string>('apiProvider') || 'Gemini';
+  let apiProvider = config.get<string>('apiProvider') || 'Gemini';
   const apiKey = config.get<string>('apiKey') || '';
-  const cliPath = config.get<string>('cliPath') || 'antigravity-cli';
+  const cliPath = resolveAgentCli('antigravity-cli', config.get<string>('cliPath') || 'antigravity-cli');
 
   if (apiProvider !== 'VS Code Copilot (Native)' && !apiKey) {
-    vscode.window.showErrorMessage(`API Key is missing for ${apiProvider}. Please open settings (⚙️) and enter your API Key!`);
-    return;
+    if ((vscode as any).lm && (vscode as any).lm.selectChatModels) {
+      apiProvider = 'VS Code Copilot (Native)';
+    } else {
+      const localNodes = buildLocalRoadmap(prompt, cliPath);
+      syncEngine.setNodes(localNodes);
+      sendNodesToWebview();
+      vscode.window.showWarningMessage(`No API key is configured for ${apiProvider}; generated a local starter roadmap so the project can continue.`);
+      return;
+    }
   }
 
   const systemInstruction = `You are Solopreneur AI, a master software architect and product manager.
@@ -640,7 +803,10 @@ Guidelines:
           vscode.window.showInformationMessage('AI Roadmap generated successfully!');
         }
       } catch (error: any) {
-        vscode.window.showErrorMessage(`Failed to generate roadmap: ${error.message || error}`);
+        const localNodes = buildLocalRoadmap(prompt, cliPath);
+        syncEngine?.setNodes(localNodes);
+        sendNodesToWebview();
+        vscode.window.showWarningMessage(`AI roadmap generation failed, so Solopreneur created a local starter roadmap instead: ${error.message || error}`);
       }
     }
   );

@@ -1,5 +1,43 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as childProcess from 'child_process';
 import { SyncEngine } from './db/syncEngine';
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function commandExists(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (path.isAbsolute(trimmed) || trimmed.includes(path.sep)) {
+    return fs.existsSync(trimmed);
+  }
+  const result = childProcess.spawnSync('sh', ['-lc', `command -v ${shellQuote(trimmed)}`], {
+    stdio: 'ignore'
+  });
+  return result.status === 0;
+}
+
+function resolveCliForTest(configuredCliPath: string): string {
+  const candidates = [
+    (configuredCliPath || '').trim(),
+    'codex',
+    'antigravity-cli',
+    'codex-cli'
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (commandExists(candidate)) {
+      return candidate;
+    }
+  }
+
+  return configuredCliPath || 'codex';
+}
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'solopreneur.sidebar';
@@ -57,8 +95,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
           break;
         case 'testCli':
-          const exec = require('child_process').exec;
-          exec(`${data.cliPath} --version`, (error: any, stdout: string, stderr: string) => {
+          const cliToTest = resolveCliForTest(data.cliPath || '');
+          childProcess.execFile(cliToTest, ['--version'], (error: any, stdout: string, stderr: string) => {
             const success = !error;
             let msg = error ? error.message : (stdout.trim() || stderr.trim());
             // Shorten error messages for the compact sidebar badge
