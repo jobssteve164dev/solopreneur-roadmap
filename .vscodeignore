@@ -1,0 +1,9 @@
+.env
+.gitignore
+.git
+.vscode
+tsconfig.json
+src/
+.github/
+docs/
+scratch_test_sql.js
