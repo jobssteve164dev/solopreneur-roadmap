@@ -1,0 +1,60 @@
+{
+  "name": "solopreneur-roadmap",
+  "displayName": "Solopreneur AI Roadmap & Agent Orchestrator",
+  "description": "Visual AI Roadmaps and Agent orchestration for solopreneurs in VS Code.",
+  "version": "0.0.1",
+  "publisher": "solopreneur",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "solopreneur.showRoadmap",
+        "title": "Solopreneur: Show AI Roadmap",
+        "category": "Solopreneur"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "solopreneur-sidebar-container",
+          "title": "Solopreneur",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "solopreneur-sidebar-container": [
+        {
+          "type": "webview",
+          "id": "solopreneur.sidebar",
+          "name": "Solopreneur Roadmap"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "build-webview": "echo 'No webview build configured yet'"
+  },
+  "dependencies": {
+    "papaparse": "^5.4.1",
+    "sql.js": "^1.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^16.18.34",
+    "@types/papaparse": "^5.3.7",
+    "@types/sql.js": "^1.4.11",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^4.9.5"
+  }
+}
