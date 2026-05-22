@@ -477,7 +477,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       gap: 30px;
     }
 
-    /* Node Stack (Cofounder2 Roadmap Flow layout) */
+    /* Node Stack (Unified Roadmap Flow layout) */
     .flow-line {
       position: absolute;
       width: 4px;
