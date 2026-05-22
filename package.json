@@ -2,7 +2,7 @@
   "name": "solopreneur-roadmap",
   "displayName": "Solopreneur AI Roadmap & Agent Orchestrator",
   "description": "Visual AI Roadmaps and Agent orchestration for solopreneurs in VS Code.",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
   "repository": {
