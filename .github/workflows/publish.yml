@@ -2,9 +2,9 @@ name: Publish VS Code Extension
 
 on:
   push:
-    tags:
-      - 'v*' # 当推送形如 v1.0.0 的版本标签时触发发布
-  workflow_dispatch: # 支持在 GitHub Web 界面上手动点击触发发布
+    branches:
+      - main # 当代码推送到 main 主分支时触发自动检测与发布
+  workflow_dispatch: # 支持手动点击触发发布
 
 jobs:
   publish:
@@ -12,6 +12,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # 完整拉取历史和标签
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -25,7 +27,35 @@ jobs:
       - name: Compile Extension
         run: npm run compile
 
+      - name: Extract Version from package.json
+        id: get_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=v$VERSION" >> $GITHUB_ENV
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if Tag Exists
+        id: check_tag
+        run: |
+          git fetch --tags
+          if git rev-parse "${{ steps.get_version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag ${{ steps.get_version.outputs.version }} already exists. Skipping tagging and publishing to avoid conflicts."
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag ${{ steps.get_version.outputs.version }} does not exist. Proceeding with release."
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create and Push Git Tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.get_version.outputs.version }}
+          git push origin ${{ steps.get_version.outputs.version }}
+
       - name: Publish to Marketplace
+        if: steps.check_tag.outputs.exists == 'false'
         run: npx @vscode/vsce publish
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
