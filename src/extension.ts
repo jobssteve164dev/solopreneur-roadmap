@@ -385,7 +385,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
             activePanel.webview.postMessage({
               command: 'nodeConversationsLoaded',
               nodeId: message.nodeId,
-              conversations: syncEngine.getAgentExecutions(message.nodeId)
+              conversations: syncEngine.getAgentExecutions(message.nodeId),
+              projectPath: activeProjectRoot || ''
             });
           }
           break;
@@ -459,6 +460,7 @@ function sendNodesToWebview() {
       activePanel.webview.postMessage({
         command: 'nodesUpdated',
         nodes: nodes,
+        projectPath: activeProjectRoot || '',
       });
     }
     if (sidebarProvider) {
@@ -1795,6 +1797,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let currentNodes = [];
     let expandedNodeId = '';
     let activeConversationId = '';
+    let activeProjectPath = '';
     const nodeConversations = {};
     const i18n = {
       zh: {
@@ -1872,6 +1875,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (el) el.textContent = value;
     }
 
+    function resetProjectScopedState(projectPath, clearNodes) {
+      activeProjectPath = projectPath || '';
+      expandedNodeId = '';
+      activeConversationId = '';
+      Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
+      if (clearNodes) {
+        currentNodes = [];
+      }
+    }
+
     function applyLanguage() {
       setText('app-title', t('title'));
       btnAddProject.title = t('addProject');
@@ -1929,6 +1942,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const message = event.data;
       switch (message.command) {
         case 'nodesUpdated':
+          if (message.projectPath && message.projectPath !== activeProjectPath) {
+            resetProjectScopedState(message.projectPath, false);
+          }
           currentNodes = message.nodes || [];
           renderRoadmap(message.nodes);
           break;
@@ -1947,11 +1963,24 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           applyLanguage();
           break;
         case 'projectsLoaded':
+          if (
+            message.projects.selectedProjectPath &&
+            activeProjectPath &&
+            message.projects.selectedProjectPath !== activeProjectPath
+          ) {
+            resetProjectScopedState(message.projects.selectedProjectPath, true);
+            renderRoadmap(currentNodes);
+          } else if (message.projects.selectedProjectPath && !activeProjectPath) {
+            activeProjectPath = message.projects.selectedProjectPath;
+          }
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
           break;
         case 'nodeConversationsLoaded':
+          if (message.projectPath && message.projectPath !== activeProjectPath) {
+            return;
+          }
           nodeConversations[message.nodeId] = message.conversations || [];
           renderRoadmap(currentNodes);
           break;

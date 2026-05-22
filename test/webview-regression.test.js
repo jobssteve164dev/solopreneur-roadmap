@@ -183,6 +183,8 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /data-send-node-id/);
   assert.match(script, /completeNode/);
   assert.match(script, /Complete Step|完成环节/);
+  assert.match(script, /resetProjectScopedState/);
+  assert.match(script, /projectPath/);
 });
 
 test('sidebar keeps project creation focused on the project switcher', () => {

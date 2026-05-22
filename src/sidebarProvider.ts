@@ -155,7 +155,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const nodes = this._syncEngine.getNodes();
       this._view.webview.postMessage({
         command: 'nodesUpdated',
-        nodes: nodes
+        nodes: nodes,
+        projectPath: this._getProjects().selectedProjectPath
       });
     }
   }
@@ -756,6 +757,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const cliTestBadge = document.getElementById('cli-test-badge');
     let currentLanguage = 'zh';
     let currentNodes = [];
+    let activeProjectPath = '';
     const currentProjects = { projects: [], selectedProjectPath: '' };
     const i18n = {
       zh: {
@@ -823,6 +825,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (el) el.textContent = value;
     }
 
+    function resetProjectScopedState(projectPath, clearNodes) {
+      activeProjectPath = projectPath || '';
+      if (clearNodes) {
+        currentNodes = [];
+      }
+    }
+
     function applyLanguage() {
       setText('sidebar-title', t('title'));
       btnToggleSettings.title = t('settingsTitle');
@@ -881,6 +890,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const message = event.data;
       switch (message.command) {
         case 'nodesUpdated':
+          if (message.projectPath && message.projectPath !== activeProjectPath) {
+            resetProjectScopedState(message.projectPath, false);
+          }
           currentNodes = message.nodes || [];
           renderSidebar(message.nodes);
           break;
@@ -901,6 +913,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'projectsLoaded':
+          if (
+            message.projects.selectedProjectPath &&
+            activeProjectPath &&
+            message.projects.selectedProjectPath !== activeProjectPath
+          ) {
+            resetProjectScopedState(message.projects.selectedProjectPath, true);
+            renderSidebar(currentNodes);
+          } else if (message.projects.selectedProjectPath && !activeProjectPath) {
+            activeProjectPath = message.projects.selectedProjectPath;
+          }
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);

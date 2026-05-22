@@ -27,6 +27,7 @@
 - After selecting a new project folder, Solopreneur asks for an optional project idea. If provided, AI roadmap generation uses a fixed four-stage framework (`商业规划` / `品牌与设置` / `产品与 MVP` / `营销与增长`) while customizing node titles, descriptions, dependencies, and agent prompts to the user's idea. Empty input keeps the default roadmap.
 - Roadmap step completion is no longer equivalent to one successful Agent run. Successful CLI exit moves the step to `In Progress` unless the Agent writes the agreed completion decision JSON. Users can always close the loop manually through the step card's complete button.
 - Each new Agent conversation receives up to the latest 10 execution-log summaries for that node so the CLI can continue from previous work.
+- Webview node state and conversation history caches must be scoped by selected project path. Project switching must clear expanded node state and cached conversations because different projects often reuse the same roadmap node IDs.
 
 ## CLI Orchestration Contract
 
