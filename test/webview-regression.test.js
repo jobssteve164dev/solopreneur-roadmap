@@ -224,6 +224,10 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
+      'module.exports.__parseStepHandoffEntries = parseStepHandoffEntries;',
+      'module.exports.__buildStepHandoffSummary = buildStepHandoffSummary;',
+      'module.exports.__updateStepHandoffSummary = updateStepHandoffSummary;',
+      'module.exports.__readStepHandoffSummary = readStepHandoffSummary;',
       'module.exports.__buildSolopreneurDirectoryReadme = buildSolopreneurDirectoryReadme;',
       'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
@@ -308,11 +312,21 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     },
     'Use a small smoke test.',
     '/workspace/app',
-    '# 环节交接总结\n\n## 2026-05-22 · In Progress\n\n### 本轮文件变化\nM README.md\n\n### 本轮关键信号\nCreated README and ran npm test.',
+    JSON.stringify({
+      version: 1,
+      format: 'solopreneur.stepHandoff',
+      entries: [{
+        timestamp: '2026-05-22T00:00:00.000Z',
+        status: 'In Progress',
+        changedFiles: ['M README.md'],
+        usefulSignals: 'Created README and ran npm test.',
+        completionReason: 'Needs another pass.'
+      }]
+    }, null, 2),
     '/workspace/app/.solopreneur/agent-runs/2/completion.json'
   );
   assert.match(prompt, /Use a small smoke test/);
-  assert.match(prompt, /该环节交接总结/);
+  assert.match(prompt, /该环节交接总结 JSON/);
   assert.match(prompt, /Created README and ran npm test/);
   assert.match(prompt, /markCompleted/);
   assert.match(prompt, /正常退出 CLI 进程/);
@@ -325,9 +339,59 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     'Implemented the first slice.\nRan npm test successfully.',
     ''
   );
-  assert.match(handoff, /本轮文件变化/);
-  assert.match(handoff, /README.md/);
-  assert.match(handoff, /本轮关键信号/);
+  assert.equal(handoff.status, 'In Progress');
+  assert.ok(handoff.changedFiles.some((line) => line.includes('README.md')));
+  assert.match(handoff.usefulSignals, /Implemented the first slice/);
+
+  const dirtySummary = [
+    '# 环节交接总结',
+    '',
+    '这份总结供下一轮 Agent 对话续接上下文使用，只保留最近 10 次结构化交接。',
+    '',
+    '## 2026-05-23T06:30:00.784Z · Completed',
+    '',
+    '### 本轮文件变化',
+    'docs/implementation-plan.md',
+    '',
+    '### 本轮关键信号',
+    'Created implementation plan.',
+    '',
+    '### 完成判断',
+    'First run complete.',
+    '# 环节交接总结',
+    '',
+    '这份总结供下一轮 Agent 对话续接上下文使用，只保留最近 10 次结构化交接。',
+    '',
+    '## 2026-05-23T06:30:00.531Z · Completed',
+    '',
+    '### 本轮文件变化',
+    'docs/implementation-plan.md',
+    '',
+    '### 本轮关键信号',
+    'Created implementation plan.',
+    '',
+    '### 完成判断',
+    'First run complete.'
+  ].join('\n');
+  const parsedDirty = extensionModule.__parseStepHandoffEntries(dirtySummary);
+  assert.equal(parsedDirty.length, 1);
+  assert.equal(JSON.stringify(parsedDirty[0].changedFiles), JSON.stringify(['docs/implementation-plan.md']));
+  assert.match(parsedDirty[0].usefulSignals, /Created implementation plan/);
+
+  const handoffPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-handoff-')), '2.json');
+  const firstSummary = extensionModule.__updateStepHandoffSummary(handoffPath, handoff);
+  const secondSummary = extensionModule.__updateStepHandoffSummary(handoffPath, handoff);
+  assert.equal(extensionModule.__parseStepHandoffEntries(secondSummary).length, 1);
+  assert.doesNotMatch(secondSummary, /# 环节交接总结/);
+  assert.doesNotMatch(secondSummary, /\n\n---\n\n/);
+  assert.equal(JSON.parse(secondSummary).entries.length, 1);
+  assert.equal(extensionModule.__readStepHandoffSummary(handoffPath), secondSummary);
+  assert.match(firstSummary, /solopreneur\.stepHandoff/);
+
+  const legacyHandoffPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-handoff-legacy-')), '2.json');
+  fs.writeFileSync(legacyHandoffPath.replace(/\.json$/, '.md'), dirtySummary, 'utf8');
+  const migrated = extensionModule.__readStepHandoffSummary(legacyHandoffPath);
+  assert.equal(JSON.parse(migrated).entries.length, 1);
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-noop-agent-'));
   const noopRun = extensionModule.__buildAgentShellScript('printf ok', tempRoot, 'noop', 'agy', 7, '');

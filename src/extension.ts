@@ -222,7 +222,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '## 主要文件',
     '',
     '- `roadmap.csv`：路线图主数据，包括环节、依赖、状态和 Agent prompt。',
-    '- `step-memory/`：每个路线图环节的交接总结。下一轮 Agent 对话会优先读取这里的上下文。',
+    '- `step-memory/`：每个路线图环节的 JSON 交接总结。下一轮 Agent 对话会优先读取这里的结构化上下文。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
     '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
@@ -589,16 +589,26 @@ function formatCliTestMessage(agentCli: string, stdout: string, stderr: string):
 }
 
 function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
+  return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.json`);
+}
+
+function getLegacyStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
   return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.md`);
 }
 
 function readStepHandoffSummary(filePath: string): string {
-  if (!filePath || !fs.existsSync(filePath)) {
+  const legacyFilePath = filePath.endsWith('.json') ? filePath.replace(/\.json$/, '.md') : '';
+  const sourceFilePath = filePath && fs.existsSync(filePath)
+    ? filePath
+    : legacyFilePath && fs.existsSync(legacyFilePath)
+      ? legacyFilePath
+      : '';
+  if (!sourceFilePath) {
     return '暂无交接总结。';
   }
 
-  const content = fs.readFileSync(filePath, 'utf8').trim();
-  return content || '暂无交接总结。';
+  const content = fs.readFileSync(sourceFilePath, 'utf8').trim();
+  return buildStepHandoffSummary(parseStepHandoffEntries(content)) || '暂无交接总结。';
 }
 
 function compactLine(value: string, maxLength: number): string {
@@ -611,13 +621,13 @@ function buildRunHandoffEntry(
   changedFilesSummary: string,
   outputTail: string,
   completionReason: string
-): string {
+): Record<string, unknown> {
   const changedFiles = changedFilesSummary
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(0, 12)
-    .join('\n') || '无文件变化记录。';
+    .filter((line) => !/^No (workspace|git|project) /i.test(line));
 
   const usefulSignals = outputTail
     .split('\n')
@@ -630,33 +640,157 @@ function buildRunHandoffEntry(
     .slice(-12)
     .join('\n');
 
-  return [
-    `## ${new Date().toISOString()} · ${status}`,
-    '',
-    '### 本轮文件变化',
-    changedFiles,
-    '',
-    '### 本轮关键信号',
-    usefulSignals ? compactLine(usefulSignals, 1200) : compactLine(outputTail, 1200) || '无可用输出摘要。',
-    '',
-    '### 完成判断',
-    completionReason || (status === 'Completed' ? '该环节已完成。' : '该环节仍需后续推进。')
-  ].join('\n');
+  return {
+    timestamp: new Date().toISOString(),
+    status,
+    changedFiles: changedFiles.length > 0 ? changedFiles : [],
+    usefulSignals: usefulSignals ? compactLine(usefulSignals, 1200) : compactLine(outputTail, 1200) || '',
+    completionReason: completionReason || (status === 'Completed' ? '该环节已完成。' : '该环节仍需后续推进。')
+  };
 }
 
-function updateStepHandoffSummary(filePath: string, entry: string): string {
-  const existing = readStepHandoffSummary(filePath);
-  const previousEntries = existing === '暂无交接总结。'
-    ? []
-    : existing.split('\n\n---\n\n').filter(Boolean);
-  const entries = [entry, ...previousEntries].slice(0, 10);
-  const nextContent = [
-    '# 环节交接总结',
-    '',
-    '这份总结供下一轮 Agent 对话续接上下文使用，只保留最近 10 次结构化交接。',
-    '',
-    ...entries
-  ].join('\n').slice(0, 12000);
+function normalizeStepHandoffEntry(entry: any): Record<string, unknown> | null {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const changedFiles = Array.isArray(entry.changedFiles)
+    ? entry.changedFiles.map((line: unknown) => String(line || '').trim()).filter(Boolean).slice(0, 12)
+    : String(entry.changedFiles || '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  return {
+    timestamp: String(entry.timestamp || new Date().toISOString()),
+    status: String(entry.status || 'In Progress'),
+    changedFiles,
+    usefulSignals: compactLine(String(entry.usefulSignals || ''), 1200),
+    completionReason: compactLine(String(entry.completionReason || ''), 600)
+  };
+}
+
+function parseLegacyMarkdownHandoffEntry(entry: string): Record<string, unknown> | null {
+  const cleaned = entry.replace(/\n# 环节交接总结[\s\S]*$/g, '').trim();
+  const header = cleaned.match(/^##\s+([^\n]+?)\s+·\s+([^\n]+)\n/);
+  if (!header) {
+    return null;
+  }
+  const section = (title: string) => {
+    const match = cleaned.match(new RegExp(`### ${title}\\n([\\s\\S]*?)(?=\\n\\n### |$)`));
+    return match ? match[1].trim() : '';
+  };
+  const changedFiles = section('本轮文件变化')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^No (workspace|git|project) /i.test(line))
+    .slice(0, 12);
+  return {
+    timestamp: header[1].trim(),
+    status: header[2].trim(),
+    changedFiles,
+    usefulSignals: compactLine(section('本轮关键信号'), 1200),
+    completionReason: compactLine(section('完成判断'), 600)
+  };
+}
+
+function handoffEntryDedupeKey(entry: Record<string, unknown>): string {
+  return JSON.stringify({
+    status: entry.status || '',
+    changedFiles: entry.changedFiles || [],
+    usefulSignals: entry.usefulSignals || '',
+    completionReason: entry.completionReason || ''
+  });
+}
+
+function parseStepHandoffEntries(content: string): Record<string, unknown>[] {
+  const body = (content || '').trim();
+  if (!body || body === '暂无交接总结。') {
+    return [];
+  }
+
+  if (body.startsWith('{') || body.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(body);
+      const rawEntries = Array.isArray(parsed) ? parsed : Array.isArray(parsed.entries) ? parsed.entries : [];
+      const seen = new Set<string>();
+      const entries: Record<string, unknown>[] = [];
+      for (const rawEntry of rawEntries) {
+        const entry = normalizeStepHandoffEntry(rawEntry);
+        if (!entry) continue;
+        const key = handoffEntryDedupeKey(entry);
+        if (!seen.has(key)) {
+          seen.add(key);
+          entries.push(entry);
+        }
+      }
+      return entries.slice(0, 10);
+    } catch {
+      return [];
+    }
+  }
+
+  const normalized = body
+    .replace(/^# 环节交接总结[\s\S]*?(?=\n##\s+\d{4}-\d{2}-\d{2}T|\n##\s+\d{4}-\d{2}-\d{2}\s|$)/, '')
+    .trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const rawEntries = normalized
+    .split(/\n\n---\n\n|(?=\n##\s+\d{4}-\d{2}-\d{2}(?:T|\s))/)
+    .map((entry) => entry.trim())
+    .filter((entry) => /^##\s+\d{4}-\d{2}-\d{2}(?:T|\s)/.test(entry));
+
+  const seen = new Set<string>();
+  const entries: Record<string, unknown>[] = [];
+  for (const entry of rawEntries) {
+    const parsedEntry = parseLegacyMarkdownHandoffEntry(entry);
+    if (!parsedEntry) continue;
+    const key = handoffEntryDedupeKey(parsedEntry);
+    if (!seen.has(key)) {
+      seen.add(key);
+      entries.push(parsedEntry);
+    }
+  }
+  return entries;
+}
+
+function buildStepHandoffSummary(entries: Record<string, unknown>[]): string {
+  const seen = new Set<string>();
+  const validEntries = entries
+    .map((entry) => normalizeStepHandoffEntry(entry))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .filter((entry) => {
+      const key = handoffEntryDedupeKey(entry);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 10);
+  if (validEntries.length === 0) {
+    return '';
+  }
+  return JSON.stringify({
+    version: 1,
+    format: 'solopreneur.stepHandoff',
+    description: 'Only real Agent run handoff entries are kept here. Newest first, max 10.',
+    entries: validEntries
+  }, null, 2);
+}
+
+function updateStepHandoffSummary(filePath: string, entry: Record<string, unknown>): string {
+  const legacyFilePath = filePath.endsWith('.json') ? filePath.replace(/\.json$/, '.md') : '';
+  const existing = filePath && fs.existsSync(filePath)
+    ? fs.readFileSync(filePath, 'utf8')
+    : legacyFilePath && fs.existsSync(legacyFilePath)
+      ? fs.readFileSync(legacyFilePath, 'utf8')
+      : '';
+  const normalizedEntry = normalizeStepHandoffEntry(entry);
+  const entries = normalizedEntry ? [normalizedEntry, ...parseStepHandoffEntries(existing)] : parseStepHandoffEntries(existing);
+  const nextContent = buildStepHandoffSummary(entries).slice(0, 12000);
 
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, nextContent, 'utf8');
@@ -689,7 +823,7 @@ function buildAgentConversationPrompt(
     node.agentPrompt,
     supplement,
     '',
-    '该环节交接总结：',
+    '该环节交接总结 JSON：',
     stepHandoffSummary,
     '',
     '闭环要求：',
