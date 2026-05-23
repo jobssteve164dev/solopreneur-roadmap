@@ -218,6 +218,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentCommand = buildAgentCommand;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
+      'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
@@ -262,22 +263,25 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     },
     'Use a small smoke test.',
     '/workspace/app',
-    [
-      {
-        timestamp: '2026-05-22T00:00:00.000Z',
-        agentCli: 'codex',
-        output: 'Created README and ran npm test.',
-        status: 'In Progress'
-      }
-    ],
+    '# 环节交接总结\n\n## 2026-05-22 · In Progress\n\n### 本轮文件变化\nM README.md\n\n### 本轮关键信号\nCreated README and ran npm test.',
     '/workspace/app/.solopreneur/agent-runs/2/completion.json'
   );
   assert.match(prompt, /Use a small smoke test/);
-  assert.match(prompt, /最近 10 轮 Agent 对话剪影/);
+  assert.match(prompt, /该环节交接总结/);
   assert.match(prompt, /Created README and ran npm test/);
   assert.match(prompt, /markCompleted/);
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /Solopreneur Roadmap/);
+
+  const handoff = extensionModule.__buildRunHandoffEntry(
+    'In Progress',
+    'M README.md\nA docs/product-brief.md',
+    'Implemented the first slice.\nRan npm test successfully.',
+    ''
+  );
+  assert.match(handoff, /本轮文件变化/);
+  assert.match(handoff, /README.md/);
+  assert.match(handoff, /本轮关键信号/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {

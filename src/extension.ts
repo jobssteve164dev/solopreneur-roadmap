@@ -524,26 +524,86 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
-function summarizeRecentConversations(conversations: { timestamp: string; agentCli: string; output: string; status: string }[]): string {
-  if (conversations.length === 0) {
-    return '暂无历史对话。';
+function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
+  return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.md`);
+}
+
+function readStepHandoffSummary(filePath: string): string {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return '暂无交接总结。';
   }
 
-  return conversations.slice(0, 10).map((conversation, index) => {
-    const output = (conversation.output || '').replace(/\s+/g, ' ').trim();
-    const clipped = output.length > 700 ? `${output.slice(0, 700)}...` : output;
-    return [
-      `#${index + 1} ${conversation.timestamp || ''} ${conversation.agentCli || ''} ${conversation.status || ''}`.trim(),
-      clipped || '无可用输出摘要。'
-    ].join('\n');
-  }).join('\n\n');
+  const content = fs.readFileSync(filePath, 'utf8').trim();
+  return content || '暂无交接总结。';
+}
+
+function compactLine(value: string, maxLength: number): string {
+  const compacted = (value || '').replace(/\s+/g, ' ').trim();
+  return compacted.length > maxLength ? `${compacted.slice(0, maxLength)}...` : compacted;
+}
+
+function buildRunHandoffEntry(
+  status: string,
+  changedFilesSummary: string,
+  outputTail: string,
+  completionReason: string
+): string {
+  const changedFiles = changedFilesSummary
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 12)
+    .join('\n') || '无文件变化记录。';
+
+  const usefulSignals = outputTail
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) =>
+      line &&
+      !/^\s*(npm|node|git|>|\[|\{)/i.test(line) &&
+      !line.includes('Refreshing run status')
+    )
+    .slice(-12)
+    .join('\n');
+
+  return [
+    `## ${new Date().toISOString()} · ${status}`,
+    '',
+    '### 本轮文件变化',
+    changedFiles,
+    '',
+    '### 本轮关键信号',
+    usefulSignals ? compactLine(usefulSignals, 1200) : compactLine(outputTail, 1200) || '无可用输出摘要。',
+    '',
+    '### 完成判断',
+    completionReason || (status === 'Completed' ? '该环节已完成。' : '该环节仍需后续推进。')
+  ].join('\n');
+}
+
+function updateStepHandoffSummary(filePath: string, entry: string): string {
+  const existing = readStepHandoffSummary(filePath);
+  const previousEntries = existing === '暂无交接总结。'
+    ? []
+    : existing.split('\n\n---\n\n').filter(Boolean);
+  const entries = [entry, ...previousEntries].slice(0, 10);
+  const nextContent = [
+    '# 环节交接总结',
+    '',
+    '这份总结供下一轮 Agent 对话续接上下文使用，只保留最近 10 次结构化交接。',
+    '',
+    ...entries
+  ].join('\n').slice(0, 12000);
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, nextContent, 'utf8');
+  return nextContent;
 }
 
 function buildAgentConversationPrompt(
   node: RoadmapNode,
   userMessage: string,
   workspaceRoot: string,
-  recentConversations: { timestamp: string; agentCli: string; output: string; status: string }[] = [],
+  stepHandoffSummary = '暂无交接总结。',
   completionDecisionFilePath = ''
 ): string {
   const supplement = userMessage.trim()
@@ -564,8 +624,8 @@ function buildAgentConversationPrompt(
     node.agentPrompt,
     supplement,
     '',
-    '该环节最近 10 轮 Agent 对话剪影：',
-    summarizeRecentConversations(recentConversations),
+    '该环节交接总结：',
+    stepHandoffSummary,
     '',
     '闭环要求：',
     '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。',
@@ -748,12 +808,13 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   // Command execution with sentinel file generation on success or fail
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const completionDecisionFilePath = path.join(runDir, 'completion.json');
-  const recentConversations = syncEngine.getAgentExecutions(nodeId).slice(0, 10);
+  const stepMemoryFilePath = getStepMemoryFilePath(workspaceRoot, nodeId);
+  const stepHandoffSummary = readStepHandoffSummary(stepMemoryFilePath);
   const conversationPrompt = buildAgentConversationPrompt(
     node,
     userMessage,
     workspaceRoot,
-    recentConversations,
+    stepHandoffSummary,
     completionDecisionFilePath
   );
   const agentCommand = buildAgentCommand(agentCli, conversationPrompt, workspaceRoot);
@@ -813,10 +874,18 @@ function processAgentStatusFile(statusFilePath: string): void {
 
     const outputTail = getOutputTail(outputFilePath);
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
+    const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
+    const handoffEntry = workspaceRoot
+      ? buildRunHandoffEntry(nextStatus, changedFilesSummary, outputTail, completionReason)
+      : '';
+    const stepHandoffSummary = workspaceRoot && handoffEntry
+      ? updateStepHandoffSummary(getStepMemoryFilePath(workspaceRoot, nodeId), handoffEntry)
+      : '';
     const executionSummary = [
       `Sentinel captured state: ${status}`,
       `Roadmap step state: ${nextStatus}`,
       completionReason ? `Completion decision: ${completionReason}` : '',
+      stepHandoffSummary ? `Step handoff summary updated: ${getStepMemoryFilePath(workspaceRoot, nodeId)}` : '',
       `Workspace changes:`,
       changedFilesSummary,
       outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
