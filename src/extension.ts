@@ -390,7 +390,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'runAgent':
-          await handleRunAgent(context, message.nodeId, message.userMessage || '');
+          await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '');
           break;
 
         case 'generateRoadmap':
@@ -708,6 +708,8 @@ function buildAgentShellScript(
   workspaceRoot: string,
   nodeId: string,
   agentCli: string,
+  executionLogId: number,
+  userMessage: string,
   completionDecisionFilePath?: string
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
@@ -717,9 +719,9 @@ function buildAgentShellScript(
   const touchedFilesPath = path.join(runDir, 'touched-files.txt');
   const startedAtFilePath = path.join(runDir, 'started_at');
   const decisionFilePath = completionDecisionFilePath || path.join(runDir, 'completion.json');
-  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
-  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', command: agentCli, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
-  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
+  const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
+  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
+  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
   const script = [
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
@@ -830,7 +832,7 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
 /**
  * Executes a CLI agent in the integrated terminal.
  */
-async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string) {
+async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '') {
   if (!syncEngine) {
     return;
   }
@@ -862,10 +864,11 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   // Resolve CLI path from config if applicable
   const configuredCliPath = getPersistedSettings(context).cliPath;
-  const agentCli = resolveAgentCli(node.agentCli, configuredCliPath);
+  const requestedAgentCli = (selectedAgentCli || node.agentCli || configuredCliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath);
 
   if (!commandExists(agentCli)) {
-    const candidates = getAgentCliCandidates(node.agentCli, configuredCliPath).join(', ');
+    const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath).join(', ');
     vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}. Set Solopreneur CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
@@ -899,18 +902,28 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     completionDecisionFilePath
   );
   const agentCommand = buildAgentCommand(agentCli, conversationPrompt, workspaceRoot);
-  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli, completionDecisionFilePath);
 
-  // Log command launch to database
-  syncEngine.logAgentExecution(
+  const launchSummary = [
+    'Agent conversation started.',
+    userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : ''
+  ].filter(Boolean).join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
     nodeId,
     agentCli,
     agentCommand,
-    userMessage.trim()
-      ? `Launched command in integrated terminal\n\nUser supplement:\n${userMessage.trim()}`
-      : 'Launched command in integrated terminal',
+    launchSummary,
     'Running'
   );
+  if (activePanel) {
+    activePanel.webview.postMessage({
+      command: 'nodeConversationsLoaded',
+      nodeId,
+      conversations: syncEngine.getAgentExecutions(nodeId),
+      projectPath: activeProjectRoot || ''
+    });
+  }
+
+  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli, executionLogId, userMessage.trim(), completionDecisionFilePath);
 
   terminal.sendText(finalCommand);
 }
@@ -927,7 +940,7 @@ function processAgentStatusFile(statusFilePath: string): void {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, status, command, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath } = statusData;
+    const { nodeId, status, agentCli, command, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
@@ -969,6 +982,7 @@ function processAgentStatusFile(statusFilePath: string): void {
       ? updateStepHandoffSummary(getStepMemoryFilePath(workspaceRoot, nodeId), handoffEntry)
       : '';
     const executionSummary = [
+      userMessage ? `User supplement:\n${userMessage}` : '',
       `Sentinel captured state: ${status}`,
       `Roadmap step state: ${nextStatus}`,
       completionReason ? `Completion decision: ${completionReason}` : '',
@@ -979,15 +993,34 @@ function processAgentStatusFile(statusFilePath: string): void {
       touchedFilesSummary,
       outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
     ].filter(Boolean).join('\n\n');
-    syncEngine.logAgentExecution(
-      nodeId,
-      command || 'Unknown CLI',
-      'Completed execution in terminal',
-      executionSummary,
-      nextStatus
-    );
+    const updatedExistingConversation = executionLogId
+      ? syncEngine.updateAgentExecution(
+        Number(executionLogId),
+        agentCli || command || 'Unknown CLI',
+        command || 'Completed execution in terminal',
+        executionSummary,
+        nextStatus
+      )
+      : false;
+    if (!updatedExistingConversation) {
+      syncEngine.logAgentExecution(
+        nodeId,
+        agentCli || command || 'Unknown CLI',
+        command || 'Completed execution in terminal',
+        executionSummary,
+        nextStatus
+      );
+    }
 
     sendNodesToWebview();
+    if (activePanel) {
+      activePanel.webview.postMessage({
+        command: 'nodeConversationsLoaded',
+        nodeId,
+        conversations: syncEngine.getAgentExecutions(nodeId),
+        projectPath: activeProjectRoot || ''
+      });
+    }
     if (nextStatus === 'Completed' && changedFilesSummary === 'No workspace file changes detected.') {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
     } else {
@@ -1615,6 +1648,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       gap: 8px;
       align-items: center;
+      flex-wrap: wrap;
     }
 
     .conversation-compose input {
@@ -1623,9 +1657,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       min-width: 0;
     }
 
+    .conversation-agent-select {
+      width: 132px;
+      min-width: 120px;
+      height: 34px;
+      background: rgba(0, 0, 0, 0.24);
+      border: 1px solid var(--border-glass);
+      color: var(--text-main);
+      border-radius: 6px;
+      padding: 0 8px;
+      font-size: 12px;
+    }
+
     .btn-send-conversation {
       min-width: 78px;
       white-space: nowrap;
+    }
+
+    .conversation-compose input:disabled,
+    .conversation-agent-select:disabled,
+    .btn-send-conversation:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
 
     .conversation-title {
@@ -1681,6 +1734,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .conversation-time {
       color: var(--text-muted);
       font-size: 11px;
+    }
+
+    .conversation-summary {
+      color: var(--text-main);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: min(520px, 58vw);
     }
 
     .conversation-detail {
@@ -1956,6 +2018,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let expandedNodeId = '';
     let activeConversationId = '';
     let activeProjectPath = '';
+    let currentCliPath = 'agy';
     const nodeConversations = {};
     const i18n = {
       zh: {
@@ -1977,6 +2040,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         conversationHistory: 'Agent 对话历史',
         noConversations: '这个环节还没有 Agent 对话。',
         conversationPlaceholder: '补充这次要 Agent 注意的要求...',
+        agentSelector: '选择 Agent',
         send: '发送',
         command: '命令',
         output: '输出',
@@ -2005,6 +2069,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         conversationHistory: 'Agent Conversation History',
         noConversations: 'No Agent conversations for this step yet.',
         conversationPlaceholder: 'Add guidance for this Agent run...',
+        agentSelector: 'Choose Agent',
         send: 'Send',
         command: 'Command',
         output: 'Output',
@@ -2110,6 +2175,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           settingProvider.value = message.settings.apiProvider || 'Gemini';
           settingKey.value = message.settings.apiKey || '';
           settingCliPath.value = message.settings.cliPath || 'agy';
+          currentCliPath = settingCliPath.value || 'agy';
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
 
@@ -2246,6 +2312,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
         const expanded = expandedNodeId === node.id;
         const conversations = nodeConversations[node.id] || [];
+        const conversationDisabled = node.status === 'Running' ? 'disabled' : '';
         const promptHtml = expanded ? \`
           <div class="node-expanded-body">
             <div class="node-desc">\${escapeHtml(node.description)}</div>
@@ -2253,8 +2320,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
               <strong>\${escapeHtml(node.agentCli)}:</strong> \${escapeHtml(node.agentPrompt)}
             </div>
             <div class="conversation-compose">
-              <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}">
-              <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}">\${t('send')}</button>
+              <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" \${conversationDisabled}>
+              <select class="conversation-agent-select" data-agent-select-id="\${escapeHtml(node.id)}" title="\${t('agentSelector')}" \${conversationDisabled}>
+                \${renderAgentOptions(node)}
+              </select>
+              <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" \${conversationDisabled}>\${t('send')}</button>
             </div>
             <div class="conversation-panel">
               <div class="conversation-title">\${t('conversationHistory')}</div>
@@ -2284,7 +2354,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const card = row.querySelector('[data-node-card-id]');
         if (card) {
           card.addEventListener('click', (event) => {
-            if (event.target.closest('button') || event.target.closest('input') || event.target.closest('[data-conversation-id]')) {
+            if (event.target.closest('button') || event.target.closest('input') || event.target.closest('select') || event.target.closest('[data-conversation-id]')) {
               return;
             }
             toggleNode(node.id);
@@ -2295,7 +2365,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           sendButton.addEventListener('click', (event) => {
             event.stopPropagation();
             const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
-            triggerRun(node.id, input ? input.value : '');
+            const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
+            triggerRun(node.id, input ? input.value : '', agentSelect ? agentSelect.value : '');
             if (input) input.value = '';
           });
         }
@@ -2328,11 +2399,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const conversationId = nodeId + ':' + conversation.id;
         const open = activeConversationId === conversationId;
         const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
+        const summary = summarizeConversation(conversation);
         return \`
           <div class="conversation-item" data-conversation-id="\${escapeHtml(conversationId)}">
             <div class="conversation-row">
               <div class="conversation-meta">
                 <span class="conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
+                <span class="conversation-summary">\${escapeHtml(summary)}</span>
                 <span class="conversation-time">\${escapeHtml(when)}</span>
               </div>
               <span class="status-badge \${statusClass(conversation.status)}">\${statusText(conversation.status)}</span>
@@ -2351,6 +2424,40 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return '<div class="conversation-list">' + items + '</div>';
     }
 
+    function renderAgentOptions(node) {
+      const options = [];
+      function addOption(value, label) {
+        const normalized = String(value || '').trim();
+        if (!normalized || options.some(option => option.value === normalized)) return;
+        options.push({ value: normalized, label: label || normalized });
+      }
+      addOption(node.agentCli || currentCliPath || 'agy');
+      addOption(currentCliPath || 'agy');
+      addOption('agy');
+      addOption('codex');
+      addOption('antigravity');
+      addOption('antigravity-cli');
+      addOption('codex-cli');
+      return options.map(option => \`
+        <option value="\${escapeHtml(option.value)}">\${escapeHtml(option.label)}</option>
+      \`).join('');
+    }
+
+    function summarizeConversation(conversation) {
+      const output = String(conversation.output || '');
+      const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(\\n\\n|$)/);
+      if (userMatch && userMatch[1].trim()) {
+        return userMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
+      const changedMatch = output.match(/Touched project files:\\n([\\s\\S]*?)(\\n\\n|$)/);
+      if (changedMatch && changedMatch[1].trim() && !changedMatch[1].includes('No project files')) {
+        return changedMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
+      const tailMatch = output.match(/Agent output tail:\\n([\\s\\S]*)$/);
+      const fallback = tailMatch ? tailMatch[1] : output;
+      return fallback.trim().replace(/\\s+/g, ' ').slice(0, 120) || statusText(conversation.status);
+    }
+
     function toggleNode(nodeId) {
       expandedNodeId = expandedNodeId === nodeId ? '' : nodeId;
       activeConversationId = '';
@@ -2367,11 +2474,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return String(value).replace(/"/g, '\\"');
     }
 
-    function triggerRun(nodeId, userMessage) {
+    function triggerRun(nodeId, userMessage, agentCli) {
       vscode.postMessage({
         command: 'runAgent',
         nodeId: nodeId,
-        userMessage: userMessage || ''
+        userMessage: userMessage || '',
+        agentCli: agentCli || ''
       });
     }
   </script>

@@ -91,8 +91,21 @@ export class SyncEngine {
     command: string,
     output: string,
     status: string
-  ): void {
-    this.sqliteStore.logExecution(nodeId, agentCli, command, output, status);
+  ): number {
+    return this.sqliteStore.logExecution(nodeId, agentCli, command, output, status);
+  }
+
+  /**
+   * Update a previously created Agent execution log.
+   */
+  public updateAgentExecution(
+    id: number,
+    agentCli: string,
+    command: string,
+    output: string,
+    status: string
+  ): boolean {
+    return this.sqliteStore.updateExecution(id, agentCli, command, output, status);
   }
 
   /**

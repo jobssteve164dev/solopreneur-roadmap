@@ -166,7 +166,7 @@ export class SqliteStore {
     command: string,
     output: string,
     status: string
-  ): void {
+  ): number {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -183,7 +183,35 @@ export class SqliteStore {
         status,
       ]
     );
+    const idResult = this.db.exec('SELECT last_insert_rowid() AS id');
+    const id = idResult[0]?.values?.[0]?.[0];
     this.save();
+    return typeof id === 'number' ? id : Number(id || 0);
+  }
+
+  /**
+   * Updates an existing execution log so one Agent run appears as one conversation.
+   */
+  public updateExecution(
+    id: number,
+    agentCli: string,
+    command: string,
+    output: string,
+    status: string
+  ): boolean {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    this.db.run(
+      `UPDATE execution_logs
+       SET agentCli = ?, command = ?, output = ?, status = ?
+       WHERE id = ?`,
+      [agentCli, command, output, status, id]
+    );
+    const changed = this.db.getRowsModified() > 0;
+    this.save();
+    return changed;
   }
 
   /**
@@ -209,7 +237,16 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    return logs;
+    const latestFinishedId = logs
+      .filter((log) => log.status !== 'Running')
+      .reduce((max, log) => Math.max(max, Number(log.id || 0)), 0);
+    return logs.filter((log) => {
+      if (log.status !== 'Running' || Number(log.id || 0) > latestFinishedId) {
+        return true;
+      }
+      const output = String(log.output || '');
+      return !/Agent conversation started|Launched command in integrated terminal/.test(output);
+    });
   }
 
   /**

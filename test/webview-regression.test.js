@@ -183,6 +183,9 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /Agent Conversation History|Agent 对话历史/);
   assert.match(script, /conversationPlaceholder/);
   assert.match(script, /data-send-node-id/);
+  assert.match(script, /data-agent-select-id/);
+  assert.match(script, /renderAgentOptions/);
+  assert.match(script, /summarizeConversation/);
   assert.match(script, /completeNode/);
   assert.match(script, /Complete Step|完成环节/);
   assert.match(script, /resetProjectScopedState/);
@@ -277,7 +280,9 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     "'codex' exec -C '/workspace/app' 'Ship the MVP'",
     '/workspace/app',
     '2',
-    'codex'
+    'codex',
+    42,
+    'Use a small smoke test.'
   );
   assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/output.log'));
   assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/touched-files.txt'));
@@ -287,6 +292,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('timed out waiting for response'));
   assert.ok(shellScript.finalCommand.includes('without project file changes or a completion decision'));
   assert.ok(shellScript.finalCommand.includes('.agent_status.json'));
+  assert.ok(shellScript.finalCommand.includes('executionLogId'));
+  assert.ok(shellScript.finalCommand.includes('Use a small smoke test.'));
   assert.ok(shellScript.finalCommand.includes('In Progress'));
   assert.ok(shellScript.finalCommand.includes('markCompleted'));
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
@@ -323,7 +330,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(handoff, /本轮关键信号/);
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-noop-agent-'));
-  const noopRun = extensionModule.__buildAgentShellScript('printf ok', tempRoot, 'noop', 'agy');
+  const noopRun = extensionModule.__buildAgentShellScript('printf ok', tempRoot, 'noop', 'agy', 7, '');
   childProcess.execSync(noopRun.finalCommand, { cwd: tempRoot, stdio: 'ignore' });
   const noopStatus = JSON.parse(fs.readFileSync(path.join(tempRoot, '.agent_status.json'), 'utf8'));
   assert.equal(noopStatus.status, 'Failed');
@@ -351,4 +358,28 @@ test('local roadmap fallback produces runnable dependent tasks', () => {
   assert.equal(nodes[3].dependencies, '3');
   assert.ok(nodes.every((node) => node.agentCli === 'codex'));
   assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/product-brief.md')));
+});
+
+test('agent execution log updates one conversation instead of creating a duplicate', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-log-update-'));
+  const store = new SqliteStore(path.join(tempRoot, 'journal.db'), projectRoot);
+  await store.init();
+
+  const logId = store.logExecution('2', 'agy', 'agy --print task', 'Agent conversation started.', 'Running');
+  const updated = store.updateExecution(logId, 'agy', 'agy --print task', 'Agent output tail:\nDone.', 'In Progress');
+  const logs = store.getExecutionLogs('2');
+
+  assert.equal(updated, true);
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].id, logId);
+  assert.equal(logs[0].status, 'In Progress');
+  assert.match(logs[0].output, /Done/);
+
+  store.logExecution('3', 'agy', 'agy --print task', 'Launched command in integrated terminal', 'Running');
+  store.logExecution('3', 'agy', 'agy --print task', 'Agent output tail:\nFinished.', 'In Progress');
+  const cleanedLogs = store.getExecutionLogs('3');
+  assert.equal(cleanedLogs.length, 1);
+  assert.equal(cleanedLogs[0].status, 'In Progress');
+  store.close();
 });
