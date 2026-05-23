@@ -340,22 +340,16 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     },
     'Use a small smoke test.',
     '/workspace/app',
-    JSON.stringify({
-      version: 1,
-      format: 'solopreneur.stepHandoff',
-      entries: [{
-        timestamp: '2026-05-22T00:00:00.000Z',
-        status: 'In Progress',
-        changedFiles: ['M README.md'],
-        usefulSignals: 'Created README and ran npm test.',
-        completionReason: 'Needs another pass.'
-      }]
-    }, null, 2),
+    '/workspace/app/.solopreneur/step-memory/2.json',
+    '/workspace/app/.solopreneur/agent-runs/2',
     '/workspace/app/.solopreneur/agent-runs/2/completion.json'
   );
   assert.match(prompt, /Use a small smoke test/);
-  assert.match(prompt, /该环节交接总结 JSON/);
-  assert.match(prompt, /Created README and ran npm test/);
+  assert.match(prompt, /必须先读取 Solopreneur 为本环节保存的项目上下文文件/);
+  assert.match(prompt, /\.solopreneur\/step-memory\/2\.json/);
+  assert.match(prompt, /\.solopreneur\/agent-runs\/2/);
+  assert.doesNotMatch(prompt, /该环节交接总结 JSON/);
+  assert.doesNotMatch(prompt, /Created README and ran npm test/);
   assert.match(prompt, /markCompleted/);
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /唯一任务/);
@@ -371,12 +365,15 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     },
     'Keep the original novel ending.',
     '/workspace/app',
-    JSON.stringify({ entries: [{ usefulSignals: 'Old handoff should not be injected.' }] }),
+    '/workspace/app/.solopreneur/step-memory/2.json',
+    '/workspace/app/.solopreneur/agent-runs/2',
     '/workspace/app/.solopreneur/agent-runs/2/completion.json',
     '3350a3b7-7761-4ed5-9661-2e9c9de8f924'
   );
   assert.match(followupPrompt, /继续 Solopreneur Roadmap 当前路线图环节/);
   assert.match(followupPrompt, /Keep the original novel ending/);
+  assert.match(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
+  assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(followupPrompt, /Old handoff should not be injected/);
 

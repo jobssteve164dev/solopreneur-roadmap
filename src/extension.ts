@@ -965,13 +965,23 @@ function buildAgentConversationPrompt(
   node: RoadmapNode,
   userMessage: string,
   workspaceRoot: string,
-  stepHandoffSummary = '暂无交接总结。',
+  stepMemoryFilePath = '',
+  agentRunsDir = '',
   completionDecisionFilePath = '',
   nativeSessionId = ''
 ): string {
   const supplement = userMessage.trim()
     ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
     : '';
+  const memoryFile = stepMemoryFilePath || getStepMemoryFilePath(workspaceRoot, node.id || '');
+  const runsDir = agentRunsDir || path.join(workspaceRoot, '.solopreneur', 'agent-runs', node.id || '');
+  const memoryInstructions = [
+    '开始前必须先读取 Solopreneur 为本环节保存的项目上下文文件：',
+    `- 环节交接 JSON：${memoryFile}`,
+    `- 环节运行记录目录：${runsDir}`,
+    '如果文件或目录不存在，说明这是该环节的早期对话，继续执行本轮任务即可。',
+    '读取这些项目文件后，再结合本次用户补充推进当前环节；不要依赖插件直接注入的历史摘要。'
+  ].join('\n');
 
   if (nativeSessionId.trim()) {
     return [
@@ -983,6 +993,8 @@ function buildAgentConversationPrompt(
       `环节：${node.title}`,
       `阶段：${node.stage}`,
       `当前环节状态：${node.status}`,
+      '',
+      memoryInstructions,
       supplement,
       '',
       '本轮推进要求：',
@@ -1011,8 +1023,7 @@ function buildAgentConversationPrompt(
     node.agentPrompt,
     supplement,
     '',
-    '该环节交接总结 JSON：',
-    stepHandoffSummary,
+    memoryInstructions,
     '',
     '闭环要求：',
     '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。除非用户明确要求，否则不要只输出计划或总结。',
@@ -1225,12 +1236,12 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
   const stepMemoryFilePath = getStepMemoryFilePath(workspaceRoot, nodeId);
-  const stepHandoffSummary = nativeSessionId ? '原生 Agent 会话续接中，本轮不注入历史交接 JSON。' : readStepHandoffSummary(stepMemoryFilePath);
   const conversationPrompt = buildAgentConversationPrompt(
     node,
     userMessage,
     workspaceRoot,
-    stepHandoffSummary,
+    stepMemoryFilePath,
+    runDir,
     completionDecisionFilePath,
     nativeSessionId
   );
