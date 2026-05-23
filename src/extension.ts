@@ -117,7 +117,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   return {
     apiProvider: saved.apiProvider || config.get('apiProvider') || 'Gemini',
     apiKey: saved.apiKey || config.get('apiKey') || '',
-    cliPath: saved.cliPath || config.get('cliPath') || 'antigravity-cli',
+    cliPath: saved.cliPath || config.get('cliPath') || 'agy',
     language: saved.language || config.get('language') || 'zh'
   };
 }
@@ -126,7 +126,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   const nextSettings: SolopreneurSettings = {
     apiProvider: settings.apiProvider || 'Gemini',
     apiKey: settings.apiKey || '',
-    cliPath: settings.cliPath || 'antigravity-cli',
+    cliPath: settings.cliPath || 'agy',
     language: settings.language === 'en' ? 'en' : 'zh'
   };
   await context.globalState.update(settingsKey, nextSettings);
@@ -521,25 +521,30 @@ function commandExists(command: string): boolean {
     return fs.existsSync(trimmed);
   }
 
-  const result = childProcess.spawnSync('sh', ['-lc', `command -v ${shellQuote(trimmed)}`], {
+  const result = childProcess.spawnSync('bash', ['-lc', `command -v ${shellQuote(trimmed)}`], {
     stdio: 'ignore'
   });
   return result.status === 0;
 }
 
-function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
+function getAgentCliCandidates(agentCli: string, configuredCliPath: string): string[] {
   const requestedCli = (agentCli || '').trim();
   const configuredCli = (configuredCliPath || '').trim();
-  const defaultCliNames = new Set(['', 'antigravity-cli', 'codex-cli']);
-  const preferredCli = defaultCliNames.has(requestedCli) ? configuredCli : requestedCli;
-  const candidates = [
-    preferredCli,
-    requestedCli,
-    configuredCli,
-    'codex',
-    'antigravity-cli',
-    'codex-cli'
-  ].filter(Boolean);
+  const requestedName = path.basename(requestedCli).toLowerCase();
+  const configuredName = path.basename(configuredCli).toLowerCase();
+  const antigravityNames = new Set(['', 'agy', 'antigravity', 'antigravity-cli']);
+  const codexNames = new Set(['codex', 'codex-cli']);
+  const wantsCodex = codexNames.has(requestedName) || codexNames.has(configuredName);
+  const wantsAntigravity = antigravityNames.has(requestedName) || antigravityNames.has(configuredName);
+  const candidates = wantsCodex && !wantsAntigravity
+    ? [configuredCli, requestedCli, 'codex', 'codex-cli', 'agy', 'antigravity', 'antigravity-cli']
+    : [configuredCli, requestedCli, 'agy', 'antigravity', 'antigravity-cli', 'codex', 'codex-cli'];
+
+  return candidates.filter(Boolean).filter((candidate, index, all) => all.indexOf(candidate) === index);
+}
+
+function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
+  const candidates = getAgentCliCandidates(agentCli, configuredCliPath);
 
   for (const candidate of candidates) {
     if (commandExists(candidate)) {
@@ -547,7 +552,7 @@ function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
     }
   }
 
-  return preferredCli || 'codex';
+  return candidates[0] || 'agy';
 }
 
 function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string): string {
@@ -557,6 +562,10 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity') {
+    return `${quotedCli} --print --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
@@ -823,7 +832,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const agentCli = resolveAgentCli(node.agentCli, configuredCliPath);
 
   if (!commandExists(agentCli)) {
-    vscode.window.showErrorMessage(`Agent CLI not found: ${agentCli}. Set Solopreneur CLI Command or Path to an installed executable such as codex.`);
+    const candidates = getAgentCliCandidates(node.agentCli, configuredCliPath).join(', ');
+    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}. Set Solopreneur CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
 
@@ -1869,9 +1879,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
-      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. antigravity-cli">
+      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy">
       <div id="help-cli-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Name of globally installed CLI (e.g. <code>antigravity-cli</code> or <code>codex-cli</code>) or the absolute path to its executable.
+        Name of globally installed CLI (e.g. <code>agy</code> or <code>codex</code>) or the absolute path to its executable.
       </div>
     </div>
 
@@ -1917,7 +1927,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         apiKeyPlaceholder: '输入 API Key...',
         apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 VS Code Copilot 时不需要。',
         cliPath: 'Agent CLI 命令或路径',
-        cliPathHelp: '填写全局安装的 CLI 命令（如 antigravity-cli、codex）或可执行文件绝对路径。',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -1945,7 +1955,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         apiKeyPlaceholder: 'Enter API Key...',
         apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for VS Code Copilot.',
         cliPath: 'CLI Command or Path',
-        cliPathHelp: 'Name of a globally installed CLI such as antigravity-cli or codex, or an absolute executable path.',
+        cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -2058,7 +2068,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         case 'settingsLoaded':
           settingProvider.value = message.settings.apiProvider || 'Gemini';
           settingKey.value = message.settings.apiKey || '';
-          settingCliPath.value = message.settings.cliPath || 'antigravity-cli';
+          settingCliPath.value = message.settings.cliPath || 'agy';
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
 

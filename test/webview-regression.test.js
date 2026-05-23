@@ -220,6 +220,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
       'module.exports.__buildSolopreneurDirectoryReadme = buildSolopreneurDirectoryReadme;',
+      'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
@@ -237,6 +238,14 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
     "'antigravity-cli' run --task 'Build landing page'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
+    "'agy' --print --add-dir '/workspace/app' 'Build landing page'"
+  );
+  assert.equal(
+    JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
+    JSON.stringify(['agy', 'antigravity-cli', 'antigravity', 'codex'])
   );
 
   const shellScript = extensionModule.__buildAgentShellScript(

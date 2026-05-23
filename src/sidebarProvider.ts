@@ -28,7 +28,7 @@ function commandExists(command: string): boolean {
   if (path.isAbsolute(trimmed) || trimmed.includes(path.sep)) {
     return fs.existsSync(trimmed);
   }
-  const result = childProcess.spawnSync('sh', ['-lc', `command -v ${shellQuote(trimmed)}`], {
+  const result = childProcess.spawnSync('bash', ['-lc', `command -v ${shellQuote(trimmed)}`], {
     stdio: 'ignore'
   });
   return result.status === 0;
@@ -37,8 +37,10 @@ function commandExists(command: string): boolean {
 function resolveCliForTest(configuredCliPath: string): string {
   const candidates = [
     (configuredCliPath || '').trim(),
-    'codex',
+    'agy',
+    'antigravity',
     'antigravity-cli',
+    'codex',
     'codex-cli'
   ].filter(Boolean);
 
@@ -48,7 +50,7 @@ function resolveCliForTest(configuredCliPath: string): string {
     }
   }
 
-  return configuredCliPath || 'codex';
+  return configuredCliPath || 'agy';
 }
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
@@ -698,9 +700,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
-      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. antigravity-cli">
+      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy">
       <div id="help-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Name of globally installed CLI (e.g. <code>antigravity-cli</code> or <code>codex-cli</code>) or the absolute path to its executable.
+        Name of globally installed CLI (e.g. <code>agy</code> or <code>codex</code>) or the absolute path to its executable.
       </div>
     </div>
 
@@ -769,7 +771,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         apiKeyPlaceholder: '输入 API Key...',
         apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 VS Code Copilot 时不需要。',
         cliPath: 'Agent CLI 命令或路径',
-        cliPathHelp: '填写全局安装的 CLI 命令（如 antigravity-cli、codex）或可执行文件绝对路径。',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -792,7 +794,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         apiKeyPlaceholder: 'Enter API Key...',
         apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for VS Code Copilot.',
         cliPath: 'CLI Command or Path',
-        cliPathHelp: 'Name of a globally installed CLI such as antigravity-cli or codex, or an absolute executable path.',
+        cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -900,7 +902,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'settingsLoaded':
           settingProvider.value = message.settings.apiProvider || 'Gemini';
           settingKey.value = message.settings.apiKey || '';
-          settingCliPath.value = message.settings.cliPath || 'antigravity-cli';
+          settingCliPath.value = message.settings.cliPath || 'agy';
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
           
