@@ -61,3 +61,4 @@
 
 - Local or Marketplace VSIX builds must include runtime dependencies. Use `vsce package` / `vsce publish`, not `--no-dependencies`, because the extension imports `papaparse` and `sql.js` at activation time.
 - `.vscodeignore` intentionally excludes source, docs, tests, env files, and project memory from the shipped extension.
+- Code-server local dev install must not chain `node_modules` through versioned extension directories like `0.0.28-link -> 0.0.27-link -> ...`. That chain can break and leave activation stuck on Loading with `Cannot find module 'papaparse'`. Use the stable repo-backed installer `npm run install:local-dev`, which registers `szlk.solopreneur-roadmap-dev` and symlinks its runtime assets directly to the repo root.
