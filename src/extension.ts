@@ -1001,29 +1001,34 @@ function buildAgentConversationPrompt(
     ].join('\n');
 
   if (nativeSessionId.trim()) {
+    const resumeTaskBlock = normalizedUserMessage
+      ? [
+        '本轮唯一目标：',
+        normalizedUserMessage
+      ].join('\n')
+      : [
+        '本轮唯一目标：',
+        node.agentPrompt
+      ].join('\n');
     return [
-      '继续 Solopreneur Roadmap 当前路线图环节的原生 Agent 会话。',
-      '这次调用是该环节的下一轮对话，请沿用本会话已经建立的项目目标、用户要求和工作上下文。',
-      '不要把这次调用当成全新任务，也不要切换到其他项目或其他路线图环节。',
-      '',
-      `项目目录：${workspaceRoot}`,
-      `环节：${node.title}`,
-      `阶段：${node.stage}`,
-      `当前环节状态：${node.status}`,
+      '继续当前路线图环节的原生 Agent 会话。',
+      '这是一条续接消息，不是新的总任务说明。',
+      '只执行本轮唯一目标，不要重复总结旧成果，不要复读之前已经完成的内容。',
       '',
       userPriorityInstructions,
       '',
-      memoryInstructions,
-      supplement,
+      resumeTaskBlock,
       '',
-      '本轮推进要求：',
-      '1. 只处理本路线图环节内本轮能闭环的工作。',
-      '2. 直接在项目目录中完成必要文件改动或文档产出；除非用户明确要求，否则不要只输出计划。',
-      '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
+      memoryInstructions,
+      '',
+      '执行要求：',
+      '1. 先读项目文件，再直接产出这轮要求对应的文件改动。',
+      '2. 如果旧会话在讨论别的事情，立刻切回本轮唯一目标。',
+      '3. 除非本轮真的完成了这次要求，否则不要输出“已完成”“状态健康”“随时待命”之类总结。',
       '4. 完成后正常退出 CLI 进程。',
       completionDecisionFilePath
-        ? `5. 如果你判断整个路线图环节已经达到完成标准，请写入文件 ${completionDecisionFilePath}，内容必须是 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续对话，不要写这个文件。`
-        : '5. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。'
+        ? `5. 只有当整个路线图环节现在真的完成时，才写入 ${completionDecisionFilePath}，内容必须是 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。否则不要写。`
+        : '5. 如果整个路线图环节现在真的完成了，再在最终输出中明确说明。'
     ].join('\n');
   }
 
@@ -1070,6 +1075,7 @@ function buildAgentShellScript(
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
   const outputFilePath = path.join(runDir, 'output.log');
+  const commandFilePath = path.join(runDir, 'command.txt');
   const changesFilePath = path.join(runDir, 'changes.txt');
   const touchedFilesPath = path.join(runDir, 'touched-files.txt');
   const startedAtFilePath = path.join(runDir, 'started_at');
@@ -1078,14 +1084,16 @@ function buildAgentShellScript(
   const agentProvider = getAgentProvider(agentCli);
   const sessionKey = getAgentSessionKey(agentCli);
   const sessionMode = nativeSessionId.trim() ? 'resume' : 'new';
-  const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
-  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
-  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
+  const commandPreview = `${agentCli} [${sessionMode}]`;
+  const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
+  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
+  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
+    `printf %s ${shellQuote(agentCommand)} > ${shellQuote(commandFilePath)}`,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
     `(${agentCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
@@ -1332,7 +1340,7 @@ function processAgentStatusFile(statusFilePath: string): void {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, status, agentCli, command, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode } = statusData;
+    const { nodeId, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
@@ -1376,11 +1384,14 @@ function processAgentStatusFile(statusFilePath: string): void {
       }
     }
     if (workspaceRoot && sessionMode === 'resume' && status === 'Failed' && /session|conversation/i.test(outputTail) && /not found|unknown|missing|invalid|不存在|找不到/i.test(outputTail)) {
-      const cleared = clearStoredAgentSession(workspaceRoot, nodeId, agentCli || command || 'unknown');
+      const cleared = clearStoredAgentSession(workspaceRoot, nodeId, agentCli || commandPreview || command || 'unknown');
       if (cleared) {
         nativeSessionSummary = `${nativeSessionSummary ? `${nativeSessionSummary}\n` : ''}Native Agent session was invalid and has been reset. The next run will start a fresh session with the project handoff JSON.`;
       }
     }
+    const resolvedCommand = commandFilePath && fs.existsSync(commandFilePath)
+      ? fs.readFileSync(commandFilePath, 'utf8').trim()
+      : command || commandPreview || 'Completed execution in terminal';
     const handoffEntry = workspaceRoot
       ? buildRunHandoffEntry(
         nextStatus,
@@ -1409,8 +1420,8 @@ function processAgentStatusFile(statusFilePath: string): void {
     const updatedExistingConversation = executionLogId
       ? syncEngine.updateAgentExecution(
         Number(executionLogId),
-        agentCli || command || 'Unknown CLI',
-        command || 'Completed execution in terminal',
+        agentCli || commandPreview || command || 'Unknown CLI',
+        resolvedCommand,
         executionSummary,
         nextStatus
       )
@@ -1418,8 +1429,8 @@ function processAgentStatusFile(statusFilePath: string): void {
     if (!updatedExistingConversation) {
       syncEngine.logAgentExecution(
         nodeId,
-        agentCli || command || 'Unknown CLI',
-        command || 'Completed execution in terminal',
+        agentCli || commandPreview || command || 'Unknown CLI',
+        resolvedCommand,
         executionSummary,
         nextStatus
       );

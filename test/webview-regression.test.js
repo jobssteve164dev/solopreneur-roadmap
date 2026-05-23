@@ -316,6 +316,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('executionLogId'));
   assert.ok(shellScript.finalCommand.includes('sessionFilePath'));
   assert.ok(shellScript.finalCommand.includes('sessionMode'));
+  assert.ok(shellScript.finalCommand.includes('commandFilePath'));
+  assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/command.txt'));
   assert.ok(shellScript.finalCommand.includes('.codex/sessions'));
   assert.ok(shellScript.finalCommand.includes('Use a small smoke test.'));
   assert.ok(shellScript.finalCommand.includes('In Progress'));
@@ -375,10 +377,13 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     '/workspace/app/.solopreneur/agent-runs/2/completion.json',
     '3350a3b7-7761-4ed5-9661-2e9c9de8f924'
   );
-  assert.match(followupPrompt, /继续 Solopreneur Roadmap 当前路线图环节/);
+  assert.match(followupPrompt, /继续当前路线图环节的原生 Agent 会话/);
   assert.match(followupPrompt, /Keep the original novel ending/);
   assert.match(followupPrompt, /高于旧会话中的既有结论/);
   assert.match(followupPrompt, /即使当前环节状态显示为 Completed 或 Failed/);
+  assert.match(followupPrompt, /本轮唯一目标/);
+  assert.doesNotMatch(followupPrompt, /项目目录：\/workspace\/app/);
+  assert.doesNotMatch(followupPrompt, /环节说明：Create the first usable onboarding path/);
   assert.match(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
