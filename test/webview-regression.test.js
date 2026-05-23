@@ -348,6 +348,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     '/workspace/app/.solopreneur/agent-runs/2/completion.json'
   );
   assert.match(prompt, /Use a small smoke test/);
+  assert.match(prompt, /最高优先级规则/);
+  assert.match(prompt, /唯一最高优先级指令/);
   assert.match(prompt, /必须先读取 Solopreneur 为本环节保存的项目上下文文件/);
   assert.match(prompt, /\.solopreneur\/step-memory\/2\.json/);
   assert.match(prompt, /\.solopreneur\/agent-runs\/2/);
@@ -375,6 +377,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.match(followupPrompt, /继续 Solopreneur Roadmap 当前路线图环节/);
   assert.match(followupPrompt, /Keep the original novel ending/);
+  assert.match(followupPrompt, /高于旧会话中的既有结论/);
+  assert.match(followupPrompt, /即使当前环节状态显示为 Completed 或 Failed/);
   assert.match(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);

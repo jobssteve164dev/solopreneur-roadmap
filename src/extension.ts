@@ -974,6 +974,7 @@ function buildAgentConversationPrompt(
   completionDecisionFilePath = '',
   nativeSessionId = ''
 ): string {
+  const normalizedUserMessage = userMessage.trim();
   const supplement = userMessage.trim()
     ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
     : '';
@@ -986,6 +987,18 @@ function buildAgentConversationPrompt(
     '如果文件或目录不存在，说明这是该环节的早期对话，继续执行本轮任务即可。',
     '读取这些项目文件后，再结合本次用户补充推进当前环节；不要依赖插件直接注入的历史摘要。'
   ].join('\n');
+  const userPriorityInstructions = normalizedUserMessage
+    ? [
+      '最高优先级规则：',
+      '1. 本次“用户对本次对话的补充要求”是这一轮唯一最高优先级指令，高于旧会话中的既有结论、高于之前的完成判断、高于你刚才输出过的总结话术。',
+      '2. 如果旧会话、环节默认任务、历史完成状态与这次用户补充有任何冲突，必须以这次用户补充为准。',
+      '3. 禁止重复汇报与这次用户补充无关的旧成果，禁止再次输出“已经完成”“状态健康”“随时待命”这类空泛总结，除非你在本轮真的完成了用户补充要求。',
+      '4. 即使当前环节状态显示为 Completed 或 Failed，也不能把它当成停止信号；你仍然必须执行这次用户补充要求。'
+    ].join('\n')
+    : [
+      '最高优先级规则：',
+      '如果本轮没有额外的用户补充要求，就以当前环节任务为唯一目标，不要偏离到其他路线图环节或仓库内无关工作。'
+    ].join('\n');
 
   if (nativeSessionId.trim()) {
     return [
@@ -997,6 +1010,8 @@ function buildAgentConversationPrompt(
       `环节：${node.title}`,
       `阶段：${node.stage}`,
       `当前环节状态：${node.status}`,
+      '',
+      userPriorityInstructions,
       '',
       memoryInstructions,
       supplement,
@@ -1022,6 +1037,8 @@ function buildAgentConversationPrompt(
     `阶段：${node.stage}`,
     `环节说明：${node.description}`,
     `当前环节状态：${node.status}`,
+    '',
+    userPriorityInstructions,
     '',
     '本次任务：',
     node.agentPrompt,
