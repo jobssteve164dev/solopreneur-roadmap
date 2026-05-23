@@ -219,6 +219,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
+      'module.exports.__buildSolopreneurDirectoryReadme = buildSolopreneurDirectoryReadme;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
@@ -282,6 +283,13 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(handoff, /本轮文件变化/);
   assert.match(handoff, /README.md/);
   assert.match(handoff, /本轮关键信号/);
+
+  const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
+  assert.match(dataReadme, /Solopreneur Project Data/);
+  assert.match(dataReadme, /roadmap\.csv/);
+  assert.match(dataReadme, /step-memory/);
+  assert.match(dataReadme, /project_journal\.db/);
+  assert.match(dataReadme, /Git\/GitHub/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {

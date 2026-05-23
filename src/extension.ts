@@ -207,6 +207,43 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   sendNodesToWebview();
 }
 
+function buildSolopreneurDirectoryReadme(): string {
+  return [
+    '# Solopreneur Project Data',
+    '',
+    '这个目录由 Solopreneur Roadmap 插件自动创建，用来保存当前项目的路线图、Agent 对话记录、执行日志和环节交接总结。',
+    '',
+    '## 为什么数据放在项目里',
+    '',
+    '- 项目数据跟随项目文件夹走，不依赖插件后端服务。',
+    '- 换一台机器、换一个 IDE、重新安装插件后，只要项目文件还在，Solopreneur 就能重新加载这些数据。',
+    '- 这个目录可以交给 Git/GitHub 管理，让路线图、交接总结和执行记录成为项目历史的一部分。',
+    '',
+    '## 主要文件',
+    '',
+    '- `roadmap.csv`：路线图主数据，包括环节、依赖、状态和 Agent prompt。',
+    '- `step-memory/`：每个路线图环节的交接总结。下一轮 Agent 对话会优先读取这里的上下文。',
+    '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
+    '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
+    '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
+    '',
+    '## 请不要随意删除',
+    '',
+    '删除这个目录会导致 Solopreneur 无法恢复该项目的路线图、状态、对话历史和环节交接总结。需要清理体积时，优先只清理 `agent-runs/` 中很旧的运行记录，并保留 `roadmap.csv` 和 `step-memory/`。',
+    '',
+    '## Git 建议',
+    '',
+    '如果你希望项目在多台机器或多个 IDE 间保持一致，可以把 `.solopreneur/` 提交到 Git。这样 Solopreneur 的项目上下文会跟项目代码一起迁移。'
+  ].join('\n');
+}
+
+function ensureSolopreneurReadme(solopreneurDir: string): void {
+  const readmePath = path.join(solopreneurDir, 'README.md');
+  if (!fs.existsSync(readmePath)) {
+    fs.writeFileSync(readmePath, buildSolopreneurDirectoryReadme(), 'utf8');
+  }
+}
+
 async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
   const result = await vscode.window.showOpenDialog({
     canSelectFiles: false,
@@ -275,6 +312,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   if (!fs.existsSync(solopreneurDir)) {
     fs.mkdirSync(solopreneurDir, { recursive: true });
   }
+  ensureSolopreneurReadme(solopreneurDir);
 
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');

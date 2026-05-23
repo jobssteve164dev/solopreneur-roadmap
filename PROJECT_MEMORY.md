@@ -28,6 +28,7 @@
 - Roadmap step completion is no longer equivalent to one successful Agent run. Successful CLI exit moves the step to `In Progress` unless the Agent writes the agreed completion decision JSON. Users can always close the loop manually through the step card's complete button.
 - Each roadmap step keeps a project-local handoff file at `.solopreneur/step-memory/<nodeId>.md`. After each Agent run, the extension appends a structured handoff entry with file changes, useful output signals, and completion judgment, keeping the latest 10 entries. New Agent conversations inject this handoff summary instead of raw execution logs.
 - Webview node state and conversation history caches must be scoped by selected project path. Project switching must clear expanded node state and cached conversations because different projects often reuse the same roadmap node IDs.
+- Solopreneur intentionally keeps project data inside the project folder under `.solopreneur/` so Git can manage it and the user can move between machines/IDEs without a Solopreneur backend. The extension must generate `.solopreneur/README.md` explaining the directory contents and deletion risk.
 
 ## CLI Orchestration Contract
 
