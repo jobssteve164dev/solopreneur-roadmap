@@ -407,6 +407,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '');
           break;
 
+        case 'retryConversation':
+          await handleRetryConversation(context, message.nodeId, Number(message.conversationId || 0));
+          break;
+
         case 'generateRoadmap':
           await handleGenerateRoadmap(context, message.prompt);
           break;
@@ -1273,6 +1277,32 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   terminal.sendText(finalCommand);
 }
 
+function extractUserSupplementFromExecutionOutput(output: string): string {
+  const text = String(output || '');
+  const match = text.match(/User supplement:\n([\s\S]*?)(?:\n\n(?:Sentinel captured state:|Native session mode:|Roadmap step state:|Workspace changes:|Touched project files:|Agent output tail:)|$)/);
+  return match ? match[1].trim() : '';
+}
+
+async function handleRetryConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
+  if (!syncEngine || !nodeId || !conversationId) {
+    return;
+  }
+
+  const conversation = syncEngine.getAgentExecutions(nodeId).find((item) => Number(item.id) === Number(conversationId));
+  if (!conversation) {
+    vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
+    return;
+  }
+
+  if (conversation.status !== 'Failed') {
+    vscode.window.showWarningMessage('Only failed Agent conversations can be retried.');
+    return;
+  }
+
+  const retryUserMessage = extractUserSupplementFromExecutionOutput(conversation.output || '');
+  await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '');
+}
+
 function processAgentStatusFile(statusFilePath: string): void {
   if (!fs.existsSync(statusFilePath)) {
     return;
@@ -2089,6 +2119,33 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       min-width: 0;
     }
 
+    .conversation-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .conversation-retry-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-glass);
+      color: var(--text-main);
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .conversation-retry-btn:hover {
+      background: rgba(255, 23, 68, 0.16);
+      border-color: rgba(255, 23, 68, 0.4);
+      color: #ffd7df;
+      box-shadow: none;
+      transform: none;
+    }
+
     .conversation-cli {
       color: #38bdf8;
       font-weight: 700;
@@ -2408,6 +2465,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         conversationPlaceholder: '补充这次要 Agent 注意的要求...',
         agentSelector: '选择 Agent',
         send: '发送',
+        retry: '重试',
         command: '命令',
         output: '输出',
         testing: '正在测试连接...',
@@ -2437,6 +2495,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         conversationPlaceholder: 'Add guidance for this Agent run...',
         agentSelector: 'Choose Agent',
         send: 'Send',
+        retry: 'Retry',
         command: 'Command',
         output: 'Output',
         testing: 'Testing connection...',
@@ -2752,6 +2811,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             renderRoadmap(currentNodes);
           });
         });
+        row.querySelectorAll('[data-retry-conversation-id]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const conversationId = item.getAttribute('data-retry-conversation-id');
+            if (!conversationId) return;
+            vscode.postMessage({
+              command: 'retryConversation',
+              nodeId: node.id,
+              conversationId
+            });
+          });
+        });
         canvas.appendChild(row);
       });
     }
@@ -2766,6 +2837,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const open = activeConversationId === conversationId;
         const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
         const summary = summarizeConversation(conversation);
+        const retryButton = conversation.status === 'Failed'
+          ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
+          : '';
         return \`
           <div class="conversation-item" data-conversation-id="\${escapeHtml(conversationId)}">
             <div class="conversation-row">
@@ -2774,7 +2848,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 <span class="conversation-summary">\${escapeHtml(summary)}</span>
                 <span class="conversation-time">\${escapeHtml(when)}</span>
               </div>
-              <span class="status-badge \${statusClass(conversation.status)}">\${statusText(conversation.status)}</span>
+              <div class="conversation-actions">
+                \${retryButton}
+                <span class="status-badge \${statusClass(conversation.status)}">\${statusText(conversation.status)}</span>
+              </div>
             </div>
             \${open ? \`
               <div class="conversation-detail">

@@ -184,8 +184,10 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /conversationPlaceholder/);
   assert.match(script, /data-send-node-id/);
   assert.match(script, /data-agent-select-id/);
+  assert.match(script, /data-retry-conversation-id/);
   assert.match(script, /renderAgentOptions/);
   assert.match(script, /summarizeConversation/);
+  assert.match(script, /retryConversation/);
   assert.match(script, /completeNode/);
   assert.match(script, /Complete Step|完成环节/);
   assert.match(script, /resetProjectScopedState/);
@@ -236,6 +238,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__getStoredAgentSession = getStoredAgentSession;',
       'module.exports.__updateStoredAgentSession = updateStoredAgentSession;',
       'module.exports.__clearStoredAgentSession = clearStoredAgentSession;',
+      'module.exports.__extractUserSupplementFromExecutionOutput = extractUserSupplementFromExecutionOutput;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
@@ -392,6 +395,15 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(extensionModule.__clearStoredAgentSession(sessionRoot, '2', 'antigravity-cli'), true);
   assert.equal(extensionModule.__getStoredAgentSession(sessionRoot, '2', 'agy'), null);
   assert.match(extensionModule.__getStepSessionFilePath(sessionRoot, '2'), /\.solopreneur\/step-sessions\/2\.json$/);
+  assert.equal(
+    extensionModule.__extractUserSupplementFromExecutionOutput([
+      'User supplement:',
+      'Keep chapter three shorter.',
+      '',
+      'Sentinel captured state: Failed'
+    ].join('\n')),
+    'Keep chapter three shorter.'
+  );
 
   const handoff = extensionModule.__buildRunHandoffEntry(
     'In Progress',
@@ -467,6 +479,18 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(dataReadme, /step-sessions/);
   assert.match(dataReadme, /project_journal\.db/);
   assert.match(dataReadme, /Git\/GitHub/);
+});
+
+test('failed conversations render retry action in roadmap webview', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml({}, { extensionPath: projectRoot });
+
+  assert.match(html, /conversation-retry-btn/);
+  assert.match(html, /Retry|重试/);
+  assert.match(html, /retryConversation/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {
