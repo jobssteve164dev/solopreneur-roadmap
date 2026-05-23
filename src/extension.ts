@@ -657,18 +657,13 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPrompt = shellQuote(agentPrompt);
+  void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    if (nativeSessionId.trim()) {
-      return `${quotedCli} exec resume ${shellQuote(nativeSessionId.trim())} ${quotedPrompt}`;
-    }
     return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    if (nativeSessionId.trim()) {
-      return `${quotedCli} --print --print-timeout=30m --conversation ${shellQuote(nativeSessionId.trim())} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
-    }
     return `${quotedCli} --print --print-timeout=30m --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
@@ -972,7 +967,7 @@ function buildAgentConversationPrompt(
   stepMemoryFilePath = '',
   agentRunsDir = '',
   completionDecisionFilePath = '',
-  nativeSessionId = ''
+  previousSessionId = ''
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const supplement = userMessage.trim()
@@ -1000,37 +995,15 @@ function buildAgentConversationPrompt(
       '如果本轮没有额外的用户补充要求，就以当前环节任务为唯一目标，不要偏离到其他路线图环节或仓库内无关工作。'
     ].join('\n');
 
-  if (nativeSessionId.trim()) {
-    const resumeTaskBlock = normalizedUserMessage
-      ? [
-        '本轮唯一目标：',
-        normalizedUserMessage
-      ].join('\n')
-      : [
-        '本轮唯一目标：',
-        node.agentPrompt
-      ].join('\n');
-    return [
-      '继续当前路线图环节的原生 Agent 会话。',
-      '这是一条续接消息，不是新的总任务说明。',
-      '只执行本轮唯一目标，不要重复总结旧成果，不要复读之前已经完成的内容。',
-      '',
-      userPriorityInstructions,
-      '',
-      resumeTaskBlock,
-      '',
-      memoryInstructions,
-      '',
-      '执行要求：',
-      '1. 先读项目文件，再直接产出这轮要求对应的文件改动。',
-      '2. 如果旧会话在讨论别的事情，立刻切回本轮唯一目标。',
-      '3. 除非本轮真的完成了这次要求，否则不要输出“已完成”“状态健康”“随时待命”之类总结。',
-      '4. 完成后正常退出 CLI 进程。',
-      completionDecisionFilePath
-        ? `5. 只有当整个路线图环节现在真的完成时，才写入 ${completionDecisionFilePath}，内容必须是 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。否则不要写。`
-        : '5. 如果整个路线图环节现在真的完成了，再在最终输出中明确说明。'
-    ].join('\n');
-  }
+  const priorSessionInstructions = previousSessionId.trim()
+    ? [
+      '上轮同 Agent 原生会话参考：',
+      `- 上一轮会话 ID：${previousSessionId.trim()}`,
+      '- 这只是可选参考，不是强制续接命令。',
+      '- 只有在你判断确实需要查看上一轮对话细节时，才自行使用这个会话 ID；否则直接按本轮任务执行。',
+      '- 即使你查看上一轮对话，本轮仍必须以当前环节任务和本次用户补充为准，不要被旧结论带偏。'
+    ].join('\n')
+    : '';
 
   return [
     '你正在 Solopreneur Roadmap 的一个路线图环节中工作。',
@@ -1048,7 +1021,7 @@ function buildAgentConversationPrompt(
     '本次任务：',
     node.agentPrompt,
     supplement,
-    '',
+    ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
     memoryInstructions,
     '',
     '闭环要求：',
@@ -1083,7 +1056,7 @@ function buildAgentShellScript(
   const decisionFilePath = completionDecisionFilePath || path.join(runDir, 'completion.json');
   const agentProvider = getAgentProvider(agentCli);
   const sessionKey = getAgentSessionKey(agentCli);
-  const sessionMode = nativeSessionId.trim() ? 'resume' : 'new';
+  const sessionMode = nativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
   const commandPreview = `${agentCli} [${sessionMode}]`;
   const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
   const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
@@ -1278,7 +1251,9 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   const launchSummary = [
     'Agent conversation started.',
-    nativeSessionId ? `Resuming native ${getAgentProvider(agentCli)} session: ${nativeSessionId}` : `Starting a new native ${getAgentProvider(agentCli)} session.`,
+    nativeSessionId
+      ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
+      : `Starting a new native ${getAgentProvider(agentCli)} session.`,
     userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : ''
   ].filter(Boolean).join('\n\n');
   const executionLogId = syncEngine.logAgentExecution(
@@ -1381,12 +1356,6 @@ function processAgentStatusFile(statusFilePath: string): void {
         }
       } catch {
         nativeSessionSummary = 'Native Agent session could not be parsed.';
-      }
-    }
-    if (workspaceRoot && sessionMode === 'resume' && status === 'Failed' && /session|conversation/i.test(outputTail) && /not found|unknown|missing|invalid|不存在|找不到/i.test(outputTail)) {
-      const cleared = clearStoredAgentSession(workspaceRoot, nodeId, agentCli || commandPreview || command || 'unknown');
-      if (cleared) {
-        nativeSessionSummary = `${nativeSessionSummary ? `${nativeSessionSummary}\n` : ''}Native Agent session was invalid and has been reset. The next run will start a fresh session with the project handoff JSON.`;
       }
     }
     const resolvedCommand = commandFilePath && fs.existsSync(commandFilePath)

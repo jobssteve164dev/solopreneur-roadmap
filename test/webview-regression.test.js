@@ -255,7 +255,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Continue the MVP', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
-    "'codex' exec resume '019dc472-6a80-7c70-99a4-b2593a641d11' 'Continue the MVP'"
+    "'codex' exec -C '/workspace/app' 'Continue the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
@@ -267,7 +267,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Continue landing page', '/workspace/app', '3350a3b7-7761-4ed5-9661-2e9c9de8f924'),
-    "'agy' --print --print-timeout=30m --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --add-dir='/workspace/app' 'Continue landing page'"
+    "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Continue landing page'"
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -377,17 +377,20 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     '/workspace/app/.solopreneur/agent-runs/2/completion.json',
     '3350a3b7-7761-4ed5-9661-2e9c9de8f924'
   );
-  assert.match(followupPrompt, /继续当前路线图环节的原生 Agent 会话/);
   assert.match(followupPrompt, /Keep the original novel ending/);
   assert.match(followupPrompt, /高于旧会话中的既有结论/);
   assert.match(followupPrompt, /即使当前环节状态显示为 Completed 或 Failed/);
-  assert.match(followupPrompt, /本轮唯一目标/);
-  assert.doesNotMatch(followupPrompt, /项目目录：\/workspace\/app/);
-  assert.doesNotMatch(followupPrompt, /环节说明：Create the first usable onboarding path/);
+  assert.match(followupPrompt, /上轮同 Agent 原生会话参考/);
+  assert.match(followupPrompt, /上一轮会话 ID：3350a3b7-7761-4ed5-9661-2e9c9de8f924/);
+  assert.match(followupPrompt, /这只是可选参考，不是强制续接命令/);
+  assert.match(followupPrompt, /只有在你判断确实需要查看上一轮对话细节时/);
+  assert.match(followupPrompt, /项目目录：\/workspace\/app/);
+  assert.match(followupPrompt, /环节说明：Create the first usable onboarding path/);
   assert.match(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(followupPrompt, /Old handoff should not be injected/);
+  assert.doesNotMatch(followupPrompt, /继续当前路线图环节的原生 Agent 会话/);
 
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-session-'));
   const sessionState = extensionModule.__updateStoredAgentSession(
