@@ -564,7 +564,7 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
     return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
-  if (executableName === 'agy' || executableName === 'antigravity') {
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `${quotedCli} --print --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 

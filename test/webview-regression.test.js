@@ -237,7 +237,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
-    "'antigravity-cli' run --task 'Build landing page'"
+    "'antigravity-cli' --print --add-dir '/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
