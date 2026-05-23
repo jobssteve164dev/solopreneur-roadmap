@@ -484,6 +484,14 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(noopStatus.status, 'Failed');
   assert.match(fs.readFileSync(noopRun.outputFilePath, 'utf8'), /without project file changes/);
 
+  const writeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-write-agent-'));
+  fs.mkdirSync(path.join(writeRoot, 'docs'), { recursive: true });
+  const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.writeFileSync("docs/out.txt","done\\n",{flag:"a"});')}`;
+  const writeRun = extensionModule.__buildAgentShellScript(writeCommand, writeRoot, 'write', 'codex', 8, '');
+  childProcess.execSync(writeRun.finalCommand, { cwd: writeRoot, stdio: 'ignore' });
+  const touchedFiles = fs.readFileSync(path.join(writeRoot, '.solopreneur/agent-runs/write/touched-files.txt'), 'utf8');
+  assert.match(touchedFiles, /[AM] docs\/out\.txt/);
+
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
   assert.match(dataReadme, /Solopreneur Project Data/);
   assert.match(dataReadme, /roadmap\.csv/);
@@ -503,6 +511,9 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /conversation-retry-btn/);
   assert.match(html, /Retry|重试/);
   assert.match(html, /retryConversation/);
+  assert.match(html, /data-open-file-path/);
+  assert.match(html, /openProjectFile/);
+  assert.match(html, /修改文件|Changed Files/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {

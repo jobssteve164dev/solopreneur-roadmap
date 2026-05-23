@@ -411,6 +411,17 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await handleRetryConversation(context, message.nodeId, Number(message.conversationId || 0));
           break;
 
+        case 'openProjectFile':
+          if (activeProjectRoot && message.relativePath) {
+            const candidatePath = path.resolve(activeProjectRoot, String(message.relativePath));
+            const relativeToRoot = path.relative(activeProjectRoot, candidatePath);
+            if (!relativeToRoot.startsWith('..') && !path.isAbsolute(relativeToRoot) && fs.existsSync(candidatePath)) {
+              const doc = await vscode.workspace.openTextDocument(candidatePath);
+              await vscode.window.showTextDocument(doc, { preview: false });
+            }
+          }
+          break;
+
         case 'generateRoadmap':
           await handleGenerateRoadmap(context, message.prompt);
           break;
@@ -751,6 +762,67 @@ function buildSessionCaptureScript(
   ].join('; ');
 }
 
+function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: string): string {
+  return `node -e ${shellQuote([
+    'const fs=require("fs");',
+    'const path=require("path");',
+    'const root=process.argv[1];',
+    'const out=process.argv[2];',
+    'const skip=new Set([".git",".solopreneur","node_modules"]);',
+    'const snapshot={};',
+    'function walk(dir){',
+    'for(const entry of fs.readdirSync(dir,{withFileTypes:true})){',
+    'if(skip.has(entry.name)) continue;',
+    'const full=path.join(dir,entry.name);',
+    'const rel=path.relative(root,full).replace(/\\\\/g,"/");',
+    'if(entry.isDirectory()){ walk(full); continue; }',
+    'if(!entry.isFile() || rel===".agent_status.json") continue;',
+    'const stat=fs.statSync(full);',
+    'snapshot[rel]={size:stat.size,mtimeMs:stat.mtimeMs};',
+    '}',
+    '}',
+    'if(fs.existsSync(root)) walk(root);',
+    'fs.mkdirSync(path.dirname(out),{recursive:true});',
+    'fs.writeFileSync(out, JSON.stringify(snapshot));'
+  ].join(''))} ${shellQuote(workspaceRoot)} ${shellQuote(snapshotFilePath)}`;
+}
+
+function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: string, touchedFilesPath: string): string {
+  return `node -e ${shellQuote([
+    'const fs=require("fs");',
+    'const path=require("path");',
+    'const root=process.argv[1];',
+    'const beforeFile=process.argv[2];',
+    'const out=process.argv[3];',
+    'const skip=new Set([".git",".solopreneur","node_modules"]);',
+    'let before={};',
+    'try{ before=JSON.parse(fs.readFileSync(beforeFile,"utf8"))||{}; } catch {}',
+    'const after={};',
+    'function walk(dir){',
+    'for(const entry of fs.readdirSync(dir,{withFileTypes:true})){',
+    'if(skip.has(entry.name)) continue;',
+    'const full=path.join(dir,entry.name);',
+    'const rel=path.relative(root,full).replace(/\\\\/g,"/");',
+    'if(entry.isDirectory()){ walk(full); continue; }',
+    'if(!entry.isFile() || rel===".agent_status.json") continue;',
+    'const stat=fs.statSync(full);',
+    'after[rel]={size:stat.size,mtimeMs:stat.mtimeMs};',
+    '}',
+    '}',
+    'if(fs.existsSync(root)) walk(root);',
+    'const changes=[];',
+    'for(const [rel,meta] of Object.entries(after)){',
+    'const prev=before[rel];',
+    'if(!prev){ changes.push(`A ${rel}`); continue; }',
+    'if(prev.size!==meta.size || Math.round(prev.mtimeMs)!==Math.round(meta.mtimeMs)){ changes.push(`M ${rel}`); }',
+    '}',
+    'for(const rel of Object.keys(before)){ if(!after[rel]) changes.push(`D ${rel}`); }',
+    'changes.sort((a,b)=>a.localeCompare(b));',
+    'fs.mkdirSync(path.dirname(out),{recursive:true});',
+    'fs.writeFileSync(out, changes.join("\\n"));'
+  ].join(''))} ${shellQuote(workspaceRoot)} ${shellQuote(snapshotFilePath)} ${shellQuote(touchedFilesPath)}`;
+}
+
 function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
   return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.json`);
 }
@@ -1051,6 +1123,7 @@ function buildAgentShellScript(
   const commandFilePath = path.join(runDir, 'command.txt');
   const changesFilePath = path.join(runDir, 'changes.txt');
   const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  const workspaceSnapshotPath = path.join(runDir, 'workspace-before.json');
   const startedAtFilePath = path.join(runDir, 'started_at');
   const sessionFilePath = path.join(runDir, 'session.json');
   const decisionFilePath = completionDecisionFilePath || path.join(runDir, 'completion.json');
@@ -1062,10 +1135,13 @@ function buildAgentShellScript(
   const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
   const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
+  const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
+  const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
+    workspaceSnapshotScript,
     `printf %s ${shellQuote(agentCommand)} > ${shellQuote(commandFilePath)}`,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
@@ -1073,7 +1149,7 @@ function buildAgentShellScript(
     `status=\${PIPESTATUS[0]}`,
     sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
-    `find ${shellQuote(workspaceRoot)} \\( -path ${shellQuote(path.join(workspaceRoot, '.git'))} -o -path ${shellQuote(path.join(workspaceRoot, '.solopreneur'))} -o -path ${shellQuote(path.join(workspaceRoot, 'node_modules'))} \\) -prune -o -type f -newer ${shellQuote(startedAtFilePath)} ! -path ${shellQuote(statusFilePath)} -print 2>/dev/null | sed ${shellQuote(`s#^${workspaceRoot}/##`)} > ${shellQuote(touchedFilesPath)} || true`,
+    workspaceDiffScript,
     `if grep -qi 'timed out waiting for response\\|Error: timed out' ${shellQuote(outputFilePath)} 2>/dev/null; then status=124; fi`,
     `if [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSolopreneur: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; fi`,
     `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
@@ -1115,6 +1191,13 @@ function getTouchedFilesSummary(filePath: string): string {
 
   const content = fs.readFileSync(filePath, 'utf8').trim();
   return content || 'No project files were touched during this run.';
+}
+
+function hasRecordedWorkspaceChanges(changedFilesSummary: string, touchedFilesSummary: string): boolean {
+  const noGitChanges = changedFilesSummary === 'No workspace file changes detected.'
+    || changedFilesSummary === 'No git workspace changes were detected or this workspace is not a Git repository.';
+  const noTouchedFiles = touchedFilesSummary === 'No project files were touched during this run.';
+  return !noGitChanges || !noTouchedFiles;
 }
 
 function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
@@ -1414,7 +1497,7 @@ function processAgentStatusFile(statusFilePath: string): void {
         projectPath: activeProjectRoot || ''
       });
     }
-    if (nextStatus === 'Completed' && changedFilesSummary === 'No workspace file changes detected.') {
+    if (nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
     } else {
       vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${nextStatus}`);
@@ -2182,6 +2265,32 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       color: #cbd5e1;
     }
 
+    .conversation-files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 8px 0 12px;
+    }
+
+    .conversation-file-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      padding: 5px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border-glass);
+      background: rgba(56, 189, 248, 0.10);
+      color: #d7f3ff;
+      text-decoration: none;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .conversation-file-link:hover {
+      background: rgba(56, 189, 248, 0.16);
+    }
+
     /* Settings Overlay Styles */
     .settings-overlay {
       position: absolute;
@@ -2465,6 +2574,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         retry: '重试',
         command: '命令',
         output: '输出',
+        changedFiles: '修改文件',
+        openFile: '打开',
         testing: '正在测试连接...',
         connectionOk: '连接正常：',
         connectionFailed: '连接失败：',
@@ -2495,6 +2606,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         retry: 'Retry',
         command: 'Command',
         output: 'Output',
+        changedFiles: 'Changed Files',
+        openFile: 'Open',
         testing: 'Testing connection...',
         connectionOk: 'Connection OK: ',
         connectionFailed: 'Connection Failed: ',
@@ -2820,6 +2933,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             });
           });
         });
+        row.querySelectorAll('[data-open-file-path]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const relativePath = item.getAttribute('data-open-file-path');
+            if (!relativePath) return;
+            vscode.postMessage({ command: 'openProjectFile', relativePath });
+          });
+        });
         canvas.appendChild(row);
       });
     }
@@ -2852,6 +2973,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             </div>
             \${open ? \`
               <div class="conversation-detail">
+                \${renderConversationFiles(conversation)}
                 <strong>\${t('command')}</strong>
                 <pre>\${escapeHtml(conversation.command)}</pre>
                 <strong>\${t('output')}</strong>
@@ -2896,6 +3018,51 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const tailMatch = output.match(/Agent output tail:\\n([\\s\\S]*)$/);
       const fallback = tailMatch ? tailMatch[1] : output;
       return fallback.trim().replace(/\\s+/g, ' ').slice(0, 120) || statusText(conversation.status);
+    }
+
+    function extractConversationFiles(output) {
+      const text = String(output || '');
+      const sections = [
+        /Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/,
+        /Workspace changes:\\n([\\s\\S]*?)(?:\\n\\nTouched project files:|\\n\\n|$)/
+      ];
+      const files = [];
+      const seen = new Set();
+      for (const pattern of sections) {
+        const match = text.match(pattern);
+        if (!match || !match[1]) continue;
+        const lines = match[1].split('\\n').map(line => line.trim()).filter(Boolean);
+        for (const line of lines) {
+          if (/^No (workspace|git|project) /i.test(line)) continue;
+          const normalized = line.replace(/^(?:[AMDRC?U!]{1,2}|[A-Z])\\s+/, '').trim();
+          if (!normalized || seen.has(normalized)) continue;
+          seen.add(normalized);
+          files.push({ label: line, path: normalized });
+        }
+      }
+      return files;
+    }
+
+    function renderConversationFiles(conversation) {
+      const files = extractConversationFiles(conversation.output);
+      if (!files.length) {
+        return '';
+      }
+      return \`
+        <strong>\${escapeHtml(t('changedFiles'))}</strong>
+        <div class="conversation-files">
+          \${files.map(file => \`
+            <button
+              class="conversation-file-link"
+              data-open-file-path="\${escapeHtml(file.path)}"
+              title="\${escapeHtml(file.path)}"
+            >
+              <span>\${escapeHtml(file.label)}</span>
+              <span>\${escapeHtml(t('openFile'))}</span>
+            </button>
+          \`).join('')}
+        </div>
+      \`;
     }
 
     function toggleNode(nodeId) {
