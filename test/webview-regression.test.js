@@ -249,6 +249,29 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
     JSON.stringify(['agy', 'antigravity-cli', 'antigravity', 'codex'])
   );
+  assert.equal(
+    JSON.stringify(extensionModule.__getAgentCliCandidates('codex', 'codex').slice(0, 4)),
+    JSON.stringify(['codex', 'codex-cli', 'agy', 'antigravity'])
+  );
+
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    [
+      'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
+      'module.exports.__getCliVersionArgs = getCliVersionArgs;',
+      'module.exports.__formatCliTestMessage = formatCliTestMessage;'
+    ].join('\n')
+  );
+  assert.equal(
+    JSON.stringify(sidebarModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
+    JSON.stringify(['agy', 'antigravity-cli', 'antigravity', 'codex'])
+  );
+  assert.equal(
+    JSON.stringify(sidebarModule.__getAgentCliCandidates('codex', 'codex').slice(0, 4)),
+    JSON.stringify(['codex', 'codex-cli', 'agy', 'antigravity'])
+  );
+  assert.equal(JSON.stringify(sidebarModule.__getCliVersionArgs('agy')), JSON.stringify(['--version']));
+  assert.match(sidebarModule.__formatCliTestMessage('agy', '1.0.1\n', ''), /agy · 1\.0\.1/);
 
   const shellScript = extensionModule.__buildAgentShellScript(
     "'codex' exec -C '/workspace/app' 'Ship the MVP'",

@@ -34,15 +34,24 @@ function commandExists(command: string): boolean {
   return result.status === 0;
 }
 
-function resolveCliForTest(configuredCliPath: string): string {
-  const candidates = [
-    (configuredCliPath || '').trim(),
-    'agy',
-    'antigravity',
-    'antigravity-cli',
-    'codex',
-    'codex-cli'
-  ].filter(Boolean);
+function getAgentCliCandidates(agentCli: string, configuredCliPath: string): string[] {
+  const requestedCli = (agentCli || '').trim();
+  const configuredCli = (configuredCliPath || '').trim();
+  const requestedName = path.basename(requestedCli).toLowerCase();
+  const configuredName = path.basename(configuredCli).toLowerCase();
+  const antigravityNames = new Set(['', 'agy', 'antigravity', 'antigravity-cli']);
+  const codexNames = new Set(['codex', 'codex-cli']);
+  const wantsCodex = codexNames.has(requestedName) || codexNames.has(configuredName);
+  const wantsAntigravity = antigravityNames.has(requestedName) || antigravityNames.has(configuredName);
+  const candidates = wantsCodex && !wantsAntigravity
+    ? [configuredCli, requestedCli, 'codex', 'codex-cli', 'agy', 'antigravity', 'antigravity-cli']
+    : [configuredCli, requestedCli, 'agy', 'antigravity', 'antigravity-cli', 'codex', 'codex-cli'];
+
+  return candidates.filter(Boolean).filter((candidate, index, all) => all.indexOf(candidate) === index);
+}
+
+function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
+  const candidates = getAgentCliCandidates(agentCli, configuredCliPath);
 
   for (const candidate of candidates) {
     if (commandExists(candidate)) {
@@ -50,7 +59,23 @@ function resolveCliForTest(configuredCliPath: string): string {
     }
   }
 
-  return configuredCliPath || 'agy';
+  return candidates[0] || 'agy';
+}
+
+function getCliVersionArgs(agentCli: string): string[] {
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return ['--version'];
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return ['--version'];
+  }
+  return ['--version'];
+}
+
+function formatCliTestMessage(agentCli: string, stdout: string, stderr: string): string {
+  const version = (stdout.trim() || stderr.trim() || 'available').split('\n')[0];
+  return `${agentCli} · ${version}`;
 }
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
@@ -116,13 +141,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
           break;
         case 'testCli':
-          const cliToTest = resolveCliForTest(data.cliPath || '');
-          childProcess.execFile(cliToTest, ['--version'], (error: any, stdout: string, stderr: string) => {
+          const cliToTest = resolveAgentCli('antigravity-cli', data.cliPath || '');
+          childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
             const success = !error;
-            let msg = error ? error.message : (stdout.trim() || stderr.trim());
-            // Shorten error messages for the compact sidebar badge
+            let msg = error ? error.message : formatCliTestMessage(cliToTest, stdout, stderr);
             if (!success) {
-              msg = 'Command not found or failed';
+              const candidates = getAgentCliCandidates('antigravity-cli', data.cliPath || '').join(', ');
+              msg = `Command not found or failed. Tried: ${candidates}`;
             }
             this._view?.webview.postMessage({
               command: 'cliTestResult',

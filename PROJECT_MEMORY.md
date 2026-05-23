@@ -42,6 +42,7 @@
 - Task dependencies are enforced before running a node: dependent tasks must be `Completed`.
 - Agent execution uses `bash -lc` plus `tee` so users see terminal output while the extension also captures it for the execution log.
 - Agent execution records touched project files outside `.solopreneur`, `.git`, and `node_modules`. If the CLI exits without project file changes, without a completion decision, or with timeout output, the sentinel records `Failed` instead of silently advancing the roadmap step.
+- Settings-panel CLI tests must use the same candidate ordering as Agent dispatch in both the full roadmap and sidebar webviews. The result message should show the actual resolved command so users know which local CLI will be used.
 - AI roadmap generation falls back to a local starter roadmap if the configured AI provider is unavailable or missing credentials, so the user can still continue the flow.
 
 ## Regression Tests

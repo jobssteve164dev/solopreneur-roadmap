@@ -446,11 +446,12 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'testCli':
           const cliToTest = resolveAgentCli('antigravity-cli', message.cliPath || '');
-          childProcess.execFile(cliToTest, ['--version'], (error: any, stdout: string, stderr: string) => {
+          childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
             const success = !error;
-            let msg = error ? error.message : (stdout.trim() || stderr.trim());
+            let msg = error ? error.message : formatCliTestMessage(cliToTest, stdout, stderr);
             if (!success) {
-              msg = 'Command not found or failed';
+              const candidates = getAgentCliCandidates('antigravity-cli', message.cliPath || '').join(', ');
+              msg = `Command not found or failed. Tried: ${candidates}`;
             }
             if (activePanel) {
               activePanel.webview.postMessage({
@@ -569,6 +570,22 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
+}
+
+function getCliVersionArgs(agentCli: string): string[] {
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return ['--version'];
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return ['--version'];
+  }
+  return ['--version'];
+}
+
+function formatCliTestMessage(agentCli: string, stdout: string, stderr: string): string {
+  const version = (stdout.trim() || stderr.trim() || 'available').split('\n')[0];
+  return `${agentCli} · ${version}`;
 }
 
 function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
