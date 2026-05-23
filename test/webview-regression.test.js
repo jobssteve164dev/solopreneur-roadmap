@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
@@ -237,11 +239,11 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
-    "'antigravity-cli' --print --add-dir '/workspace/app' 'Build landing page'"
+    "'antigravity-cli' --print --print-timeout=30m --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
-    "'agy' --print --add-dir '/workspace/app' 'Build landing page'"
+    "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -255,9 +257,12 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     'codex'
   );
   assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/output.log'));
+  assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/touched-files.txt'));
   assert.ok(shellScript.finalCommand.includes("git -C"));
   assert.ok(shellScript.finalCommand.includes('/workspace/app'));
   assert.ok(shellScript.finalCommand.includes('status --short'));
+  assert.ok(shellScript.finalCommand.includes('timed out waiting for response'));
+  assert.ok(shellScript.finalCommand.includes('without project file changes or a completion decision'));
   assert.ok(shellScript.finalCommand.includes('.agent_status.json'));
   assert.ok(shellScript.finalCommand.includes('In Progress'));
   assert.ok(shellScript.finalCommand.includes('markCompleted'));
@@ -281,6 +286,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(prompt, /Created README and ran npm test/);
   assert.match(prompt, /markCompleted/);
   assert.match(prompt, /正常退出 CLI 进程/);
+  assert.match(prompt, /唯一任务/);
   assert.match(prompt, /Solopreneur Roadmap/);
 
   const handoff = extensionModule.__buildRunHandoffEntry(
@@ -292,6 +298,13 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(handoff, /本轮文件变化/);
   assert.match(handoff, /README.md/);
   assert.match(handoff, /本轮关键信号/);
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-noop-agent-'));
+  const noopRun = extensionModule.__buildAgentShellScript('printf ok', tempRoot, 'noop', 'agy');
+  childProcess.execSync(noopRun.finalCommand, { cwd: tempRoot, stdio: 'ignore' });
+  const noopStatus = JSON.parse(fs.readFileSync(path.join(tempRoot, '.agent_status.json'), 'utf8'));
+  assert.equal(noopStatus.status, 'Failed');
+  assert.match(fs.readFileSync(noopRun.outputFilePath, 'utf8'), /without project file changes/);
 
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
   assert.match(dataReadme, /Solopreneur Project Data/);

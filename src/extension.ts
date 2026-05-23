@@ -565,7 +565,7 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --print --print-timeout=30m --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
@@ -660,6 +660,7 @@ function buildAgentConversationPrompt(
   return [
     '你正在 Solopreneur Roadmap 的一个路线图环节中工作。',
     '请把这次调用当成该环节的一次 agent 对话，而不是必须一次性完成整个环节。',
+    '这是本次调用的唯一任务。不要执行与本环节无关的仓库记忆、历史会话或其他待办事项。',
     '',
     `项目目录：${workspaceRoot}`,
     `环节：${node.title}`,
@@ -675,7 +676,7 @@ function buildAgentConversationPrompt(
     stepHandoffSummary,
     '',
     '闭环要求：',
-    '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。',
+    '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。除非用户明确要求，否则不要只输出计划或总结。',
     '2. 不要等待用户二次确认；如果任务过大，先交付一个可验证的小闭环，并在输出末尾说明下一次建议继续做什么。',
     '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
     '4. 完成后正常退出 CLI 进程。扩展会根据进程退出码记录本轮对话是否成功。',
@@ -696,17 +697,23 @@ function buildAgentShellScript(
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
   const outputFilePath = path.join(runDir, 'output.log');
   const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  const startedAtFilePath = path.join(runDir, 'started_at');
   const decisionFilePath = completionDecisionFilePath || path.join(runDir, 'completion.json');
-  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli, outputFilePath, changesFilePath, completionDecisionFilePath: decisionFilePath });
-  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', command: agentCli, outputFilePath, changesFilePath, completionDecisionFilePath: decisionFilePath });
-  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli, outputFilePath, changesFilePath, completionDecisionFilePath: decisionFilePath });
+  const runningStatus = JSON.stringify({ nodeId, status: 'Running', command: agentCli, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
+  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', command: agentCli, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
+  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', command: agentCli, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
   const script = [
     `mkdir -p ${shellQuote(runDir)}`,
+    `touch ${shellQuote(startedAtFilePath)}`,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
     `(${agentCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
     `status=\${PIPESTATUS[0]}`,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
+    `find ${shellQuote(workspaceRoot)} \\( -path ${shellQuote(path.join(workspaceRoot, '.git'))} -o -path ${shellQuote(path.join(workspaceRoot, '.solopreneur'))} -o -path ${shellQuote(path.join(workspaceRoot, 'node_modules'))} \\) -prune -o -type f -newer ${shellQuote(startedAtFilePath)} ! -path ${shellQuote(statusFilePath)} -print 2>/dev/null | sed ${shellQuote(`s#^${workspaceRoot}/##`)} > ${shellQuote(touchedFilesPath)} || true`,
+    `if grep -qi 'timed out waiting for response\\|Error: timed out' ${shellQuote(outputFilePath)} 2>/dev/null; then status=124; fi`,
+    `if [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSolopreneur: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; fi`,
     `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
 
@@ -737,6 +744,15 @@ function getChangedFilesSummary(filePath: string): string {
 
   const content = fs.readFileSync(filePath, 'utf8').trim();
   return content || 'No workspace file changes detected.';
+}
+
+function getTouchedFilesSummary(filePath: string): string {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return 'No project files were touched during this run.';
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8').trim();
+  return content || 'No project files were touched during this run.';
 }
 
 function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
@@ -894,7 +910,7 @@ function processAgentStatusFile(statusFilePath: string): void {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, status, command, outputFilePath, changesFilePath, completionDecisionFilePath } = statusData;
+    const { nodeId, status, command, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
@@ -922,9 +938,15 @@ function processAgentStatusFile(statusFilePath: string): void {
 
     const outputTail = getOutputTail(outputFilePath);
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
+    const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
     const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
     const handoffEntry = workspaceRoot
-      ? buildRunHandoffEntry(nextStatus, changedFilesSummary, outputTail, completionReason)
+      ? buildRunHandoffEntry(
+        nextStatus,
+        [changedFilesSummary, touchedFilesSummary].filter(Boolean).join('\n'),
+        outputTail,
+        completionReason
+      )
       : '';
     const stepHandoffSummary = workspaceRoot && handoffEntry
       ? updateStepHandoffSummary(getStepMemoryFilePath(workspaceRoot, nodeId), handoffEntry)
@@ -936,6 +958,8 @@ function processAgentStatusFile(statusFilePath: string): void {
       stepHandoffSummary ? `Step handoff summary updated: ${getStepMemoryFilePath(workspaceRoot, nodeId)}` : '',
       `Workspace changes:`,
       changedFilesSummary,
+      `Touched project files:`,
+      touchedFilesSummary,
       outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
     ].filter(Boolean).join('\n\n');
     syncEngine.logAgentExecution(
