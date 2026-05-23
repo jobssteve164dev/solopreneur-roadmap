@@ -28,7 +28,9 @@
 - Each Agent run should appear as one conversation. The extension creates one SQLite execution log when the run starts and updates that same row when the sentinel finishes; old launch-only `Running` rows are hidden once a later finished row exists for the same step.
 - After selecting a new project folder, Solopreneur asks for an optional project idea. If provided, AI roadmap generation uses a fixed four-stage framework (`商业规划` / `品牌与设置` / `产品与 MVP` / `营销与增长`) while customizing node titles, descriptions, dependencies, and agent prompts to the user's idea. Empty input keeps the default roadmap.
 - Roadmap step completion is no longer equivalent to one successful Agent run. Successful CLI exit moves the step to `In Progress` unless the Agent writes the agreed completion decision JSON. Users can always close the loop manually through the step card's complete button.
-- Each roadmap step keeps a project-local JSON handoff file at `.solopreneur/step-memory/<nodeId>.json`. After each Agent run, the extension appends a structured handoff entry with file changes, useful output signals, and completion judgment, keeping the latest 10 real entries. New Agent conversations inject this JSON summary instead of raw execution logs.
+- Each roadmap step keeps a project-local JSON handoff file at `.solopreneur/step-memory/<nodeId>.json`. After each Agent run, the extension appends a structured handoff entry with file changes, useful output signals, and completion judgment, keeping the latest 10 real entries. This JSON is the fallback context for first runs, missing native sessions, or cross-Agent handoff, not the primary continuation path.
+- Each roadmap step also keeps per-Agent native session IDs in `.solopreneur/step-sessions/<nodeId>.json`. When the same step continues with the same Agent family, Solopreneur should resume the CLI's native conversation (`agy --conversation <id>` or `codex exec resume <id>`) instead of injecting accumulated handoff context.
+- If a native resumed Agent session is reported missing or invalid, Solopreneur clears that saved session entry so the next run can start a fresh native session with the project-local handoff JSON.
 - Step handoff files must contain only real run entries. The parser/writer must dedupe entries by content and migrate old `.md` handoff files by stripping nested `# 环节交接总结` blocks so previous summaries cannot recursively copy themselves into future prompts.
 - Webview node state and conversation history caches must be scoped by selected project path. Project switching must clear expanded node state and cached conversations because different projects often reuse the same roadmap node IDs.
 - Solopreneur intentionally keeps project data inside the project folder under `.solopreneur/` so Git can manage it and the user can move between machines/IDEs without a Solopreneur backend. The extension must generate `.solopreneur/README.md` explaining the directory contents and deletion risk.
@@ -38,8 +40,8 @@
 ## CLI Orchestration Contract
 
 - User-facing setting `solopreneur.cliPath` controls the local agent executable.
-- `codex` and `codex-cli` must be invoked through `codex exec -C <workspace> <prompt>`.
-- `antigravity-cli` uses the `--print --print-timeout=30m --add-dir=<workspace> <prompt>` shape (matching `agy`).
+- New `codex` and `codex-cli` sessions must be invoked through `codex exec -C <workspace> <prompt>`. Follow-up sessions for the same roadmap step and Agent family use `codex exec resume <session_id> <prompt>` from the project root.
+- New `agy` / `antigravity-cli` sessions use the `--print --print-timeout=30m --add-dir=<workspace> <prompt>` shape. Follow-up sessions for the same roadmap step and Agent family use `--conversation <conversation_id>`.
 - Agent commands run in the opened workspace root, and the sentinel file is written with an absolute path so sidebar-only usage can still complete.
 - If the configured/default CLI is unavailable, runtime discovery falls back to installed candidates such as `codex` before failing.
 - Task dependencies are enforced before running a node: dependent tasks must be `Completed`.

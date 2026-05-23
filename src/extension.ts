@@ -26,6 +26,19 @@ interface SolopreneurProject {
   path: string;
 }
 
+interface AgentStepSession {
+  agentCli: string;
+  provider: string;
+  sessionId: string;
+  updatedAt: string;
+}
+
+interface StepSessionState {
+  version: number;
+  nodeId: string;
+  sessions: Record<string, AgentStepSession>;
+}
+
 const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
@@ -222,7 +235,8 @@ function buildSolopreneurDirectoryReadme(): string {
     '## 主要文件',
     '',
     '- `roadmap.csv`：路线图主数据，包括环节、依赖、状态和 Agent prompt。',
-    '- `step-memory/`：每个路线图环节的 JSON 交接总结。下一轮 Agent 对话会优先读取这里的结构化上下文。',
+    '- `step-memory/`：每个路线图环节的 JSON 交接总结。没有可续接的 Agent 原生会话时，下一轮 Agent 对话会读取这里的结构化上下文。',
+    '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会优先续接同一个 Agent 会话。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
     '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
@@ -556,16 +570,101 @@ function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
   return candidates[0] || 'agy';
 }
 
-function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string): string {
+function getAgentProvider(agentCli: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return 'codex';
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return 'antigravity';
+  }
+  return executableName || 'unknown';
+}
+
+function getAgentSessionKey(agentCli: string): string {
+  return getAgentProvider(agentCli);
+}
+
+function getStepSessionFilePath(workspaceRoot: string, nodeId: string): string {
+  return path.join(workspaceRoot, '.solopreneur', 'step-sessions', `${nodeId}.json`);
+}
+
+function readStepSessionState(filePath: string, nodeId: string): StepSessionState {
+  const emptyState: StepSessionState = {
+    version: 1,
+    nodeId,
+    sessions: {}
+  };
+  if (!filePath || !fs.existsSync(filePath)) {
+    return emptyState;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const sessions = parsed && typeof parsed.sessions === 'object' && parsed.sessions ? parsed.sessions : {};
+    return {
+      version: 1,
+      nodeId: String(parsed.nodeId || nodeId),
+      sessions
+    };
+  } catch {
+    return emptyState;
+  }
+}
+
+function getStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string): AgentStepSession | null {
+  const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
+  const state = readStepSessionState(filePath, nodeId);
+  const session = state.sessions[getAgentSessionKey(agentCli)];
+  return session && session.sessionId ? session : null;
+}
+
+function updateStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string, sessionId: string): StepSessionState {
+  const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
+  const state = readStepSessionState(filePath, nodeId);
+  const sessionKey = getAgentSessionKey(agentCli);
+  state.version = 1;
+  state.nodeId = nodeId;
+  state.sessions[sessionKey] = {
+    agentCli,
+    provider: getAgentProvider(agentCli),
+    sessionId,
+    updatedAt: new Date().toISOString()
+  };
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf8');
+  return state;
+}
+
+function clearStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string): boolean {
+  const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
+  const state = readStepSessionState(filePath, nodeId);
+  const sessionKey = getAgentSessionKey(agentCli);
+  if (!state.sessions[sessionKey]) {
+    return false;
+  }
+  delete state.sessions[sessionKey];
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf8');
+  return true;
+}
+
+function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string, nativeSessionId = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPrompt = shellQuote(agentPrompt);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
+    if (nativeSessionId.trim()) {
+      return `${quotedCli} exec resume ${shellQuote(nativeSessionId.trim())} ${quotedPrompt}`;
+    }
     return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    if (nativeSessionId.trim()) {
+      return `${quotedCli} --print --print-timeout=30m --conversation ${shellQuote(nativeSessionId.trim())} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    }
     return `${quotedCli} --print --print-timeout=30m --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
@@ -586,6 +685,71 @@ function getCliVersionArgs(agentCli: string): string[] {
 function formatCliTestMessage(agentCli: string, stdout: string, stderr: string): string {
   const version = (stdout.trim() || stderr.trim() || 'available').split('\n')[0];
   return `${agentCli} · ${version}`;
+}
+
+function buildSessionCaptureScript(
+  provider: string,
+  workspaceRoot: string,
+  startedAtFilePath: string,
+  outputFilePath: string,
+  sessionFilePath: string
+): string {
+  const sessionWriter = [
+    `if [ -n "$session_id" ]; then`,
+    `node -e ${shellQuote([
+      'const fs=require("fs");',
+      'const file=process.argv[1];',
+      'const sessionId=process.argv[2];',
+      'const source=process.argv[3]||"unknown";',
+      'fs.mkdirSync(require("path").dirname(file),{recursive:true});',
+      'fs.writeFileSync(file, JSON.stringify({ sessionId, source }, null, 2));'
+    ].join(''))} ${shellQuote(sessionFilePath)} "$session_id" "$session_source";`,
+    `fi`
+  ].join(' ');
+
+  if (provider === 'antigravity') {
+    return [
+      `session_id=""`,
+      `session_source=""`,
+      `latest_log=$(find "$HOME/.gemini/antigravity-cli/log" -type f -name 'cli-*.log' -newer ${shellQuote(startedAtFilePath)} -print 2>/dev/null | sort | tail -1 || true)`,
+      `if [ -n "$latest_log" ]; then session_id=$(grep -Eo 'conversation[ =:]+[0-9a-fA-F-]{36}|Created conversation [0-9a-fA-F-]{36}' "$latest_log" 2>/dev/null | grep -Eo '[0-9a-fA-F-]{36}' | tail -1 || true); session_source="antigravity-log"; fi`,
+      `if [ -z "$session_id" ] && [ -f "$HOME/.gemini/antigravity-cli/cache/last_conversations.json" ]; then session_id=$(node -e ${shellQuote([
+        'const fs=require("fs");',
+        'const file=process.argv[1];',
+        'const workspace=process.argv[2];',
+        'try {',
+        'const data=JSON.parse(fs.readFileSync(file,"utf8"));',
+        'process.stdout.write(data[workspace] || "");',
+        '} catch {}'
+      ].join(''))} "$HOME/.gemini/antigravity-cli/cache/last_conversations.json" ${shellQuote(workspaceRoot)}); session_source="antigravity-cache"; fi`,
+      sessionWriter
+    ].join('; ');
+  }
+
+  if (provider === 'codex') {
+    return [
+      `session_id=""`,
+      `session_source=""`,
+      `session_id=$(grep -Eo '"id"[[:space:]]*:[[:space:]]*"[0-9a-fA-F-]{36}"|session[_ -]?id[^0-9a-fA-F]*[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | grep -Eo '[0-9a-fA-F-]{36}' | tail -1 || true)`,
+      `if [ -n "$session_id" ]; then session_source="codex-output"; fi`,
+      `if [ -z "$session_id" ]; then latest_session=$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -newer ${shellQuote(startedAtFilePath)} -print 2>/dev/null | sort | tail -1 || true); if [ -n "$latest_session" ]; then session_id=$(node -e ${shellQuote([
+        'const fs=require("fs");',
+        'const file=process.argv[1];',
+        'try {',
+        'const first=fs.readFileSync(file,"utf8").split(/\\r?\\n/).find(Boolean)||"";',
+        'const parsed=JSON.parse(first);',
+        'process.stdout.write((parsed.payload && parsed.payload.id) || "");',
+        '} catch {}'
+      ].join(''))} "$latest_session"); session_source="codex-session-file"; fi; fi`,
+      sessionWriter
+    ].join('; ');
+  }
+
+  return [
+    `session_id=$(grep -Eo '[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | tail -1 || true)`,
+    `session_source="generic-output"`,
+    sessionWriter
+  ].join('; ');
 }
 
 function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
@@ -802,11 +966,35 @@ function buildAgentConversationPrompt(
   userMessage: string,
   workspaceRoot: string,
   stepHandoffSummary = '暂无交接总结。',
-  completionDecisionFilePath = ''
+  completionDecisionFilePath = '',
+  nativeSessionId = ''
 ): string {
   const supplement = userMessage.trim()
     ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
     : '';
+
+  if (nativeSessionId.trim()) {
+    return [
+      '继续 Solopreneur Roadmap 当前路线图环节的原生 Agent 会话。',
+      '这次调用是该环节的下一轮对话，请沿用本会话已经建立的项目目标、用户要求和工作上下文。',
+      '不要把这次调用当成全新任务，也不要切换到其他项目或其他路线图环节。',
+      '',
+      `项目目录：${workspaceRoot}`,
+      `环节：${node.title}`,
+      `阶段：${node.stage}`,
+      `当前环节状态：${node.status}`,
+      supplement,
+      '',
+      '本轮推进要求：',
+      '1. 只处理本路线图环节内本轮能闭环的工作。',
+      '2. 直接在项目目录中完成必要文件改动或文档产出；除非用户明确要求，否则不要只输出计划。',
+      '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
+      '4. 完成后正常退出 CLI 进程。',
+      completionDecisionFilePath
+        ? `5. 如果你判断整个路线图环节已经达到完成标准，请写入文件 ${completionDecisionFilePath}，内容必须是 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续对话，不要写这个文件。`
+        : '5. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。'
+    ].join('\n');
+  }
 
   return [
     '你正在 Solopreneur Roadmap 的一个路线图环节中工作。',
@@ -844,7 +1032,8 @@ function buildAgentShellScript(
   agentCli: string,
   executionLogId: number,
   userMessage: string,
-  completionDecisionFilePath?: string
+  completionDecisionFilePath?: string,
+  nativeSessionId = ''
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
@@ -852,17 +1041,24 @@ function buildAgentShellScript(
   const changesFilePath = path.join(runDir, 'changes.txt');
   const touchedFilesPath = path.join(runDir, 'touched-files.txt');
   const startedAtFilePath = path.join(runDir, 'started_at');
+  const sessionFilePath = path.join(runDir, 'session.json');
   const decisionFilePath = completionDecisionFilePath || path.join(runDir, 'completion.json');
-  const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
-  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
-  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath });
+  const agentProvider = getAgentProvider(agentCli);
+  const sessionKey = getAgentSessionKey(agentCli);
+  const sessionMode = nativeSessionId.trim() ? 'resume' : 'new';
+  const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
+  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
+  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, command: agentCommand, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
+  const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const script = [
+    `cd ${shellQuote(workspaceRoot)}`,
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
     `(${agentCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
     `status=\${PIPESTATUS[0]}`,
+    sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     `find ${shellQuote(workspaceRoot)} \\( -path ${shellQuote(path.join(workspaceRoot, '.git'))} -o -path ${shellQuote(path.join(workspaceRoot, '.solopreneur'))} -o -path ${shellQuote(path.join(workspaceRoot, 'node_modules'))} \\) -prune -o -type f -newer ${shellQuote(startedAtFilePath)} ! -path ${shellQuote(statusFilePath)} -print 2>/dev/null | sed ${shellQuote(`s#^${workspaceRoot}/##`)} > ${shellQuote(touchedFilesPath)} || true`,
     `if grep -qi 'timed out waiting for response\\|Error: timed out' ${shellQuote(outputFilePath)} 2>/dev/null; then status=124; fi`,
@@ -1026,19 +1222,23 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   // Command execution with sentinel file generation on success or fail
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const completionDecisionFilePath = path.join(runDir, 'completion.json');
+  const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
+  const nativeSessionId = storedSession?.sessionId || '';
   const stepMemoryFilePath = getStepMemoryFilePath(workspaceRoot, nodeId);
-  const stepHandoffSummary = readStepHandoffSummary(stepMemoryFilePath);
+  const stepHandoffSummary = nativeSessionId ? '原生 Agent 会话续接中，本轮不注入历史交接 JSON。' : readStepHandoffSummary(stepMemoryFilePath);
   const conversationPrompt = buildAgentConversationPrompt(
     node,
     userMessage,
     workspaceRoot,
     stepHandoffSummary,
-    completionDecisionFilePath
+    completionDecisionFilePath,
+    nativeSessionId
   );
-  const agentCommand = buildAgentCommand(agentCli, conversationPrompt, workspaceRoot);
+  const agentCommand = buildAgentCommand(agentCli, conversationPrompt, workspaceRoot, nativeSessionId);
 
   const launchSummary = [
     'Agent conversation started.',
+    nativeSessionId ? `Resuming native ${getAgentProvider(agentCli)} session: ${nativeSessionId}` : `Starting a new native ${getAgentProvider(agentCli)} session.`,
     userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : ''
   ].filter(Boolean).join('\n\n');
   const executionLogId = syncEngine.logAgentExecution(
@@ -1057,7 +1257,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     });
   }
 
-  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli, executionLogId, userMessage.trim(), completionDecisionFilePath);
+  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId);
 
   terminal.sendText(finalCommand);
 }
@@ -1074,7 +1274,7 @@ function processAgentStatusFile(statusFilePath: string): void {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, status, agentCli, command, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath } = statusData;
+    const { nodeId, status, agentCli, command, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
@@ -1104,6 +1304,25 @@ function processAgentStatusFile(statusFilePath: string): void {
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
     const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
     const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
+    let nativeSessionSummary = '';
+    if (workspaceRoot && sessionFilePath && fs.existsSync(sessionFilePath)) {
+      try {
+        const sessionData = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+        const sessionId = String(sessionData.sessionId || '').trim();
+        if (sessionId) {
+          updateStoredAgentSession(workspaceRoot, nodeId, agentCli || command || 'unknown', sessionId);
+          nativeSessionSummary = `Native Agent session saved: ${getStepSessionFilePath(workspaceRoot, nodeId)} (${sessionId})`;
+        }
+      } catch {
+        nativeSessionSummary = 'Native Agent session could not be parsed.';
+      }
+    }
+    if (workspaceRoot && sessionMode === 'resume' && status === 'Failed' && /session|conversation/i.test(outputTail) && /not found|unknown|missing|invalid|不存在|找不到/i.test(outputTail)) {
+      const cleared = clearStoredAgentSession(workspaceRoot, nodeId, agentCli || command || 'unknown');
+      if (cleared) {
+        nativeSessionSummary = `${nativeSessionSummary ? `${nativeSessionSummary}\n` : ''}Native Agent session was invalid and has been reset. The next run will start a fresh session with the project handoff JSON.`;
+      }
+    }
     const handoffEntry = workspaceRoot
       ? buildRunHandoffEntry(
         nextStatus,
@@ -1117,6 +1336,8 @@ function processAgentStatusFile(statusFilePath: string): void {
       : '';
     const executionSummary = [
       userMessage ? `User supplement:\n${userMessage}` : '',
+      sessionMode ? `Native session mode: ${sessionMode}` : '',
+      nativeSessionSummary,
       `Sentinel captured state: ${status}`,
       `Roadmap step state: ${nextStatus}`,
       completionReason ? `Completion decision: ${completionReason}` : '',

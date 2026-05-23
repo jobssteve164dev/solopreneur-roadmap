@@ -230,6 +230,12 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__readStepHandoffSummary = readStepHandoffSummary;',
       'module.exports.__buildSolopreneurDirectoryReadme = buildSolopreneurDirectoryReadme;',
       'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
+      'module.exports.__getAgentProvider = getAgentProvider;',
+      'module.exports.__getStepSessionFilePath = getStepSessionFilePath;',
+      'module.exports.__readStepSessionState = readStepSessionState;',
+      'module.exports.__getStoredAgentSession = getStoredAgentSession;',
+      'module.exports.__updateStoredAgentSession = updateStoredAgentSession;',
+      'module.exports.__clearStoredAgentSession = clearStoredAgentSession;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
@@ -245,12 +251,20 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     "'codex-cli' exec -C '/workspace/app' 'Don'\\''t skip tests'"
   );
   assert.equal(
+    extensionModule.__buildAgentCommand('codex', 'Continue the MVP', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
+    "'codex' exec resume '019dc472-6a80-7c70-99a4-b2593a641d11' 'Continue the MVP'"
+  );
+  assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
     "'antigravity-cli' --print --print-timeout=30m --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
     "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Build landing page'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommand('agy', 'Continue landing page', '/workspace/app', '3350a3b7-7761-4ed5-9661-2e9c9de8f924'),
+    "'agy' --print --print-timeout=30m --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --add-dir='/workspace/app' 'Continue landing page'"
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -297,10 +311,24 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('without project file changes or a completion decision'));
   assert.ok(shellScript.finalCommand.includes('.agent_status.json'));
   assert.ok(shellScript.finalCommand.includes('executionLogId'));
+  assert.ok(shellScript.finalCommand.includes('sessionFilePath'));
+  assert.ok(shellScript.finalCommand.includes('sessionMode'));
+  assert.ok(shellScript.finalCommand.includes('.codex/sessions'));
   assert.ok(shellScript.finalCommand.includes('Use a small smoke test.'));
   assert.ok(shellScript.finalCommand.includes('In Progress'));
   assert.ok(shellScript.finalCommand.includes('markCompleted'));
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
+
+  const agyShellScript = extensionModule.__buildAgentShellScript(
+    "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Ship the MVP'",
+    '/workspace/app',
+    '2',
+    'agy',
+    43,
+    ''
+  );
+  assert.ok(agyShellScript.finalCommand.includes('antigravity-cli/cache/last_conversations.json'));
+  assert.ok(agyShellScript.finalCommand.includes('antigravity-log'));
 
   const prompt = extensionModule.__buildAgentConversationPrompt(
     {
@@ -332,6 +360,41 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /唯一任务/);
   assert.match(prompt, /Solopreneur Roadmap/);
+
+  const followupPrompt = extensionModule.__buildAgentConversationPrompt(
+    {
+      title: 'Build onboarding',
+      stage: '产品与 MVP',
+      description: 'Create the first usable onboarding path.',
+      agentPrompt: 'Implement the first slice.',
+      status: 'In Progress'
+    },
+    'Keep the original novel ending.',
+    '/workspace/app',
+    JSON.stringify({ entries: [{ usefulSignals: 'Old handoff should not be injected.' }] }),
+    '/workspace/app/.solopreneur/agent-runs/2/completion.json',
+    '3350a3b7-7761-4ed5-9661-2e9c9de8f924'
+  );
+  assert.match(followupPrompt, /继续 Solopreneur Roadmap 当前路线图环节/);
+  assert.match(followupPrompt, /Keep the original novel ending/);
+  assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
+  assert.doesNotMatch(followupPrompt, /Old handoff should not be injected/);
+
+  const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-session-'));
+  const sessionState = extensionModule.__updateStoredAgentSession(
+    sessionRoot,
+    '2',
+    'agy',
+    '3350a3b7-7761-4ed5-9661-2e9c9de8f924'
+  );
+  assert.equal(sessionState.sessions.antigravity.sessionId, '3350a3b7-7761-4ed5-9661-2e9c9de8f924');
+  assert.equal(
+    extensionModule.__getStoredAgentSession(sessionRoot, '2', 'antigravity-cli').sessionId,
+    '3350a3b7-7761-4ed5-9661-2e9c9de8f924'
+  );
+  assert.equal(extensionModule.__clearStoredAgentSession(sessionRoot, '2', 'antigravity-cli'), true);
+  assert.equal(extensionModule.__getStoredAgentSession(sessionRoot, '2', 'agy'), null);
+  assert.match(extensionModule.__getStepSessionFilePath(sessionRoot, '2'), /\.solopreneur\/step-sessions\/2\.json$/);
 
   const handoff = extensionModule.__buildRunHandoffEntry(
     'In Progress',
@@ -404,6 +467,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(dataReadme, /Solopreneur Project Data/);
   assert.match(dataReadme, /roadmap\.csv/);
   assert.match(dataReadme, /step-memory/);
+  assert.match(dataReadme, /step-sessions/);
   assert.match(dataReadme, /project_journal\.db/);
   assert.match(dataReadme, /Git\/GitHub/);
 });
