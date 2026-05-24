@@ -61,6 +61,22 @@ function commandExists(command: string): boolean {
   return result.status === 0;
 }
 
+function resolveExecutablePath(command: string): string {
+  const trimmed = (command || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (path.isAbsolute(trimmed) || trimmed.includes(path.sep)) {
+    return trimmed;
+  }
+  const result = childProcess.spawnSync('bash', ['-lc', `command -v ${shellQuote(trimmed)}`], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  const resolved = String(result.stdout || '').trim().split('\n')[0];
+  return resolved || trimmed;
+}
+
 function getAgentCliCandidates(agentCli: string, configuredCliPath: string): string[] {
   const requestedCli = (agentCli || '').trim();
   const configuredCli = (configuredCliPath || '').trim();
@@ -82,7 +98,7 @@ function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
 
   for (const candidate of candidates) {
     if (commandExists(candidate)) {
-      return candidate;
+      return resolveExecutablePath(candidate);
     }
   }
 

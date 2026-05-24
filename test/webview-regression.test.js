@@ -382,8 +382,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('markCompleted'));
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
   assert.match(extensionModule.__buildRoadmapGenerationSystemInstruction('codex'), /"agentCli": "codex"/);
-  assert.equal(extensionModule.__resolveRoadmapProviderCli('Codex CLI (Local)', 'agy'), 'codex');
-  assert.equal(extensionModule.__resolveRoadmapProviderCli('Antigravity CLI (Local)', 'codex'), 'agy');
+  assert.equal(path.basename(extensionModule.__resolveRoadmapProviderCli('Codex CLI (Local)', 'agy')), 'codex');
+  assert.equal(path.basename(extensionModule.__resolveRoadmapProviderCli('Antigravity CLI (Local)', 'codex')), 'agy');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Ship the MVP'",
