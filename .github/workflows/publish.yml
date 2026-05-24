@@ -4,6 +4,16 @@ on:
   push:
     branches:
       - main # 当代码推送到 main 主分支时触发自动检测与发布
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - 'scripts/**'
+      - 'resources/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - '.vscodeignore'
+      - 'LICENSE'
   workflow_dispatch: # 支持手动点击触发发布
 
 jobs:
