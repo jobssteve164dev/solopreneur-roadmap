@@ -6,4 +6,5 @@ out/
 .agent_status.json
 *.vsix
 *.log
+log
 .DS_Store

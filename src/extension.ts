@@ -755,7 +755,7 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --print-timeout=30m --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --print --print-timeout=2m --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
@@ -1734,7 +1734,7 @@ function runLocalRoadmapGenerator(apiProvider: string, prompt: string, workspace
     if (executableName === 'codex' || executableName === 'codex-cli') {
       args = ['exec', '-C', workspaceRoot, instruction];
     } else if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-      args = ['--print', '--print-timeout=30m', `--add-dir=${workspaceRoot}`, instruction];
+      args = ['--print', '--print-timeout=2m', `--add-dir=${workspaceRoot}`, instruction];
     } else {
       reject(new Error(`Unsupported local roadmap generator CLI: ${cli}`));
       return;
@@ -1742,7 +1742,7 @@ function runLocalRoadmapGenerator(apiProvider: string, prompt: string, workspace
 
     childProcess.execFile(cli, args, {
       cwd: workspaceRoot,
-      timeout: 30 * 60 * 1000,
+      timeout: 2 * 60 * 1000,
       maxBuffer: 8 * 1024 * 1024
     }, (error, stdout, stderr) => {
       if (error) {

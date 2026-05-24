@@ -34,14 +34,14 @@
 - Step handoff files must contain only real run entries. The parser/writer must dedupe entries by content and migrate old `.md` handoff files by stripping nested `# 环节交接总结` blocks so previous summaries cannot recursively copy themselves into future prompts.
 - Webview node state and conversation history caches must be scoped by selected project path. Project switching must clear expanded node state and cached conversations because different projects often reuse the same roadmap node IDs.
 - Solopreneur intentionally keeps project data inside the project folder under `.solopreneur/` so Git can manage it and the user can move between machines/IDEs without a Solopreneur backend. The extension must generate `.solopreneur/README.md` explaining the directory contents and deletion risk.
-- Local Agent CLI discovery must treat Antigravity as the `agy` CLI first, while still supporting `antigravity`, `antigravity-cli`, `codex`, and `codex-cli`. `agy` and `antigravity-cli` run non-interactively through `--print --print-timeout=30m --add-dir=<workspace> <prompt>`.
+- Local Agent CLI discovery must treat Antigravity as the `agy` CLI first, while still supporting `antigravity`, `antigravity-cli`, `codex`, and `codex-cli`. `agy` and `antigravity-cli` run non-interactively through `--print --print-timeout=2m --add-dir=<workspace> <prompt>`.
 - Antigravity/agy print mode can emit progress or timeout text while still returning a zero shell exit code. Solopreneur must not treat exit code alone as successful progress; a run needs project file changes, a completion decision, and no CLI timeout signal before it can advance out of failure handling.
 
 ## CLI Orchestration Contract
 
 - User-facing setting `solopreneur.cliPath` controls the local agent executable.
 - `codex` and `codex-cli` sessions must be invoked through `codex exec -C <workspace> <prompt>`, even when a previous same-step session ID exists.
-- `agy` / `antigravity-cli` sessions use the `--print --print-timeout=30m --add-dir=<workspace> <prompt>` shape for every run. Previous conversation IDs are not passed as forced `--conversation` arguments.
+- `agy` / `antigravity-cli` sessions use the `--print --print-timeout=2m --add-dir=<workspace> <prompt>` shape for every run. Previous conversation IDs are not passed as forced `--conversation` arguments.
 - Agent commands run in the opened workspace root, and the sentinel file is written with an absolute path so sidebar-only usage can still complete.
 - If the configured/default CLI is unavailable, runtime discovery falls back to installed candidates such as `codex` before failing.
 - Task dependencies are enforced before running a node: dependent tasks must be `Completed`.

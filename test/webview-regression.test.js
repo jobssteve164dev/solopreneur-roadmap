@@ -317,15 +317,15 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
-    "'antigravity-cli' --print --print-timeout=30m --add-dir='/workspace/app' 'Build landing page'"
+    "'antigravity-cli' --print --print-timeout=2m --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
-    "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Build landing page'"
+    "'agy' --print --print-timeout=2m --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Continue landing page', '/workspace/app', '3350a3b7-7761-4ed5-9661-2e9c9de8f924'),
-    "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Continue landing page'"
+    "'agy' --print --print-timeout=2m --add-dir='/workspace/app' 'Continue landing page'"
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -386,7 +386,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(path.basename(extensionModule.__resolveRoadmapProviderCli('Antigravity CLI (Local)', 'codex')), 'agy');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
-    "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Ship the MVP'",
+    "'agy' --print --print-timeout=2m --add-dir='/workspace/app' 'Ship the MVP'",
     '/workspace/app',
     '2',
     'agy',
