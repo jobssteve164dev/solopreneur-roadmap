@@ -826,7 +826,7 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --print-timeout=2m --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
@@ -842,7 +842,7 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --print-timeout=2m --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
+    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
   }
 
   return `${quotedCli} run --task @prompt-file:${quotedPromptFile}`;
@@ -858,7 +858,7 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --print-timeout=2m --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
 
   return `${quotedCli} run --task ${promptExpression}`;
@@ -1373,7 +1373,6 @@ function buildAgentShellScript(
     sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
-    `if grep -qi 'timed out waiting for response\\|Error: timed out' ${shellQuote(outputFilePath)} 2>/dev/null; then status=124; fi`,
     `if [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; fi`,
     `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
