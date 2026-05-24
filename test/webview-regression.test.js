@@ -239,6 +239,11 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /Start Agent Conversation|发起 Agent 对话/);
   assert.match(script, /Agent Conversation History|Agent 对话历史/);
   assert.match(script, /conversationPlaceholder/);
+  assert.match(script, /conversation-composer/);
+  assert.match(script, /data-attach-node-id/);
+  assert.match(script, /chooseSupplementFiles/);
+  assert.match(script, /supplementFilesSelected/);
+  assert.match(script, /conversation-attachment-chip/);
   assert.match(script, /data-send-node-id/);
   assert.match(script, /data-agent-select-id/);
   assert.match(script, /data-retry-conversation-id/);
@@ -508,6 +513,29 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(followupPrompt, /项目目录：\/workspace\/app/);
   assert.match(followupPrompt, /环节说明：Create the first usable onboarding path/);
   assert.match(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
+
+  const attachedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-attached-files-'));
+  fs.mkdirSync(path.join(attachedRoot, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(attachedRoot, 'docs', 'brief.md'), 'Brief', 'utf8');
+  const attachedPrompt = extensionModule.__buildAgentConversationPrompt(
+    {
+      title: 'Build onboarding',
+      stage: '产品与 MVP',
+      description: 'Create the first usable onboarding path.',
+      agentPrompt: 'Implement the first slice.',
+      status: 'In Progress'
+    },
+    'Use the attached brief.',
+    attachedRoot,
+    path.join(attachedRoot, '.solopreneur', 'step-memory', '2.json'),
+    path.join(attachedRoot, '.solopreneur', 'agent-runs', '2'),
+    path.join(attachedRoot, '.solopreneur', 'agent-runs', '2', 'completion.json'),
+    '',
+    ['docs/brief.md', '../outside.md']
+  );
+  assert.match(attachedPrompt, /用户为本次对话选择了补充文件/);
+  assert.match(attachedPrompt, /docs\/brief\.md/);
+  assert.doesNotMatch(attachedPrompt, /\.\.\/outside\.md/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);

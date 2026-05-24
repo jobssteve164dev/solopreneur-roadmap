@@ -294,6 +294,62 @@ function ensureBootstrapRoadmapInstructions(solopreneurDir: string, cliPath: str
   fs.writeFileSync(instructionsPath, buildBootstrapRoadmapInstructions(cliPath), 'utf8');
 }
 
+function normalizeSupplementFiles(files: unknown): string[] {
+  if (!Array.isArray(files)) {
+    return [];
+  }
+  const normalized = files
+    .map((file) => String(file || '').trim())
+    .filter(Boolean)
+    .filter((file, index, all) => all.indexOf(file) === index)
+    .slice(0, 10);
+  return normalized;
+}
+
+function filterProjectRelativeFiles(workspaceRoot: string, files: string[]): string[] {
+  return normalizeSupplementFiles(files).filter((relativePath) => {
+    const absolutePath = path.resolve(workspaceRoot, relativePath);
+    const relativeToRoot = path.relative(workspaceRoot, absolutePath);
+    return Boolean(relativeToRoot)
+      && !relativeToRoot.startsWith('..')
+      && !path.isAbsolute(relativeToRoot)
+      && fs.existsSync(absolutePath)
+      && fs.statSync(absolutePath).isFile();
+  });
+}
+
+async function chooseSupplementFilesForNode(nodeId: string): Promise<void> {
+  if (!activeProjectRoot || !activePanel) {
+    vscode.window.showErrorMessage('Choose a project folder before attaching task files.');
+    return;
+  }
+
+  const selected = await vscode.window.showOpenDialog({
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: true,
+    openLabel: 'Attach Files',
+    defaultUri: vscode.Uri.file(activeProjectRoot)
+  });
+
+  const files = (selected || [])
+    .map((uri) => {
+      const absolutePath = uri.fsPath;
+      const relativeToRoot = path.relative(activeProjectRoot as string, absolutePath);
+      if (!relativeToRoot || relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
+        return '';
+      }
+      return relativeToRoot.split(path.sep).join('/');
+    })
+    .filter(Boolean);
+
+  activePanel.webview.postMessage({
+    command: 'supplementFilesSelected',
+    nodeId,
+    files
+  });
+}
+
 async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
   const result = await vscode.window.showOpenDialog({
     canSelectFiles: false,
@@ -483,7 +539,11 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'runAgent':
-          await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '');
+          await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
+          break;
+
+        case 'chooseSupplementFiles':
+          await chooseSupplementFilesForNode(message.nodeId);
           break;
 
         case 'retryConversation':
@@ -1179,11 +1239,20 @@ function buildAgentConversationPrompt(
   stepMemoryFilePath = '',
   agentRunsDir = '',
   completionDecisionFilePath = '',
-  previousSessionId = ''
+  previousSessionId = '',
+  supplementFiles: string[] = []
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const supplement = userMessage.trim()
     ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
+    : '';
+  const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
+  const supplementFileInstructions = attachedFiles.length > 0
+    ? [
+      '用户为本次对话选择了补充文件，开始执行前必须先读取这些文件：',
+      ...attachedFiles.map((file) => `- ${file}`),
+      '这些文件是本轮任务的重要上下文；如果它们与历史记录或环节默认描述冲突，以这些文件和本次用户补充为准。'
+    ].join('\n')
     : '';
   const memoryFile = stepMemoryFilePath || getStepMemoryFilePath(workspaceRoot, node.id || '');
   const runsDir = agentRunsDir || path.join(workspaceRoot, '.solopreneur', 'agent-runs', node.id || '');
@@ -1238,6 +1307,7 @@ function buildAgentConversationPrompt(
     '本次任务：',
     node.agentPrompt,
     supplement,
+    ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
     memoryInstructions,
     '',
@@ -1427,7 +1497,7 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
 /**
  * Executes a CLI agent in the integrated terminal.
  */
-async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '') {
+async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '', supplementFiles: string[] = []) {
   if (!syncEngine) {
     return;
   }
@@ -1456,6 +1526,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     vscode.window.showErrorMessage('Choose a project folder before running an Agent task.');
     return;
   }
+  const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
 
   // Resolve CLI path from config if applicable
   const configuredCliPath = getPersistedSettings(context).cliPath;
@@ -1497,7 +1568,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     stepMemoryFilePath,
     runDir,
     completionDecisionFilePath,
-    nativeSessionId
+    nativeSessionId,
+    attachedFiles
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
@@ -1507,7 +1579,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     nativeSessionId
       ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
       : `Starting a new native ${getAgentProvider(agentCli)} session.`,
-    userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : ''
+    userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
+    attachedFiles.length ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
   const executionLogId = syncEngine.logAgentExecution(
     nodeId,
@@ -2162,17 +2235,47 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       padding: 10px;
     }
 
+    .conversation-composer {
+      background: rgba(0, 0, 0, 0.20);
+      border: 1px solid var(--border-glass);
+      border-radius: 10px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
     .conversation-compose {
       display: flex;
       gap: 8px;
       align-items: center;
-      flex-wrap: wrap;
     }
 
     .conversation-compose input {
       flex: 1;
       width: auto;
       min-width: 0;
+    }
+
+    .conversation-tool-btn {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-main);
+      border: 1px solid var(--border-glass);
+      border-radius: 8px;
+      flex-shrink: 0;
+    }
+
+    .conversation-tool-btn:hover {
+      color: #000;
+      background: #00e5ff;
+      border-color: #00e5ff;
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
     }
 
     .conversation-agent-select {
@@ -2188,15 +2291,62 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     .btn-send-conversation {
-      min-width: 78px;
+      min-width: 42px;
+      height: 34px;
+      padding: 0 12px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
       white-space: nowrap;
     }
 
     .conversation-compose input:disabled,
     .conversation-agent-select:disabled,
-    .btn-send-conversation:disabled {
+    .btn-send-conversation:disabled,
+    .conversation-tool-btn:disabled {
       opacity: 0.55;
       cursor: not-allowed;
+    }
+
+    .conversation-attachments {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .conversation-attachment-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 100%;
+      padding: 4px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--border-glass);
+      background: rgba(56, 189, 248, 0.10);
+      color: #d7f3ff;
+      font-size: 11px;
+    }
+
+    .conversation-attachment-chip span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: min(360px, 48vw);
+    }
+
+    .conversation-attachment-remove {
+      width: 16px;
+      height: 16px;
+      padding: 0;
+      border: none;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.10);
+      color: var(--text-main);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
     }
 
     .conversation-title {
@@ -2572,6 +2722,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let activeProjectPath = '';
     let currentCliPath = 'agy';
     const nodeConversations = {};
+    const nodeSupplementFiles = {};
     const i18n = {
       zh: {
         title: 'SoloMap',
@@ -2590,6 +2741,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         noConversations: '这个环节还没有 Agent 对话。',
         conversationPlaceholder: '补充这次要 Agent 注意的要求...',
         agentSelector: '选择 Agent',
+        attachFiles: '选择补充文件',
+        attachedFiles: '补充文件',
+        removeAttachment: '移除',
         send: '发送',
         retry: '重试',
         command: '命令',
@@ -2619,6 +2773,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         noConversations: 'No Agent conversations for this step yet.',
         conversationPlaceholder: 'Add guidance for this Agent run...',
         agentSelector: 'Choose Agent',
+        attachFiles: 'Attach files',
+        attachedFiles: 'Attached files',
+        removeAttachment: 'Remove',
         send: 'Send',
         retry: 'Retry',
         command: 'Command',
@@ -2655,6 +2812,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       expandedNodeId = '';
       activeConversationId = '';
       Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
+      Object.keys(nodeSupplementFiles).forEach(key => delete nodeSupplementFiles[key]);
       if (clearNodes) {
         currentNodes = [];
       }
@@ -2739,6 +2897,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             return;
           }
           nodeConversations[message.nodeId] = message.conversations || [];
+          renderRoadmap(currentNodes);
+          break;
+        case 'supplementFilesSelected':
+          nodeSupplementFiles[message.nodeId] = mergeSupplementFiles(
+            nodeSupplementFiles[message.nodeId] || [],
+            message.files || []
+          );
           renderRoadmap(currentNodes);
           break;
         case 'cliTestResult':
@@ -2848,6 +3013,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
         const expanded = expandedNodeId === node.id;
         const conversations = nodeConversations[node.id] || [];
+        const supplementFiles = nodeSupplementFiles[node.id] || [];
         const conversationDisabled = node.status === 'Running' ? 'disabled' : '';
         const promptHtml = expanded ? \`
           <div class="node-expanded-body">
@@ -2855,12 +3021,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             <div class="node-agent-prompt">
               <strong>\${escapeHtml(node.agentCli)}:</strong> \${escapeHtml(node.agentPrompt)}
             </div>
-            <div class="conversation-compose">
-              <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" \${conversationDisabled}>
-              <select class="conversation-agent-select" data-agent-select-id="\${escapeHtml(node.id)}" title="\${t('agentSelector')}" \${conversationDisabled}>
-                \${renderAgentOptions(node)}
-              </select>
-              <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" \${conversationDisabled}>\${t('send')}</button>
+            <div class="conversation-composer">
+              <div class="conversation-compose">
+                <button class="conversation-tool-btn" data-attach-node-id="\${escapeHtml(node.id)}" title="\${t('attachFiles')}" \${conversationDisabled}>
+                  <span class="codicon codicon-attach"></span>
+                </button>
+                <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" \${conversationDisabled}>
+                <select class="conversation-agent-select" data-agent-select-id="\${escapeHtml(node.id)}" title="\${t('agentSelector')}" \${conversationDisabled}>
+                  \${renderAgentOptions(node)}
+                </select>
+                <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" title="\${t('send')}" \${conversationDisabled}>
+                  <span class="codicon codicon-send"></span>
+                </button>
+              </div>
+              \${renderSupplementFiles(node.id, supplementFiles)}
             </div>
             <div class="conversation-panel">
               <div class="conversation-title">\${t('conversationHistory')}</div>
@@ -2902,10 +3076,26 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             event.stopPropagation();
             const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
             const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
-            triggerRun(node.id, input ? input.value : '', agentSelect ? agentSelect.value : '');
+            triggerRun(node.id, input ? input.value : '', agentSelect ? agentSelect.value : '', nodeSupplementFiles[node.id] || []);
             if (input) input.value = '';
+            nodeSupplementFiles[node.id] = [];
+            renderRoadmap(currentNodes);
           });
         }
+        row.querySelectorAll('[data-attach-node-id]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            vscode.postMessage({ command: 'chooseSupplementFiles', nodeId: node.id });
+          });
+        });
+        row.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const file = item.getAttribute('data-remove-supplement-file');
+            nodeSupplementFiles[node.id] = (nodeSupplementFiles[node.id] || []).filter(candidate => candidate !== file);
+            renderRoadmap(currentNodes);
+          });
+        });
         const completeButton = row.querySelector('[data-complete-node-id]');
         if (completeButton) {
           completeButton.addEventListener('click', (event) => {
@@ -3006,6 +3196,41 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       \`).join('');
     }
 
+    function mergeSupplementFiles(existing, incoming) {
+      const seen = new Set();
+      return [...(existing || []), ...(incoming || [])]
+        .map(file => String(file || '').trim())
+        .filter(Boolean)
+        .filter(file => {
+          if (seen.has(file)) return false;
+          seen.add(file);
+          return true;
+        })
+        .slice(0, 10);
+    }
+
+    function renderSupplementFiles(nodeId, files) {
+      if (!files || files.length === 0) {
+        return '';
+      }
+      return \`
+        <div class="conversation-attachments" aria-label="\${escapeHtml(t('attachedFiles'))}">
+          \${files.map(file => \`
+            <span class="conversation-attachment-chip" title="\${escapeHtml(file)}">
+              <span>\${escapeHtml(file)}</span>
+              <button
+                class="conversation-attachment-remove"
+                data-remove-supplement-file="\${escapeHtml(file)}"
+                title="\${escapeHtml(t('removeAttachment'))}"
+              >
+                <span class="codicon codicon-close"></span>
+              </button>
+            </span>
+          \`).join('')}
+        </div>
+      \`;
+    }
+
     function summarizeConversation(conversation) {
       const output = String(conversation.output || '');
       const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(\\n\\n|$)/);
@@ -3082,12 +3307,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return String(value).replace(/"/g, '\\"');
     }
 
-    function triggerRun(nodeId, userMessage, agentCli) {
+    function triggerRun(nodeId, userMessage, agentCli, supplementFiles) {
       vscode.postMessage({
         command: 'runAgent',
         nodeId: nodeId,
         userMessage: userMessage || '',
-        agentCli: agentCli || ''
+        agentCli: agentCli || '',
+        supplementFiles: supplementFiles || []
       });
     }
   </script>
