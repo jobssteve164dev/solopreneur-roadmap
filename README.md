@@ -39,6 +39,10 @@ See [docs/methodology.md](docs/methodology.md) for the full methodology. 中文�
 
 完整方法论见 [docs/methodology.zh.md](docs/methodology.zh.md)，英文版本见 [docs/methodology.md](docs/methodology.md)。
 
+Next-stage product planning is tracked in [docs/next_feature_plan.zh.md](docs/next_feature_plan.zh.md).
+
+下一阶段功能规划见 [docs/next_feature_plan.zh.md](docs/next_feature_plan.zh.md)。
+
 ---
 
 ## Core Capabilities / 核心能力
