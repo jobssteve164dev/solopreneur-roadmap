@@ -1654,23 +1654,32 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
     const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
     const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
-    if (
-      workspaceRoot &&
-      currentNode?.title === '生成初始路线图' &&
-      didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary) &&
-      nextStatus === 'Completed'
-    ) {
+    const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
+    let shouldWriteNodeStatus = true;
+    let shouldRefreshRoadmap = false;
+    if (workspaceRoot && currentNode?.title === '生成初始路线图' && roadmapCsvChanged) {
       const validation = validateBootstrapRoadmapRewrite(workspaceRoot, nodeId);
       if (!validation.valid) {
         nextStatus = 'Failed';
         completionReason = validation.reason;
+      } else {
+        shouldWriteNodeStatus = false;
+        shouldRefreshRoadmap = true;
+        if (!completionReason) {
+          completionReason = '初始路线图已写入 roadmap.csv，并通过结构校验。';
+        }
       }
+    } else if (workspaceRoot && roadmapCsvChanged) {
+      shouldWriteNodeStatus = false;
+      shouldRefreshRoadmap = true;
     }
-    const completedAt = nextStatus === 'Completed' ? new Date().toISOString() : '';
-    syncEngine.updateNode(nodeId, {
-      status: nextStatus,
-      completedAt,
-    });
+    if (shouldWriteNodeStatus) {
+      const completedAt = nextStatus === 'Completed' ? new Date().toISOString() : '';
+      syncEngine.updateNode(nodeId, {
+        status: nextStatus,
+        completedAt,
+      });
+    }
     let nativeSessionSummary = '';
     if (workspaceRoot && sessionFilePath && fs.existsSync(sessionFilePath)) {
       try {
@@ -1731,8 +1740,6 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       );
     }
 
-    const shouldRefreshRoadmap = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary)
-      && !(currentNode?.title === '生成初始路线图' && nextStatus === 'Failed');
     if (workspaceRoot && shouldRefreshRoadmap) {
       await syncEngine.initAndSync();
     }
