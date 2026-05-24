@@ -42,6 +42,7 @@ const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
+const roadmapRevisionId = '__roadmap_revision__';
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
@@ -544,6 +545,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'runAgent':
           await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
+          break;
+
+        case 'runRoadmapRevision':
+          await handleRoadmapRevision(context, message.userMessage || '', message.agentCli || '');
           break;
 
         case 'chooseSupplementFiles':
@@ -1345,6 +1350,38 @@ function buildAgentConversationPrompt(
   ].join('\n');
 }
 
+function buildRoadmapRevisionPrompt(
+  userMessage: string,
+  workspaceRoot: string,
+  globalPrompt = ''
+): string {
+  const normalizedUserMessage = userMessage.trim();
+  const globalPromptInstructions = globalPrompt.trim()
+    ? [
+      '用户设置的全局默认要求：',
+      globalPrompt.trim(),
+      '如与本次路线图调整要求冲突，始终以本次路线图调整要求为准。'
+    ].join('\n')
+    : '';
+  return [
+    '你正在 SoloMap 中调整当前项目路线图。',
+    '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
+    '',
+    `项目目录：${workspaceRoot}`,
+    '',
+    '本次路线图调整要求（最高优先级）：',
+    normalizedUserMessage,
+    ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
+    '',
+    '执行要求：',
+    '1. 先读取当前 `.solopreneur/roadmap.csv` 和项目已有文件，理解已经完成的工作与仍待推进的事项。',
+    '2. 直接重写 `.solopreneur/roadmap.csv`，让后续环节反映本次调整要求；不要把本段提示词、解释文字或执行日志写进 CSV。',
+    '3. 除非用户明确要求推翻已完成工作，否则保留已完成环节的事实和状态，并围绕新方向调整待推进环节、依赖与 Agent 任务。',
+    '4. CSV 必须保留字段 `id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt`；每个依赖必须指向存在的环节 ID，且不能自依赖。',
+    '5. 完成后重新读取 CSV，确认每个环节都有明确标题、描述和可执行的 Agent 任务，再正常退出 CLI。'
+  ].join('\n');
+}
+
 function buildAgentShellScript(
   agentCli: string,
   conversationPrompt: string,
@@ -1354,7 +1391,9 @@ function buildAgentShellScript(
   userMessage: string,
   completionDecisionFilePath?: string,
   nativeSessionId = '',
-  directExecutionCommand = ''
+  directExecutionCommand = '',
+  runKind = 'step',
+  roadmapBackupFilePath = ''
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
@@ -1375,7 +1414,7 @@ function buildAgentShellScript(
   const commandPreview = `${agentCli} [${sessionMode}]`;
   const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
   const executionCommand = directExecutionCommand || buildAgentCommandFromShellVar(agentCli, 'agent_prompt', workspaceRoot);
-  const statusBase = { nodeId, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
+  const statusBase = { nodeId, runKind, roadmapBackupFilePath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
@@ -1552,6 +1591,17 @@ function readAgentStatus(statusFilePath: string): any | null {
   }
 }
 
+function hasRunningAgentConversation(workspaceRoot: string, nodes: RoadmapNode[]): boolean {
+  if (nodes.some((candidate) => candidate.status === 'Running')) {
+    return true;
+  }
+  if (syncEngine?.getAgentExecutions(roadmapRevisionId).some((conversation) => conversation.status === 'Running')) {
+    return true;
+  }
+  const status = readAgentStatus(path.join(workspaceRoot, '.agent_status.json'));
+  return Boolean(status && status.status === 'Running');
+}
+
 async function stopAgentRun(nodeId: string, conversationId: number): Promise<void> {
   if (!syncEngine || !activeProjectRoot || !nodeId) {
     return;
@@ -1583,7 +1633,9 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     return;
   }
 
-  syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+  if (nodeId !== roadmapRevisionId) {
+    syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+  }
   syncEngine.updateAgentExecution(
     conversationId,
     conversation.agentCli,
@@ -1594,6 +1646,88 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   sendNodesToWebview();
   postNodeConversations(nodeId);
   vscode.window.showInformationMessage(`Agent task [${nodeId}] was stopped.`);
+}
+
+async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = ''): Promise<void> {
+  if (!syncEngine || !activeProjectRoot) {
+    return;
+  }
+  const revisionRequest = userMessage.trim();
+  if (!revisionRequest) {
+    vscode.window.showWarningMessage('Describe how you want to adjust the roadmap before sending.');
+    return;
+  }
+  const nodes = syncEngine.getNodes();
+  if (hasRunningAgentConversation(activeProjectRoot, nodes)) {
+    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before adjusting the roadmap.');
+    return;
+  }
+
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = (selectedAgentCli || settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath);
+  if (!commandExists(agentCli)) {
+    const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath).join(', ');
+    const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
+    syncEngine.logAgentExecution(
+      roadmapRevisionId,
+      requestedAgentCli || agentCli,
+      requestedAgentCli || agentCli,
+      `User supplement:\n${revisionRequest}\n\nFailure category: cli_not_found\n\nFailure reason:\n${failureReason}`,
+      'Failed'
+    );
+    postNodeConversations(roadmapRevisionId);
+    vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
+    return;
+  }
+
+  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', 'roadmap-revision');
+  const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
+  const roadmapBackupFilePath = path.join(runDir, 'roadmap-before.csv');
+  fs.mkdirSync(runDir, { recursive: true });
+  if (fs.existsSync(roadmapPath)) {
+    fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
+  }
+  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt);
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot);
+  const executionLogId = syncEngine.logAgentExecution(
+    roadmapRevisionId,
+    agentCli,
+    agentCommand,
+    [
+      'Roadmap revision started.',
+      `Run started at: ${new Date().toISOString()}`,
+      `User supplement:\n${revisionRequest}`
+    ].join('\n\n'),
+    'Running'
+  );
+  postNodeConversations(roadmapRevisionId);
+
+  let terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
+  if (!terminal) {
+    terminal = vscode.window.createTerminal({
+      name: 'SoloMap Agent Console',
+      iconPath: new vscode.ThemeIcon('robot'),
+      color: new vscode.ThemeColor('terminal.ansiCyan'),
+      cwd: activeProjectRoot
+    });
+  }
+  terminal.show(true);
+  const { finalCommand } = buildAgentShellScript(
+    agentCli,
+    conversationPrompt,
+    activeProjectRoot,
+    roadmapRevisionId,
+    executionLogId,
+    revisionRequest,
+    undefined,
+    '',
+    '',
+    'roadmap_revision',
+    roadmapBackupFilePath
+  );
+  terminal.sendText(finalCommand);
 }
 
 /**
@@ -1629,8 +1763,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     return;
   }
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
-  const runningNode = nodes.find((candidate) => candidate.status === 'Running');
-  if (runningNode) {
+  if (hasRunningAgentConversation(workspaceRoot, nodes)) {
     vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before starting a new one.');
     return;
   }
@@ -1745,6 +1878,10 @@ async function handleRetryConversation(context: vscode.ExtensionContext, nodeId:
   }
 
   const retryUserMessage = extractUserSupplementFromExecutionOutput(conversation.output || '');
+  if (nodeId === roadmapRevisionId) {
+    await handleRoadmapRevision(context, retryUserMessage, conversation.agentCli || '');
+    return;
+  }
   await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '');
 }
 
@@ -1809,6 +1946,71 @@ function validateBootstrapRoadmapRewrite(workspaceRoot: string, nodeId: string):
   }
 }
 
+function validateRoadmapRevision(workspaceRoot: string): { valid: boolean; reason: string } {
+  const roadmapPath = path.join(workspaceRoot, '.solopreneur', 'roadmap.csv');
+  if (!fs.existsSync(roadmapPath)) {
+    return { valid: false, reason: '调整后的路线图文件不存在。' };
+  }
+  try {
+    const parsed = Papa.parse<RoadmapNode>(fs.readFileSync(roadmapPath, 'utf8'), {
+      header: true,
+      skipEmptyLines: true
+    });
+    const requiredColumns = ['id', 'title', 'description', 'stage', 'dependencies', 'agentCli', 'agentPrompt', 'status', 'createdAt', 'completedAt'];
+    const fields = parsed.meta.fields || [];
+    if (parsed.errors.length > 0 || requiredColumns.some((field) => !fields.includes(field))) {
+      return { valid: false, reason: '调整后的 roadmap.csv 格式不完整或无法解析。' };
+    }
+    const nodes = parsed.data
+      .map((node) => ({
+        ...node,
+        id: String(node.id || '').trim(),
+        title: String(node.title || '').trim(),
+        description: String(node.description || '').trim(),
+        agentPrompt: String(node.agentPrompt || '').trim(),
+        dependencies: String(node.dependencies || '').trim(),
+        status: String(node.status || '').trim()
+      }))
+      .filter((node) => node.id);
+    if (nodes.length === 0) {
+      return { valid: false, reason: '调整后的路线图没有可执行环节。' };
+    }
+    const ids = nodes.map((node) => node.id);
+    const idSet = new Set(ids);
+    if (idSet.size !== ids.length) {
+      return { valid: false, reason: '调整后的路线图存在重复环节 ID。' };
+    }
+    if (nodes.some((node) => !node.title || !node.description || !node.agentPrompt)) {
+      return { valid: false, reason: '调整后的路线图存在缺少标题、描述或 Agent 任务的环节。' };
+    }
+    const allowedStatuses = new Set(['Pending', 'In Progress', 'Running', 'Completed', 'Failed']);
+    if (nodes.some((node) => !allowedStatuses.has(node.status))) {
+      return { valid: false, reason: '调整后的路线图存在无法识别的环节状态。' };
+    }
+    for (const node of nodes) {
+      const dependencies = node.dependencies.split(',').map((entry) => entry.trim()).filter(Boolean);
+      if (dependencies.includes(node.id) || dependencies.some((entry) => !idSet.has(entry))) {
+        return { valid: false, reason: '调整后的路线图存在无效依赖关系。' };
+      }
+    }
+    return { valid: true, reason: '' };
+  } catch (error: any) {
+    return { valid: false, reason: `调整后的路线图校验失败：${error?.message || error}` };
+  }
+}
+
+function restoreRoadmapBackup(roadmapBackupFilePath: string, workspaceRoot: string): boolean {
+  if (!roadmapBackupFilePath || !fs.existsSync(roadmapBackupFilePath)) {
+    return false;
+  }
+  fs.writeFileSync(
+    path.join(workspaceRoot, '.solopreneur', 'roadmap.csv'),
+    fs.readFileSync(roadmapBackupFilePath, 'utf8'),
+    'utf8'
+  );
+  return true;
+}
+
 async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   if (!fs.existsSync(statusFilePath)) {
     return;
@@ -1821,7 +2023,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
@@ -1854,7 +2056,36 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
     let shouldWriteNodeStatus = true;
     let shouldRefreshRoadmap = false;
-    if (workspaceRoot && currentNode?.title === '生成初始路线图' && roadmapCsvChanged) {
+    if (workspaceRoot && runKind === 'roadmap_revision') {
+      shouldWriteNodeStatus = false;
+      if (status === 'In Progress' && roadmapCsvChanged) {
+        const validation = validateRoadmapRevision(workspaceRoot);
+        if (validation.valid) {
+          nextStatus = 'Completed';
+          completionReason = '路线图已按本次要求更新并通过校验。';
+          shouldRefreshRoadmap = true;
+        } else {
+          nextStatus = 'Failed';
+          failureCode = 'roadmap_validation_failed';
+          failureReason = `${validation.reason} 已保留调整前的路线图。`;
+          completionReason = failureReason;
+          restoreRoadmapBackup(roadmapBackupFilePath, workspaceRoot);
+        }
+      } else if (status === 'In Progress') {
+        nextStatus = 'Failed';
+        failureCode = 'roadmap_not_updated';
+        failureReason = 'Agent 未更新路线图文件，原路线图保持不变。';
+        completionReason = failureReason;
+      } else {
+        nextStatus = 'Failed';
+        failureCode = failureCode || 'agent_exit_failed';
+        failureReason = failureReason || 'Agent CLI 在完成路线图调整前退出。';
+        if (roadmapCsvChanged && restoreRoadmapBackup(roadmapBackupFilePath, workspaceRoot)) {
+          failureReason = `${failureReason} 已保留调整前的路线图。`;
+        }
+        completionReason = failureReason;
+      }
+    } else if (workspaceRoot && currentNode?.title === '生成初始路线图' && roadmapCsvChanged) {
       const validation = validateBootstrapRoadmapRewrite(workspaceRoot, nodeId);
       if (!validation.valid) {
         nextStatus = 'Failed';
@@ -1902,7 +2133,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const finishedAt = new Date().toISOString();
     const startedTime = startedAt ? Date.parse(String(startedAt)) : NaN;
     const runDurationMs = Number.isFinite(startedTime) ? Math.max(0, Date.now() - startedTime) : 0;
-    const handoffEntry = workspaceRoot
+    const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision'
       ? buildRunHandoffEntry(
         nextStatus,
         [changedFilesSummary, touchedFilesSummary].filter(Boolean).join('\n'),
@@ -2168,6 +2399,51 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       flex-direction: column;
       align-items: center;
       gap: 30px;
+    }
+
+    .roadmap-revision {
+      width: min(760px, calc(100vw - 48px));
+      margin: 10px auto 22px;
+      position: relative;
+      z-index: 2;
+      border: 1px solid var(--border-glass);
+      border-radius: 8px;
+      background: rgb(22, 28, 45);
+      overflow: hidden;
+    }
+
+    .roadmap-revision-toggle {
+      width: 100%;
+      padding: 11px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--text-main);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      text-align: left;
+      font-weight: 700;
+    }
+
+    .roadmap-revision-toggle:hover {
+      background: rgba(56, 189, 248, 0.08);
+    }
+
+    .roadmap-revision-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .roadmap-revision-body {
+      padding: 0 12px 12px;
+      border-top: 1px solid var(--border-glass);
+    }
+
+    .roadmap-revision-body .conversation-composer {
+      margin-top: 12px;
     }
 
     /* Node Stack (Unified Roadmap Flow layout) */
@@ -2918,6 +3194,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let activeConversationId = '';
     let activeProjectPath = '';
     let currentCliPath = 'agy';
+    const roadmapRevisionId = '__roadmap_revision__';
+    let roadmapRevisionExpanded = false;
     const nodeConversations = {};
     const nodeSupplementFiles = {};
     const i18n = {
@@ -2962,6 +3240,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           stopped_by_user: '任务已由用户停止。',
           no_deliverable_changes: 'Agent 已退出，但没有检测到文件修改或完成判断。',
           roadmap_validation_failed: '生成的路线图未通过结构校验。',
+          roadmap_not_updated: 'Agent 未更新路线图，原路线图保持不变。',
           completion_state_invalid: 'Agent 返回的完成状态无法读取。',
           agent_exit_failed: 'Agent CLI 在交付任务前退出。'
         },
@@ -2973,6 +3252,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         connectionOk: '连接正常：',
         connectionFailed: '连接失败：',
         markComplete: '完成环节',
+        reviseRoadmap: '调整路线图',
+        reviseRoadmapPlaceholder: '描述目标、优先级或方向发生了什么变化...',
+        revisionHistory: '路线图调整历史',
+        noRevisionConversations: '还没有路线图调整记录。',
+        sendRevision: '发送调整',
         status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败' }
       },
       en: {
@@ -3016,6 +3300,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           stopped_by_user: 'The task was stopped by the user.',
           no_deliverable_changes: 'The Agent exited without detected file changes or a completion decision.',
           roadmap_validation_failed: 'The generated roadmap failed structure validation.',
+          roadmap_not_updated: 'The Agent did not update the roadmap; the previous roadmap was kept.',
           completion_state_invalid: 'The Agent completion state could not be read.',
           agent_exit_failed: 'The Agent CLI exited before delivering the task.'
         },
@@ -3027,6 +3312,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         connectionOk: 'Connection OK: ',
         connectionFailed: 'Connection Failed: ',
         markComplete: 'Complete Step',
+        reviseRoadmap: 'Revise Roadmap',
+        reviseRoadmapPlaceholder: 'Describe what changed in your goal, priority, or direction...',
+        revisionHistory: 'Roadmap Revision History',
+        noRevisionConversations: 'No roadmap revisions yet.',
+        sendRevision: 'Send revision',
         status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
       }
     };
@@ -3055,6 +3345,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function resetProjectScopedState(projectPath, clearNodes) {
       activeProjectPath = projectPath || '';
       expandedNodeId = '';
+      roadmapRevisionExpanded = false;
       activeConversationId = '';
       Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
       Object.keys(nodeSupplementFiles).forEach(key => delete nodeSupplementFiles[key]);
@@ -3253,6 +3544,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const flowLine = canvas.querySelector('.flow-line');
       canvas.innerHTML = '';
       canvas.appendChild(flowLine);
+      renderRoadmapRevisionPanel(nodes || []);
 
       if (!nodes || nodes.length === 0) {
         const placeholder = document.createElement('div');
@@ -3409,9 +3701,115 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     }
 
-    function renderConversations(nodeId, conversations) {
+    function renderRoadmapRevisionPanel(nodes) {
+      const panel = document.createElement('section');
+      panel.className = 'roadmap-revision';
+      const conversations = nodeConversations[roadmapRevisionId] || [];
+      const revisionRunning = conversations.some(conversation => conversation.status === 'Running')
+        || nodes.some(node => node.status === 'Running');
+      const disabled = revisionRunning ? 'disabled' : '';
+      panel.innerHTML = \`
+        <button class="roadmap-revision-toggle" data-toggle-roadmap-revision>
+          <span class="roadmap-revision-title"><span class="codicon codicon-git-compare"></span>\${escapeHtml(t('reviseRoadmap'))}</span>
+          <span class="codicon \${roadmapRevisionExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
+        </button>
+        \${roadmapRevisionExpanded ? \`
+          <div class="roadmap-revision-body">
+            <div class="conversation-composer">
+              <div class="conversation-compose">
+                <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" \${disabled}>
+                <select class="conversation-agent-select" data-roadmap-revision-agent title="\${escapeHtml(t('agentSelector'))}" \${disabled}>
+                  \${renderAgentOptions({ agentCli: currentCliPath || 'agy' })}
+                </select>
+                <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${disabled}>
+                  <span class="codicon codicon-send"></span>
+                </button>
+              </div>
+            </div>
+            <div class="conversation-panel">
+              <div class="conversation-title">\${escapeHtml(t('revisionHistory'))}</div>
+              \${renderConversations(roadmapRevisionId, conversations, t('noRevisionConversations'))}
+            </div>
+          </div>
+        \` : ''}
+      \`;
+      panel.querySelector('[data-toggle-roadmap-revision]').addEventListener('click', () => {
+        roadmapRevisionExpanded = !roadmapRevisionExpanded;
+        activeConversationId = '';
+        if (roadmapRevisionExpanded && !nodeConversations[roadmapRevisionId]) {
+          vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
+        }
+        renderRoadmap(currentNodes);
+      });
+      const sendButton = panel.querySelector('[data-send-roadmap-revision]');
+      if (sendButton) {
+        sendButton.addEventListener('click', () => {
+          const input = panel.querySelector('[data-roadmap-revision-input]');
+          const agentSelect = panel.querySelector('[data-roadmap-revision-agent]');
+          const request = input ? input.value.trim() : '';
+          if (!request) return;
+          vscode.postMessage({
+            command: 'runRoadmapRevision',
+            userMessage: request,
+            agentCli: agentSelect ? agentSelect.value : ''
+          });
+          input.value = '';
+        });
+      }
+      bindConversationActions(panel, roadmapRevisionId);
+      canvas.appendChild(panel);
+    }
+
+    function bindConversationActions(container, nodeId) {
+      container.querySelectorAll('[data-conversation-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          activeConversationId = activeConversationId === item.getAttribute('data-conversation-id')
+            ? ''
+            : item.getAttribute('data-conversation-id');
+          renderRoadmap(currentNodes);
+        });
+      });
+      container.querySelectorAll('[data-retry-conversation-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'retryConversation',
+            nodeId,
+            conversationId: item.getAttribute('data-retry-conversation-id')
+          });
+        });
+      });
+      container.querySelectorAll('[data-show-agent-terminal]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'showAgentTerminal' });
+        });
+      });
+      container.querySelectorAll('[data-stop-agent-run]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'stopAgentRun',
+            nodeId,
+            conversationId: item.getAttribute('data-stop-agent-run')
+          });
+        });
+      });
+      container.querySelectorAll('[data-open-file-path]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const relativePath = item.getAttribute('data-open-file-path');
+          if (relativePath) {
+            vscode.postMessage({ command: 'openProjectFile', relativePath });
+          }
+        });
+      });
+    }
+
+    function renderConversations(nodeId, conversations, emptyLabel = t('noConversations')) {
       if (!conversations || conversations.length === 0) {
-        return '<div class="conversation-empty">' + t('noConversations') + '</div>';
+        return '<div class="conversation-empty">' + escapeHtml(emptyLabel) + '</div>';
       }
 
       const items = conversations.map(conversation => {

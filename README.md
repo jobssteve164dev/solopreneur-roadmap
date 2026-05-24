@@ -37,6 +37,8 @@ You choose a project folder, SoloMap creates a `.solopreneur/` data directory, a
 - 把项目想法拆成从规划到交付的可执行环节。
 - Start with a runnable starter roadmap, then ask a local Agent to rewrite the real `roadmap.csv` for your project.
 - 默认初始化为可执行 starter roadmap，再通过本地 Agent 按你的项目要求改写真实的 `roadmap.csv`。
+- Revise the roadmap at any time when priorities or direction change, using the same local Agent conversation flow.
+- 当目标、优先级或方向变化时，可随时通过同一套本地 Agent 对话流程调整路线图。
 - Store the roadmap in `.solopreneur/roadmap.csv`, making it easy to review, diff, and manage with Git.
 - 路线图保存在 `.solopreneur/roadmap.csv`，便于 Git 管理、审阅和跨设备迁移。
 

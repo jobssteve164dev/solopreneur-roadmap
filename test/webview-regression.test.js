@@ -266,6 +266,10 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /extractAgentConclusion/);
   assert.match(script, /Open terminal|打开终端/);
   assert.match(script, /Failure reason|失败原因/);
+  assert.match(script, /runRoadmapRevision/);
+  assert.match(script, /Roadmap Revision History|路线图调整历史/);
+  assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
+  assert.match(script, /renderRoadmapRevisionPanel/);
   assert.match(script, /completeNode/);
   assert.match(script, /Complete Step|完成环节/);
   assert.match(script, /resetProjectScopedState/);
@@ -350,6 +354,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
+      'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
@@ -368,6 +373,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__extractUserSupplementFromExecutionOutput = extractUserSupplementFromExecutionOutput;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__validateBootstrapRoadmapRewrite = validateBootstrapRoadmapRewrite;',
+      'module.exports.__validateRoadmapRevision = validateRoadmapRevision;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
     ].join('\n')
@@ -566,6 +572,17 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.doesNotMatch(followupPrompt, /Old handoff should not be injected/);
   assert.doesNotMatch(followupPrompt, /继续当前路线图环节的原生 Agent 会话/);
 
+  const revisionPrompt = extensionModule.__buildRoadmapRevisionPrompt(
+    '将发布准备提前，并增加支付验证环节。',
+    '/workspace/app',
+    'Always run focused checks.'
+  );
+  assert.match(revisionPrompt, /本次路线图调整要求（最高优先级）/);
+  assert.match(revisionPrompt, /将发布准备提前，并增加支付验证环节/);
+  assert.match(revisionPrompt, /直接更新项目目录中的 `\.solopreneur\/roadmap\.csv`/);
+  assert.match(revisionPrompt, /不要把本段提示词、解释文字或执行日志写进 CSV/);
+  assert.match(revisionPrompt, /Always run focused checks/);
+
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-session-'));
   const sessionState = extensionModule.__updateStoredAgentSession(
     sessionRoot,
@@ -691,6 +708,13 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   ].join('\n'));
   const validBootstrap = extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1');
   assert.equal(validBootstrap.valid, true);
+
+  assert.equal(extensionModule.__validateRoadmapRevision(validBootstrapRoot).valid, true);
+  fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,梳理目标客户,整理 ICP,商业规划,99,agy,创建 docs/icp.md,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+  assert.match(extensionModule.__validateRoadmapRevision(validBootstrapRoot).reason, /无效依赖/);
 
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
   const bootstrapInstructions = extensionModule.__buildBootstrapRoadmapInstructions('codex');
@@ -874,6 +898,121 @@ test('invalid Agent completion state is recorded as a visible failed conversatio
   assert.equal(loggedStatus, 'Failed');
   assert.match(loggedOutput, /Failure category: completion_state_invalid/);
   assert.match(loggedOutput, /Failure reason:\nAgent completion decision file could not be parsed/);
+});
+
+test('roadmap revision accepts valid CSV updates and restores the previous roadmap after invalid output', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const createRevisionRun = (suffix, revisedCsv) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `solopreneur-revision-${suffix}-`));
+    const solopreneurDir = path.join(root, '.solopreneur');
+    const runDir = path.join(solopreneurDir, 'agent-runs', 'roadmap-revision');
+    fs.mkdirSync(runDir, { recursive: true });
+    const originalCsv = [
+      'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+      '1,Original step,Keep existing work,规划,,codex,Continue original work,In Progress,2026-01-01T00:00:00.000Z,'
+    ].join('\n');
+    fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), revisedCsv, 'utf8');
+    fs.writeFileSync(path.join(runDir, 'roadmap-before.csv'), originalCsv, 'utf8');
+    fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
+    fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
+    fs.writeFileSync(path.join(runDir, 'output.log'), 'Updated the roadmap for the new priority.\n', 'utf8');
+    const statusPath = path.join(root, '.agent_status.json');
+    fs.writeFileSync(statusPath, JSON.stringify({
+      nodeId: '__roadmap_revision__',
+      runKind: 'roadmap_revision',
+      roadmapBackupFilePath: path.join(runDir, 'roadmap-before.csv'),
+      status: 'In Progress',
+      agentCli: 'codex',
+      executionLogId: suffix === 'valid' ? 31 : 32,
+      outputFilePath: path.join(runDir, 'output.log'),
+      changesFilePath: path.join(runDir, 'changes.txt'),
+      touchedFilesPath: path.join(runDir, 'touched-files.txt'),
+      startedAt: '2026-05-24T00:00:00.000Z'
+    }), 'utf8');
+    return { root, statusPath, originalCsv };
+  };
+  const validCsv = [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Original step,Keep existing work,规划,,codex,Continue original work,Completed,2026-01-01T00:00:00.000Z,2026-05-24T00:00:00.000Z',
+    '2,Validate payment,Confirm checkout direction,产品,1,codex,Create a payment validation plan,Pending,2026-05-24T00:00:00.000Z,'
+  ].join('\n');
+  const validRun = createRevisionRun('valid', validCsv);
+  let validStatus = '';
+  let validOutput = '';
+  let validRefresh = false;
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    updateNode: () => { throw new Error('roadmap revision is not a roadmap step'); },
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      validOutput = output;
+      validStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 31,
+    getAgentExecutions: () => [],
+    initAndSync: async () => { validRefresh = true; }
+  }, validRun.root);
+
+  await extensionModule.__processAgentStatusFile(validRun.statusPath);
+  assert.equal(validStatus, 'Completed');
+  assert.equal(validRefresh, true);
+  assert.match(validOutput, /路线图已按本次要求更新并通过校验/);
+  assert.equal(fs.readFileSync(path.join(validRun.root, '.solopreneur', 'roadmap.csv'), 'utf8'), validCsv);
+
+  const invalidRun = createRevisionRun('invalid', [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '2,Broken dependency,Cannot proceed,产品,404,codex,Try work,Pending,2026-05-24T00:00:00.000Z,'
+  ].join('\n'));
+  let invalidStatus = '';
+  let invalidOutput = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    updateNode: () => { throw new Error('invalid roadmap revision must not become a node update'); },
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      invalidOutput = output;
+      invalidStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 32,
+    getAgentExecutions: () => []
+  }, invalidRun.root);
+
+  await extensionModule.__processAgentStatusFile(invalidRun.statusPath);
+  assert.equal(invalidStatus, 'Failed');
+  assert.match(invalidOutput, /Failure category: roadmap_validation_failed/);
+  assert.match(invalidOutput, /已保留调整前的路线图/);
+  assert.equal(fs.readFileSync(path.join(invalidRun.root, '.solopreneur', 'roadmap.csv'), 'utf8'), invalidRun.originalCsv);
+
+  const stoppedRun = createRevisionRun('stopped', validCsv);
+  const stoppedStatusData = JSON.parse(fs.readFileSync(stoppedRun.statusPath, 'utf8'));
+  fs.writeFileSync(stoppedRun.statusPath, JSON.stringify({
+    ...stoppedStatusData,
+    status: 'Failed',
+    failureCode: 'stopped_by_user',
+    failureReason: 'Stopped by user.'
+  }), 'utf8');
+  let stoppedOutput = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    updateNode: () => { throw new Error('stopped roadmap revision must not become a node update'); },
+    updateAgentExecution: (_id, _cli, _command, output) => {
+      stoppedOutput = output;
+      return true;
+    },
+    logAgentExecution: () => 33,
+    getAgentExecutions: () => []
+  }, stoppedRun.root);
+
+  await extensionModule.__processAgentStatusFile(stoppedRun.statusPath);
+  assert.match(stoppedOutput, /Failure category: stopped_by_user/);
+  assert.match(stoppedOutput, /Stopped by user\. 已保留调整前的路线图。/);
+  assert.equal(fs.readFileSync(path.join(stoppedRun.root, '.solopreneur', 'roadmap.csv'), 'utf8'), stoppedRun.originalCsv);
 });
 
 test('stopping an Agent run records the user decision on the active conversation', async () => {
