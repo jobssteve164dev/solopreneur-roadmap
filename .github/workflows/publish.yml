@@ -6,9 +6,6 @@ on:
       - main # 当代码推送到 main 主分支时触发自动检测与发布
   workflow_dispatch: # 支持手动点击触发发布
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -16,13 +13,13 @@ jobs:
       contents: write
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0 # 完整拉取历史和标签
           ref: main      # 显式拉取 main 分支，避免分离 HEAD 导致无法 push
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: 'npm'
