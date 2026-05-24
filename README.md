@@ -35,9 +35,9 @@ SoloMap follows a simple builder loop: find the real problem, build the product 
 
 SoloMap 遵循一套面向独立开发者的行动循环：发现真实问题，打造产品系统，卖给客户，再通过 Build -> Sell -> Learn -> Improve 持续放大。
 
-See [docs/methodology.md](docs/methodology.md) for the full methodology.
+See [docs/methodology.md](docs/methodology.md) for the full methodology. 中文版本见 [docs/methodology.zh.md](docs/methodology.zh.md)。
 
-完整方法论见 [docs/methodology.md](docs/methodology.md)。
+完整方法论见 [docs/methodology.zh.md](docs/methodology.zh.md)，英文版本见 [docs/methodology.md](docs/methodology.md)。
 
 ---
 
