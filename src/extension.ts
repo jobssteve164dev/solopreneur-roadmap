@@ -778,7 +778,7 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   const quotedPromptFile = shellQuote(promptFilePath);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -794,7 +794,7 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   const promptExpression = `"$${promptVarName}"`;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} -`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {

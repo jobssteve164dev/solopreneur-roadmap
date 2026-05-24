@@ -325,11 +325,11 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec -C '/workspace/app' -"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec -C '/workspace/app' --skip-git-repo-check -"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
-    "printf %s \"$agent_prompt\" | 'codex' exec -C '/workspace/app' -"
+    "printf %s \"$agent_prompt\" | 'codex' exec -C '/workspace/app' --skip-git-repo-check -"
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -372,7 +372,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec -C .* -/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec -C .*--skip-git-repo-check -/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
