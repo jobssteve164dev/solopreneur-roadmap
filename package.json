@@ -83,6 +83,11 @@
             "en"
           ],
           "description": "The display language used by SoloMap webviews."
+        },
+        "solopreneur.globalPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Default instructions injected into every SoloMap Agent task conversation."
         }
       }
     }

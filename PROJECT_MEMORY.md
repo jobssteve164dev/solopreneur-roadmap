@@ -22,6 +22,7 @@
 - Full roadmap node cards are collapsed by default. Expanding a node reads that node's SQLite `execution_logs` and presents each agent run as a conversation-like history item with command/output details, so users manage agent work from the roadmap step instead of treating each step as a one-shot dispatch.
 - Expanded roadmap node cards include a per-run Agent selector next to the send button. This lets the user choose which local Agent CLI joins this conversation without changing the node's default Agent setting.
 - Display language is a persisted user setting (`solopreneur.language`, `zh` or `en`) and must be applied consistently in both the sidebar and full roadmap webviews.
+- User default Agent instructions are stored as `solopreneur.globalPrompt` and surfaced in both settings panels. They are injected into every roadmap-step Agent conversation, but the user's supplement in the current conversation always takes priority if there is a conflict.
 - Project switcher areas should stay focused on project switching and adding folders. Do not reintroduce sidebar-level or full-header roadmap generation prompts; task-specific agent input belongs inside expanded roadmap node cards.
 - Agent execution closure uses both the `.agent_status.json` watcher and a polling fallback. This prevents completed CLI runs from leaving node cards stuck in `Running` when VS Code misses a file watcher event.
 - Agent run prompts are wrapped with Solopreneur task context, the user's per-run supplement, and explicit closure instructions so the CLI knows to deliver a small verifiable result and exit cleanly.
@@ -41,6 +42,7 @@
 
 - User-facing setting `solopreneur.cliPath` controls the local agent executable.
 - `codex` and `codex-cli` sessions must be invoked through `codex exec -C <workspace> <prompt>`, even when a previous same-step session ID exists.
+- Codex task invocations use `--color always` because output is piped through `tee`; captured output tails must strip ANSI escape sequences before rendering in conversation history.
 - `agy` / `antigravity-cli` sessions use the `--print --add-dir=<workspace> <prompt>` shape for every run. Previous conversation IDs are not passed as forced `--conversation` arguments, and SoloMap should not add its own task timeout.
 - Agent commands run in the opened workspace root, and the sentinel file is written with an absolute path so sidebar-only usage can still complete.
 - If the configured/default CLI is unavailable, runtime discovery falls back to installed candidates such as `codex` before failing.

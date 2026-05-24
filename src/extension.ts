@@ -17,6 +17,7 @@ let activeProjectRoot: string | null = null;
 interface SolopreneurSettings {
   cliPath: string;
   language: string;
+  globalPrompt: string;
 }
 
 interface SolopreneurProject {
@@ -122,20 +123,23 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
   return {
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
-    language: saved.language || config.get('language') || 'zh'
+    language: saved.language || config.get('language') || 'zh',
+    globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? ''
   };
 }
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
   const nextSettings: SolopreneurSettings = {
     cliPath: settings.cliPath || 'agy',
-    language: settings.language === 'en' ? 'en' : 'zh'
+    language: settings.language === 'en' ? 'en' : 'zh',
+    globalPrompt: String(settings.globalPrompt || '').trim()
   };
   await context.globalState.update(settingsKey, nextSettings);
 
   const config = vscode.workspace.getConfiguration('solopreneur');
   await config.update('cliPath', nextSettings.cliPath, vscode.ConfigurationTarget.Global);
   await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
+  await config.update('globalPrompt', nextSettings.globalPrompt, vscode.ConfigurationTarget.Global);
 }
 
 function projectName(projectPath: string): string {
@@ -573,7 +577,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
         case 'updateSettings':
           await updatePersistedSettings(context, {
             cliPath: message.cliPath,
-            language: message.language
+            language: message.language,
+            globalPrompt: message.globalPrompt
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -822,7 +827,7 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -838,7 +843,7 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   const quotedPromptFile = shellQuote(promptFilePath);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -854,7 +859,7 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   const promptExpression = `"$${promptVarName}"`;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -1240,9 +1245,11 @@ function buildAgentConversationPrompt(
   agentRunsDir = '',
   completionDecisionFilePath = '',
   previousSessionId = '',
-  supplementFiles: string[] = []
+  supplementFiles: string[] = [],
+  globalPrompt = ''
 ): string {
   const normalizedUserMessage = userMessage.trim();
+  const normalizedGlobalPrompt = globalPrompt.trim();
   const supplement = userMessage.trim()
     ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
     : '';
@@ -1252,6 +1259,13 @@ function buildAgentConversationPrompt(
       '用户为本次对话选择了补充文件，开始执行前必须先读取这些文件：',
       ...attachedFiles.map((file) => `- ${file}`),
       '这些文件是本轮任务的重要上下文；如果它们与历史记录或环节默认描述冲突，以这些文件和本次用户补充为准。'
+    ].join('\n')
+    : '';
+  const globalPromptInstructions = normalizedGlobalPrompt
+    ? [
+      '用户设置的全局默认要求（适用于每一次环节对话）：',
+      normalizedGlobalPrompt,
+      '如果全局默认要求与本次用户补充冲突，以本次用户补充为准。'
     ].join('\n')
     : '';
   const memoryFile = stepMemoryFilePath || getStepMemoryFilePath(workspaceRoot, node.id || '');
@@ -1308,6 +1322,7 @@ function buildAgentConversationPrompt(
     node.agentPrompt,
     supplement,
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
+    ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
     memoryInstructions,
     '',
@@ -1393,7 +1408,9 @@ function getOutputTail(filePath: string): string {
     return '';
   }
 
-  const content = fs.readFileSync(filePath, 'utf8').trim();
+  const content = fs.readFileSync(filePath, 'utf8')
+    .replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, '')
+    .trim();
   if (content.length <= 4000) {
     return content;
   }
@@ -1528,7 +1545,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
 
   // Resolve CLI path from config if applicable
-  const configuredCliPath = getPersistedSettings(context).cliPath;
+  const settings = getPersistedSettings(context);
+  const configuredCliPath = settings.cliPath;
   const requestedAgentCli = (selectedAgentCli || node.agentCli || configuredCliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath);
 
@@ -1548,6 +1566,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     terminal = vscode.window.createTerminal({
       name: 'SoloMap Agent Console',
       iconPath: new vscode.ThemeIcon('robot'),
+      color: new vscode.ThemeColor('terminal.ansiCyan'),
       cwd: workspaceRoot,
     });
   }
@@ -1568,7 +1587,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     runDir,
     completionDecisionFilePath,
     nativeSessionId,
-    attachedFiles
+    attachedFiles,
+    settings.globalPrompt
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
@@ -2498,6 +2518,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: none;
       flex-direction: column;
       gap: 12px;
+      max-height: calc(100vh - 110px);
+      overflow-y: auto;
       animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
@@ -2561,7 +2583,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       outline: none;
     }
 
-    .settings-input:focus, .settings-select:focus {
+    .settings-textarea {
+      min-height: 76px;
+      resize: vertical;
+      line-height: 1.45;
+    }
+
+    .settings-input:focus, .settings-select:focus, .settings-textarea:focus {
       border-color: #00e5ff;
     }
 
@@ -2691,6 +2719,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       </div>
     </div>
 
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
+      <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Always keep changes minimal and run the narrowest relevant test."></textarea>
+      <div id="help-global-prompt" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Injected into every task conversation. Instructions added in a step conversation take priority.
+      </div>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -2711,6 +2747,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliPath = document.getElementById('setting-clipath');
     const settingLanguage = document.getElementById('setting-language');
+    const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -2731,6 +2768,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeProject: '删除项目',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
+        globalPrompt: '全局默认提示词',
+        globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
+        globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -2763,6 +2803,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeProject: 'Remove project',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
+        globalPrompt: 'Default Agent Instructions',
+        globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
+        globalPromptHelp: 'Injected into every task conversation; guidance in the current conversation takes priority.',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -2825,6 +2868,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
+      setText('label-global-prompt', t('globalPrompt'));
+      settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
+      setText('help-global-prompt', t('globalPromptHelp'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
@@ -2871,6 +2917,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           break;
         case 'settingsLoaded':
           settingCliPath.value = message.settings.cliPath || 'agy';
+          settingGlobalPrompt.value = message.settings.globalPrompt || '';
           currentCliPath = settingCliPath.value || 'agy';
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
@@ -2923,7 +2970,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       vscode.postMessage({
         command: 'updateSettings',
         cliPath: settingCliPath.value.trim(),
-        language: settingLanguage.value
+        language: settingLanguage.value,
+        globalPrompt: settingGlobalPrompt.value.trim()
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';

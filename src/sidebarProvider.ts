@@ -8,6 +8,7 @@ import { SyncEngine } from './db/syncEngine';
 interface SolopreneurSettings {
   cliPath: string;
   language: string;
+  globalPrompt: string;
 }
 
 interface SolopreneurProject {
@@ -266,7 +267,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'updateSettings':
           await this._updateSettings({
             cliPath: data.cliPath,
-            language: data.language
+            language: data.language,
+            globalPrompt: data.globalPrompt
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -454,6 +456,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       z-index: 50;
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
       display: none;
+      max-height: calc(100vh - 70px);
+      overflow-y: auto;
       animation: slide-down 0.2s ease-out;
     }
 
@@ -521,6 +525,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .settings-input:focus, .settings-select:focus {
       border-color: #00e5ff;
+    }
+
+    .settings-textarea {
+      min-height: 66px;
+      resize: vertical;
+      line-height: 1.4;
     }
 
     .project-switcher {
@@ -1033,6 +1043,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
 
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
+      <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Keep changes minimal and run the narrowest relevant test."></textarea>
+      <div id="help-global-prompt" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Injected into every task conversation. Current conversation guidance takes priority.
+      </div>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -1080,6 +1098,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliPath = document.getElementById('setting-clipath');
     const settingLanguage = document.getElementById('setting-language');
+    const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -1110,6 +1129,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
+        globalPrompt: '全局默认提示词',
+        globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
+        globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -1144,6 +1166,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         language: 'Language',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
+        globalPrompt: 'Default Agent Instructions',
+        globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
+        globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -1192,6 +1217,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
+      setText('label-global-prompt', t('globalPrompt'));
+      settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
+      setText('help-global-prompt', t('globalPromptHelp'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       setText('progress-label', t('progress'));
@@ -1241,6 +1269,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'settingsLoaded':
           settingCliPath.value = message.settings.cliPath || 'agy';
+          settingGlobalPrompt.value = message.settings.globalPrompt || '';
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
           applyLanguage();
@@ -1282,7 +1311,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({
         command: 'updateSettings',
         cliPath: settingCliPath.value.trim(),
-        language: settingLanguage.value
+        language: settingLanguage.value,
+        globalPrompt: settingGlobalPrompt.value.trim()
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';

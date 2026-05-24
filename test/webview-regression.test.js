@@ -126,6 +126,7 @@ test('extension manifest uses SoloMap visible branding', () => {
   assert.equal(manifest.contributes.viewsContainers.activitybar[0].icon, 'resources/activitybar.svg');
   assert.equal(manifest.contributes.views['solopreneur-sidebar-container'][0].name, 'SoloMap');
   assert.equal(manifest.contributes.configuration.title, 'SoloMap Settings');
+  assert.equal(manifest.contributes.configuration.properties['solopreneur.globalPrompt'].default, '');
 });
 
 test('readme uses bilingual marketplace copy and stable remote logo', () => {
@@ -176,6 +177,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'settings-panel',
     'setting-language',
     'setting-clipath',
+    'setting-global-prompt',
     'btn-test-cli',
     'btn-save-settings',
     'cli-test-badge'
@@ -207,6 +209,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'settings-panel',
     'setting-language',
     'setting-clipath',
+    'setting-global-prompt',
     'btn-test-cli',
     'btn-save-settings',
     'cli-test-badge'
@@ -228,6 +231,7 @@ test('full roadmap webview exposes node conversation history and language settin
   const script = extractLastScript(html);
 
   assert.match(html, /id="setting-language"/);
+  assert.match(html, /id="setting-global-prompt"/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -334,6 +338,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
+      'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
       'module.exports.__parseStepHandoffEntries = parseStepHandoffEntries;',
@@ -358,15 +363,15 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
 
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Ship the MVP', '/workspace/app'),
-    "'codex' exec -C '/workspace/app' 'Ship the MVP'"
+    "'codex' exec --color always -C '/workspace/app' 'Ship the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex-cli', "Don't skip tests", '/workspace/app'),
-    "'codex-cli' exec -C '/workspace/app' 'Don'\\''t skip tests'"
+    "'codex-cli' exec --color always -C '/workspace/app' 'Don'\\''t skip tests'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Continue the MVP', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
-    "'codex' exec -C '/workspace/app' 'Continue the MVP'"
+    "'codex' exec --color always -C '/workspace/app' 'Continue the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
@@ -386,11 +391,11 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec -C '/workspace/app' --skip-git-repo-check -"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
-    "printf %s \"$agent_prompt\" | 'codex' exec -C '/workspace/app' --skip-git-repo-check -"
+    "printf %s \"$agent_prompt\" | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -433,7 +438,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec -C .*--skip-git-repo-check -/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec --color always -C .*--skip-git-repo-check -/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
@@ -447,6 +452,9 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.codex\/sessions/);
   assert.doesNotMatch(shellScript.finalCommand, /Use a small smoke test\./);
   assert.doesNotMatch(shellScript.finalCommand, /Ship the MVP/);
+  const coloredOutputPath = path.join(os.tmpdir(), 'solopreneur-colored-output.log');
+  fs.writeFileSync(coloredOutputPath, '\u001b[32mDone\u001b[0m', 'utf8');
+  assert.equal(extensionModule.__getOutputTail(coloredOutputPath), 'Done');
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
@@ -531,11 +539,15 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     path.join(attachedRoot, '.solopreneur', 'agent-runs', '2'),
     path.join(attachedRoot, '.solopreneur', 'agent-runs', '2', 'completion.json'),
     '',
-    ['docs/brief.md', '../outside.md']
+    ['docs/brief.md', '../outside.md'],
+    'Always preserve public API compatibility.'
   );
   assert.match(attachedPrompt, /用户为本次对话选择了补充文件/);
   assert.match(attachedPrompt, /docs\/brief\.md/);
   assert.doesNotMatch(attachedPrompt, /\.\.\/outside\.md/);
+  assert.match(attachedPrompt, /用户设置的全局默认要求/);
+  assert.match(attachedPrompt, /Always preserve public API compatibility/);
+  assert.match(attachedPrompt, /本次用户补充为准/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
