@@ -249,11 +249,49 @@ function buildSolopreneurDirectoryReadme(): string {
   ].join('\n');
 }
 
+function buildBootstrapRoadmapInstructions(cliPath: string): string {
+  return [
+    '# Bootstrap Roadmap Instructions',
+    '',
+    '你当前的任务是为这个项目生成真正可执行的定制化路线图，并直接重写 `.solopreneur/roadmap.csv`。',
+    '',
+    '## 必做前置阅读',
+    '- 阅读当前项目目录中的 README、docs、源码入口以及 `.solopreneur/README.md`（如果存在）。',
+    '- 理解这个项目当前想做什么、面向谁、当前文件里已经有哪些线索。',
+    '',
+    '## 你的唯一交付物',
+    '- 直接重写 `.solopreneur/roadmap.csv`。',
+    '- 不要只在终端输出路线图建议。',
+    '- 不要把本文件内容、提示词模板或解释性说明写回 CSV。',
+    '',
+    '## CSV 硬约束',
+    '1. 保留 CSV 表头，字段顺序必须严格是：`id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt`。',
+    '2. 生成 4 到 6 个环节。',
+    '3. 标题、描述、agentPrompt 全部使用中文。',
+    '4. `stage` 只能使用：`商业规划`、`品牌与设置`、`产品与 MVP`、`营销与增长`。',
+    `5. 每一行 \`agentCli\` 都写 \`${cliPath}\`。`,
+    '6. `dependencies` 必须反映真实前置关系；第一步留空，后续按需要依赖前面环节的 id。',
+    '7. `status` 全部写 `Pending`，`completedAt` 留空，`createdAt` 写当前 ISO 时间。',
+    '8. 每个 `agentPrompt` 都必须要求后续 Agent 直接创建或修改项目本地文件，并在适用时执行最窄验证命令。',
+    '9. 不要生成空泛咨询任务；每个环节都必须有看得见的本地交付物。',
+    '',
+    '## 结束前自检',
+    '- 重新读取 `.solopreneur/roadmap.csv`。',
+    '- 确认列名、环节数量、stage 枚举、依赖关系都正确。',
+    '- 确认 CSV 中没有残留“生成初始路线图”、本文件原文或提示词模板。'
+  ].join('\n');
+}
+
 function ensureSolopreneurReadme(solopreneurDir: string): void {
   const readmePath = path.join(solopreneurDir, 'README.md');
   if (!fs.existsSync(readmePath)) {
     fs.writeFileSync(readmePath, buildSolopreneurDirectoryReadme(), 'utf8');
   }
+}
+
+function ensureBootstrapRoadmapInstructions(solopreneurDir: string, cliPath: string): void {
+  const instructionsPath = path.join(solopreneurDir, 'bootstrap-roadmap-instructions.md');
+  fs.writeFileSync(instructionsPath, buildBootstrapRoadmapInstructions(cliPath), 'utf8');
 }
 
 async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
@@ -367,6 +405,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
     fs.mkdirSync(solopreneurDir, { recursive: true });
   }
   ensureSolopreneurReadme(solopreneurDir);
+  ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
 
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
@@ -739,7 +778,7 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   const quotedPromptFile = shellQuote(promptFilePath);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -755,7 +794,7 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   const promptExpression = `"$${promptVarName}"`;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec -C ${shellQuote(workspaceRoot)} -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -1329,22 +1368,7 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
       stage: '商业规划',
       dependencies: '',
       agentCli: cliPath,
-      agentPrompt: [
-        `你现在要为“${safePrompt}”生成真正的项目路线图。`,
-        '必须先阅读当前项目目录里已有的 README、docs、源码入口和 .solopreneur/README.md（如果存在），理解这个项目想做什么。',
-        '你的唯一交付物是直接重写 .solopreneur/roadmap.csv，不要只输出建议，不要把路线图打印在终端里代替写文件。',
-        '硬性要求：',
-        '1. 保留 CSV 表头且字段顺序必须严格是：id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-        '2. 生成 4 到 6 个环节，全部使用中文标题、中文描述、中文 agentPrompt',
-        '3. stage 只能使用这四个值：商业规划、品牌与设置、产品与 MVP、营销与增长',
-        `4. 每一行 agentCli 都写 ${cliPath}`,
-        '5. dependencies 必须反映真实前置关系；第一步留空，后续环节按需要依赖前面的 id',
-        '6. status 全部写 Pending，completedAt 留空，createdAt 写当前 ISO 时间',
-        '7. 每个 agentPrompt 都必须要求 Agent 去修改或创建项目本地文件，并在适用时执行最窄验证命令',
-        '8. 不要生成空泛咨询任务；每个环节都必须有看得见的本地交付物',
-        '9. 除了 .solopreneur/roadmap.csv 和为了完成路线图必要的少量项目说明文件外，不要顺手改无关文件',
-        '写完后你必须重新读取 .solopreneur/roadmap.csv，自检列名、环节数量、依赖关系、stage 枚举和值是否正确；确认无误后再结束本轮。'
-      ].join('\n'),
+      agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md，基于当前项目文件直接重写 .solopreneur/roadmap.csv。完成后按指令文件中的自检要求重新读取并校验该 CSV。',
       status: 'Pending',
       createdAt: now,
       completedAt: '',
@@ -1561,7 +1585,9 @@ function validateBootstrapRoadmapRewrite(workspaceRoot: string, nodeId: string):
       '你的唯一主任务是直接重写 .solopreneur/roadmap.csv',
       '你的唯一交付物是直接重写 .solopreneur/roadmap.csv',
       '保留 CSV 表头且字段顺序必须严格是',
-      '生成初始路线图'
+      '生成初始路线图',
+      '.solopreneur/bootstrap-roadmap-instructions.md',
+      '不要把本文件内容、提示词模板或解释性说明写回 CSV'
     ];
 
     if (parsed.errors.length > 0) {
@@ -1582,7 +1608,7 @@ function validateBootstrapRoadmapRewrite(workspaceRoot: string, nodeId: string):
     if (nodes.some((node) => bootstrapMarkers.some((marker) => node.title.includes(marker) || node.agentPrompt.includes(marker)))) {
       return { valid: false, reason: '生成后的 roadmap.csv 仍然残留了初始化提示词，没有真正写成业务路线图。' };
     }
-    if (nodes[0]?.id === nodeId) {
+    if (nodes.some((node) => node.title === '生成初始路线图')) {
       return { valid: false, reason: '生成后的路线图仍然保留了原始 bootstrap 节点。' };
     }
     return { valid: true, reason: '' };

@@ -274,6 +274,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
+      'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
       'module.exports.__parseStepHandoffEntries = parseStepHandoffEntries;',
       'module.exports.__buildStepHandoffSummary = buildStepHandoffSummary;',
       'module.exports.__updateStepHandoffSummary = updateStepHandoffSummary;',
@@ -323,8 +324,12 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     "'agy' --print --print-timeout=2m --add-dir='/workspace/app' @prompt-file:'/workspace/app/.solopreneur/agent-runs/2/prompt.txt'"
   );
   assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec -C '/workspace/app' -"
+  );
+  assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
-    "'codex' exec -C '/workspace/app' \"$agent_prompt\""
+    "printf %s \"$agent_prompt\" | 'codex' exec -C '/workspace/app' -"
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -367,7 +372,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /@prompt-file:/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec -C .* -/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
@@ -577,12 +582,15 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(validBootstrap.valid, true);
 
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
+  const bootstrapInstructions = extensionModule.__buildBootstrapRoadmapInstructions('codex');
   assert.match(dataReadme, /Solopreneur Project Data/);
   assert.match(dataReadme, /roadmap\.csv/);
   assert.match(dataReadme, /step-memory/);
   assert.match(dataReadme, /step-sessions/);
   assert.match(dataReadme, /project_journal\.db/);
   assert.match(dataReadme, /Git\/GitHub/);
+  assert.match(bootstrapInstructions, /Bootstrap Roadmap Instructions/);
+  assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
 });
 
 test('failed conversations render retry action in roadmap webview', () => {
@@ -615,10 +623,8 @@ test('local roadmap fallback produces runnable dependent tasks', () => {
   assert.equal(nodes[4].dependencies, '4');
   assert.ok(nodes.every((node) => node.agentCli === 'codex'));
   assert.match(nodes[0].title, /生成初始路线图/);
-  assert.match(nodes[0].agentPrompt, /\.solopreneur\/roadmap\.csv/);
-  assert.match(nodes[0].agentPrompt, /字段顺序必须严格是/);
-  assert.match(nodes[0].agentPrompt, /stage 只能使用/);
-  assert.match(nodes[0].agentPrompt, /重新读取 \.solopreneur\/roadmap\.csv/);
+  assert.match(nodes[0].agentPrompt, /\.solopreneur\/bootstrap-roadmap-instructions\.md/);
+  assert.doesNotMatch(nodes[0].agentPrompt, /字段顺序必须严格是/);
   assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/product-brief.md')));
 });
 
