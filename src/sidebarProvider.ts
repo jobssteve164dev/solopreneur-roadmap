@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as childProcess from 'child_process';
+import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 
 interface SolopreneurSettings {
@@ -14,6 +15,32 @@ interface SolopreneurSettings {
 interface SolopreneurProject {
   name: string;
   path: string;
+}
+
+interface ProjectPortfolioSummary {
+  name: string;
+  path: string;
+  totalNodes: number;
+  completedNodes: number;
+  failedNodes: number;
+  runningNodes: number;
+  inProgressNodes: number;
+  pendingNodes: number;
+  progressPercent: number;
+  currentStage: string;
+  recommendedNodeId: string;
+  recommendedNodeTitle: string;
+  recommendedStatus: string;
+  overallStatus: string;
+  recentActivityAt: string;
+}
+
+interface RoadmapNodeLike {
+  id: string;
+  title: string;
+  stage: string;
+  status: string;
+  dependencies?: string;
 }
 
 function shellQuote(value: string): string {
@@ -76,6 +103,105 @@ function getCliVersionArgs(agentCli: string): string[] {
 function formatCliTestMessage(agentCli: string, stdout: string, stderr: string): string {
   const version = (stdout.trim() || stderr.trim() || 'available').split('\n')[0];
   return `${agentCli} · ${version}`;
+}
+
+function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
+  const roadmapPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
+  if (!fs.existsSync(roadmapPath)) {
+    return [];
+  }
+
+  try {
+    const content = fs.readFileSync(roadmapPath, 'utf8');
+    const parseResult = Papa.parse<RoadmapNodeLike>(content, {
+      header: true,
+      skipEmptyLines: true,
+    });
+    return parseResult.data.map((node) => ({
+      id: String(node.id || '').trim(),
+      title: String(node.title || '').trim(),
+      stage: String(node.stage || '').trim(),
+      status: String(node.status || 'Pending').trim() || 'Pending',
+      dependencies: String(node.dependencies || '').trim()
+    })).filter((node) => node.id);
+  } catch {
+    return [];
+  }
+}
+
+function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
+  if (!nodes.length) {
+    return null;
+  }
+  const byStatus = (status: string) => nodes.find((node) => node.status === status);
+  return byStatus('Failed')
+    || byStatus('In Progress')
+    || byStatus('Running')
+    || nodes.find((node) => node.status === 'Pending' && !(node.dependencies || '').trim())
+    || byStatus('Pending')
+    || nodes.find((node) => node.status !== 'Completed')
+    || nodes[0];
+}
+
+function getProjectRecentActivityAt(projectPath: string): string {
+  const candidates = [
+    path.join(projectPath, '.solopreneur', 'roadmap.csv'),
+    path.join(projectPath, '.solopreneur', 'project_journal.db'),
+    path.join(projectPath, '.solopreneur', 'agent-runs')
+  ];
+  let latestMtime = 0;
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    try {
+      const stat = fs.statSync(candidate);
+      latestMtime = Math.max(latestMtime, stat.mtimeMs);
+    } catch {}
+  }
+  return latestMtime ? new Date(latestMtime).toISOString() : '';
+}
+
+function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortfolioSummary {
+  const nodes = readProjectRoadmapNodes(project.path);
+  const totalNodes = nodes.length;
+  const completedNodes = nodes.filter((node) => node.status === 'Completed').length;
+  const failedNodes = nodes.filter((node) => node.status === 'Failed').length;
+  const runningNodes = nodes.filter((node) => node.status === 'Running').length;
+  const inProgressNodes = nodes.filter((node) => node.status === 'In Progress').length;
+  const pendingNodes = nodes.filter((node) => node.status === 'Pending').length;
+  const recommendedNode = getRecommendedNode(nodes);
+  const overallStatus = runningNodes > 0
+    ? 'Running'
+    : failedNodes > 0
+      ? 'Failed'
+      : totalNodes > 0 && completedNodes === totalNodes
+        ? 'Completed'
+        : inProgressNodes > 0
+          ? 'In Progress'
+          : 'Pending';
+
+  return {
+    name: project.name,
+    path: project.path,
+    totalNodes,
+    completedNodes,
+    failedNodes,
+    runningNodes,
+    inProgressNodes,
+    pendingNodes,
+    progressPercent: totalNodes > 0 ? Math.round((completedNodes / totalNodes) * 100) : 0,
+    currentStage: recommendedNode?.stage || '',
+    recommendedNodeId: recommendedNode?.id || '',
+    recommendedNodeTitle: recommendedNode?.title || '',
+    recommendedStatus: recommendedNode?.status || '',
+    overallStatus,
+    recentActivityAt: getProjectRecentActivityAt(project.path)
+  };
+}
+
+function buildProjectPortfolioSummaries(projects: SolopreneurProject[]): ProjectPortfolioSummary[] {
+  return projects.map((project) => buildProjectPortfolioSummary(project));
 }
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
@@ -165,6 +291,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'addProject':
           await this._addProject();
           break;
+        case 'openProjectFromPortfolio':
+          await this._selectProject(data.projectPath);
+          vscode.commands.executeCommand('solopreneur.showRoadmap');
+          break;
+        case 'continueProjectFromPortfolio':
+          await this._selectProject(data.projectPath);
+          if (data.nodeId) {
+            await this._onRunAgent(data.nodeId);
+          } else {
+            vscode.commands.executeCommand('solopreneur.showRoadmap');
+          }
+          break;
       }
     });
 
@@ -202,9 +340,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
   public sendProjects() {
     if (this._view) {
+      const projectState = this._getProjects();
       this._view.webview.postMessage({
         command: 'projectsLoaded',
-        projects: this._getProjects()
+        projects: {
+          ...projectState,
+          portfolio: buildProjectPortfolioSummaries(projectState.projects)
+        }
       });
     }
   }
@@ -388,6 +530,155 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       color: var(--text-main);
       cursor: pointer;
       font-weight: 800;
+    }
+
+    .portfolio-panel {
+      background: var(--bg-glass);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border-glass);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 14px;
+    }
+
+    .portfolio-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .portfolio-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .portfolio-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+
+    .portfolio-filter-btn {
+      border: 1px solid var(--border-glass);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.04);
+      color: var(--text-muted);
+      padding: 3px 8px;
+      font-size: 10px;
+      cursor: pointer;
+    }
+
+    .portfolio-filter-btn.active {
+      background: rgba(0, 229, 255, 0.14);
+      color: #d8fbff;
+      border-color: rgba(0, 229, 255, 0.25);
+    }
+
+    .portfolio-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .empty-portfolio {
+      color: var(--text-muted);
+      font-size: 11px;
+      text-align: center;
+      padding: 10px 4px;
+    }
+
+    .portfolio-card {
+      border: 1px solid var(--border-glass);
+      border-radius: 6px;
+      padding: 9px;
+      background: rgba(255,255,255,0.03);
+    }
+
+    .portfolio-card.is-selected {
+      border-color: rgba(0, 229, 255, 0.28);
+      background: rgba(0, 229, 255, 0.07);
+    }
+
+    .portfolio-card-head,
+    .portfolio-card-meta,
+    .portfolio-card-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .portfolio-card-meta {
+      margin-top: 6px;
+      font-size: 10px;
+      color: var(--text-muted);
+      flex-wrap: wrap;
+    }
+
+    .portfolio-project-name {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-main);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .portfolio-stage,
+    .portfolio-updated,
+    .portfolio-recommendation {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .portfolio-status {
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .portfolio-progress {
+      margin-top: 8px;
+    }
+
+    .portfolio-progress-track {
+      height: 5px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      overflow: hidden;
+    }
+
+    .portfolio-progress-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #00e5ff, #7c4dff);
+    }
+
+    .portfolio-card-actions {
+      margin-top: 8px;
+    }
+
+    .portfolio-action-btn {
+      flex: 1;
+      border: 1px solid var(--border-glass);
+      border-radius: 5px;
+      background: rgba(255,255,255,0.05);
+      color: var(--text-main);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 5px 8px;
+      cursor: pointer;
+    }
+
+    .portfolio-action-btn.primary {
+      background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
+      color: #000;
+      border-color: transparent;
     }
 
     .settings-actions {
@@ -691,6 +982,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
   </div>
 
+  <div class="portfolio-panel">
+    <div class="portfolio-header">
+      <div class="portfolio-title" id="portfolio-title">项目总览</div>
+    </div>
+    <div class="portfolio-filters" id="portfolio-filters"></div>
+    <div class="portfolio-list" id="portfolio-list"></div>
+  </div>
+
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
@@ -769,6 +1068,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnOpenFull = document.getElementById('btn-open-full');
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
+    const portfolioList = document.getElementById('portfolio-list');
+    const portfolioFilters = document.getElementById('portfolio-filters');
 
     // Settings elements
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
@@ -785,10 +1086,26 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let currentLanguage = 'zh';
     let currentNodes = [];
     let activeProjectPath = '';
-    const currentProjects = { projects: [], selectedProjectPath: '' };
+    let activePortfolioFilter = 'all';
+    const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [] };
     const i18n = {
       zh: {
         title: '🎯 独立项目控制台',
+        portfolioTitle: '项目总览',
+        filterAll: '全部',
+        filterActive: '进行中',
+        filterFailed: '有失败',
+        filterCompleted: '已完成',
+        projectOpen: '打开',
+        projectContinue: '继续推进',
+        projectReviewFailure: '处理失败',
+        emptyPortfolio: '还没有已登记项目。',
+        noPortfolioMatch: '当前筛选下没有项目。',
+        latestUpdate: '最近更新',
+        currentStage: '当前阶段',
+        nextAction: '下一步',
+        failures: '失败',
+        selected: '当前项目',
         settingsTitle: '⚙️ 设置',
         language: '界面语言',
         provider: 'AI 服务',
@@ -812,6 +1129,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       },
       en: {
         title: '🎯 Solopreneur Control Panel',
+        portfolioTitle: 'Project Portfolio',
+        filterAll: 'All',
+        filterActive: 'Active',
+        filterFailed: 'Failed',
+        filterCompleted: 'Done',
+        projectOpen: 'Open',
+        projectContinue: 'Continue',
+        projectReviewFailure: 'Review Failure',
+        emptyPortfolio: 'No registered projects yet.',
+        noPortfolioMatch: 'No projects match this filter.',
+        latestUpdate: 'Updated',
+        currentStage: 'Stage',
+        nextAction: 'Next',
+        failures: 'Failures',
+        selected: 'Current project',
         settingsTitle: '⚙️ Solopreneur Settings',
         language: 'Language',
         provider: 'AI Provider',
@@ -861,6 +1193,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function applyLanguage() {
       setText('sidebar-title', t('title'));
+      setText('portfolio-title', t('portfolioTitle'));
       btnToggleSettings.title = t('settingsTitle');
       btnAddProject.title = t('chooseProject');
       setText('settings-title', t('settingsTitle'));
@@ -876,6 +1209,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('progress-label', t('progress'));
       setText('text-open-full', t('openFull'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
+      renderPortfolioFilters();
+      renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderSidebar(currentNodes);
     }
 
@@ -952,7 +1287,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           }
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
+          currentProjects.portfolio = message.projects.portfolio || [];
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
+          renderPortfolio(message.projects.portfolio || [], message.projects.selectedProjectPath || '');
           break;
 
         case 'cliTestResult':
@@ -1010,6 +1347,27 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ command: 'addProject' });
     });
 
+    function renderPortfolioFilters() {
+      const filters = [
+        { key: 'all', label: t('filterAll') },
+        { key: 'active', label: t('filterActive') },
+        { key: 'failed', label: t('filterFailed') },
+        { key: 'completed', label: t('filterCompleted') }
+      ];
+      portfolioFilters.innerHTML = filters.map(filter => \`
+        <button class="portfolio-filter-btn \${activePortfolioFilter === filter.key ? 'active' : ''}" data-portfolio-filter="\${filter.key}">
+          \${filter.label}
+        </button>
+      \`).join('');
+      portfolioFilters.querySelectorAll('[data-portfolio-filter]').forEach(button => {
+        button.addEventListener('click', () => {
+          activePortfolioFilter = button.getAttribute('data-portfolio-filter') || 'all';
+          renderPortfolioFilters();
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+    }
+
     function renderProjects(projects, selectedProjectPath) {
       projectSelect.innerHTML = '';
       if (!projects || projects.length === 0) {
@@ -1029,6 +1387,100 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           option.selected = true;
         }
         projectSelect.appendChild(option);
+      });
+    }
+
+    function formatRelativeTime(value) {
+      if (!value) return '';
+      const time = new Date(value).getTime();
+      if (Number.isNaN(time)) return '';
+      const diffMinutes = Math.max(0, Math.round((Date.now() - time) / 60000));
+      if (diffMinutes < 1) return currentLanguage === 'zh' ? '刚刚' : 'just now';
+      if (diffMinutes < 60) return currentLanguage === 'zh' ? (diffMinutes + ' 分钟前') : (diffMinutes + 'm');
+      const diffHours = Math.round(diffMinutes / 60);
+      if (diffHours < 24) return currentLanguage === 'zh' ? (diffHours + ' 小时前') : (diffHours + 'h');
+      const diffDays = Math.round(diffHours / 24);
+      return currentLanguage === 'zh' ? (diffDays + ' 天前') : (diffDays + 'd');
+    }
+
+    function shouldShowPortfolioProject(project) {
+      if (activePortfolioFilter === 'failed') {
+        return Number(project.failedNodes || 0) > 0;
+      }
+      if (activePortfolioFilter === 'completed') {
+        return Number(project.totalNodes || 0) > 0 && project.overallStatus === 'Completed';
+      }
+      if (activePortfolioFilter === 'active') {
+        return project.overallStatus === 'Running' || project.overallStatus === 'In Progress' || Number(project.failedNodes || 0) > 0;
+      }
+      return true;
+    }
+
+    function renderPortfolio(portfolio, selectedProjectPath) {
+      if (!portfolio || portfolio.length === 0) {
+        portfolioList.innerHTML = '<div class="empty-portfolio">' + t('emptyPortfolio') + '</div>';
+        return;
+      }
+
+      const visibleProjects = portfolio.filter(shouldShowPortfolioProject);
+      if (!visibleProjects.length) {
+        portfolioList.innerHTML = '<div class="empty-portfolio">' + t('noPortfolioMatch') + '</div>';
+        return;
+      }
+
+      portfolioList.innerHTML = visibleProjects.map(project => {
+        const isSelected = project.path === selectedProjectPath;
+        const nextActionLabel = Number(project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue');
+        const progressWidth = Math.max(0, Math.min(100, Number(project.progressPercent || 0)));
+        const relativeTime = formatRelativeTime(project.recentActivityAt);
+        const recommendation = project.recommendedNodeTitle || '';
+        return \`
+          <div class="portfolio-card \${isSelected ? 'is-selected' : ''}">
+            <div class="portfolio-card-head">
+              <span class="portfolio-project-name">\${project.name}</span>
+              <span class="portfolio-status status-lbl \${statusClass(project.overallStatus)}">\${statusText(project.overallStatus)}</span>
+            </div>
+            <div class="portfolio-card-meta">
+              <span class="portfolio-stage">\${t('currentStage')}: \${project.currentStage || '-'}</span>
+              <span>\${project.completedNodes}/\${project.totalNodes || 0}</span>
+              <span>\${t('failures')}: \${project.failedNodes || 0}</span>
+            </div>
+            <div class="portfolio-card-meta">
+              <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
+              \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}
+            </div>
+            <div class="portfolio-card-meta">
+              <span class="portfolio-recommendation">\${t('nextAction')}: \${recommendation || '-'}</span>
+            </div>
+            <div class="portfolio-progress">
+              <div class="portfolio-progress-track">
+                <div class="portfolio-progress-fill" style="width:\${progressWidth}%"></div>
+              </div>
+            </div>
+            <div class="portfolio-card-actions">
+              <button class="portfolio-action-btn" data-open-project-path="\${project.path}">\${t('projectOpen')}</button>
+              <button class="portfolio-action-btn primary" data-continue-project-path="\${project.path}" data-continue-node-id="\${project.recommendedNodeId || ''}">\${nextActionLabel}</button>
+            </div>
+          </div>
+        \`;
+      }).join('');
+
+      portfolioList.querySelectorAll('[data-open-project-path]').forEach(button => {
+        button.addEventListener('click', () => {
+          vscode.postMessage({
+            command: 'openProjectFromPortfolio',
+            projectPath: button.getAttribute('data-open-project-path')
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-continue-project-path]').forEach(button => {
+        button.addEventListener('click', () => {
+          vscode.postMessage({
+            command: 'continueProjectFromPortfolio',
+            projectPath: button.getAttribute('data-continue-project-path'),
+            nodeId: button.getAttribute('data-continue-node-id')
+          });
+        });
       });
     }
 

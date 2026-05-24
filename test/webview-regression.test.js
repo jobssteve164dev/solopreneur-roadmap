@@ -113,6 +113,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-open-full',
     'project-select',
     'btn-add-project',
+    'portfolio-title',
+    'portfolio-list',
+    'portfolio-filters',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -214,8 +217,54 @@ test('sidebar keeps project creation focused on the project switcher', () => {
 
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
+  assert.match(html, /id="portfolio-list"/);
+  assert.match(html, /continueProjectFromPortfolio/);
+  assert.match(html, /openProjectFromPortfolio/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
+});
+
+test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    [
+      'module.exports.__buildProjectPortfolioSummaries = buildProjectPortfolioSummaries;'
+    ].join('\n')
+  );
+
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-portfolio-a-'));
+  const solopreneurA = path.join(projectRootA, '.solopreneur');
+  fs.mkdirSync(solopreneurA, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurA, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Brief,,商业规划,,agy,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z',
+    '2,Build MVP,,产品与 MVP,1,agy,,Failed,2026-01-01T00:00:00.000Z,',
+    '3,Launch,,营销与增长,2,agy,,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+
+  const projectRootB = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-portfolio-b-'));
+  const solopreneurB = path.join(projectRootB, '.solopreneur');
+  fs.mkdirSync(solopreneurB, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurB, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,商业规划,,agy,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z',
+    '2,Implement,,产品与 MVP,1,agy,,In Progress,2026-01-01T00:00:00.000Z,',
+    '3,Grow,,营销与增长,2,agy,,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+
+  const summaries = sidebarModule.__buildProjectPortfolioSummaries([
+    { name: 'Novel', path: projectRootA },
+    { name: 'CRM', path: projectRootB }
+  ]);
+
+  assert.equal(summaries.length, 2);
+  assert.equal(summaries[0].failedNodes, 1);
+  assert.equal(summaries[0].overallStatus, 'Failed');
+  assert.equal(summaries[0].recommendedNodeTitle, 'Build MVP');
+  assert.equal(summaries[0].recommendedStatus, 'Failed');
+  assert.equal(summaries[0].progressPercent, 33);
+  assert.equal(summaries[1].overallStatus, 'In Progress');
+  assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
 });
 
 test('agent command builder uses Codex exec and preserves Antigravity run path', () => {
