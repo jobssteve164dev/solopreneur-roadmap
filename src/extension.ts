@@ -2269,6 +2269,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       --text-muted: #94a3b8;
     }
 
+    * {
+      box-sizing: border-box;
+    }
+
     body {
       margin: 0;
       padding: 0;
@@ -2290,6 +2294,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 16px;
       padding: 16px 24px;
       background: rgba(15, 17, 26, 0.7);
       backdrop-filter: blur(12px);
@@ -2312,10 +2317,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       align-items: center;
       gap: 12px;
+      min-width: 0;
     }
 
     .project-select {
-      width: 180px;
+      width: clamp(150px, 18vw, 240px);
+      min-width: 0;
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-glass);
       border-radius: 6px;
@@ -2341,6 +2348,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .btn-project-remove:hover {
       box-shadow: 0 4px 15px rgba(255, 23, 68, 0.28);
       background: rgba(255, 23, 68, 0.18);
+    }
+
+    .btn-roadmap-revision {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(56, 189, 248, 0.10);
+      color: #d7f3ff;
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 8px;
+      flex-shrink: 0;
+    }
+
+    .btn-roadmap-revision:hover,
+    .btn-roadmap-revision.active {
+      background: #00e5ff;
+      border-color: #00e5ff;
+      color: #000;
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
     }
 
     input[type="text"] {
@@ -2394,56 +2423,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       position: relative;
       background: radial-gradient(circle at 50% 50%, rgba(20, 25, 45, 0.6) 0%, rgba(10, 12, 22, 0.95) 100%);
       overflow: auto;
-      padding: 40px;
+      padding: clamp(18px, 4vw, 40px);
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 30px;
     }
 
-    .roadmap-revision {
-      width: min(760px, calc(100vw - 48px));
-      margin: 10px auto 22px;
-      position: relative;
-      z-index: 2;
-      border: 1px solid var(--border-glass);
-      border-radius: 8px;
-      background: rgb(22, 28, 45);
-      overflow: hidden;
-    }
-
-    .roadmap-revision-toggle {
-      width: 100%;
-      padding: 11px 14px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      color: var(--text-main);
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      text-align: left;
-      font-weight: 700;
-    }
-
-    .roadmap-revision-toggle:hover {
-      background: rgba(56, 189, 248, 0.08);
-    }
-
     .roadmap-revision-title {
       display: inline-flex;
       align-items: center;
       gap: 8px;
+      min-width: 0;
     }
 
     .roadmap-revision-body {
-      padding: 0 12px 12px;
-      border-top: 1px solid var(--border-glass);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
     }
 
     .roadmap-revision-body .conversation-composer {
-      margin-top: 12px;
+      margin-top: 0;
     }
 
     /* Node Stack (Unified Roadmap Flow layout) */
@@ -2462,7 +2463,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       justify-content: center;
       align-items: center;
       width: 100%;
-      max-width: 800px;
+      max-width: min(920px, 100%);
       z-index: 2;
     }
 
@@ -2543,6 +2544,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       gap: 12px;
       align-items: flex-start;
       justify-content: space-between;
+      min-width: 0;
     }
 
     .node-headline {
@@ -2596,6 +2598,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       justify-content: space-between;
       align-items: flex-end;
       gap: 10px;
+      flex-shrink: 0;
     }
 
     .status-badge {
@@ -2660,6 +2663,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       gap: 8px;
       align-items: center;
+      min-width: 0;
     }
 
     .conversation-compose input {
@@ -2699,6 +2703,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       border-radius: 6px;
       padding: 0 8px;
       font-size: 12px;
+      flex-shrink: 0;
     }
 
     .btn-send-conversation {
@@ -2789,6 +2794,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .conversation-row {
       display: flex;
       justify-content: space-between;
+      align-items: flex-start;
       gap: 10px;
       padding: 8px 10px;
       cursor: pointer;
@@ -2806,6 +2812,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       align-items: center;
       gap: 8px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
       flex-shrink: 0;
     }
 
@@ -2879,7 +2887,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      max-width: min(520px, 58vw);
+      max-width: 100%;
     }
 
     .conversation-detail {
@@ -2958,6 +2966,66 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       max-height: calc(100vh - 110px);
       overflow-y: auto;
       animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .roadmap-revision-popover {
+      position: absolute;
+      top: 75px;
+      right: 68px;
+      width: clamp(340px, 42vw, 560px);
+      max-width: calc(100vw - 32px);
+      background: rgba(15, 17, 26, 0.96);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border-glass);
+      border-radius: 12px;
+      padding: 14px;
+      z-index: 100;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.52);
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+      max-height: calc(100vh - 110px);
+      overflow-y: auto;
+      animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .roadmap-revision-popover.open {
+      display: flex;
+    }
+
+    .roadmap-revision-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid var(--border-glass);
+      padding-bottom: 8px;
+    }
+
+    .roadmap-revision-header h3 {
+      margin: 0;
+      font-size: 14px;
+      color: #00e5ff;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .btn-close-revision {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .btn-close-revision:hover {
+      color: #ff1744;
+      box-shadow: none;
+      transform: none;
     }
 
     @keyframes slide-down {
@@ -3103,15 +3171,115 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       cursor: pointer;
       color: var(--text-muted);
       padding: 4px;
+      width: 34px;
+      height: 34px;
       display: flex;
       align-items: center;
       justify-content: center;
       transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      flex-shrink: 0;
     }
 
     .btn-gear:hover {
       color: #00e5ff;
       transform: rotate(30deg) scale(1.1);
+    }
+
+    @media (max-width: 720px) {
+      header {
+        padding: 12px 14px;
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+
+      .controls {
+        width: 100%;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      .project-select {
+        flex: 1 1 160px;
+        width: auto;
+      }
+
+      .roadmap-canvas {
+        padding: 18px 12px;
+        gap: 22px;
+      }
+
+      .node-summary,
+      .conversation-row {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .node-actions {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+      }
+
+      .conversation-compose {
+        flex-wrap: wrap;
+      }
+
+      .conversation-compose input {
+        flex: 1 1 100%;
+      }
+
+      .conversation-agent-select {
+        flex: 1 1 160px;
+        width: auto;
+      }
+
+      .btn-send-conversation {
+        flex: 0 0 42px;
+      }
+
+      .conversation-actions {
+        justify-content: flex-start;
+      }
+
+      .settings-overlay,
+      .roadmap-revision-popover {
+        top: 118px;
+        left: 12px;
+        right: 12px;
+        width: auto;
+        max-width: none;
+      }
+    }
+
+    @media (max-width: 430px) {
+      h1 {
+        font-size: 18px;
+      }
+
+      .controls {
+        justify-content: flex-start;
+      }
+
+      .btn-project-add,
+      .btn-project-remove,
+      .btn-roadmap-revision {
+        width: 34px;
+        min-width: 34px;
+      }
+
+      .node-card {
+        padding: 16px;
+      }
+
+      .node-title {
+        font-size: 14px;
+      }
+
+      .status-badge,
+      .btn-run {
+        max-width: 100%;
+      }
     }
   </style>
 </head>
@@ -3123,6 +3291,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         <select class="project-select" id="project-select"></select>
         <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
         <button class="btn-project-remove" id="btn-remove-project" title="Remove project"><span class="codicon codicon-trash"></span></button>
+        <button class="btn-roadmap-revision" id="btn-toggle-roadmap-revision" title="Revise Roadmap"><span class="codicon codicon-git-compare"></span></button>
         <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
       </div>
     </header>
@@ -3131,6 +3300,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="flow-line"></div>
       <!-- Nodes are injected here -->
     </div>
+  </div>
+
+  <div class="roadmap-revision-popover" id="roadmap-revision-panel">
+    <div class="roadmap-revision-header">
+      <h3><span class="codicon codicon-git-compare"></span><span id="roadmap-revision-title">Revise Roadmap</span></h3>
+      <button class="btn-close-revision" id="btn-close-roadmap-revision" title="Close"><span class="codicon codicon-close"></span></button>
+    </div>
+    <div class="roadmap-revision-body" id="roadmap-revision-body"></div>
   </div>
 
   <!-- Settings Panel Overlay -->
@@ -3177,6 +3354,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
     const btnRemoveProject = document.getElementById('btn-remove-project');
+    const btnToggleRoadmapRevision = document.getElementById('btn-toggle-roadmap-revision');
+    const btnCloseRoadmapRevision = document.getElementById('btn-close-roadmap-revision');
+    const roadmapRevisionPanel = document.getElementById('roadmap-revision-panel');
+    const roadmapRevisionBody = document.getElementById('roadmap-revision-body');
 
     // Settings Panel elements
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
@@ -3347,6 +3528,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       expandedNodeId = '';
       roadmapRevisionExpanded = false;
       activeConversationId = '';
+      if (roadmapRevisionPanel) roadmapRevisionPanel.classList.remove('open');
+      if (btnToggleRoadmapRevision) btnToggleRoadmapRevision.classList.remove('active');
+      if (roadmapRevisionBody) roadmapRevisionBody.innerHTML = '';
       Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
       Object.keys(nodeSupplementFiles).forEach(key => delete nodeSupplementFiles[key]);
       if (clearNodes) {
@@ -3358,7 +3542,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('app-title', t('title'));
       btnAddProject.title = t('addProject');
       btnRemoveProject.title = t('removeProject');
+      btnToggleRoadmapRevision.title = t('reviseRoadmap');
       setText('settings-title', t('settingsTitle'));
+      setText('roadmap-revision-title', t('reviseRoadmap'));
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
@@ -3369,6 +3555,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('text-save-settings', t('save'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderRoadmap(currentNodes);
+      renderRoadmapRevisionPanel(currentNodes);
     }
 
     const currentProjects = { projects: [], selectedProjectPath: '' };
@@ -3378,6 +3565,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (settingsPanel.style.display === 'flex') {
         settingsPanel.style.display = 'none';
       } else {
+        roadmapRevisionExpanded = false;
+        roadmapRevisionPanel.classList.remove('open');
+        btnToggleRoadmapRevision.classList.remove('active');
         settingsPanel.style.display = 'flex';
         vscode.postMessage({ command: 'getSettings' });
       }
@@ -3386,6 +3576,29 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     btnCloseSettings.addEventListener('click', () => {
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
+    });
+
+    btnToggleRoadmapRevision.addEventListener('click', () => {
+      roadmapRevisionExpanded = !roadmapRevisionExpanded;
+      activeConversationId = '';
+      roadmapRevisionPanel.classList.toggle('open', roadmapRevisionExpanded);
+      btnToggleRoadmapRevision.classList.toggle('active', roadmapRevisionExpanded);
+      if (roadmapRevisionExpanded) {
+        settingsPanel.style.display = 'none';
+        cliTestBadge.style.display = 'none';
+        if (!nodeConversations[roadmapRevisionId]) {
+          vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
+        }
+      }
+      renderRoadmapRevisionPanel(currentNodes);
+    });
+
+    btnCloseRoadmapRevision.addEventListener('click', () => {
+      roadmapRevisionExpanded = false;
+      activeConversationId = '';
+      roadmapRevisionPanel.classList.remove('open');
+      btnToggleRoadmapRevision.classList.remove('active');
+      renderRoadmapRevisionPanel(currentNodes);
     });
 
     settingLanguage.addEventListener('change', () => {
@@ -3402,6 +3615,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         if (expandedNodeId && currentNodes.some(node => node.status === 'Running')) {
           renderRoadmap(currentNodes);
         }
+        const revisionRunning = (nodeConversations[roadmapRevisionId] || [])
+          .some(conversation => conversation.status === 'Running');
+        if (roadmapRevisionExpanded && revisionRunning) {
+          renderRoadmapRevisionPanel(currentNodes);
+        }
       }, 1000);
     }
 
@@ -3415,6 +3633,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           }
           currentNodes = message.nodes || [];
           renderRoadmap(message.nodes);
+          renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'settingsLoaded':
           settingCliPath.value = message.settings.cliPath || 'agy';
@@ -3445,6 +3664,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           }
           nodeConversations[message.nodeId] = message.conversations || [];
           renderRoadmap(currentNodes);
+          renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'supplementFilesSelected':
           nodeSupplementFiles[message.nodeId] = mergeSupplementFiles(
@@ -3544,7 +3764,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const flowLine = canvas.querySelector('.flow-line');
       canvas.innerHTML = '';
       canvas.appendChild(flowLine);
-      renderRoadmapRevisionPanel(nodes || []);
 
       if (!nodes || nodes.length === 0) {
         const placeholder = document.createElement('div');
@@ -3702,50 +3921,41 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     function renderRoadmapRevisionPanel(nodes) {
-      const panel = document.createElement('section');
-      panel.className = 'roadmap-revision';
+      if (!roadmapRevisionPanel || !roadmapRevisionBody) {
+        return;
+      }
       const conversations = nodeConversations[roadmapRevisionId] || [];
       const revisionRunning = conversations.some(conversation => conversation.status === 'Running')
-        || nodes.some(node => node.status === 'Running');
+        || (nodes || []).some(node => node.status === 'Running');
       const disabled = revisionRunning ? 'disabled' : '';
-      panel.innerHTML = \`
-        <button class="roadmap-revision-toggle" data-toggle-roadmap-revision>
-          <span class="roadmap-revision-title"><span class="codicon codicon-git-compare"></span>\${escapeHtml(t('reviseRoadmap'))}</span>
-          <span class="codicon \${roadmapRevisionExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
-        </button>
-        \${roadmapRevisionExpanded ? \`
-          <div class="roadmap-revision-body">
-            <div class="conversation-composer">
-              <div class="conversation-compose">
-                <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" \${disabled}>
-                <select class="conversation-agent-select" data-roadmap-revision-agent title="\${escapeHtml(t('agentSelector'))}" \${disabled}>
-                  \${renderAgentOptions({ agentCli: currentCliPath || 'agy' })}
-                </select>
-                <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${disabled}>
-                  <span class="codicon codicon-send"></span>
-                </button>
-              </div>
-            </div>
-            <div class="conversation-panel">
-              <div class="conversation-title">\${escapeHtml(t('revisionHistory'))}</div>
-              \${renderConversations(roadmapRevisionId, conversations, t('noRevisionConversations'))}
-            </div>
+      roadmapRevisionPanel.classList.toggle('open', roadmapRevisionExpanded);
+      btnToggleRoadmapRevision.classList.toggle('active', roadmapRevisionExpanded);
+      if (!roadmapRevisionExpanded) {
+        roadmapRevisionBody.innerHTML = '';
+        return;
+      }
+      roadmapRevisionBody.innerHTML = \`
+        <div class="conversation-composer">
+          <div class="conversation-compose">
+            <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" \${disabled}>
+            <select class="conversation-agent-select" data-roadmap-revision-agent title="\${escapeHtml(t('agentSelector'))}" \${disabled}>
+              \${renderAgentOptions({ agentCli: currentCliPath || 'agy' })}
+            </select>
+            <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${disabled}>
+              <span class="codicon codicon-send"></span>
+            </button>
           </div>
-        \` : ''}
+        </div>
+        <div class="conversation-panel">
+          <div class="conversation-title">\${escapeHtml(t('revisionHistory'))}</div>
+          \${renderConversations(roadmapRevisionId, conversations, t('noRevisionConversations'))}
+        </div>
       \`;
-      panel.querySelector('[data-toggle-roadmap-revision]').addEventListener('click', () => {
-        roadmapRevisionExpanded = !roadmapRevisionExpanded;
-        activeConversationId = '';
-        if (roadmapRevisionExpanded && !nodeConversations[roadmapRevisionId]) {
-          vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
-        }
-        renderRoadmap(currentNodes);
-      });
-      const sendButton = panel.querySelector('[data-send-roadmap-revision]');
+      const sendButton = roadmapRevisionBody.querySelector('[data-send-roadmap-revision]');
       if (sendButton) {
         sendButton.addEventListener('click', () => {
-          const input = panel.querySelector('[data-roadmap-revision-input]');
-          const agentSelect = panel.querySelector('[data-roadmap-revision-agent]');
+          const input = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
+          const agentSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-agent]');
           const request = input ? input.value.trim() : '';
           if (!request) return;
           vscode.postMessage({
@@ -3756,8 +3966,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           input.value = '';
         });
       }
-      bindConversationActions(panel, roadmapRevisionId);
-      canvas.appendChild(panel);
+      bindConversationActions(roadmapRevisionBody, roadmapRevisionId);
     }
 
     function bindConversationActions(container, nodeId) {
@@ -3768,6 +3977,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             ? ''
             : item.getAttribute('data-conversation-id');
           renderRoadmap(currentNodes);
+          if (nodeId === roadmapRevisionId) {
+            renderRoadmapRevisionPanel(currentNodes);
+          }
         });
       });
       container.querySelectorAll('[data-retry-conversation-id]').forEach(item => {

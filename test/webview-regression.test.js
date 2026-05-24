@@ -79,12 +79,35 @@ function createElement(id) {
     value: '',
     textContent: '',
     className: '',
+    classList: {
+      values: new Set(),
+      add(value) {
+        this.values.add(value);
+      },
+      remove(value) {
+        this.values.delete(value);
+      },
+      toggle(value, force) {
+        if (force === undefined ? !this.values.has(value) : force) {
+          this.values.add(value);
+          return true;
+        }
+        this.values.delete(value);
+        return false;
+      },
+      contains(value) {
+        return this.values.has(value);
+      }
+    },
     addEventListener(type, listener) {
       this.listeners[type] = listener;
     },
     appendChild() {},
     querySelector() {
       return null;
+    },
+    querySelectorAll() {
+      return [];
     },
     set innerHTML(value) {
       this._innerHTML = value;
@@ -209,6 +232,10 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'project-select',
     'btn-add-project',
     'btn-remove-project',
+    'btn-toggle-roadmap-revision',
+    'btn-close-roadmap-revision',
+    'roadmap-revision-panel',
+    'roadmap-revision-body',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -225,6 +252,12 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   assert.equal(elements['settings-panel'].style.display, 'flex');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
+
+  elements['btn-toggle-roadmap-revision'].listeners.click();
+
+  assert.ok(elements['roadmap-revision-panel'].classList.contains('open'));
+  assert.ok(elements['roadmap-revision-body'].innerHTML.includes('data-roadmap-revision-input'));
+  assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__roadmap_revision__'));
 });
 
 test('full roadmap webview exposes node conversation history and language setting', () => {
@@ -269,7 +302,12 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /runRoadmapRevision/);
   assert.match(script, /Roadmap Revision History|路线图调整历史/);
   assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
+  assert.match(html, /id="btn-toggle-roadmap-revision"/);
+  assert.match(html, /id="roadmap-revision-panel"/);
+  assert.match(html, /id="roadmap-revision-body"/);
   assert.match(script, /renderRoadmapRevisionPanel/);
+  assert.doesNotMatch(script, /canvas\.appendChild\(panel\)/);
+  assert.doesNotMatch(script, /data-toggle-roadmap-revision/);
   assert.match(script, /completeNode/);
   assert.match(script, /Complete Step|完成环节/);
   assert.match(script, /resetProjectScopedState/);
