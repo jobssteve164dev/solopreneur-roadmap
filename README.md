@@ -29,6 +29,18 @@ You choose a project folder, SoloMap creates a `.solopreneur/` data directory, a
 
 ---
 
+## Methodology / 方法论
+
+SoloMap follows a simple builder loop: find the real problem, build the product system, sell to customers, then keep scaling through Build -> Sell -> Learn -> Improve.
+
+SoloMap 遵循一套面向独立开发者的行动循环：发现真实问题，打造产品系统，卖给客户，再通过 Build -> Sell -> Learn -> Improve 持续放大。
+
+See [docs/methodology.md](docs/methodology.md) for the full methodology.
+
+完整方法论见 [docs/methodology.md](docs/methodology.md)。
+
+---
+
 ## Core Capabilities / 核心能力
 
 ### AI Roadmap / AI 路线图
