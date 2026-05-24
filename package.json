@@ -55,9 +55,11 @@
           "enum": [
             "Gemini",
             "OpenAI",
-            "VS Code Copilot (Native)"
+            "VS Code Copilot (Native)",
+            "Codex CLI (Local)",
+            "Antigravity CLI (Local)"
           ],
-          "description": "The AI provider used to generate visual roadmaps."
+          "description": "The AI provider used to generate visual roadmaps. Supports hosted APIs, Copilot Chat, and local Codex/Antigravity CLIs."
         },
         "solopreneur.apiKey": {
           "type": "string",

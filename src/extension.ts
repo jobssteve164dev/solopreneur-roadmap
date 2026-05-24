@@ -42,6 +42,7 @@ interface StepSessionState {
 const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
+const hiddenProjectsKey = 'solopreneur.hiddenProjects';
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('Solopreneur Roadmaps extension is now active!');
@@ -161,10 +162,11 @@ function getWorkspaceRoot(): string {
 
 function getProjects(context: vscode.ExtensionContext): SolopreneurProject[] {
   const savedProjects = context.globalState.get<SolopreneurProject[]>(projectsKey) || [];
+  const hiddenProjects = new Set(context.globalState.get<string[]>(hiddenProjectsKey) || []);
   const workspaceRoot = getWorkspaceRoot();
   const projects = [...savedProjects];
 
-  if (workspaceRoot && !projects.some((project) => project.path === workspaceRoot)) {
+  if (workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
     projects.unshift({
       name: projectName(workspaceRoot),
       path: workspaceRoot
@@ -195,6 +197,16 @@ function getProjectState(context: vscode.ExtensionContext): { projects: Solopren
 
 async function saveProjects(context: vscode.ExtensionContext, projects: SolopreneurProject[]): Promise<void> {
   await context.globalState.update(projectsKey, projects);
+}
+
+async function setProjectHidden(context: vscode.ExtensionContext, projectPath: string, hidden: boolean): Promise<void> {
+  const hiddenProjects = new Set(context.globalState.get<string[]>(hiddenProjectsKey) || []);
+  if (hidden) {
+    hiddenProjects.add(projectPath);
+  } else {
+    hiddenProjects.delete(projectPath);
+  }
+  await context.globalState.update(hiddenProjectsKey, [...hiddenProjects]);
 }
 
 async function selectProject(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
@@ -279,6 +291,7 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
     });
     await saveProjects(context, projects);
   }
+  await setProjectHidden(context, folder, false);
 
   await context.globalState.update(selectedProjectKey, folder);
   syncEngine = null;
@@ -294,6 +307,55 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
   }
   sendProjectsToWebviews(context);
   sendNodesToWebview();
+}
+
+async function removeProject(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
+  const projects = getProjects(context);
+  const project = projects.find((candidate) => candidate.path === projectPath);
+  if (!project) {
+    vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+    return;
+  }
+
+  const confirmed = await vscode.window.showWarningMessage(
+    `从 Solopreneur 中删除项目“${project.name}”？这只会删除该项目里的 .solopreneur 文件夹，并把项目从插件列表中移除，不会删除项目本身的代码文件夹。`,
+    { modal: true },
+    '确认删除'
+  );
+  if (confirmed !== '确认删除') {
+    return;
+  }
+
+  const solopreneurDir = path.join(projectPath, '.solopreneur');
+  if (fs.existsSync(solopreneurDir)) {
+    fs.rmSync(solopreneurDir, { recursive: true, force: true });
+  }
+
+  const nextProjects = projects.filter((candidate) => candidate.path !== projectPath);
+  await saveProjects(context, nextProjects);
+  await setProjectHidden(context, projectPath, true);
+
+  const nextSelectedProjectPath = nextProjects[0]?.path || '';
+  await context.globalState.update(selectedProjectKey, nextSelectedProjectPath);
+
+  syncEngine = null;
+  activeProjectRoot = null;
+  if (watcher) {
+    watcher.dispose();
+    watcher = null;
+  }
+  if (statusPoller) {
+    clearInterval(statusPoller);
+    statusPoller = null;
+  }
+
+  if (nextSelectedProjectPath) {
+    await ensureSyncEngine(context);
+  }
+
+  sendProjectsToWebviews(context);
+  sendNodesToWebview();
+  vscode.window.showInformationMessage(`Solopreneur 已移除项目“${project.name}”。项目文件夹本身未删除。`);
 }
 
 function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
@@ -473,6 +535,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await addProjectFromDialog(context);
           break;
 
+        case 'removeProject':
+          await removeProject(context, message.projectPath);
+          break;
+
         case 'testCli':
           const cliToTest = resolveAgentCli('antigravity-cli', message.cliPath || '');
           childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
@@ -522,18 +588,16 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
  * Sends current node and edge states back to the Webview frontend.
  */
 function sendNodesToWebview() {
-  if (syncEngine) {
-    const nodes = syncEngine.getNodes();
-    if (activePanel) {
-      activePanel.webview.postMessage({
-        command: 'nodesUpdated',
-        nodes: nodes,
-        projectPath: activeProjectRoot || '',
-      });
-    }
-    if (sidebarProvider) {
-      sidebarProvider.sendNodesToWebview();
-    }
+  const nodes = syncEngine ? syncEngine.getNodes() : [];
+  if (activePanel) {
+    activePanel.webview.postMessage({
+      command: 'nodesUpdated',
+      nodes,
+      projectPath: activeProjectRoot || '',
+    });
+  }
+  if (sidebarProvider) {
+    sidebarProvider.sendNodesToWebview();
   }
 }
 
@@ -1592,6 +1656,93 @@ function cleanAndParseJson(text: string): any {
   return JSON.parse(cleaned);
 }
 
+function resolveRoadmapProviderCli(apiProvider: string, configuredCliPath: string): string {
+  const configuredName = path.basename((configuredCliPath || '').trim()).toLowerCase();
+  if (apiProvider === 'Codex CLI (Local)') {
+    if (configuredName === 'codex' || configuredName === 'codex-cli') {
+      return resolveAgentCli('codex', configuredCliPath);
+    }
+    return resolveAgentCli('codex', '');
+  }
+  if (apiProvider === 'Antigravity CLI (Local)') {
+    if (configuredName === 'agy' || configuredName === 'antigravity' || configuredName === 'antigravity-cli') {
+      return resolveAgentCli('agy', configuredCliPath);
+    }
+    return resolveAgentCli('agy', '');
+  }
+  return resolveAgentCli('antigravity-cli', configuredCliPath);
+}
+
+function buildRoadmapGenerationSystemInstruction(agentCli: string): string {
+  return `You are Solopreneur AI, a product strategist and software delivery planner for solo builders.
+Your task is to generate a customized local-first project roadmap as a JSON array of tasks based on the user's project idea and requirements.
+
+Return ONLY a valid JSON array of roadmap nodes. Do NOT wrap it in HTML, do NOT add any markdown formatting (like \`\`\`json), and do NOT include any introductory or concluding text. Your entire response must be a single parseable JSON array.
+
+Each node in the array must strictly conform to the following JSON structure:
+{
+  "id": "unique_string_number_e.g_1_2_3",
+  "title": "Short concise task title in Chinese",
+  "description": "Clear explanation in Chinese of what outcome this roadmap step should achieve",
+  "stage": "商业规划" | "品牌与设置" | "产品与 MVP" | "营销与增长",
+  "dependencies": "comma_separated_dependency_ids_or_empty_string",
+  "agentCli": "${agentCli}",
+  "agentPrompt": "A concrete Chinese instruction prompt to send to the AI agent for this step"
+}
+
+Guidelines:
+1. The roadmap must always follow this clear framework, customized to the user's idea:
+   - "商业规划": target user, promise, market position, MVP boundary, risks, acceptance criteria.
+   - "品牌与设置": naming/voice, README/project docs, workspace structure, lightweight operating assets.
+   - "产品与 MVP": implementation plan, first vertical slice, local run path, verification commands.
+   - "营销与增长": launch checklist, initial copy, distribution experiment, measurable next action.
+2. Create a logical progression of 4 to 6 tasks. Each task should be small enough to support multiple Agent conversations.
+3. Make sure dependencies are correctly set. For example, "2" depends on "1", "3" depends on "2", etc. Dependencies should reflect actual prerequisite outcomes.
+4. Set "agentCli" to the exact string: "${agentCli}".
+5. Create descriptive but action-oriented "agentPrompt" prompts. Each prompt should ask the agent to write or modify concrete local project files and run narrow verification where relevant.
+6. Do not generate vague consulting tasks. Every roadmap step must have a visible local deliverable.`;
+}
+
+function runLocalRoadmapGenerator(apiProvider: string, prompt: string, workspaceRoot: string, configuredCliPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const cli = resolveRoadmapProviderCli(apiProvider, configuredCliPath);
+    if (!commandExists(cli)) {
+      reject(new Error(`${apiProvider} is not installed or not discoverable on this machine.`));
+      return;
+    }
+
+    const instruction = `${buildRoadmapGenerationSystemInstruction(cli)}\n\nProject Description: ${prompt}`;
+    const executableName = path.basename(cli).toLowerCase();
+    let args: string[] = [];
+
+    if (executableName === 'codex' || executableName === 'codex-cli') {
+      args = ['exec', '-C', workspaceRoot, instruction];
+    } else if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+      args = ['--print', '--print-timeout=30m', `--add-dir=${workspaceRoot}`, instruction];
+    } else {
+      reject(new Error(`Unsupported local roadmap generator CLI: ${cli}`));
+      return;
+    }
+
+    childProcess.execFile(cli, args, {
+      cwd: workspaceRoot,
+      timeout: 30 * 60 * 1000,
+      maxBuffer: 8 * 1024 * 1024
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr?.trim() || stdout?.trim() || error.message));
+        return;
+      }
+      const text = String(stdout || '').trim() || String(stderr || '').trim();
+      if (!text) {
+        reject(new Error(`${apiProvider} returned no roadmap output.`));
+        return;
+      }
+      resolve(text);
+    });
+  });
+}
+
 /**
  * Handles AI Generation of the Roadmap using LLM API
  */
@@ -1604,8 +1755,14 @@ async function handleGenerateRoadmap(context: vscode.ExtensionContext, prompt: s
   let apiProvider = savedSettings.apiProvider;
   const apiKey = savedSettings.apiKey;
   const cliPath = resolveAgentCli('antigravity-cli', savedSettings.cliPath);
+  const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || getWorkspaceRoot();
 
-  if (apiProvider !== 'VS Code Copilot (Native)' && !apiKey) {
+  if (
+    apiProvider !== 'VS Code Copilot (Native)'
+    && apiProvider !== 'Codex CLI (Local)'
+    && apiProvider !== 'Antigravity CLI (Local)'
+    && !apiKey
+  ) {
     if ((vscode as any).lm && (vscode as any).lm.selectChatModels) {
       apiProvider = 'VS Code Copilot (Native)';
     } else {
@@ -1617,33 +1774,7 @@ async function handleGenerateRoadmap(context: vscode.ExtensionContext, prompt: s
     }
   }
 
-  const systemInstruction = `You are Solopreneur AI, a product strategist and software delivery planner for solo builders.
-Your task is to generate a customized local-first project roadmap as a JSON array of tasks based on the user's project idea and requirements.
-
-Return ONLY a valid JSON array of roadmap nodes. Do NOT wrap it in HTML, do NOT add any markdown formatting (like \`\`\`json), and do NOT include any introductory or concluding text. Your entire response must be a single parseable JSON array.
-
-Each node in the array must strictly conform to the following JSON structure:
-{
-  "id": "unique_string_number_e.g_1_2_3",
-  "title": "Short concise task title in Chinese",
-  "description": "Clear explanation in Chinese of what outcome this roadmap step should achieve",
-  "stage": "商业规划" | "品牌与设置" | "产品与 MVP" | "营销与增长",
-  "dependencies": "comma_separated_dependency_ids_or_empty_string",
-  "agentCli": "${cliPath}",
-  "agentPrompt": "A concrete Chinese instruction prompt to send to the AI agent for this step"
-}
-
-Guidelines:
-1. The roadmap must always follow this clear framework, customized to the user's idea:
-   - "商业规划": target user, promise, market position, MVP boundary, risks, acceptance criteria.
-   - "品牌与设置": naming/voice, README/project docs, workspace structure, lightweight operating assets.
-   - "产品与 MVP": implementation plan, first vertical slice, local run path, verification commands.
-   - "营销与增长": launch checklist, initial copy, distribution experiment, measurable next action.
-2. Create a logical progression of 4 to 6 tasks. Each task should be small enough to support multiple Agent conversations.
-3. Make sure dependencies are correctly set. For example, "2" depends on "1", "3" depends on "2", etc. Dependencies should reflect actual prerequisite outcomes.
-4. Set "agentCli" to the exact string: "${cliPath}".
-5. Create descriptive but action-oriented "agentPrompt" prompts. Each prompt should ask the agent to write or modify concrete local project files and run narrow verification where relevant.
-6. Do not generate vague consulting tasks. Every roadmap step must have a visible local deliverable.`;
+  const systemInstruction = buildRoadmapGenerationSystemInstruction(cliPath);
 
   await vscode.window.withProgress(
     {
@@ -1668,6 +1799,8 @@ Guidelines:
           for await (const chunk of response.text) {
             responseText += chunk;
           }
+        } else if (apiProvider === 'Codex CLI (Local)' || apiProvider === 'Antigravity CLI (Local)') {
+          responseText = await runLocalRoadmapGenerator(apiProvider, prompt, workspaceRoot, savedSettings.cliPath);
         } else if (apiProvider === 'Gemini') {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
           const postData = JSON.stringify({
@@ -1871,6 +2004,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .btn-project-add {
       padding: 8px 10px;
       min-width: 34px;
+    }
+
+    .btn-project-remove {
+      background: rgba(255, 23, 68, 0.10);
+      color: #ffe1e8;
+      border: 1px solid rgba(255, 23, 68, 0.22);
+      padding: 8px 10px;
+      min-width: 34px;
+    }
+
+    .btn-project-remove:hover {
+      box-shadow: 0 4px 15px rgba(255, 23, 68, 0.28);
+      background: rgba(255, 23, 68, 0.18);
     }
 
     input[type="text"] {
@@ -2467,6 +2613,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="controls">
         <select class="project-select" id="project-select"></select>
         <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
+        <button class="btn-project-remove" id="btn-remove-project" title="Remove project">−</button>
         <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
       </div>
     </header>
@@ -2498,6 +2645,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         <option value="Gemini">Gemini</option>
         <option value="OpenAI">OpenAI</option>
         <option value="VS Code Copilot (Native)">VS Code Copilot (Native)</option>
+        <option value="Codex CLI (Local)">Codex CLI (Local)</option>
+        <option value="Antigravity CLI (Local)">Antigravity CLI (Local)</option>
       </select>
     </div>
 
@@ -2505,7 +2654,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <label class="settings-lbl-title" id="label-api-key">API Key</label>
       <input type="password" class="settings-input" id="setting-key" placeholder="Enter API Key...">
       <div id="help-api-key" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Required for standalone providers (Gemini or OpenAI). Not needed for VS Code Copilot (Native).
+        Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.
       </div>
     </div>
 
@@ -2529,6 +2678,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const canvas = document.getElementById('canvas');
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
+    const btnRemoveProject = document.getElementById('btn-remove-project');
 
     // Settings Panel elements
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
@@ -2556,9 +2706,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         settingsTitle: '⚙️ 设置',
         language: '界面语言',
         provider: 'AI 服务',
+        removeProject: '删除项目',
         apiKey: 'API Key',
         apiKeyPlaceholder: '输入 API Key...',
-        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 VS Code Copilot 时不需要。',
+        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 Copilot、本地 Codex CLI 或 agy 生成路线图时不需要。',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
         testCli: '测试 CLI',
@@ -2588,9 +2739,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         settingsTitle: '⚙️ Solopreneur Settings',
         language: 'Language',
         provider: 'AI Provider',
+        removeProject: 'Remove project',
         apiKey: 'API Key',
         apiKeyPlaceholder: 'Enter API Key...',
-        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for VS Code Copilot.',
+        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
         testCli: 'Test CLI',
@@ -2646,6 +2798,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function applyLanguage() {
       setText('app-title', t('title'));
       btnAddProject.title = t('addProject');
+      btnRemoveProject.title = t('removeProject');
       setText('settings-title', t('settingsTitle'));
       setText('label-language', t('language'));
       setText('label-provider', t('provider'));
@@ -2678,7 +2831,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     });
 
     settingProvider.addEventListener('change', () => {
-      if (settingProvider.value === 'VS Code Copilot (Native)') {
+      if (
+        settingProvider.value === 'VS Code Copilot (Native)'
+        || settingProvider.value === 'Codex CLI (Local)'
+        || settingProvider.value === 'Antigravity CLI (Local)'
+      ) {
         apiKeyContainer.style.display = 'none';
       } else {
         apiKeyContainer.style.display = 'flex';
@@ -2714,7 +2871,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
 
-          if (settingProvider.value === 'VS Code Copilot (Native)') {
+          if (
+            settingProvider.value === 'VS Code Copilot (Native)'
+            || settingProvider.value === 'Codex CLI (Local)'
+            || settingProvider.value === 'Antigravity CLI (Local)'
+          ) {
             apiKeyContainer.style.display = 'none';
           } else {
             apiKeyContainer.style.display = 'flex';
@@ -2792,6 +2953,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     btnAddProject.addEventListener('click', () => {
       vscode.postMessage({ command: 'addProject' });
+    });
+
+    btnRemoveProject.addEventListener('click', () => {
+      if (!projectSelect.value) return;
+      vscode.postMessage({ command: 'removeProject', projectPath: projectSelect.value });
     });
 
     function renderProjects(projects, selectedProjectPath) {

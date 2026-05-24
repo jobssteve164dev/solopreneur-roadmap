@@ -1011,6 +1011,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         <option value="Gemini">Gemini</option>
         <option value="OpenAI">OpenAI</option>
         <option value="VS Code Copilot (Native)">VS Code Copilot (Native)</option>
+        <option value="Codex CLI (Local)">Codex CLI (Local)</option>
+        <option value="Antigravity CLI (Local)">Antigravity CLI (Local)</option>
       </select>
     </div>
 
@@ -1018,7 +1020,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       <label class="settings-lbl-title" id="label-api-key">API Key</label>
       <input type="password" class="settings-input" id="setting-key" placeholder="Enter API Key...">
       <div id="help-api-key" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Required for standalone providers (Gemini or OpenAI). Not needed for VS Code Copilot (Native).
+        Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.
       </div>
     </div>
 
@@ -1111,7 +1113,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         provider: 'AI 服务',
         apiKey: 'API Key',
         apiKeyPlaceholder: '输入 API Key...',
-        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 VS Code Copilot 时不需要。',
+        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 Copilot、本地 Codex CLI 或 agy 生成路线图时不需要。',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
         testCli: '测试 CLI',
@@ -1149,7 +1151,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         provider: 'AI Provider',
         apiKey: 'API Key',
         apiKeyPlaceholder: 'Enter API Key...',
-        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for VS Code Copilot.',
+        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
         testCli: 'Test CLI',
@@ -1230,7 +1232,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
 
     settingProvider.addEventListener('change', () => {
-      if (settingProvider.value === 'VS Code Copilot (Native)') {
+      if (
+        settingProvider.value === 'VS Code Copilot (Native)'
+        || settingProvider.value === 'Codex CLI (Local)'
+        || settingProvider.value === 'Antigravity CLI (Local)'
+      ) {
         apiKeyContainer.style.display = 'none';
       } else {
         apiKeyContainer.style.display = 'flex';
@@ -1266,7 +1272,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
           
-          if (settingProvider.value === 'VS Code Copilot (Native)') {
+          if (
+            settingProvider.value === 'VS Code Copilot (Native)'
+            || settingProvider.value === 'Codex CLI (Local)'
+            || settingProvider.value === 'Antigravity CLI (Local)'
+          ) {
             apiKeyContainer.style.display = 'none';
           } else {
             apiKeyContainer.style.display = 'flex';

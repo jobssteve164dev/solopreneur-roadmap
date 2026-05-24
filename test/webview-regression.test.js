@@ -149,6 +149,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'canvas',
     'project-select',
     'btn-add-project',
+    'btn-remove-project',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -178,6 +179,10 @@ test('full roadmap webview exposes node conversation history and language settin
   const script = extractLastScript(html);
 
   assert.match(html, /id="setting-language"/);
+  assert.match(html, /id="btn-remove-project"/);
+  assert.match(html, /removeProject/);
+  assert.match(html, /Codex CLI \(Local\)/);
+  assert.match(html, /Antigravity CLI \(Local\)/);
   assert.doesNotMatch(html, /id="ai-prompt"/);
   assert.doesNotMatch(html, /id="btn-generate"/);
   assert.match(script, /getNodeConversations/);
@@ -220,6 +225,8 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="portfolio-list"/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
+  assert.match(html, /Codex CLI \(Local\)/);
+  assert.match(html, /Antigravity CLI \(Local\)/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
 });
@@ -289,6 +296,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__clearStoredAgentSession = clearStoredAgentSession;',
       'module.exports.__extractUserSupplementFromExecutionOutput = extractUserSupplementFromExecutionOutput;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
+      'module.exports.__buildRoadmapGenerationSystemInstruction = buildRoadmapGenerationSystemInstruction;',
+      'module.exports.__resolveRoadmapProviderCli = resolveRoadmapProviderCli;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
     ].join('\n')
@@ -372,6 +381,9 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('In Progress'));
   assert.ok(shellScript.finalCommand.includes('markCompleted'));
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
+  assert.match(extensionModule.__buildRoadmapGenerationSystemInstruction('codex'), /"agentCli": "codex"/);
+  assert.equal(extensionModule.__resolveRoadmapProviderCli('Codex CLI (Local)', 'agy'), 'codex');
+  assert.equal(extensionModule.__resolveRoadmapProviderCli('Antigravity CLI (Local)', 'codex'), 'agy');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     "'agy' --print --print-timeout=30m --add-dir='/workspace/app' 'Ship the MVP'",
