@@ -554,6 +554,14 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await handleRetryConversation(context, message.nodeId, Number(message.conversationId || 0));
           break;
 
+        case 'showAgentTerminal':
+          showAgentTerminal();
+          break;
+
+        case 'stopAgentRun':
+          await stopAgentRun(message.nodeId, Number(message.conversationId || 0));
+          break;
+
         case 'openProjectFile':
           if (activeProjectRoot && message.relativePath) {
             const candidatePath = path.resolve(activeProjectRoot, String(message.relativePath));
@@ -1363,12 +1371,15 @@ function buildAgentShellScript(
   const agentProvider = getAgentProvider(agentCli);
   const sessionKey = getAgentSessionKey(agentCli);
   const sessionMode = nativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
+  const startedAt = new Date().toISOString();
   const commandPreview = `${agentCli} [${sessionMode}]`;
   const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
   const executionCommand = directExecutionCommand || buildAgentCommandFromShellVar(agentCli, 'agent_prompt', workspaceRoot);
-  const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
-  const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
-  const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
+  const statusBase = { nodeId, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
+  const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
+  const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
+  const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
+  const noChangesStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'no_deliverable_changes', failureReason: 'Agent exited without project file changes or a completion decision.' });
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
@@ -1388,8 +1399,7 @@ function buildAgentShellScript(
     sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
-    `if [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; fi`,
-    `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
+    `if [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
 
@@ -1510,6 +1520,82 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
   ];
 }
 
+function postNodeConversations(nodeId: string): void {
+  if (syncEngine && activePanel) {
+    activePanel.webview.postMessage({
+      command: 'nodeConversationsLoaded',
+      nodeId,
+      conversations: syncEngine.getAgentExecutions(nodeId),
+      projectPath: activeProjectRoot || ''
+    });
+  }
+}
+
+function showAgentTerminal(): void {
+  const terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
+  if (terminal) {
+    terminal.show(true);
+    return;
+  }
+  vscode.window.showInformationMessage('No active SoloMap Agent terminal is available.');
+}
+
+function readAgentStatus(statusFilePath: string): any | null {
+  if (!fs.existsSync(statusFilePath)) {
+    return null;
+  }
+  try {
+    const content = fs.readFileSync(statusFilePath, 'utf8').trim();
+    return content ? JSON.parse(content) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function stopAgentRun(nodeId: string, conversationId: number): Promise<void> {
+  if (!syncEngine || !activeProjectRoot || !nodeId) {
+    return;
+  }
+  const statusFilePath = path.join(activeProjectRoot, '.agent_status.json');
+  const runningStatus = readAgentStatus(statusFilePath);
+  const conversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId));
+  if (!conversation || conversation.status !== 'Running') {
+    vscode.window.showInformationMessage('This Agent conversation is no longer running.');
+    return;
+  }
+
+  const terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
+  terminal?.dispose();
+  const failureReason = 'Stopped by user.';
+  const finishedAt = new Date().toISOString();
+  if (runningStatus && runningStatus.nodeId === nodeId && Number(runningStatus.executionLogId) === Number(conversationId)) {
+    if (runningStatus.outputFilePath) {
+      fs.appendFileSync(runningStatus.outputFilePath, '\nSoloMap: Task stopped by user.\n', 'utf8');
+    }
+    fs.writeFileSync(statusFilePath, JSON.stringify({
+      ...runningStatus,
+      status: 'Failed',
+      failureCode: 'stopped_by_user',
+      failureReason,
+      finishedAt
+    }), 'utf8');
+    await processAgentStatusFile(statusFilePath);
+    return;
+  }
+
+  syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+  syncEngine.updateAgentExecution(
+    conversationId,
+    conversation.agentCli,
+    conversation.command,
+    `${conversation.output}\n\nFailure category: stopped_by_user\n\nFailure reason:\n${failureReason}\n\nRun finished at: ${finishedAt}`,
+    'Failed'
+  );
+  sendNodesToWebview();
+  postNodeConversations(nodeId);
+  vscode.window.showInformationMessage(`Agent task [${nodeId}] was stopped.`);
+}
+
 /**
  * Executes a CLI agent in the integrated terminal.
  */
@@ -1543,6 +1629,11 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     return;
   }
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
+  const runningNode = nodes.find((candidate) => candidate.status === 'Running');
+  if (runningNode) {
+    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before starting a new one.');
+    return;
+  }
 
   // Resolve CLI path from config if applicable
   const settings = getPersistedSettings(context);
@@ -1552,7 +1643,22 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath).join(', ');
-    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}. Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
+    const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
+    syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    syncEngine.logAgentExecution(
+      nodeId,
+      requestedAgentCli || agentCli,
+      requestedAgentCli || agentCli,
+      [
+        userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
+        'Failure category: cli_not_found',
+        `Failure reason:\n${failureReason}`
+      ].filter(Boolean).join('\n\n'),
+      'Failed'
+    );
+    sendNodesToWebview();
+    postNodeConversations(nodeId);
+    vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
 
@@ -1595,6 +1701,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   const launchSummary = [
     'Agent conversation started.',
+    `Run started at: ${new Date().toISOString()}`,
     nativeSessionId
       ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
       : `Starting a new native ${getAgentProvider(agentCli)} session.`,
@@ -1608,14 +1715,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     launchSummary,
     'Running'
   );
-  if (activePanel) {
-    activePanel.webview.postMessage({
-      command: 'nodeConversationsLoaded',
-      nodeId,
-      conversations: syncEngine.getAgentExecutions(nodeId),
-      projectPath: activeProjectRoot || ''
-    });
-  }
+  postNodeConversations(nodeId);
 
   const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId);
 
@@ -1721,7 +1821,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode } = statusData;
+    const { nodeId, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
@@ -1729,6 +1829,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     let nextStatus = status as RoadmapNode['status'];
     let completionReason = '';
+    let failureCode = String(statusData.failureCode || '').trim();
+    let failureReason = String(statusData.failureReason || '').trim();
     const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
     if (status === 'In Progress' && completionDecisionFilePath && fs.existsSync(completionDecisionFilePath)) {
       try {
@@ -1738,6 +1840,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           completionReason = completionDecision.reason || 'Agent marked this roadmap step complete.';
         }
       } catch (error) {
+        nextStatus = 'Failed';
+        failureCode = 'completion_state_invalid';
+        failureReason = 'Agent completion decision file could not be parsed.';
         completionReason = 'Agent completion decision file could not be parsed.';
       }
     }
@@ -1754,6 +1859,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       if (!validation.valid) {
         nextStatus = 'Failed';
         completionReason = validation.reason;
+        failureCode = 'roadmap_validation_failed';
+        failureReason = validation.reason;
       } else {
         shouldWriteNodeStatus = false;
         shouldRefreshRoadmap = true;
@@ -1788,6 +1895,13 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const resolvedCommand = commandFilePath && fs.existsSync(commandFilePath)
       ? fs.readFileSync(commandFilePath, 'utf8').trim()
       : command || commandPreview || 'Completed execution in terminal';
+    if (nextStatus === 'Failed' && !failureReason) {
+      failureCode = failureCode || 'agent_exit_failed';
+      failureReason = completionReason || 'Agent CLI exited before completing this task.';
+    }
+    const finishedAt = new Date().toISOString();
+    const startedTime = startedAt ? Date.parse(String(startedAt)) : NaN;
+    const runDurationMs = Number.isFinite(startedTime) ? Math.max(0, Date.now() - startedTime) : 0;
     const handoffEntry = workspaceRoot
       ? buildRunHandoffEntry(
         nextStatus,
@@ -1805,6 +1919,11 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       nativeSessionSummary,
       `Sentinel captured state: ${status}`,
       `Roadmap step state: ${nextStatus}`,
+      startedAt ? `Run started at: ${startedAt}` : '',
+      `Run finished at: ${finishedAt}`,
+      startedAt ? `Run duration ms: ${runDurationMs}` : '',
+      failureCode ? `Failure category: ${failureCode}` : '',
+      failureReason ? `Failure reason:\n${failureReason}` : '',
       completionReason ? `Completion decision: ${completionReason}` : '',
       stepHandoffSummary ? `Step handoff summary updated: ${getStepMemoryFilePath(workspaceRoot, nodeId)}` : '',
       `Workspace changes:`,
@@ -1837,14 +1956,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     sendNodesToWebview();
-    if (activePanel) {
-      activePanel.webview.postMessage({
-        command: 'nodeConversationsLoaded',
-        nodeId,
-        conversations: syncEngine.getAgentExecutions(nodeId),
-        projectPath: activeProjectRoot || ''
-      });
-    }
+    postNodeConversations(nodeId);
     if (nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
     } else {
@@ -1852,7 +1964,11 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     setTimeout(() => {
-      if (fs.existsSync(statusFilePath)) {
+      const currentStatus = readAgentStatus(statusFilePath);
+      const belongsToProcessedRun = currentStatus
+        && Number(currentStatus.executionLogId || 0) === Number(executionLogId || 0)
+        && String(currentStatus.status || '') === String(status || '');
+      if (belongsToProcessedRun && fs.existsSync(statusFilePath)) {
         fs.unlinkSync(statusFilePath);
       }
     }, 1000);
@@ -2437,6 +2553,32 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       transform: none;
     }
 
+    .conversation-control-btn {
+      background: rgba(56, 189, 248, 0.10);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      color: #d7f3ff;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .conversation-control-btn.stop {
+      background: rgba(255, 23, 68, 0.10);
+      border-color: rgba(255, 23, 68, 0.32);
+      color: #ffd7df;
+    }
+
+    .conversation-control-btn:hover {
+      background: rgba(56, 189, 248, 0.20);
+    }
+
+    .conversation-control-btn.stop:hover {
+      background: rgba(255, 23, 68, 0.20);
+    }
+
     .conversation-cli {
       color: #38bdf8;
       font-weight: 700;
@@ -2447,6 +2589,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     .conversation-time {
       color: var(--text-muted);
+      font-size: 11px;
+    }
+
+    .conversation-runtime {
+      color: #38bdf8;
       font-size: 11px;
     }
 
@@ -2464,6 +2611,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       padding: 10px;
       color: var(--text-muted);
       font-size: 12px;
+    }
+
+    .conversation-outcome {
+      margin: 0 0 10px;
+      padding: 8px 9px;
+      border-radius: 6px;
+      background: rgba(56, 189, 248, 0.08);
+      color: var(--text-main);
+      line-height: 1.45;
+    }
+
+    .conversation-outcome.failed {
+      background: rgba(255, 23, 68, 0.10);
+      color: #ffd7df;
     }
 
     .conversation-detail pre {
@@ -2785,6 +2946,25 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeAttachment: '移除',
         send: '发送',
         retry: '重试',
+        openTerminal: '打开终端',
+        stopRun: '停止',
+        elapsed: '已运行',
+        duration: '耗时',
+        runResult: '本轮结果',
+        stillWorking: 'Agent 正在执行这次对话。',
+        awaitingNextConversation: '本轮已结束，环节仍可继续推进。',
+        stepCompleted: 'Agent 判断该环节已完成。',
+        changedCount: '本轮修改文件数',
+        agentConclusion: 'Agent 结论',
+        failureLabel: '失败原因',
+        failureCategories: {
+          cli_not_found: '未找到所选 Agent CLI。',
+          stopped_by_user: '任务已由用户停止。',
+          no_deliverable_changes: 'Agent 已退出，但没有检测到文件修改或完成判断。',
+          roadmap_validation_failed: '生成的路线图未通过结构校验。',
+          completion_state_invalid: 'Agent 返回的完成状态无法读取。',
+          agent_exit_failed: 'Agent CLI 在交付任务前退出。'
+        },
         command: '命令',
         output: '输出',
         changedFiles: '修改文件',
@@ -2820,6 +3000,25 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeAttachment: 'Remove',
         send: 'Send',
         retry: 'Retry',
+        openTerminal: 'Open terminal',
+        stopRun: 'Stop',
+        elapsed: 'Elapsed',
+        duration: 'Duration',
+        runResult: 'Run result',
+        stillWorking: 'The Agent is running this conversation.',
+        awaitingNextConversation: 'This run ended; the step can continue.',
+        stepCompleted: 'The Agent marked this step complete.',
+        changedCount: 'Files changed in this run',
+        agentConclusion: 'Agent conclusion',
+        failureLabel: 'Failure reason',
+        failureCategories: {
+          cli_not_found: 'The selected Agent CLI was not found.',
+          stopped_by_user: 'The task was stopped by the user.',
+          no_deliverable_changes: 'The Agent exited without detected file changes or a completion decision.',
+          roadmap_validation_failed: 'The generated roadmap failed structure validation.',
+          completion_state_invalid: 'The Agent completion state could not be read.',
+          agent_exit_failed: 'The Agent CLI exited before delivering the task.'
+        },
         command: 'Command',
         output: 'Output',
         changedFiles: 'Changed Files',
@@ -2842,6 +3041,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     function statusClass(status) {
       return String(status || '').replace(/[^a-zA-Z0-9]/g, '-');
+    }
+
+    function failureCategoryText(category) {
+      return (i18n[currentLanguage].failureCategories || {})[category] || '';
     }
 
     function setText(id, value) {
@@ -2903,6 +3106,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
     vscode.postMessage({ command: 'getProjects' });
+    if (typeof setInterval === 'function') {
+      setInterval(() => {
+        if (expandedNodeId && currentNodes.some(node => node.status === 'Running')) {
+          renderRoadmap(currentNodes);
+        }
+      }, 1000);
+    }
 
     // Handle messages from Extension Host
     window.addEventListener('message', event => {
@@ -3171,6 +3381,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             });
           });
         });
+        row.querySelectorAll('[data-show-agent-terminal]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            vscode.postMessage({ command: 'showAgentTerminal' });
+          });
+        });
+        row.querySelectorAll('[data-stop-agent-run]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            vscode.postMessage({
+              command: 'stopAgentRun',
+              nodeId: node.id,
+              conversationId: item.getAttribute('data-stop-agent-run')
+            });
+          });
+        });
         row.querySelectorAll('[data-open-file-path]').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -3193,8 +3419,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const open = activeConversationId === conversationId;
         const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
         const summary = summarizeConversation(conversation);
+        const duration = formatConversationDuration(conversation);
+        const runtimeLabel = duration
+          ? (conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration
+          : '';
         const retryButton = conversation.status === 'Failed'
           ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
+          : '';
+        const runningButtons = conversation.status === 'Running'
+          ? \`
+            <button class="conversation-control-btn" data-show-agent-terminal title="\${escapeHtml(t('openTerminal'))}">\${t('openTerminal')}</button>
+            <button class="conversation-control-btn stop" data-stop-agent-run="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${t('stopRun')}</button>
+          \`
           : '';
         return \`
           <div class="conversation-item" data-conversation-id="\${escapeHtml(conversationId)}">
@@ -3203,14 +3439,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 <span class="conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
                 <span class="conversation-summary">\${escapeHtml(summary)}</span>
                 <span class="conversation-time">\${escapeHtml(when)}</span>
+                \${runtimeLabel ? \`<span class="conversation-runtime">\${escapeHtml(runtimeLabel)}</span>\` : ''}
               </div>
               <div class="conversation-actions">
+                \${runningButtons}
                 \${retryButton}
                 <span class="status-badge \${statusClass(conversation.status)}">\${statusText(conversation.status)}</span>
               </div>
             </div>
             \${open ? \`
               <div class="conversation-detail">
+                \${renderConversationOutcome(conversation)}
                 \${renderConversationFiles(conversation)}
                 <strong>\${t('command')}</strong>
                 <pre>\${escapeHtml(conversation.command)}</pre>
@@ -3222,6 +3461,71 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         \`;
       }).join('');
       return '<div class="conversation-list">' + items + '</div>';
+    }
+
+    function formatDurationMs(durationMs) {
+      const seconds = Math.max(0, Math.floor(Number(durationMs || 0) / 1000));
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const remainder = seconds % 60;
+      if (hours > 0) return hours + 'h ' + minutes + 'm';
+      if (minutes > 0) return minutes + 'm ' + remainder + 's';
+      return remainder + 's';
+    }
+
+    function formatConversationDuration(conversation) {
+      const output = String(conversation.output || '');
+      const storedDuration = output.match(/Run duration ms:\\s*(\\d+)/);
+      if (storedDuration) {
+        return formatDurationMs(Number(storedDuration[1]));
+      }
+      if (conversation.status !== 'Running' || !conversation.timestamp) {
+        return '';
+      }
+      return formatDurationMs(Date.now() - new Date(conversation.timestamp).getTime());
+    }
+
+    function renderConversationOutcome(conversation) {
+      const output = String(conversation.output || '');
+      const failureCategory = (output.match(/Failure category:\\s*([^\\n]+)/) || [])[1] || '';
+      const failureReason = (output.match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
+      const files = extractConversationFiles(output);
+      let result = '';
+      if (conversation.status === 'Running') {
+        result = t('stillWorking');
+      } else if (conversation.status === 'Failed') {
+        result = failureCategoryText(failureCategory.trim()) || failureReason.trim() || statusText(conversation.status);
+      } else if (conversation.status === 'Completed') {
+        result = t('stepCompleted');
+      } else {
+        result = t('awaitingNextConversation');
+      }
+      if (files.length > 0 && conversation.status !== 'Running') {
+        result += ' ' + t('changedCount') + ': ' + files.length + '.';
+      }
+      const label = conversation.status === 'Failed' ? t('failureLabel') : t('runResult');
+      const conclusion = conversation.status === 'Running' ? '' : extractAgentConclusion(output);
+      return \`
+        <div class="conversation-outcome \${conversation.status === 'Failed' ? 'failed' : ''}">
+          <strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}
+          \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
+        </div>
+      \`;
+    }
+
+    function extractAgentConclusion(output) {
+      const match = String(output || '').match(/Agent output tail:\\n([\\s\\S]*)$/);
+      if (!match || !match[1]) {
+        return '';
+      }
+      return match[1]
+        .split('\\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('SoloMap:'))
+        .slice(-3)
+        .join(' ')
+        .replace(/\\s+/g, ' ')
+        .slice(0, 240);
     }
 
     function renderAgentOptions(node) {
