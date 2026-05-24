@@ -43,7 +43,7 @@ const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
 
 export async function activate(context: vscode.ExtensionContext) {
-  console.log('Solopreneur Roadmaps extension is now active!');
+  console.log('SoloMap extension is now active!');
 
   // Register command to show roadmap webview
   const showRoadmapDisposable = vscode.commands.registerCommand(
@@ -220,14 +220,14 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
 
 function buildSolopreneurDirectoryReadme(): string {
   return [
-    '# Solopreneur Project Data',
+    '# SoloMap Project Data',
     '',
-    '这个目录由 Solopreneur Roadmap 插件自动创建，用来保存当前项目的路线图、Agent 对话记录、执行日志和环节交接总结。',
+    '这个目录由 SoloMap 自动创建，用来保存当前项目的路线图、Agent 对话记录、执行日志和环节交接总结。',
     '',
     '## 为什么数据放在项目里',
     '',
     '- 项目数据跟随项目文件夹走，不依赖插件后端服务。',
-    '- 换一台机器、换一个 IDE、重新安装插件后，只要项目文件还在，Solopreneur 就能重新加载这些数据。',
+    '- 换一台机器、换一个 IDE、重新安装插件后，只要项目文件还在，SoloMap 就能重新加载这些数据。',
     '- 这个目录可以交给 Git/GitHub 管理，让路线图、交接总结和执行记录成为项目历史的一部分。',
     '',
     '## 主要文件',
@@ -241,11 +241,11 @@ function buildSolopreneurDirectoryReadme(): string {
     '',
     '## 请不要随意删除',
     '',
-    '删除这个目录会导致 Solopreneur 无法恢复该项目的路线图、状态、对话历史和环节交接总结。需要清理体积时，优先只清理 `agent-runs/` 中很旧的运行记录，并保留 `roadmap.csv` 和 `step-memory/`。',
+    '删除这个目录会导致 SoloMap 无法恢复该项目的路线图、状态、对话历史和环节交接总结。需要清理体积时，优先只清理 `agent-runs/` 中很旧的运行记录，并保留 `roadmap.csv` 和 `step-memory/`。',
     '',
     '## Git 建议',
     '',
-    '如果你希望项目在多台机器或多个 IDE 间保持一致，可以把 `.solopreneur/` 提交到 Git。这样 Solopreneur 的项目上下文会跟项目代码一起迁移。'
+    '如果你希望项目在多台机器或多个 IDE 间保持一致，可以把 `.solopreneur/` 提交到 Git。这样 SoloMap 的项目上下文会跟项目代码一起迁移。'
   ].join('\n');
 }
 
@@ -334,7 +334,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
   }
 
   const confirmed = await vscode.window.showWarningMessage(
-    `从 Solopreneur 中删除项目“${project.name}”？这只会删除该项目里的 .solopreneur 文件夹，并把项目从插件列表中移除，不会删除项目本身的代码文件夹。`,
+    `从 SoloMap 中删除项目“${project.name}”？这只会删除该项目里的 .solopreneur 文件夹，并把项目从插件列表中移除，不会删除项目本身的代码文件夹。`,
     { modal: true },
     '确认删除'
   );
@@ -371,7 +371,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
 
   sendProjectsToWebviews(context);
   sendNodesToWebview();
-  vscode.window.showInformationMessage(`Solopreneur 已移除项目“${project.name}”。项目文件夹本身未删除。`);
+  vscode.window.showInformationMessage(`SoloMap 已移除项目“${project.name}”。项目文件夹本身未删除。`);
 }
 
 function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
@@ -445,7 +445,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
   // Create Webview Panel
   activePanel = vscode.window.createWebviewPanel(
     'solopreneurRoadmap',
-    'Solopreneur AI Roadmap',
+    'SoloMap: AI Roadmap & Agent Task Flow',
     vscode.ViewColumn.One,
     {
       enableScripts: true,
@@ -515,7 +515,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
             cliPath: message.cliPath,
             language: message.language
           });
-          vscode.window.showInformationMessage('Solopreneur settings saved successfully!');
+          vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
           vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
           break;
@@ -1193,7 +1193,7 @@ function buildAgentConversationPrompt(
   const memoryFileDisplay = toProjectRelativeRuntimePath(workspaceRoot, memoryFile);
   const runsDirDisplay = toProjectRelativeRuntimePath(workspaceRoot, runsDir);
   const memoryInstructions = [
-    '开始前必须先读取 Solopreneur 为本环节保存的项目上下文文件：',
+    '开始前必须先读取 SoloMap 为本环节保存的项目上下文文件：',
     `- 环节交接 JSON：${memoryFileDisplay}`,
     `- 环节运行记录目录：${runsDirDisplay}`,
     '如果文件或目录不存在，说明这是该环节的早期对话，继续执行本轮任务即可。',
@@ -1223,7 +1223,7 @@ function buildAgentConversationPrompt(
     : '';
 
   return [
-    '你正在 Solopreneur Roadmap 的一个路线图环节中工作。',
+    '你正在 SoloMap 的一个路线图环节中工作。',
     '请把这次调用当成该环节的一次 agent 对话，而不是必须一次性完成整个环节。',
     '这是本次调用的唯一任务。不要执行与本环节无关的仓库记忆、历史会话或其他待办事项。',
     '',
@@ -1304,7 +1304,7 @@ function buildAgentShellScript(
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
     `if grep -qi 'timed out waiting for response\\|Error: timed out' ${shellQuote(outputFilePath)} 2>/dev/null; then status=124; fi`,
-    `if [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSolopreneur: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; fi`,
+    `if [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; fi`,
     `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
@@ -1464,7 +1464,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath).join(', ');
-    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}. Set Solopreneur CLI Command or Path to an installed executable such as agy or codex.`);
+    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}. Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
 
@@ -1473,10 +1473,10 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   sendNodesToWebview();
 
   // Create or retrieve agent terminal
-  let terminal = vscode.window.terminals.find((t) => t.name === 'Solopreneur Agent Console');
+  let terminal = vscode.window.terminals.find((t) => t.name === 'SoloMap Agent Console');
   if (!terminal) {
     terminal = vscode.window.createTerminal({
-      name: 'Solopreneur Agent Console',
+      name: 'SoloMap Agent Console',
       iconPath: new vscode.ThemeIcon('robot'),
       cwd: workspaceRoot,
     });
@@ -1802,16 +1802,18 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
 function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContext): string {
   // In MVP, we embed a fully functional React + CSS app direct inside the iframe
   // which uses modern styling guidelines (glassmorphism, glowing connections, inter font).
+  const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Solopreneur Roadmap</title>
+  <title>SoloMap</title>
   <!-- Load Inter & Outfit Fonts Asynchronously (Prevent network blocks on slow connections) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" media="print" onload="this.media='all'">
+  <link rel="stylesheet" href="${codiconsUri}">
   <noscript>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
   </noscript>
@@ -1929,6 +1931,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       cursor: pointer;
       font-family: inherit;
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .codicon {
+      font-size: 16px;
+      line-height: 1;
+    }
+
+    .brand-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
 
     button:hover {
@@ -2475,7 +2488,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       border: none;
       cursor: pointer;
       color: var(--text-muted);
-      font-size: 20px;
       padding: 4px;
       display: flex;
       align-items: center;
@@ -2492,12 +2504,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 <body>
   <div class="app-container">
     <header>
-      <h1 id="app-title">🎯 Solopreneur AI Roadmap</h1>
+      <h1 class="brand-title"><span class="codicon codicon-map"></span><span id="app-title">SoloMap</span></h1>
       <div class="controls">
         <select class="project-select" id="project-select"></select>
-        <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
-        <button class="btn-project-remove" id="btn-remove-project" title="Remove project">−</button>
-        <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
+        <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
+        <button class="btn-project-remove" id="btn-remove-project" title="Remove project"><span class="codicon codicon-trash"></span></button>
+        <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
       </div>
     </header>
 
@@ -2510,8 +2522,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
-      <h3 id="settings-title">⚙️ Solopreneur Settings</h3>
-      <button class="btn-close-settings" id="btn-close-settings">×</button>
+      <h3><span class="codicon codicon-settings-gear"></span> <span id="settings-title">SoloMap Settings</span></h3>
+      <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
     <div class="settings-field">
@@ -2531,8 +2543,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-actions">
-      <button class="settings-action-btn test-btn" id="btn-test-cli">⚡ <span id="text-test-cli">Test CLI</span></button>
-      <button class="settings-action-btn save-btn" id="btn-save-settings">💾 <span id="text-save-settings">Save</span></button>
+      <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
+      <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
     </div>
     <div class="cli-badge" id="cli-test-badge" style="display:none;"></div>
   </div>
@@ -2562,9 +2574,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const nodeConversations = {};
     const i18n = {
       zh: {
-        title: '🎯 独立项目 AI 路线图',
+        title: 'SoloMap',
         addProject: '添加项目文件夹',
-        settingsTitle: '⚙️ 设置',
+        settingsTitle: 'SoloMap 设置',
         language: '界面语言',
         removeProject: '删除项目',
         cliPath: 'Agent CLI 命令或路径',
@@ -2591,9 +2603,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败' }
       },
       en: {
-        title: '🎯 Solopreneur AI Roadmap',
+        title: 'SoloMap',
         addProject: 'Add project folder',
-        settingsTitle: '⚙️ Solopreneur Settings',
+        settingsTitle: 'SoloMap Settings',
         language: 'Language',
         removeProject: 'Remove project',
         cliPath: 'CLI Command or Path',

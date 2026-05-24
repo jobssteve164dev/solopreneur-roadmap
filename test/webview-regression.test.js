@@ -8,6 +8,24 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 
+function createUri(value) {
+  return {
+    fsPath: value,
+    path: value,
+    toString() {
+      return value;
+    }
+  };
+}
+
+function createWebviewStub() {
+  return {
+    asWebviewUri(uri) {
+      return String(uri && (uri.fsPath || uri.path || uri));
+    }
+  };
+}
+
 function loadCompiledModule(relativePath, exportPatch) {
   const filename = path.join(projectRoot, relativePath);
   const source = fs.readFileSync(filename, 'utf8') + `\n${exportPatch}`;
@@ -18,7 +36,14 @@ function loadCompiledModule(relativePath, exportPatch) {
     module,
     require: (id) => {
       if (id === 'vscode') {
-        return {};
+        return {
+          Uri: {
+            file: createUri,
+            joinPath(base, ...segments) {
+              return createUri(path.join(base.fsPath || base.path || String(base), ...segments));
+            }
+          }
+        };
       }
       if (id.startsWith('./')) {
         return {};
@@ -85,13 +110,25 @@ function runScriptWithMinimalDom(script, ids) {
   return { elements, postedMessages };
 }
 
+test('extension manifest uses SoloMap visible branding', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
+
+  assert.equal(manifest.displayName, 'SoloMap: AI Roadmap & Agent Task Flow');
+  assert.equal(manifest.description, 'Turn project ideas into AI roadmaps and local agent task flows in VS Code.');
+  assert.equal(manifest.contributes.commands[0].title, 'SoloMap: Show AI Roadmap');
+  assert.equal(manifest.contributes.commands[0].category, 'SoloMap');
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].title, 'SoloMap');
+  assert.equal(manifest.contributes.views['solopreneur-sidebar-container'][0].name, 'SoloMap');
+  assert.equal(manifest.contributes.configuration.title, 'SoloMap Settings');
+});
+
 test('sidebar webview runtime script parses and opens settings panel', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     ''
   );
   const provider = new SolopreneurSidebarProvider(
-    {},
+    createUri(projectRoot),
     { getNodes: () => [] },
     async () => {},
     () => ({ cliPath: 'codex', language: 'zh' }),
@@ -100,7 +137,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     async () => {},
     async () => {}
   );
-  const html = provider._getHtmlForWebview({});
+  const html = provider._getHtmlForWebview(createWebviewStub());
   const script = extractLastScript(html);
 
   assert.doesNotThrow(() => new vm.Script(script));
@@ -136,7 +173,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'out/extension.js',
     'module.exports.__getWebviewHtml = getWebviewHtml;'
   );
-  const html = extensionModule.__getWebviewHtml({}, { extensionPath: projectRoot });
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const script = extractLastScript(html);
 
   assert.doesNotThrow(() => new vm.Script(script));
@@ -168,7 +205,7 @@ test('full roadmap webview exposes node conversation history and language settin
     'out/extension.js',
     'module.exports.__getWebviewHtml = getWebviewHtml;'
   );
-  const html = extensionModule.__getWebviewHtml({}, { extensionPath: projectRoot });
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const script = extractLastScript(html);
 
   assert.match(html, /id="setting-language"/);
@@ -201,7 +238,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
     ''
   );
   const provider = new SolopreneurSidebarProvider(
-    {},
+    createUri(projectRoot),
     { getNodes: () => [] },
     async () => {},
     () => ({ cliPath: 'codex', language: 'zh' }),
@@ -210,7 +247,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
     async () => {},
     async () => {}
   );
-  const html = provider._getHtmlForWebview({});
+  const html = provider._getHtmlForWebview(createWebviewStub());
 
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
@@ -416,7 +453,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(prompt, /Use a small smoke test/);
   assert.match(prompt, /最高优先级规则/);
   assert.match(prompt, /唯一最高优先级指令/);
-  assert.match(prompt, /必须先读取 Solopreneur 为本环节保存的项目上下文文件/);
+  assert.match(prompt, /必须先读取 SoloMap 为本环节保存的项目上下文文件/);
   assert.match(prompt, /\.solopreneur\/step-memory\/2\.json/);
   assert.match(prompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(prompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
@@ -425,7 +462,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(prompt, /markCompleted/);
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /唯一任务/);
-  assert.match(prompt, /Solopreneur Roadmap/);
+  assert.match(prompt, /SoloMap/);
 
   const followupPrompt = extensionModule.__buildAgentConversationPrompt(
     {
@@ -583,7 +620,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
 
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
   const bootstrapInstructions = extensionModule.__buildBootstrapRoadmapInstructions('codex');
-  assert.match(dataReadme, /Solopreneur Project Data/);
+  assert.match(dataReadme, /SoloMap Project Data/);
   assert.match(dataReadme, /roadmap\.csv/);
   assert.match(dataReadme, /step-memory/);
   assert.match(dataReadme, /step-sessions/);
@@ -598,7 +635,7 @@ test('failed conversations render retry action in roadmap webview', () => {
     'out/extension.js',
     'module.exports.__getWebviewHtml = getWebviewHtml;'
   );
-  const html = extensionModule.__getWebviewHtml({}, { extensionPath: projectRoot });
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
 
   assert.match(html, /conversation-retry-btn/);
   assert.match(html, /Retry|重试/);

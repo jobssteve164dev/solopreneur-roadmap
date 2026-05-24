@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="resources/logo.png" width="150" height="150" alt="Solopreneur AI Roadmap Logo" />
+  <img src="resources/logo.png" width="150" height="150" alt="SoloMap Logo" />
 </p>
 
-<h1 align="center">🎯 Solopreneur AI Roadmap</h1>
+<h1 align="center">SoloMap: AI Roadmap & Agent Task Flow</h1>
 
 <p align="center">
-  <strong>独立开发者与一人公司的全生命周期 AI 导航仪 ＆ 智能体编排引擎</strong>
+  <strong>Turn your project idea into a roadmap your local AI agents can execute.</strong>
 </p>
 
 <p align="center">
@@ -16,93 +16,81 @@
 
 ---
 
-## 💡 为什么选择 Solopreneur AI Roadmap？
+## 为什么选择 SoloMap？
 
-对于**独立开发者（Solopreneurs）**与**一人公司**而言，最奢侈的资源就是**时间与执行焦距**。我们常常在海量的任务中迷失方向，或者在调用各种繁琐的 AI 智能体时感到流程支离破碎。
+SoloMap 是一个本地优先的 VS Code 插件，用路线图管理项目推进，用本地 Agent CLI 执行每个环节的具体任务。
 
-**Solopreneur AI Roadmap** 彻底改变了这一切。它是一个直接嵌入您 VS Code 侧边栏的交互式项目生命周期导航面板。只需输入您的产品创意，AI 便会瞬间为您规划出清晰的里程碑图谱。更重要的是，您可以直接指派本地安装的 AI 智能体 CLI，让它们在 VS Code 集成终端中为您攻坚克难，自动推进项目状态。
-
----
-
-## ✨ 核心亮点
-
-### 🎨 1. 顶奢级极客视觉美学
-*   **玻璃拟态面板**：采用最前沿的毛玻璃微透卡片视觉（`backdrop-filter: blur(10px)`），全局适配 VS Code 原生配色。
-*   **状态呼吸流光**：节点状态一目了然：
-    *   `Pending (等待)`：精致优雅的极简白灰边框。
-    *   `Running (执行中)`：炫酷的**青蓝霓虹流光发光与呼吸阴影**。
-    *   `Completed (已完成)`：带成功勾选标记的翡翠绿光环。
-    *   `Failed (失败)`：警示度极高的霓虹红霓虹边缘。
-*   **光流连接连线**：连接节点的 SVG 路径具有流光传送微交互动效，直观呈现项目里程碑的演进轨迹。
-
-### 💾 2. 完美的 Git 友好双轨存储 (CSV + SQLite)
-*   **纯文本 CSV 真实源** (`roadmap.csv`)：项目节点、依赖与执行状态保存在极简的文本 CSV 文件中。每当项目产生阶段性进展，`git diff` 会呈现单行级文本变更，**彻底规避二进制合并冲突**，天然便于版本控制。
-*   **WASM SQLite 高性能日志库** (`project_journal.db`)：使用 `sql.js` WASM 运行层，零 C++ 编译负担。自动在本地存储详细的 Agent 控制台交互日志、AI 提示词历史及执行性能，保障高频关系检索。
-
-### 🤖 3. 终端智能体编排 (File Sentinel IPC)
-*   **集成终端无缝交互**：点击 `⚡ Run Agent` 直接唤起侧边交互终端，自动匹配执行本地智能体（如 `antigravity-cli`, `cursor-cli`, `gitops-cli` 等）。
-*   **文件哨兵异步互通**：使用轻量级的 `.agent_status.json` 文件作为进程通讯媒介，插件的原生文件系统监视器自动捕获智能体运行成果，自动将路线图推进至下一节点。
+它把“项目想法、路线图、Agent 对话、文件修改、任务状态、环节记忆”放在同一条工作流里：你选择项目文件夹，SoloMap 创建本地 `.solopreneur/` 项目数据目录；初始化路线图会包含“生成初始路线图”环节；随后你可以把项目要求交给本地 Agent，让它直接修改路线图 CSV，再按环节持续推进项目。
 
 ---
 
-## 🛠️ 极客架构全景
+## 核心能力
 
-```mermaid
-graph TD
-    subgraph VS Code Host
-        Extension[插件核心核心] <--> Webview[Webview: React Flow]
-        Extension <--> LLMEngine[AI 生成器: Gemini/OpenAI SDK]
-        Extension <--> CLIOrchestrator[CLI 终端调度引擎]
-        Extension <--> DbManager[本地同步引擎]
-    end
+### AI Roadmap
 
-    subgraph User Workspace
-        DbManager <--> CSV[roadmap.csv: Git 差分友好]
-        DbManager <--> SQLite[project_journal.db: WASM SQLite]
-        Git[Git 仓库] <--> CSV
-        Git <--> SQLite
-    end
+- 用路线图拆解项目从想法到交付的关键环节。
+- 默认初始化为可执行的 starter roadmap，并通过“生成初始路线图”环节让本地 Agent 按你的项目要求改写真实路线图。
+- 路线图保存在 `.solopreneur/roadmap.csv`，适合 Git 管理、审阅和跨设备迁移。
 
-    subgraph OS Processes
-        CLIOrchestrator <--> VSTerminal[VS Code 集成终端]
-        VSTerminal <--> AgentCLIs[本地 Agent CLI]
-    end
+### Agent Task Flow
 
-    CLIOrchestrator -. 哨兵状态监测 .-> SQLite
+- 每个路线图环节都可以展开为任务对话列表。
+- 你可以为单次任务补充要求，并选择本地 Agent CLI 执行。
+- SoloMap 会记录 Agent 输入、输出、状态、修改文件列表和重试入口。
+- 环节记忆保存在 `.solopreneur/step-memory/`，Agent 每次工作前都会被要求读取当前环节上下文。
+
+### Local-First Project Data
+
+- 项目数据保存在项目文件夹内的 `.solopreneur/` 目录。
+- 你可以把 `.solopreneur/` 提交到 Git，让路线图、任务记录和环节记忆随项目一起流转。
+- 删除 SoloMap 中的项目只会移除该项目的 `.solopreneur/` 数据目录，不会删除项目代码文件夹。
+
+---
+
+## 快速开始
+
+1. 打开 VS Code 命令面板。
+2. 运行 `SoloMap: Show AI Roadmap`。
+3. 点击项目下拉框旁边的添加按钮，选择项目工作目录。
+4. 在初始化环节输入你的项目想法和要求，指派本地 Agent 生成初始路线图。
+5. 展开路线图环节，继续通过 Agent 对话推进项目交付。
+
+---
+
+## 本地 Agent CLI
+
+SoloMap 通过 VS Code 集成终端调用你本机已安装的 Agent CLI。当前链路重点支持 Antigravity `agy` 和 Codex CLI，也可以在设置中填写自定义 CLI 命令或绝对路径。
+
+如果 Agent CLI 没有被系统 PATH 识别，请在 SoloMap 设置里填写可执行文件路径。
+
+---
+
+## 数据位置
+
+SoloMap 会在每个项目根目录自动创建：
+
+```text
+.solopreneur/
+  README.md
+  roadmap.csv
+  project_journal.db
+  agent-runs/
+  step-memory/
 ```
 
----
-
-## 🚀 快速激活与使用指引
-
-### 1. 启动路线图
-1. 打开您的任意项目文件夹。
-2. 按下快捷键 `Ctrl + Shift + P`（macOS 上为 `Cmd + Shift + P`）唤起命令面板。
-3. 输入并运行命令：**`Solopreneur: Show AI Roadmap`**。
-4. 侧边栏及主视图将立刻为您载入一个精致的 6 阶段初始化路线图！
-
-### 2. 用 AI 生成定制项目图谱
-1. 在顶部输入框中键入您的业务创意（例如：“*开发一个带暗黑模式和 GitHub 登录的 Markdown 博客*”）。
-2. 点击 **Generate AI Roadmap (AI 生成路线图)**。
-3. 进度气泡自动显示，数秒内 AI 就会为您动态生成一套定制的任务里程碑有向无环图 (DAG)！
-
-### 3. 一键指派本地智能体
-1. 选择任意任务卡片，查看对应的 Agent 指令与 CLI。
-2. 点击 **`⚡ Run Agent`**，内置终端将自动浮现并开始执行 AI 生成的具体代码或文档任务。
-3. 节点将伴随青蓝发光显示为 `Running`。当终端运行结束，节点将自动闪烁呼吸翡翠绿并标记为 `Completed`，全自动流转！
+`.solopreneur/README.md` 会说明每类文件的用途。不要随意删除 `.solopreneur/roadmap.csv` 和 `.solopreneur/step-memory/`，否则该项目的路线图和环节上下文会丢失。
 
 ---
 
-## 🔒 隐私与安全性
+## 隐私
 
-*   **100% 本地优先**：除了您的 AI 生成请求（如使用 Gemini 官方接口）外，您的所有项目结构、任务描述、数据库及智能体输出日志**全部保留在您的本地电脑中**，绝不上传至任何第三方云端。您的代码与商业秘密绝对安全。
-*   **透明执行**：所有本地智能体指令均在 VS Code 内置终端中可视化公开运行，绝不在后台暗中执行，让您拥有完全的主权与掌控度。
+SoloMap 不需要后端服务。路线图、任务记录、Agent 日志和环节记忆默认都保存在你的项目本地文件夹中。Agent CLI 的实际联网、认证和模型调用行为由你本机安装的对应 CLI 决定。
 
 ---
 
-## 🤝 贡献与反馈
+## 反馈
 
-本插件由 **SZLK** 精心打造。如果您在使用过程中有任何反馈、功能建议或发现了 Bug，非常欢迎访问我们的 [GitHub 仓库](https://github.com/jobssteve164dev/solopreneur-roadmap) 提交 Issue 或 Pull Request！
+欢迎在 [GitHub 仓库](https://github.com/jobssteve164dev/solopreneur-roadmap) 提交 Issue 或 Pull Request。
 
-*   **项目官网**: [jobssteve164dev/solopreneur-roadmap](https://github.com/jobssteve164dev/solopreneur-roadmap)
-*   **许可协议**: [MIT License](https://github.com/jobssteve164dev/solopreneur-roadmap/blob/main/LICENSE)
+- 项目仓库: [jobssteve164dev/solopreneur-roadmap](https://github.com/jobssteve164dev/solopreneur-roadmap)
+- 许可协议: [MIT License](https://github.com/jobssteve164dev/solopreneur-roadmap/blob/main/LICENSE)

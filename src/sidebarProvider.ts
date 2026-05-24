@@ -268,7 +268,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             cliPath: data.cliPath,
             language: data.language
           });
-          vscode.window.showInformationMessage('Solopreneur settings saved successfully!');
+          vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
           this.sendSettings();
           // Trigger updates on the full screen view if active
@@ -360,16 +360,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private _getHtmlForWebview(webview: vscode.Webview): string {
+    const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Solopreneur Control Panel</title>
+  <title>SoloMap</title>
   <!-- Load Inter & Outfit Fonts Asynchronously -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" media="print" onload="this.media='all'">
+  <link rel="stylesheet" href="${codiconsUri}">
   <noscript>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
   </noscript>
@@ -417,11 +419,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       border: none;
       cursor: pointer;
       color: var(--text-muted);
-      font-size: 15px;
       padding: 4px;
       display: flex;
       align-items: center;
       transition: color 0.2s;
+    }
+
+    .codicon {
+      font-size: 15px;
+      line-height: 1;
+    }
+
+    .brand-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
     }
 
     .btn-gear:hover {
@@ -981,13 +993,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="header-container">
-    <h2 id="sidebar-title">🎯 Solopreneur Control Panel</h2>
-    <button class="btn-gear" id="btn-toggle-settings" title="Solopreneur Settings">⚙️</button>
+    <h2 class="brand-title"><span class="codicon codicon-map"></span><span id="sidebar-title">SoloMap</span></h2>
+    <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
   </div>
 
   <div class="project-switcher">
     <select class="project-select" id="project-select"></select>
-    <button class="btn-project-add" id="btn-add-project" title="Add project folder">+</button>
+    <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
   </div>
 
   <div class="portfolio-panel">
@@ -1001,8 +1013,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
-      <h3 id="settings-title">⚙️ Solopreneur Settings</h3>
-      <button class="btn-close-settings" id="btn-close-settings">×</button>
+      <h3><span class="codicon codicon-settings-gear"></span> <span id="settings-title">SoloMap Settings</span></h3>
+      <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
     <div class="settings-field">
@@ -1022,8 +1034,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-actions">
-      <button class="settings-action-btn test-btn" id="btn-test-cli">⚡ <span id="text-test-cli">Test CLI</span></button>
-      <button class="settings-action-btn save-btn" id="btn-save-settings">💾 <span id="text-save-settings">Save</span></button>
+      <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
+      <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
     </div>
     <div class="cli-badge" id="cli-test-badge" style="display:none;"></div>
   </div>
@@ -1047,7 +1059,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   <!-- Footer CTA -->
   <div class="sidebar-footer">
     <button class="btn-large" id="btn-open-full">
-      🖥️ <span id="text-open-full">Open Visual Roadmap Graph</span>
+      <span class="codicon codicon-type-hierarchy-sub"></span><span id="text-open-full">Open Visual Roadmap Graph</span>
     </button>
   </div>
 
@@ -1078,7 +1090,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [] };
     const i18n = {
       zh: {
-        title: '🎯 独立项目控制台',
+        title: 'SoloMap',
         portfolioTitle: '项目总览',
         filterAll: '全部',
         filterActive: '进行中',
@@ -1094,7 +1106,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         nextAction: '下一步',
         failures: '失败',
         selected: '当前项目',
-        settingsTitle: '⚙️ 设置',
+        settingsTitle: 'SoloMap 设置',
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
@@ -1112,7 +1124,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败' }
       },
       en: {
-        title: '🎯 Solopreneur Control Panel',
+        title: 'SoloMap',
         portfolioTitle: 'Project Portfolio',
         filterAll: 'All',
         filterActive: 'Active',
@@ -1128,7 +1140,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         nextAction: 'Next',
         failures: 'Failures',
         selected: 'Current project',
-        settingsTitle: '⚙️ Solopreneur Settings',
+        settingsTitle: 'SoloMap Settings',
         language: 'Language',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
@@ -1479,7 +1491,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         // Small run button if applicable
         const actionHtml = (node.status === 'Pending' || node.status === 'Failed' || node.status === 'In Progress')
-          ? '<button class="btn-run-small" data-run-node-id="' + node.id + '">⚡ ' + t('run') + '</button>'
+          ? '<button class="btn-run-small" data-run-node-id="' + node.id + '"><span class="codicon codicon-comment-discussion"></span>' + t('run') + '</button>'
           : '';
 
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
