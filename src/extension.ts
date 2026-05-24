@@ -768,18 +768,43 @@ function resolveExecutablePath(command: string): string {
   return resolved || trimmed;
 }
 
+function getAgentCliFamily(command: string): string {
+  const name = path.basename((command || '').trim()).toLowerCase();
+  if (['codex', 'codex-cli'].includes(name)) return 'codex';
+  if (['claude', 'claude-code', 'claude-code-cli'].includes(name)) return 'claude';
+  if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
+  if (['', 'agy', 'antigravity', 'antigravity-cli'].includes(name)) return 'antigravity';
+  return name;
+}
+
+function getKnownAgentCliCandidates(family: string): string[] {
+  if (family === 'codex') return ['codex', 'codex-cli'];
+  if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
+  if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
+  if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
+  return family ? [family] : [];
+}
+
 function getAgentCliCandidates(agentCli: string, configuredCliPath: string): string[] {
   const requestedCli = (agentCli || '').trim();
   const configuredCli = (configuredCliPath || '').trim();
-  const requestedName = path.basename(requestedCli).toLowerCase();
-  const configuredName = path.basename(configuredCli).toLowerCase();
-  const antigravityNames = new Set(['', 'agy', 'antigravity', 'antigravity-cli']);
-  const codexNames = new Set(['codex', 'codex-cli']);
-  const wantsCodex = codexNames.has(requestedName) || codexNames.has(configuredName);
-  const wantsAntigravity = antigravityNames.has(requestedName) || antigravityNames.has(configuredName);
-  const candidates = wantsCodex && !wantsAntigravity
-    ? [configuredCli, requestedCli, 'codex', 'codex-cli', 'agy', 'antigravity', 'antigravity-cli']
-    : [configuredCli, requestedCli, 'agy', 'antigravity', 'antigravity-cli', 'codex', 'codex-cli'];
+  const requestedFamily = getAgentCliFamily(requestedCli);
+  const configuredFamily = getAgentCliFamily(configuredCli);
+  const preferredFamily = requestedCli ? requestedFamily : configuredFamily;
+  const familyOrder = [
+    preferredFamily,
+    configuredFamily,
+    requestedFamily,
+    'antigravity',
+    'codex',
+    'claude',
+    'opencode'
+  ].filter(Boolean);
+  const candidates = [
+    configuredCli,
+    requestedCli,
+    ...familyOrder.flatMap(getKnownAgentCliCandidates)
+  ];
 
   return candidates.filter(Boolean).filter((candidate, index, all) => all.indexOf(candidate) === index);
 }
@@ -800,6 +825,12 @@ function getAgentProvider(agentCli: string): string {
   const executableName = path.basename(agentCli).toLowerCase();
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return 'codex';
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return 'claude';
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return 'opencode';
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return 'antigravity';
@@ -888,6 +919,12 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPrompt})`;
+  }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
@@ -904,6 +941,12 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
   }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run "$(cat ${quotedPromptFile})")`;
+  }
 
   return `${quotedCli} run --task @prompt-file:${quotedPromptFile}`;
 }
@@ -919,6 +962,12 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `${quotedCli} run ${promptExpression}`;
   }
 
   return `${quotedCli} run --task ${promptExpression}`;
@@ -3382,9 +3431,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
-      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy">
+      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy, codex, claude, opencode">
       <div id="help-cli-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Name of globally installed CLI (e.g. <code>agy</code> or <code>codex</code>) or the absolute path to its executable.
+        Name of globally installed CLI (e.g. <code>agy</code>, <code>codex</code>, <code>claude</code>, <code>opencode</code>) or the absolute path to its executable.
       </div>
     </div>
 
@@ -3442,7 +3491,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         language: '界面语言',
         removeProject: '删除项目',
         cliPath: 'Agent CLI 命令或路径',
-        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、claude、opencode）或可执行文件绝对路径。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -3502,7 +3551,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         language: 'Language',
         removeProject: 'Remove project',
         cliPath: 'CLI Command or Path',
-        cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
+        cliPathHelp: 'Name of a globally installed CLI such as agy, codex, claude, or opencode, or an absolute executable path.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; guidance in the current conversation takes priority.',
@@ -4204,6 +4253,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       addOption(currentCliPath || 'agy');
       addOption('agy');
       addOption('codex');
+      addOption('claude');
+      addOption('opencode');
       addOption('antigravity');
       addOption('antigravity-cli');
       addOption('codex-cli');

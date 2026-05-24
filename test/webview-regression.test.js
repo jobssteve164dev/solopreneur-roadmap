@@ -336,9 +336,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="portfolio-list"/);
   assert.doesNotMatch(html, /id="next-action-panel"/);
   assert.match(html, /getNextActionNode/);
-  assert.match(html, /renderNextActionMarkup/);
-  assert.match(html, /data-next-action-panel/);
-  assert.match(html, /data-next-action-send/);
+  assert.match(html, /renderProjectContinueComposer/);
+  assert.match(html, /data-project-continue-composer/);
+  assert.match(html, /data-project-continue-send/);
   assert.match(html, /data-select-project-path/);
   assert.match(html, /selectProject/);
   assert.match(html, /continueProjectFromPortfolio/);
@@ -455,6 +455,14 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     "'agy' --print --add-dir='/workspace/app' 'Continue landing page'"
   );
   assert.equal(
+    extensionModule.__buildAgentCommand('claude', 'Ship the MVP', '/workspace/app'),
+    "'claude' -p --add-dir '/workspace/app' 'Ship the MVP'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommand('opencode', 'Ship the MVP', '/workspace/app'),
+    "(cd '/workspace/app' && 'opencode' run 'Ship the MVP')"
+  );
+  assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
     "'agy' --print --add-dir='/workspace/app' @prompt-file:'/workspace/app/.solopreneur/agent-runs/2/prompt.txt'"
   );
@@ -463,8 +471,24 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
   );
   assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('claude', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
+    "'claude' -p --add-dir '/workspace/app' \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\""
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('opencode', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
+    "(cd '/workspace/app' && 'opencode' run \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\")"
+  );
+  assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
     "printf %s \"$agent_prompt\" | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandFromShellVar('claude', 'agent_prompt', '/workspace/app'),
+    "'claude' -p --add-dir '/workspace/app' \"$agent_prompt\""
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandFromShellVar('opencode', 'agent_prompt', '/workspace/app'),
+    "'opencode' run \"$agent_prompt\""
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -474,6 +498,16 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     JSON.stringify(extensionModule.__getAgentCliCandidates('codex', 'codex').slice(0, 4)),
     JSON.stringify(['codex', 'codex-cli', 'agy', 'antigravity'])
   );
+  assert.equal(
+    JSON.stringify(extensionModule.__getAgentCliCandidates('claude', '').slice(0, 5)),
+    JSON.stringify(['claude', 'claude-code', 'claude-code-cli', 'agy', 'antigravity'])
+  );
+  assert.equal(
+    JSON.stringify(extensionModule.__getAgentCliCandidates('opencode', '').slice(0, 5)),
+    JSON.stringify(['opencode', 'open-code', 'open-code-cli', 'agy', 'antigravity'])
+  );
+  assert.equal(extensionModule.__getAgentProvider('claude'), 'claude');
+  assert.equal(extensionModule.__getAgentProvider('opencode'), 'opencode');
 
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -490,6 +524,14 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(
     JSON.stringify(sidebarModule.__getAgentCliCandidates('codex', 'codex').slice(0, 4)),
     JSON.stringify(['codex', 'codex-cli', 'agy', 'antigravity'])
+  );
+  assert.equal(
+    JSON.stringify(sidebarModule.__getAgentCliCandidates('claude', '').slice(0, 5)),
+    JSON.stringify(['claude', 'claude-code', 'claude-code-cli', 'agy', 'antigravity'])
+  );
+  assert.equal(
+    JSON.stringify(sidebarModule.__getAgentCliCandidates('opencode', '').slice(0, 5)),
+    JSON.stringify(['opencode', 'open-code', 'open-code-cli', 'agy', 'antigravity'])
   );
   assert.equal(JSON.stringify(sidebarModule.__getCliVersionArgs('agy')), JSON.stringify(['--version']));
   assert.match(sidebarModule.__formatCliTestMessage('agy', '1.0.1\n', ''), /agy · 1\.0\.1/);

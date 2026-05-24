@@ -77,18 +77,43 @@ function resolveExecutablePath(command: string): string {
   return resolved || trimmed;
 }
 
+function getAgentCliFamily(command: string): string {
+  const name = path.basename((command || '').trim()).toLowerCase();
+  if (['codex', 'codex-cli'].includes(name)) return 'codex';
+  if (['claude', 'claude-code', 'claude-code-cli'].includes(name)) return 'claude';
+  if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
+  if (['', 'agy', 'antigravity', 'antigravity-cli'].includes(name)) return 'antigravity';
+  return name;
+}
+
+function getKnownAgentCliCandidates(family: string): string[] {
+  if (family === 'codex') return ['codex', 'codex-cli'];
+  if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
+  if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
+  if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
+  return family ? [family] : [];
+}
+
 function getAgentCliCandidates(agentCli: string, configuredCliPath: string): string[] {
   const requestedCli = (agentCli || '').trim();
   const configuredCli = (configuredCliPath || '').trim();
-  const requestedName = path.basename(requestedCli).toLowerCase();
-  const configuredName = path.basename(configuredCli).toLowerCase();
-  const antigravityNames = new Set(['', 'agy', 'antigravity', 'antigravity-cli']);
-  const codexNames = new Set(['codex', 'codex-cli']);
-  const wantsCodex = codexNames.has(requestedName) || codexNames.has(configuredName);
-  const wantsAntigravity = antigravityNames.has(requestedName) || antigravityNames.has(configuredName);
-  const candidates = wantsCodex && !wantsAntigravity
-    ? [configuredCli, requestedCli, 'codex', 'codex-cli', 'agy', 'antigravity', 'antigravity-cli']
-    : [configuredCli, requestedCli, 'agy', 'antigravity', 'antigravity-cli', 'codex', 'codex-cli'];
+  const requestedFamily = getAgentCliFamily(requestedCli);
+  const configuredFamily = getAgentCliFamily(configuredCli);
+  const preferredFamily = requestedCli ? requestedFamily : configuredFamily;
+  const familyOrder = [
+    preferredFamily,
+    configuredFamily,
+    requestedFamily,
+    'antigravity',
+    'codex',
+    'claude',
+    'opencode'
+  ].filter(Boolean);
+  const candidates = [
+    configuredCli,
+    requestedCli,
+    ...familyOrder.flatMap(getKnownAgentCliCandidates)
+  ];
 
   return candidates.filter(Boolean).filter((candidate, index, all) => all.indexOf(candidate) === index);
 }
@@ -722,57 +747,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       border-color: transparent;
     }
 
-    .next-action-panel {
-      background: rgba(0, 229, 255, 0.07);
-      border: 1px solid rgba(0, 229, 255, 0.24);
-      border-radius: 6px;
-      padding: 10px;
-      margin-top: 9px;
+    .portfolio-compose {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 8px;
+      margin-top: 8px;
       cursor: default;
     }
 
-    .next-action-kicker {
-      font-size: 9px;
-      font-weight: 800;
-      color: #00e5ff;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-      margin-bottom: 6px;
-    }
-
-    .next-action-title {
-      font-size: 13px;
-      font-weight: 800;
-      color: var(--text-main);
-      line-height: 1.25;
-      margin-bottom: 5px;
-    }
-
-    .next-action-meta {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 6px;
-      font-size: 10px;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-    }
-
-    .next-action-reason {
-      font-size: 10.5px;
-      line-height: 1.35;
-      color: #cbd5e1;
-      margin-bottom: 9px;
-    }
-
-    .next-action-compose {
+    .portfolio-compose-row {
       display: flex;
       gap: 6px;
       align-items: center;
       flex-wrap: wrap;
     }
 
-    .next-action-input {
+    .portfolio-compose-input {
       flex: 1 1 100%;
       min-width: 0;
       background: rgba(255, 255, 255, 0.06);
@@ -785,7 +774,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       outline: none;
     }
 
-    .next-action-agent {
+    .portfolio-compose-agent {
       flex: 1 1 120px;
       min-width: 0;
       background: rgba(255, 255, 255, 0.06);
@@ -798,7 +787,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       outline: none;
     }
 
-    .next-action-send {
+    .portfolio-compose-send {
       border: none;
       border-radius: 5px;
       background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
@@ -812,7 +801,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       gap: 4px;
     }
 
-    .next-action-send:disabled {
+    .portfolio-compose-send:disabled {
       cursor: not-allowed;
       opacity: 0.5;
     }
@@ -1143,9 +1132,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
-      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy">
+      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy, codex, claude, opencode">
       <div id="help-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Name of globally installed CLI (e.g. <code>agy</code> or <code>codex</code>) or the absolute path to its executable.
+        Name of globally installed CLI (e.g. <code>agy</code>, <code>codex</code>, <code>claude</code>, <code>opencode</code>) or the absolute path to its executable.
       </div>
     </div>
 
@@ -1237,12 +1226,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         nextActionReasonComplete: '所有环节已完成，可以打开大图调整路线图。',
         nextActionPlaceholder: '补充这次要 Agent 做什么...',
         nextActionSend: '发送',
+        continuePlaceholder: '补充这次推进要求...',
+        continueSend: '发送',
         failures: '失败',
         selected: '当前项目',
         settingsTitle: 'SoloMap 设置',
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
-        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、claude、opencode）或可执行文件绝对路径。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -1282,12 +1273,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         nextActionReasonComplete: 'All steps are complete. Open the roadmap to revise the next loop.',
         nextActionPlaceholder: 'Add guidance for this Agent run...',
         nextActionSend: 'Send',
+        continuePlaceholder: 'Add guidance for this run...',
+        continueSend: 'Send',
         failures: 'Failures',
         selected: 'Current project',
         settingsTitle: 'SoloMap Settings',
         language: 'Language',
         cliPath: 'CLI Command or Path',
-        cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
+        cliPathHelp: 'Name of a globally installed CLI such as agy, codex, claude, or opencode, or an absolute executable path.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
@@ -1590,53 +1583,47 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       add(settingCliPath.value || 'agy');
       add('agy');
       add('codex');
+      add('claude');
+      add('opencode');
       add('antigravity');
       add('antigravity-cli');
       add('codex-cli');
       return options.map(option => '<option value="' + escapeHtml(option) + '">' + escapeHtml(option) + '</option>').join('');
     }
 
-    function renderNextActionMarkup(nodes) {
+    function renderProjectContinueComposer(nodes) {
       const node = getNextActionNode(nodes || []);
       if (!node) {
-        return '<div class="next-action-panel"><div class="next-action-kicker">' + t('nextAction') + '</div><div class="next-action-reason">' + t('empty') + '</div></div>';
+        return '';
       }
       const disabled = node.status === 'Running' || node.status === 'Completed' ? 'disabled' : '';
       return \`
-        <div class="next-action-panel" data-next-action-panel>
-          <div class="next-action-kicker">\${t('nextAction')}</div>
-          <div class="next-action-title">\${escapeHtml(node.title)}</div>
-          <div class="next-action-meta">
-            <span>\${escapeHtml(t('nextActionSubtitle'))}</span>
-            <span class="status-lbl \${statusClass(node.status)}">\${statusText(node.status)}</span>
-            <span>\${escapeHtml(node.stage || '')}</span>
-          </div>
-          <div class="next-action-reason">\${escapeHtml(getNextActionReason(node, nodes || []))}</div>
-          <div class="next-action-compose">
-            <input class="next-action-input" data-next-action-input placeholder="\${escapeHtml(t('nextActionPlaceholder'))}" \${disabled}>
-            <select class="next-action-agent" data-next-action-agent \${disabled}>
+        <div class="portfolio-compose" data-project-continue-composer>
+          <div class="portfolio-compose-row">
+            <input class="portfolio-compose-input" data-project-continue-input placeholder="\${escapeHtml(t('continuePlaceholder'))}" \${disabled}>
+            <select class="portfolio-compose-agent" data-project-continue-agent \${disabled}>
               \${renderAgentOptions(node)}
             </select>
-            <button class="next-action-send" data-next-action-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled}>
-              <span class="codicon codicon-send"></span><span>\${escapeHtml(t('nextActionSend'))}</span>
+            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled}>
+              <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
         </div>
       \`;
     }
 
-    function bindNextAction(container) {
-      container.querySelectorAll('[data-next-action-send]').forEach(sendButton => {
+    function bindProjectContinueComposer(container) {
+      container.querySelectorAll('[data-project-continue-send]').forEach(sendButton => {
         sendButton.addEventListener('click', (event) => {
           event.stopPropagation();
-          const panel = sendButton.closest('[data-next-action-panel]');
-          const input = panel ? panel.querySelector('[data-next-action-input]') : null;
-          const agentSelect = panel ? panel.querySelector('[data-next-action-agent]') : null;
+          const panel = sendButton.closest('[data-project-continue-composer]');
+          const input = panel ? panel.querySelector('[data-project-continue-input]') : null;
+          const agentSelect = panel ? panel.querySelector('[data-project-continue-agent]') : null;
           runNodeAgent(sendButton.getAttribute('data-next-node-id'), input ? input.value : '', agentSelect ? agentSelect.value : '');
           if (input) input.value = '';
         });
       });
-      container.querySelectorAll('[data-next-action-input], [data-next-action-agent]').forEach(item => {
+      container.querySelectorAll('[data-project-continue-input], [data-project-continue-agent]').forEach(item => {
         item.addEventListener('click', (event) => event.stopPropagation());
       });
     }
@@ -1684,9 +1671,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             </div>
             <div class="portfolio-card-actions">
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
-              <button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>
+              \${isSelected ? '' : \`<button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>\`}
             </div>
-            \${isSelected ? renderNextActionMarkup(currentNodes) : ''}
+            \${isSelected ? renderProjectContinueComposer(currentNodes) : ''}
           </div>
         \`;
       }).join('');
@@ -1717,7 +1704,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           });
         });
       });
-      bindNextAction(portfolioList);
+      bindProjectContinueComposer(portfolioList);
     }
 
     function renderSidebar(nodes) {
