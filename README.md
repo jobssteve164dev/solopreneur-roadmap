@@ -22,6 +22,10 @@ SoloMap 是一个本地优先的 VS Code 插件，用路线图管理项目推进
 
 它把“项目想法、路线图、Agent 对话、文件修改、任务状态、环节记忆”放在同一条工作流里：你选择项目文件夹，SoloMap 创建本地 `.solopreneur/` 项目数据目录；初始化路线图会包含“生成初始路线图”环节；随后你可以把项目要求交给本地 Agent，让它直接修改路线图 CSV，再按环节持续推进项目。
 
+SoloMap is a local-first VS Code extension for turning project ideas into executable AI roadmaps. It keeps your roadmap, agent conversations, file changes, task status, and step memory inside the project folder so your work can move with Git instead of depending on a hosted backend.
+
+You choose a project folder, SoloMap creates a `.solopreneur/` data directory, and the starter roadmap begins with a "Generate Initial Roadmap" step. From there, your local Agent CLI can rewrite the roadmap CSV and continue executing each step through structured task conversations.
+
 ---
 
 ## 核心能力

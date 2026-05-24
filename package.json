@@ -13,7 +13,26 @@
     "vscode": "^1.75.0"
   },
   "categories": [
+    "Machine Learning",
+    "Visualization",
     "Other"
+  ],
+  "keywords": [
+    "ai",
+    "chat",
+    "agent",
+    "agentic",
+    "roadmap",
+    "task-flow",
+    "workflow",
+    "automation",
+    "project-planning",
+    "local-ai",
+    "codex",
+    "antigravity",
+    "solomap",
+    "solo-developer",
+    "productivity"
   ],
   "activationEvents": [
     "onView:solopreneur.sidebar",
@@ -33,7 +52,7 @@
         {
           "id": "solopreneur-sidebar-container",
           "title": "SoloMap",
-          "icon": "$(robot)"
+          "icon": "resources/activitybar.svg"
         }
       ]
     },

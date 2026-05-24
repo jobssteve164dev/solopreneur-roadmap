@@ -115,9 +115,15 @@ test('extension manifest uses SoloMap visible branding', () => {
 
   assert.equal(manifest.displayName, 'SoloMap: AI Roadmap & Agent Task Flow');
   assert.equal(manifest.description, 'Turn project ideas into AI roadmaps and local agent task flows in VS Code.');
+  assert.deepEqual(manifest.categories, ['Machine Learning', 'Visualization', 'Other']);
+  assert.ok(manifest.keywords.includes('ai'));
+  assert.ok(manifest.keywords.includes('chat'));
+  assert.ok(manifest.keywords.includes('agent'));
+  assert.ok(manifest.keywords.includes('roadmap'));
   assert.equal(manifest.contributes.commands[0].title, 'SoloMap: Show AI Roadmap');
   assert.equal(manifest.contributes.commands[0].category, 'SoloMap');
   assert.equal(manifest.contributes.viewsContainers.activitybar[0].title, 'SoloMap');
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].icon, 'resources/activitybar.svg');
   assert.equal(manifest.contributes.views['solopreneur-sidebar-container'][0].name, 'SoloMap');
   assert.equal(manifest.contributes.configuration.title, 'SoloMap Settings');
 });
