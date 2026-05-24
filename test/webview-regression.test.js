@@ -115,7 +115,7 @@ test('extension manifest uses SoloMap visible branding', () => {
 
   assert.equal(manifest.displayName, 'SoloMap: AI Roadmap & Agent Task Flow');
   assert.equal(manifest.description, 'Turn project ideas into AI roadmaps and local agent task flows in VS Code.');
-  assert.deepEqual(manifest.categories, ['Machine Learning', 'Visualization', 'Other']);
+  assert.deepEqual(manifest.categories, ['AI', 'Chat', 'Machine Learning', 'Visualization', 'Other']);
   assert.ok(manifest.keywords.includes('ai'));
   assert.ok(manifest.keywords.includes('chat'));
   assert.ok(manifest.keywords.includes('agent'));
@@ -126,6 +126,19 @@ test('extension manifest uses SoloMap visible branding', () => {
   assert.equal(manifest.contributes.viewsContainers.activitybar[0].icon, 'resources/activitybar.svg');
   assert.equal(manifest.contributes.views['solopreneur-sidebar-container'][0].name, 'SoloMap');
   assert.equal(manifest.contributes.configuration.title, 'SoloMap Settings');
+});
+
+test('readme uses bilingual marketplace copy and stable remote logo', () => {
+  const readme = fs.readFileSync(path.join(projectRoot, 'README.md'), 'utf8');
+
+  assert.match(readme, /raw\.githubusercontent\.com\/jobssteve164dev\/solopreneur-roadmap\/main\/resources\/logo\.png/);
+  assert.match(readme, /Why SoloMap\? \/ 为什么选择 SoloMap？/);
+  assert.match(readme, /Core Capabilities \/ 核心能力/);
+  assert.match(readme, /Quick Start \/ 快速开始/);
+  assert.match(readme, /Local Agent CLI \/ 本地 Agent CLI/);
+  assert.match(readme, /Data Location \/ 数据位置/);
+  assert.match(readme, /Privacy \/ 隐私/);
+  assert.match(readme, /Feedback \/ 反馈/);
 });
 
 test('sidebar webview runtime script parses and opens settings panel', () => {
