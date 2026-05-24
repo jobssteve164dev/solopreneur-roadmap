@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as childProcess from 'child_process';
+import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { RoadmapNode } from './db/types';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
@@ -732,6 +733,38 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
+function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedPromptFile = shellQuote(promptFilePath);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --print --print-timeout=2m --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
+  }
+
+  return `${quotedCli} run --task @prompt-file:${quotedPromptFile}`;
+}
+
+function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, workspaceRoot: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const promptExpression = `"$${promptVarName}"`;
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} exec -C ${shellQuote(workspaceRoot)} ${promptExpression}`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --print --print-timeout=2m --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+  }
+
+  return `${quotedCli} run --task ${promptExpression}`;
+}
+
 function getCliVersionArgs(agentCli: string): string[] {
   const executableName = path.basename(agentCli).toLowerCase();
   if (executableName === 'codex' || executableName === 'codex-cli') {
@@ -1095,6 +1128,11 @@ function updateStepHandoffSummary(filePath: string, entry: Record<string, unknow
   return nextContent;
 }
 
+function toProjectRelativeRuntimePath(workspaceRoot: string, targetPath: string): string {
+  const relativePath = path.relative(workspaceRoot, targetPath).replace(/\\/g, '/');
+  return relativePath && !relativePath.startsWith('..') ? relativePath : targetPath;
+}
+
 function buildAgentConversationPrompt(
   node: RoadmapNode,
   userMessage: string,
@@ -1110,10 +1148,15 @@ function buildAgentConversationPrompt(
     : '';
   const memoryFile = stepMemoryFilePath || getStepMemoryFilePath(workspaceRoot, node.id || '');
   const runsDir = agentRunsDir || path.join(workspaceRoot, '.solopreneur', 'agent-runs', node.id || '');
+  const completionFile = completionDecisionFilePath
+    ? toProjectRelativeRuntimePath(workspaceRoot, completionDecisionFilePath)
+    : '';
+  const memoryFileDisplay = toProjectRelativeRuntimePath(workspaceRoot, memoryFile);
+  const runsDirDisplay = toProjectRelativeRuntimePath(workspaceRoot, runsDir);
   const memoryInstructions = [
     '开始前必须先读取 Solopreneur 为本环节保存的项目上下文文件：',
-    `- 环节交接 JSON：${memoryFile}`,
-    `- 环节运行记录目录：${runsDir}`,
+    `- 环节交接 JSON：${memoryFileDisplay}`,
+    `- 环节运行记录目录：${runsDirDisplay}`,
     '如果文件或目录不存在，说明这是该环节的早期对话，继续执行本轮任务即可。',
     '读取这些项目文件后，再结合本次用户补充推进当前环节；不要依赖插件直接注入的历史摘要。'
   ].join('\n');
@@ -1165,25 +1208,28 @@ function buildAgentConversationPrompt(
     '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
     '4. 完成后正常退出 CLI 进程。扩展会根据进程退出码记录本轮对话是否成功。',
     completionDecisionFilePath
-      ? `5. 如果你判断整个路线图环节已经达到完成标准，请写入文件 ${completionDecisionFilePath}，内容必须是 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续对话，不要写这个文件。`
+      ? `5. 如果你判断整个路线图环节已经达到完成标准，请向 ${completionFile} 写入 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续对话，不要写这个文件。`
       : '5. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。'
   ].join('\n');
 }
 
 function buildAgentShellScript(
-  agentCommand: string,
+  agentCli: string,
+  conversationPrompt: string,
   workspaceRoot: string,
   nodeId: string,
-  agentCli: string,
   executionLogId: number,
   userMessage: string,
   completionDecisionFilePath?: string,
-  nativeSessionId = ''
-): { finalCommand: string; outputFilePath: string; changesFilePath: string } {
+  nativeSessionId = '',
+  directExecutionCommand = ''
+): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
   const outputFilePath = path.join(runDir, 'output.log');
   const commandFilePath = path.join(runDir, 'command.txt');
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const runScriptPath = path.join(runDir, 'run-agent.sh');
   const changesFilePath = path.join(runDir, 'changes.txt');
   const touchedFilesPath = path.join(runDir, 'touched-files.txt');
   const workspaceSnapshotPath = path.join(runDir, 'workspace-before.json');
@@ -1194,21 +1240,26 @@ function buildAgentShellScript(
   const sessionKey = getAgentSessionKey(agentCli);
   const sessionMode = nativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
   const commandPreview = `${agentCli} [${sessionMode}]`;
+  const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
+  const executionCommand = directExecutionCommand || buildAgentCommandFromShellVar(agentCli, 'agent_prompt', workspaceRoot);
   const runningStatus = JSON.stringify({ nodeId, status: 'Running', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
   const completedStatus = JSON.stringify({ nodeId, status: 'In Progress', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
   const failedStatus = JSON.stringify({ nodeId, status: 'Failed', agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode });
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(promptFilePath, conversationPrompt, 'utf8');
+  fs.writeFileSync(commandFilePath, loggedCommand, 'utf8');
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
     workspaceSnapshotScript,
-    `printf %s ${shellQuote(agentCommand)} > ${shellQuote(commandFilePath)}`,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
-    `(${agentCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
+    `agent_prompt=$(cat ${shellQuote(promptFilePath)})`,
+    `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
     `status=\${PIPESTATUS[0]}`,
     sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
@@ -1217,11 +1268,15 @@ function buildAgentShellScript(
     `if [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSolopreneur: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; fi`,
     `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
+  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
 
   return {
-    finalCommand: `bash -lc ${shellQuote(script)}`,
+    finalCommand: `bash ${shellQuote(runScriptPath)}`,
     outputFilePath,
-    changesFilePath
+    changesFilePath,
+    commandFilePath,
+    promptFilePath,
+    runScriptPath
   };
 }
 
@@ -1420,7 +1475,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     completionDecisionFilePath,
     nativeSessionId
   );
-  const agentCommand = buildAgentCommand(agentCli, conversationPrompt, workspaceRoot, nativeSessionId);
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
 
   const launchSummary = [
     'Agent conversation started.',
@@ -1445,7 +1501,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     });
   }
 
-  const { finalCommand } = buildAgentShellScript(agentCommand, workspaceRoot, nodeId, agentCli, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId);
+  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId);
 
   terminal.sendText(finalCommand);
 }
@@ -1481,6 +1537,60 @@ function didRoadmapCsvChange(changedFilesSummary: string, touchedFilesSummary: s
   return combined.includes('.solopreneur/roadmap.csv');
 }
 
+function validateBootstrapRoadmapRewrite(workspaceRoot: string, nodeId: string): { valid: boolean; reason: string } {
+  const roadmapPath = path.join(workspaceRoot, '.solopreneur', 'roadmap.csv');
+  if (!fs.existsSync(roadmapPath)) {
+    return { valid: false, reason: '未找到 .solopreneur/roadmap.csv。' };
+  }
+
+  try {
+    const content = fs.readFileSync(roadmapPath, 'utf8');
+    const parsed = Papa.parse<RoadmapNode>(content, { header: true, skipEmptyLines: true });
+    const nodes = parsed.data.map((node) => ({
+      id: String(node.id || '').trim(),
+      title: String(node.title || '').trim(),
+      description: String(node.description || '').trim(),
+      stage: String(node.stage || '').trim(),
+      dependencies: String(node.dependencies || '').trim(),
+      agentCli: String(node.agentCli || '').trim(),
+      agentPrompt: String(node.agentPrompt || '').trim(),
+      status: String(node.status || '').trim()
+    })).filter((node) => node.id);
+    const validStages = new Set(['商业规划', '品牌与设置', '产品与 MVP', '营销与增长']);
+    const bootstrapMarkers = [
+      '你的唯一主任务是直接重写 .solopreneur/roadmap.csv',
+      '你的唯一交付物是直接重写 .solopreneur/roadmap.csv',
+      '保留 CSV 表头且字段顺序必须严格是',
+      '生成初始路线图'
+    ];
+
+    if (parsed.errors.length > 0) {
+      return { valid: false, reason: '生成后的 roadmap.csv 仍然无法被稳定解析。' };
+    }
+    if (nodes.length < 4 || nodes.length > 6) {
+      return { valid: false, reason: '生成后的路线图环节数量不在 4 到 6 个之间。' };
+    }
+    if (nodes.some((node) => !node.title || !node.description || !node.agentPrompt)) {
+      return { valid: false, reason: '生成后的路线图存在缺少标题、描述或 agentPrompt 的环节。' };
+    }
+    if (nodes.some((node) => !validStages.has(node.stage))) {
+      return { valid: false, reason: '生成后的路线图存在非法 stage 值。' };
+    }
+    if (nodes.some((node) => node.status !== 'Pending')) {
+      return { valid: false, reason: '生成后的路线图所有环节都必须回到 Pending。' };
+    }
+    if (nodes.some((node) => bootstrapMarkers.some((marker) => node.title.includes(marker) || node.agentPrompt.includes(marker)))) {
+      return { valid: false, reason: '生成后的 roadmap.csv 仍然残留了初始化提示词，没有真正写成业务路线图。' };
+    }
+    if (nodes[0]?.id === nodeId) {
+      return { valid: false, reason: '生成后的路线图仍然保留了原始 bootstrap 节点。' };
+    }
+    return { valid: true, reason: '' };
+  } catch (error: any) {
+    return { valid: false, reason: `生成后的 roadmap.csv 校验失败：${error?.message || error}` };
+  }
+}
+
 async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   if (!fs.existsSync(statusFilePath)) {
     return;
@@ -1501,6 +1611,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     let nextStatus = status as RoadmapNode['status'];
     let completionReason = '';
+    const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
     if (status === 'In Progress' && completionDecisionFilePath && fs.existsSync(completionDecisionFilePath)) {
       try {
         const completionDecision = JSON.parse(fs.readFileSync(completionDecisionFilePath, 'utf8'));
@@ -1513,16 +1624,27 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       }
     }
 
+    const outputTail = getOutputTail(outputFilePath);
+    const changedFilesSummary = getChangedFilesSummary(changesFilePath);
+    const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
+    const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
+    if (
+      workspaceRoot &&
+      currentNode?.title === '生成初始路线图' &&
+      didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary) &&
+      nextStatus === 'Completed'
+    ) {
+      const validation = validateBootstrapRoadmapRewrite(workspaceRoot, nodeId);
+      if (!validation.valid) {
+        nextStatus = 'Failed';
+        completionReason = validation.reason;
+      }
+    }
     const completedAt = nextStatus === 'Completed' ? new Date().toISOString() : '';
     syncEngine.updateNode(nodeId, {
       status: nextStatus,
       completedAt,
     });
-
-    const outputTail = getOutputTail(outputFilePath);
-    const changedFilesSummary = getChangedFilesSummary(changesFilePath);
-    const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
-    const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
     let nativeSessionSummary = '';
     if (workspaceRoot && sessionFilePath && fs.existsSync(sessionFilePath)) {
       try {
@@ -1583,7 +1705,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       );
     }
 
-    if (workspaceRoot && didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary)) {
+    const shouldRefreshRoadmap = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary)
+      && !(currentNode?.title === '生成初始路线图' && nextStatus === 'Failed');
+    if (workspaceRoot && shouldRefreshRoadmap) {
       await syncEngine.initAndSync();
     }
 

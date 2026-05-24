@@ -269,6 +269,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     'out/extension.js',
     [
       'module.exports.__buildAgentCommand = buildAgentCommand;',
+      'module.exports.__buildAgentCommandForPromptFile = buildAgentCommandForPromptFile;',
+      'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
@@ -286,6 +288,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__clearStoredAgentSession = clearStoredAgentSession;',
       'module.exports.__extractUserSupplementFromExecutionOutput = extractUserSupplementFromExecutionOutput;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
+      'module.exports.__validateBootstrapRoadmapRewrite = validateBootstrapRoadmapRewrite;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
     ].join('\n')
@@ -316,6 +319,14 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
     "'agy' --print --print-timeout=2m --add-dir='/workspace/app' 'Continue landing page'"
   );
   assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
+    "'agy' --print --print-timeout=2m --add-dir='/workspace/app' @prompt-file:'/workspace/app/.solopreneur/agent-runs/2/prompt.txt'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
+    "'codex' exec -C '/workspace/app' \"$agent_prompt\""
+  );
+  assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
     JSON.stringify(['agy', 'antigravity-cli', 'antigravity', 'codex'])
   );
@@ -343,43 +354,45 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(JSON.stringify(sidebarModule.__getCliVersionArgs('agy')), JSON.stringify(['--version']));
   assert.match(sidebarModule.__formatCliTestMessage('agy', '1.0.1\n', ''), /agy · 1\.0\.1/);
 
+  const shellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-shell-'));
   const shellScript = extensionModule.__buildAgentShellScript(
-    "'codex' exec -C '/workspace/app' 'Ship the MVP'",
-    '/workspace/app',
-    '2',
     'codex',
+    'Ship the MVP\nUse a small smoke test.',
+    shellRoot,
+    '2',
     42,
     'Use a small smoke test.'
   );
-  assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/output.log'));
-  assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/touched-files.txt'));
-  assert.ok(shellScript.finalCommand.includes("git -C"));
-  assert.ok(shellScript.finalCommand.includes('/workspace/app'));
-  assert.ok(shellScript.finalCommand.includes('status --short'));
-  assert.ok(shellScript.finalCommand.includes('timed out waiting for response'));
-  assert.ok(shellScript.finalCommand.includes('without project file changes or a completion decision'));
-  assert.ok(shellScript.finalCommand.includes('.agent_status.json'));
-  assert.ok(shellScript.finalCommand.includes('executionLogId'));
-  assert.ok(shellScript.finalCommand.includes('sessionFilePath'));
-  assert.ok(shellScript.finalCommand.includes('sessionMode'));
-  assert.ok(shellScript.finalCommand.includes('commandFilePath'));
-  assert.ok(shellScript.finalCommand.includes('/workspace/app/.solopreneur/agent-runs/2/command.txt'));
-  assert.ok(shellScript.finalCommand.includes('.codex/sessions'));
-  assert.ok(shellScript.finalCommand.includes('Use a small smoke test.'));
-  assert.ok(shellScript.finalCommand.includes('In Progress'));
-  assert.ok(shellScript.finalCommand.includes('markCompleted'));
+  assert.ok(shellScript.finalCommand.includes('run-agent.sh'));
+  assert.ok(fs.existsSync(shellScript.runScriptPath));
+  assert.ok(fs.existsSync(shellScript.promptFilePath));
+  assert.ok(fs.existsSync(shellScript.commandFilePath));
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /@prompt-file:/);
+  assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /timed out waiting for response/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.agent_status\.json/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /executionLogId/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /sessionFilePath/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /sessionMode/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /commandFilePath/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.codex\/sessions/);
+  assert.doesNotMatch(shellScript.finalCommand, /Use a small smoke test\./);
+  assert.doesNotMatch(shellScript.finalCommand, /Ship the MVP/);
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
-    "'agy' --print --print-timeout=2m --add-dir='/workspace/app' 'Ship the MVP'",
-    '/workspace/app',
-    '2',
     'agy',
+    'Ship the MVP',
+    fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agy-shell-')),
+    '2',
     43,
     ''
   );
-  assert.ok(agyShellScript.finalCommand.includes('antigravity-cli/cache/last_conversations.json'));
-  assert.ok(agyShellScript.finalCommand.includes('antigravity-log'));
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-cli\/cache\/last_conversations\.json/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-log/);
 
   const prompt = extensionModule.__buildAgentConversationPrompt(
     {
@@ -401,6 +414,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(prompt, /必须先读取 Solopreneur 为本环节保存的项目上下文文件/);
   assert.match(prompt, /\.solopreneur\/step-memory\/2\.json/);
   assert.match(prompt, /\.solopreneur\/agent-runs\/2/);
+  assert.doesNotMatch(prompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
   assert.doesNotMatch(prompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(prompt, /Created README and ran npm test/);
   assert.match(prompt, /markCompleted/);
@@ -434,6 +448,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(followupPrompt, /环节说明：Create the first usable onboarding path/);
   assert.match(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
+  assert.doesNotMatch(followupPrompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(followupPrompt, /Old handoff should not be injected/);
   assert.doesNotMatch(followupPrompt, /继续当前路线图环节的原生 Agent 会话/);
@@ -524,7 +539,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.equal(JSON.parse(migrated).entries.length, 1);
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-noop-agent-'));
-  const noopRun = extensionModule.__buildAgentShellScript('printf ok', tempRoot, 'noop', 'agy', 7, '');
+  const noopRun = extensionModule.__buildAgentShellScript('agy', 'printf ok', tempRoot, 'noop', 7, '', undefined, '', 'printf ok');
   childProcess.execSync(noopRun.finalCommand, { cwd: tempRoot, stdio: 'ignore' });
   const noopStatus = JSON.parse(fs.readFileSync(path.join(tempRoot, '.agent_status.json'), 'utf8'));
   assert.equal(noopStatus.status, 'Failed');
@@ -534,10 +549,32 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   fs.mkdirSync(path.join(writeRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(writeRoot, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n', 'utf8');
   const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.appendFileSync(".solopreneur/roadmap.csv","1,Init,,商业规划,,codex,Prompt,Pending,2026-01-01T00:00:00.000Z,\\n");')}`;
-  const writeRun = extensionModule.__buildAgentShellScript(writeCommand, writeRoot, 'write', 'codex', 8, '');
+  const writeRun = extensionModule.__buildAgentShellScript('codex', writeCommand, writeRoot, 'write', 8, '', undefined, '', writeCommand);
   childProcess.execSync(writeRun.finalCommand, { cwd: writeRoot, stdio: 'ignore' });
   const touchedFiles = fs.readFileSync(path.join(writeRoot, '.solopreneur/agent-runs/write/touched-files.txt'), 'utf8');
   assert.match(touchedFiles, /[AM] \.solopreneur\/roadmap\.csv/);
+
+  const invalidBootstrapRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-bootstrap-invalid-'));
+  fs.mkdirSync(path.join(invalidBootstrapRoot, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(invalidBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,生成初始路线图,desc,商业规划,,agy,"你的唯一主任务是直接重写 .solopreneur/roadmap.csv",Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+  const invalidBootstrap = extensionModule.__validateBootstrapRoadmapRewrite(invalidBootstrapRoot, '1');
+  assert.equal(invalidBootstrap.valid, false);
+  assert.match(invalidBootstrap.reason, /环节数量不在 4 到 6 个之间|残留了初始化提示词|保留了原始 bootstrap 节点/);
+
+  const validBootstrapRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-bootstrap-valid-'));
+  fs.mkdirSync(path.join(validBootstrapRoot, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,梳理目标客户,整理 ICP 与定价假设,商业规划,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
+    '20,校准品牌表达,整理着陆页与 README,品牌与设置,10,agy,修改 README.md 和 landing/page.html,Pending,2026-01-01T00:00:00.000Z,',
+    '30,实现首个 MVP 切片,完成最小闭环,产品与 MVP,20,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
+    '40,准备首轮外联,输出外联材料,营销与增长,30,agy,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+  const validBootstrap = extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1');
+  assert.equal(validBootstrap.valid, true);
 
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
   assert.match(dataReadme, /Solopreneur Project Data/);
