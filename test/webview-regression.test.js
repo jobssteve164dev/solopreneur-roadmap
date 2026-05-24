@@ -200,7 +200,6 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
-    'next-action-panel',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -335,9 +334,13 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
   assert.match(html, /id="portfolio-list"/);
-  assert.match(html, /id="next-action-panel"/);
+  assert.doesNotMatch(html, /id="next-action-panel"/);
   assert.match(html, /getNextActionNode/);
+  assert.match(html, /renderNextActionMarkup/);
+  assert.match(html, /data-next-action-panel/);
   assert.match(html, /data-next-action-send/);
+  assert.match(html, /data-select-project-path/);
+  assert.match(html, /selectProject/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);

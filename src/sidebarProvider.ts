@@ -636,6 +636,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       border-radius: 6px;
       padding: 9px;
       background: rgba(255,255,255,0.03);
+      cursor: pointer;
     }
 
     .portfolio-card.is-selected {
@@ -724,9 +725,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .next-action-panel {
       background: rgba(0, 229, 255, 0.07);
       border: 1px solid rgba(0, 229, 255, 0.24);
-      border-radius: 8px;
+      border-radius: 6px;
       padding: 10px;
-      margin-bottom: 14px;
+      margin-top: 9px;
+      cursor: default;
     }
 
     .next-action-kicker {
@@ -1124,8 +1126,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="portfolio-list" id="portfolio-list"></div>
   </div>
 
-  <div class="next-action-panel" id="next-action-panel"></div>
-
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
@@ -1197,7 +1197,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnAddProject = document.getElementById('btn-add-project');
     const portfolioList = document.getElementById('portfolio-list');
     const portfolioFilters = document.getElementById('portfolio-filters');
-    const nextActionPanel = document.getElementById('next-action-panel');
 
     // Settings elements
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
@@ -1388,6 +1387,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           }
           currentNodes = message.nodes || [];
           renderSidebar(message.nodes);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'settingsLoaded':
@@ -1596,41 +1596,49 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return options.map(option => '<option value="' + escapeHtml(option) + '">' + escapeHtml(option) + '</option>').join('');
     }
 
-    function renderNextAction(nodes) {
+    function renderNextActionMarkup(nodes) {
       const node = getNextActionNode(nodes || []);
       if (!node) {
-        nextActionPanel.innerHTML = '<div class="next-action-kicker">' + t('nextAction') + '</div><div class="next-action-reason">' + t('empty') + '</div>';
-        return;
+        return '<div class="next-action-panel"><div class="next-action-kicker">' + t('nextAction') + '</div><div class="next-action-reason">' + t('empty') + '</div></div>';
       }
       const disabled = node.status === 'Running' || node.status === 'Completed' ? 'disabled' : '';
-      nextActionPanel.innerHTML = \`
-        <div class="next-action-kicker">\${t('nextAction')}</div>
-        <div class="next-action-title">\${escapeHtml(node.title)}</div>
-        <div class="next-action-meta">
-          <span>\${escapeHtml(t('nextActionSubtitle'))}</span>
-          <span class="status-lbl \${statusClass(node.status)}">\${statusText(node.status)}</span>
-          <span>\${escapeHtml(node.stage || '')}</span>
-        </div>
-        <div class="next-action-reason">\${escapeHtml(getNextActionReason(node, nodes || []))}</div>
-        <div class="next-action-compose">
-          <input class="next-action-input" data-next-action-input placeholder="\${escapeHtml(t('nextActionPlaceholder'))}" \${disabled}>
-          <select class="next-action-agent" data-next-action-agent \${disabled}>
-            \${renderAgentOptions(node)}
-          </select>
-          <button class="next-action-send" data-next-action-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled}>
-            <span class="codicon codicon-send"></span><span>\${escapeHtml(t('nextActionSend'))}</span>
-          </button>
+      return \`
+        <div class="next-action-panel" data-next-action-panel>
+          <div class="next-action-kicker">\${t('nextAction')}</div>
+          <div class="next-action-title">\${escapeHtml(node.title)}</div>
+          <div class="next-action-meta">
+            <span>\${escapeHtml(t('nextActionSubtitle'))}</span>
+            <span class="status-lbl \${statusClass(node.status)}">\${statusText(node.status)}</span>
+            <span>\${escapeHtml(node.stage || '')}</span>
+          </div>
+          <div class="next-action-reason">\${escapeHtml(getNextActionReason(node, nodes || []))}</div>
+          <div class="next-action-compose">
+            <input class="next-action-input" data-next-action-input placeholder="\${escapeHtml(t('nextActionPlaceholder'))}" \${disabled}>
+            <select class="next-action-agent" data-next-action-agent \${disabled}>
+              \${renderAgentOptions(node)}
+            </select>
+            <button class="next-action-send" data-next-action-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled}>
+              <span class="codicon codicon-send"></span><span>\${escapeHtml(t('nextActionSend'))}</span>
+            </button>
+          </div>
         </div>
       \`;
-      const sendButton = nextActionPanel.querySelector('[data-next-action-send]');
-      if (sendButton) {
-        sendButton.addEventListener('click', () => {
-          const input = nextActionPanel.querySelector('[data-next-action-input]');
-          const agentSelect = nextActionPanel.querySelector('[data-next-action-agent]');
+    }
+
+    function bindNextAction(container) {
+      container.querySelectorAll('[data-next-action-send]').forEach(sendButton => {
+        sendButton.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const panel = sendButton.closest('[data-next-action-panel]');
+          const input = panel ? panel.querySelector('[data-next-action-input]') : null;
+          const agentSelect = panel ? panel.querySelector('[data-next-action-agent]') : null;
           runNodeAgent(sendButton.getAttribute('data-next-node-id'), input ? input.value : '', agentSelect ? agentSelect.value : '');
           if (input) input.value = '';
         });
-      }
+      });
+      container.querySelectorAll('[data-next-action-input], [data-next-action-agent]').forEach(item => {
+        item.addEventListener('click', (event) => event.stopPropagation());
+      });
     }
 
     function renderPortfolio(portfolio, selectedProjectPath) {
@@ -1652,13 +1660,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const relativeTime = formatRelativeTime(project.recentActivityAt);
         const recommendation = project.recommendedNodeTitle || '';
         return \`
-          <div class="portfolio-card \${isSelected ? 'is-selected' : ''}">
+          <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
-              <span class="portfolio-project-name">\${project.name}</span>
+              <span class="portfolio-project-name">\${escapeHtml(project.name)}</span>
               <span class="portfolio-status status-lbl \${statusClass(project.overallStatus)}">\${statusText(project.overallStatus)}</span>
             </div>
             <div class="portfolio-card-meta">
-              <span class="portfolio-stage">\${t('currentStage')}: \${project.currentStage || '-'}</span>
+              <span class="portfolio-stage">\${t('currentStage')}: \${escapeHtml(project.currentStage || '-')}</span>
               <span>\${project.completedNodes}/\${project.totalNodes || 0}</span>
               <span>\${t('failures')}: \${project.failedNodes || 0}</span>
             </div>
@@ -1667,7 +1675,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}
             </div>
             <div class="portfolio-card-meta">
-              <span class="portfolio-recommendation">\${t('nextAction')}: \${recommendation || '-'}</span>
+              <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(recommendation || '-')}</span>
             </div>
             <div class="portfolio-progress">
               <div class="portfolio-progress-track">
@@ -1675,13 +1683,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               </div>
             </div>
             <div class="portfolio-card-actions">
-              <button class="portfolio-action-btn" data-open-project-path="\${project.path}">\${t('projectOpen')}</button>
-              <button class="portfolio-action-btn primary" data-continue-project-path="\${project.path}" data-continue-node-id="\${project.recommendedNodeId || ''}">\${nextActionLabel}</button>
+              <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
+              <button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>
             </div>
+            \${isSelected ? renderNextActionMarkup(currentNodes) : ''}
           </div>
         \`;
       }).join('');
 
+      portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
+        card.addEventListener('click', (event) => {
+          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('select')) return;
+          vscode.postMessage({
+            command: 'selectProject',
+            projectPath: card.getAttribute('data-select-project-path')
+          });
+        });
+      });
       portfolioList.querySelectorAll('[data-open-project-path]').forEach(button => {
         button.addEventListener('click', () => {
           vscode.postMessage({
@@ -1699,11 +1717,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           });
         });
       });
+      bindNextAction(portfolioList);
     }
 
     function renderSidebar(nodes) {
       tasksList.innerHTML = '';
-      renderNextAction(nodes || []);
 
       if (!nodes || nodes.length === 0) {
         const emptyState = document.createElement('div');
