@@ -89,10 +89,10 @@ export async function activate(context: vscode.ExtensionContext) {
   sidebarProvider = new SolopreneurSidebarProvider(
     context.extensionUri,
     syncEngineWrapper,
-    async (nodeId) => {
+    async (nodeId, userMessage = '', agentCli = '') => {
       const ready = await ensureSyncEngine(context);
       if (ready) {
-        await handleRunAgent(context, nodeId, '');
+        await handleRunAgent(context, nodeId, userMessage, agentCli);
       }
     },
     () => getPersistedSettings(context),
@@ -262,6 +262,7 @@ function buildBootstrapRoadmapInstructions(cliPath: string): string {
     '',
     '## 必做前置阅读',
     '- 阅读当前项目目录中的 README、docs、源码入口以及 `.solopreneur/README.md`（如果存在）。',
+    '- 阅读 `.solopreneur/roadmap-methodology.md`，路线图必须覆盖其中定义的四层方法论。',
     '- 理解这个项目当前想做什么、面向谁、当前文件里已经有哪些线索。',
     '',
     '## 你的唯一交付物',
@@ -273,17 +274,52 @@ function buildBootstrapRoadmapInstructions(cliPath: string): string {
     '1. 保留 CSV 表头，字段顺序必须严格是：`id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt`。',
     '2. 生成 4 到 6 个环节。',
     '3. 标题、描述、agentPrompt 全部使用中文。',
-    '4. `stage` 只能使用：`商业规划`、`品牌与设置`、`产品与 MVP`、`营销与增长`。',
+    '4. `stage` 只能使用：`问题与客户发现`、`产品与 MVP`、`营销与销售`、`反馈与规模化`。',
     `5. 每一行 \`agentCli\` 都写 \`${cliPath}\`。`,
     '6. `dependencies` 必须反映真实前置关系；第一步留空，后续按需要依赖前面环节的 id。',
     '7. `status` 全部写 `Pending`，`completedAt` 留空，`createdAt` 写当前 ISO 时间。',
-    '8. 每个 `agentPrompt` 都必须要求后续 Agent 直接创建或修改项目本地文件，并在适用时执行最窄验证命令。',
-    '9. 不要生成空泛咨询任务；每个环节都必须有看得见的本地交付物。',
+    '8. 四个方法论阶段都必须至少出现一次：问题与客户发现、产品与 MVP、营销与销售、反馈与规模化。',
+    '9. 每个 `agentPrompt` 都必须要求后续 Agent 直接创建或修改项目本地文件，并在适用时执行最窄验证命令。',
+    '10. 不要生成空泛咨询任务；每个环节都必须有看得见的本地交付物。',
     '',
     '## 结束前自检',
     '- 重新读取 `.solopreneur/roadmap.csv`。',
     '- 确认列名、环节数量、stage 枚举、依赖关系都正确。',
     '- 确认 CSV 中没有残留“生成初始路线图”、本文件原文或提示词模板。'
+  ].join('\n');
+}
+
+function buildRoadmapMethodologyInstructions(): string {
+  return [
+    '# SoloMap Roadmap Methodology',
+    '',
+    'SoloMap 路线图不是普通任务清单。它必须帮助独立开发者沿着一条完整的项目推进路径行动：',
+    '',
+    '```text',
+    '发现问题 -> 打造产品 -> 卖给客户 -> 持续改进',
+    '```',
+    '',
+    '## 必须覆盖的四个阶段',
+    '',
+    '1. `问题与客户发现`：明确值得解决的问题、目标用户、验证方式和第一步行动。',
+    '2. `产品与 MVP`：把问题转成可运行、可验证的产品切片，包括需求、架构、数据、测试、部署或维护。',
+    '3. `营销与销售`：让产品被发现、理解、信任并产生转化，包括品牌、官网、发布、销售或需求生成。',
+    '4. `反馈与规模化`：建立 Build -> Sell -> Learn -> Improve 循环，包括数据、客户反馈、支持、单位经济模型或扩张机会。',
+    '',
+    '## 生成路线图时的判断标准',
+    '',
+    '- 不要只生成工程开发任务。',
+    '- 不要只生成研究、分析、规划这类无本地交付物的任务。',
+    '- 每个阶段至少有一个可执行环节。',
+    '- 每个环节都必须能通过 Agent 对话推进，并产生本地文件、验证结果、市场材料或反馈记录。',
+    '- 如果项目还没有代码，也要先产出项目文档、访谈问题、MVP 边界或发布材料等可提交文件。',
+    '- 路线图应该让用户始终知道下一步，而不是让用户阅读一份静态计划。',
+    '',
+    '## 推荐循环',
+    '',
+    '```text',
+    '项目想法 -> 方法论路线图 -> 下一步动作 -> Agent 对话 -> 本地交付 -> 状态闭环 -> 路线图更新',
+    '```'
   ].join('\n');
 }
 
@@ -297,6 +333,11 @@ function ensureSolopreneurReadme(solopreneurDir: string): void {
 function ensureBootstrapRoadmapInstructions(solopreneurDir: string, cliPath: string): void {
   const instructionsPath = path.join(solopreneurDir, 'bootstrap-roadmap-instructions.md');
   fs.writeFileSync(instructionsPath, buildBootstrapRoadmapInstructions(cliPath), 'utf8');
+}
+
+function ensureRoadmapMethodologyInstructions(solopreneurDir: string): void {
+  const instructionsPath = path.join(solopreneurDir, 'roadmap-methodology.md');
+  fs.writeFileSync(instructionsPath, buildRoadmapMethodologyInstructions(), 'utf8');
 }
 
 function normalizeSupplementFiles(files: unknown): string[] {
@@ -466,6 +507,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
     fs.mkdirSync(solopreneurDir, { recursive: true });
   }
   ensureSolopreneurReadme(solopreneurDir);
+  ensureRoadmapMethodologyInstructions(solopreneurDir);
   ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
 
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
@@ -1374,11 +1416,12 @@ function buildRoadmapRevisionPrompt(
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行要求：',
-    '1. 先读取当前 `.solopreneur/roadmap.csv` 和项目已有文件，理解已经完成的工作与仍待推进的事项。',
+    '1. 先读取当前 `.solopreneur/roadmap.csv`、`.solopreneur/roadmap-methodology.md` 和项目已有文件，理解已经完成的工作与仍待推进的事项。',
     '2. 直接重写 `.solopreneur/roadmap.csv`，让后续环节反映本次调整要求；不要把本段提示词、解释文字或执行日志写进 CSV。',
     '3. 除非用户明确要求推翻已完成工作，否则保留已完成环节的事实和状态，并围绕新方向调整待推进环节、依赖与 Agent 任务。',
     '4. CSV 必须保留字段 `id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt`；每个依赖必须指向存在的环节 ID，且不能自依赖。',
-    '5. 完成后重新读取 CSV，确认每个环节都有明确标题、描述和可执行的 Agent 任务，再正常退出 CLI。'
+    '5. 路线图必须保持方法论覆盖：问题与客户发现、产品与 MVP、营销与销售、反馈与规模化四个阶段都至少出现一次，不能只剩工程任务。',
+    '6. 完成后重新读取 CSV，确认每个环节都有明确标题、描述和可执行的 Agent 任务，再正常退出 CLI。'
   ].join('\n');
 }
 
@@ -1500,58 +1543,58 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
       id: '1',
       title: '生成初始路线图',
       description: `基于当前项目文件和你对“${safePrompt}”的理解，直接重写 .solopreneur/roadmap.csv，生成这个项目真正要执行的定制化路线图。`,
-      stage: '商业规划',
+      stage: '问题与客户发现',
       dependencies: '',
       agentCli: cliPath,
-      agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md，基于当前项目文件直接重写 .solopreneur/roadmap.csv。完成后按指令文件中的自检要求重新读取并校验该 CSV。',
+      agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md 和 .solopreneur/roadmap-methodology.md，基于当前项目文件直接重写 .solopreneur/roadmap.csv。完成后按指令文件中的自检要求重新读取并校验该 CSV。',
       status: 'Pending',
       createdAt: now,
       completedAt: '',
     },
     {
       id: '2',
-      title: '明确产品承诺',
-      description: `把“${safePrompt}”整理成清晰的目标用户、核心承诺、成功指标和第一版边界。`,
-      stage: '商业规划',
+      title: '验证问题与目标客户',
+      description: `把“${safePrompt}”整理成清晰的问题假设、目标用户、验证方式和第一版边界。`,
+      stage: '问题与客户发现',
       dependencies: '1',
       agentCli: cliPath,
-      agentPrompt: `为“${safePrompt}”创建一份简洁的产品简报，写入 docs/product-brief.md，包含目标用户、核心承诺、MVP 边界、风险和验收标准。`,
+      agentPrompt: `为“${safePrompt}”创建 docs/problem-discovery.md，包含问题假设、目标用户、验证问题、MVP 边界、风险和下一步行动。`,
       status: 'Pending',
       createdAt: now,
       completedAt: '',
     },
     {
       id: '3',
-      title: '制定实现计划',
-      description: '把产品简报转成可执行的构建顺序、关键文件、里程碑和验证命令。',
+      title: '构建第一个可用切片',
+      description: '把问题假设转成可运行、可验证的最小产品切片。',
       stage: '产品与 MVP',
       dependencies: '2',
       agentCli: cliPath,
-      agentPrompt: `阅读 docs/product-brief.md，为“${safePrompt}”创建 docs/implementation-plan.md，包含里程碑、预期文件、验证命令和第一个最小可用切片。`,
+      agentPrompt: `阅读 docs/problem-discovery.md，为“${safePrompt}”实现或规划第一个可用 MVP 切片，产出项目文件或 docs/mvp-slice.md，并记录最窄验证命令。`,
       status: 'Pending',
       createdAt: now,
       completedAt: '',
     },
     {
       id: '4',
-      title: '构建第一个可用切片',
-      description: '实现最小可用产品路径，并留下可运行、可验证的交付说明。',
-      stage: '产品与 MVP',
+      title: '准备首轮市场触达',
+      description: '把产品承诺转成品牌、官网、发布或销售材料，让潜在用户能理解并反馈。',
+      stage: '营销与销售',
       dependencies: '3',
       agentCli: cliPath,
-      agentPrompt: '实现 docs/implementation-plan.md 中定义的第一个垂直切片。改动保持在当前工作区内，更新 README.md 的运行方式，并执行最窄的相关验证命令。',
+      agentPrompt: '基于当前产品切片创建 docs/launch-message.md，包含一句话定位、官网首屏文案、发布帖、首批触达渠道和用户反馈入口。',
       status: 'Pending',
       createdAt: now,
       completedAt: '',
     },
     {
       id: '5',
-      title: '准备发布素材',
-      description: '基于已经交付的切片，准备基础发布文案、检查清单和下一步增长动作。',
-      stage: '营销与增长',
+      title: '建立反馈与改进循环',
+      description: '把首轮反馈、数据和支持信号转成下一轮 Build -> Sell -> Learn -> Improve 动作。',
+      stage: '反馈与规模化',
       dependencies: '4',
       agentCli: cliPath,
-      agentPrompt: `基于当前文件，为“${safePrompt}”创建 docs/launch-checklist.md，包含定位文案、发布检查清单、已知缺口和下一个可衡量增长动作。`,
+      agentPrompt: `基于当前文件，为“${safePrompt}”创建 docs/learning-loop.md，包含反馈收集方式、关键指标、支持信号、单位经济假设和下一轮改进任务。`,
       status: 'Pending',
       createdAt: now,
       completedAt: '',
@@ -1909,7 +1952,8 @@ function validateBootstrapRoadmapRewrite(workspaceRoot: string, nodeId: string):
       agentPrompt: String(node.agentPrompt || '').trim(),
       status: String(node.status || '').trim()
     })).filter((node) => node.id);
-    const validStages = new Set(['商业规划', '品牌与设置', '产品与 MVP', '营销与增长']);
+    const requiredMethodologyStages = ['问题与客户发现', '产品与 MVP', '营销与销售', '反馈与规模化'];
+    const validStages = new Set(requiredMethodologyStages);
     const bootstrapMarkers = [
       '你的唯一主任务是直接重写 .solopreneur/roadmap.csv',
       '你的唯一交付物是直接重写 .solopreneur/roadmap.csv',
@@ -1930,6 +1974,11 @@ function validateBootstrapRoadmapRewrite(workspaceRoot: string, nodeId: string):
     }
     if (nodes.some((node) => !validStages.has(node.stage))) {
       return { valid: false, reason: '生成后的路线图存在非法 stage 值。' };
+    }
+    const presentStages = new Set(nodes.map((node) => node.stage));
+    const missingStages = requiredMethodologyStages.filter((stage) => !presentStages.has(stage));
+    if (missingStages.length > 0) {
+      return { valid: false, reason: `生成后的路线图缺少方法论阶段：${missingStages.join('、')}。` };
     }
     if (nodes.some((node) => node.status !== 'Pending')) {
       return { valid: false, reason: '生成后的路线图所有环节都必须回到 Pending。' };
@@ -1974,6 +2023,12 @@ function validateRoadmapRevision(workspaceRoot: string): { valid: boolean; reaso
       .filter((node) => node.id);
     if (nodes.length === 0) {
       return { valid: false, reason: '调整后的路线图没有可执行环节。' };
+    }
+    const requiredMethodologyStages = ['问题与客户发现', '产品与 MVP', '营销与销售', '反馈与规模化'];
+    const presentStages = new Set(nodes.map((node) => String(node.stage || '').trim()));
+    const missingStages = requiredMethodologyStages.filter((stage) => !presentStages.has(stage));
+    if (missingStages.length > 0) {
+      return { valid: false, reason: `调整后的路线图缺少方法论阶段：${missingStages.join('、')}。` };
     }
     const ids = nodes.map((node) => node.id);
     const idSet = new Set(ids);

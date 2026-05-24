@@ -39,6 +39,7 @@ interface RoadmapNodeLike {
   title: string;
   stage: string;
   status: string;
+  agentCli?: string;
   dependencies?: string;
 }
 
@@ -137,6 +138,7 @@ function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
       title: String(node.title || '').trim(),
       stage: String(node.stage || '').trim(),
       status: String(node.status || 'Pending').trim() || 'Pending',
+      agentCli: String((node as any).agentCli || '').trim(),
       dependencies: String(node.dependencies || '').trim()
     })).filter((node) => node.id);
   } catch {
@@ -148,11 +150,19 @@ function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
   if (!nodes.length) {
     return null;
   }
+  const completedIds = new Set(nodes.filter((node) => node.status === 'Completed').map((node) => node.id));
+  const dependenciesSatisfied = (node: RoadmapNodeLike) => {
+    const dependencies = String(node.dependencies || '')
+      .split(',')
+      .map((dependency) => dependency.trim())
+      .filter(Boolean);
+    return dependencies.every((dependency) => completedIds.has(dependency));
+  };
   const byStatus = (status: string) => nodes.find((node) => node.status === status);
-  return byStatus('Failed')
+  return byStatus('Running')
+    || byStatus('Failed')
     || byStatus('In Progress')
-    || byStatus('Running')
-    || nodes.find((node) => node.status === 'Pending' && !(node.dependencies || '').trim())
+    || nodes.find((node) => node.status === 'Pending' && dependenciesSatisfied(node))
     || byStatus('Pending')
     || nodes.find((node) => node.status !== 'Completed')
     || nodes[0];
@@ -226,7 +236,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _syncEngine: SyncEngine,
-    private readonly _onRunAgent: (nodeId: string) => Promise<void>,
+    private readonly _onRunAgent: (nodeId: string, userMessage?: string, agentCli?: string) => Promise<void>,
     private readonly _getSettings: () => SolopreneurSettings,
     private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>,
     private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string },
@@ -256,7 +266,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           this.sendNodesToWebview();
           break;
         case 'runAgent':
-          await this._onRunAgent(data.nodeId);
+          await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '');
           break;
         case 'showFullRoadmap':
           vscode.commands.executeCommand('solopreneur.showRoadmap');
@@ -392,7 +402,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     body {
       margin: 0;
       padding: 12px;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC', Roboto, Helvetica, Arial, sans-serif;
       background: var(--vscode-sidebar-background, var(--bg-dark));
       color: var(--text-main);
       overflow-x: hidden;
@@ -711,6 +721,100 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       border-color: transparent;
     }
 
+    .next-action-panel {
+      background: rgba(0, 229, 255, 0.07);
+      border: 1px solid rgba(0, 229, 255, 0.24);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 14px;
+    }
+
+    .next-action-kicker {
+      font-size: 9px;
+      font-weight: 800;
+      color: #00e5ff;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-bottom: 6px;
+    }
+
+    .next-action-title {
+      font-size: 13px;
+      font-weight: 800;
+      color: var(--text-main);
+      line-height: 1.25;
+      margin-bottom: 5px;
+    }
+
+    .next-action-meta {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .next-action-reason {
+      font-size: 10.5px;
+      line-height: 1.35;
+      color: #cbd5e1;
+      margin-bottom: 9px;
+    }
+
+    .next-action-compose {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .next-action-input {
+      flex: 1 1 100%;
+      min-width: 0;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-glass);
+      border-radius: 5px;
+      padding: 6px 7px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 11px;
+      outline: none;
+    }
+
+    .next-action-agent {
+      flex: 1 1 120px;
+      min-width: 0;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-glass);
+      border-radius: 5px;
+      color: var(--text-main);
+      font-family: inherit;
+      font-size: 11px;
+      padding: 5px 6px;
+      outline: none;
+    }
+
+    .next-action-send {
+      border: none;
+      border-radius: 5px;
+      background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
+      color: #000;
+      font-size: 11px;
+      font-weight: 800;
+      padding: 6px 9px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .next-action-send:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
     .settings-actions {
       display: flex;
       gap: 6px;
@@ -1020,6 +1124,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="portfolio-list" id="portfolio-list"></div>
   </div>
 
+  <div class="next-action-panel" id="next-action-panel"></div>
+
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
@@ -1091,6 +1197,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnAddProject = document.getElementById('btn-add-project');
     const portfolioList = document.getElementById('portfolio-list');
     const portfolioFilters = document.getElementById('portfolio-filters');
+    const nextActionPanel = document.getElementById('next-action-panel');
 
     // Settings elements
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
@@ -1123,6 +1230,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         latestUpdate: '最近更新',
         currentStage: '当前阶段',
         nextAction: '下一步',
+        nextActionSubtitle: '当前最该推进',
+        nextActionReasonRunning: 'Agent 正在处理这个环节，先查看运行状态。',
+        nextActionReasonFailed: '这个环节失败过，优先重试或补充要求。',
+        nextActionReasonInProgress: '这个环节已经开始，继续推进最容易形成闭环。',
+        nextActionReasonPending: '前置环节已满足，可以开始推进。',
+        nextActionReasonComplete: '所有环节已完成，可以打开大图调整路线图。',
+        nextActionPlaceholder: '补充这次要 Agent 做什么...',
+        nextActionSend: '发送',
         failures: '失败',
         selected: '当前项目',
         settingsTitle: 'SoloMap 设置',
@@ -1160,6 +1275,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         latestUpdate: 'Updated',
         currentStage: 'Stage',
         nextAction: 'Next',
+        nextActionSubtitle: 'Current focus',
+        nextActionReasonRunning: 'The Agent is already working on this step. Check the running state first.',
+        nextActionReasonFailed: 'This step failed before. Retry it with clearer guidance.',
+        nextActionReasonInProgress: 'This step is already in motion. Continue it to close the loop.',
+        nextActionReasonPending: 'Dependencies are ready. This is the next step to start.',
+        nextActionReasonComplete: 'All steps are complete. Open the roadmap to revise the next loop.',
+        nextActionPlaceholder: 'Add guidance for this Agent run...',
+        nextActionSend: 'Send',
         failures: 'Failures',
         selected: 'Current project',
         settingsTitle: 'SoloMap Settings',
@@ -1416,6 +1539,100 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return true;
     }
 
+    function dependenciesSatisfied(node, nodes) {
+      const completedIds = new Set((nodes || []).filter(candidate => candidate.status === 'Completed').map(candidate => String(candidate.id)));
+      const dependencies = String(node.dependencies || '')
+        .split(',')
+        .map(dependency => dependency.trim())
+        .filter(Boolean);
+      return dependencies.every(dependency => completedIds.has(dependency));
+    }
+
+    function getNextActionNode(nodes) {
+      if (!nodes || nodes.length === 0) return null;
+      const byStatus = status => nodes.find(node => node.status === status);
+      return byStatus('Running')
+        || byStatus('Failed')
+        || byStatus('In Progress')
+        || nodes.find(node => node.status === 'Pending' && dependenciesSatisfied(node, nodes))
+        || byStatus('Pending')
+        || nodes.find(node => node.status !== 'Completed')
+        || nodes[0];
+    }
+
+    function getNextActionReason(node, nodes) {
+      if (!node) return '';
+      if (node.status === 'Running') return t('nextActionReasonRunning');
+      if (node.status === 'Failed') return t('nextActionReasonFailed');
+      if (node.status === 'In Progress') return t('nextActionReasonInProgress');
+      if (node.status === 'Pending') return t('nextActionReasonPending');
+      if ((nodes || []).every(candidate => candidate.status === 'Completed')) return t('nextActionReasonComplete');
+      return t('nextActionReasonPending');
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function renderAgentOptions(node) {
+      const options = [];
+      function add(value) {
+        const normalized = String(value || '').trim();
+        if (!normalized || options.includes(normalized)) return;
+        options.push(normalized);
+      }
+      add(node && node.agentCli);
+      add(settingCliPath.value || 'agy');
+      add('agy');
+      add('codex');
+      add('antigravity');
+      add('antigravity-cli');
+      add('codex-cli');
+      return options.map(option => '<option value="' + escapeHtml(option) + '">' + escapeHtml(option) + '</option>').join('');
+    }
+
+    function renderNextAction(nodes) {
+      const node = getNextActionNode(nodes || []);
+      if (!node) {
+        nextActionPanel.innerHTML = '<div class="next-action-kicker">' + t('nextAction') + '</div><div class="next-action-reason">' + t('empty') + '</div>';
+        return;
+      }
+      const disabled = node.status === 'Running' || node.status === 'Completed' ? 'disabled' : '';
+      nextActionPanel.innerHTML = \`
+        <div class="next-action-kicker">\${t('nextAction')}</div>
+        <div class="next-action-title">\${escapeHtml(node.title)}</div>
+        <div class="next-action-meta">
+          <span>\${escapeHtml(t('nextActionSubtitle'))}</span>
+          <span class="status-lbl \${statusClass(node.status)}">\${statusText(node.status)}</span>
+          <span>\${escapeHtml(node.stage || '')}</span>
+        </div>
+        <div class="next-action-reason">\${escapeHtml(getNextActionReason(node, nodes || []))}</div>
+        <div class="next-action-compose">
+          <input class="next-action-input" data-next-action-input placeholder="\${escapeHtml(t('nextActionPlaceholder'))}" \${disabled}>
+          <select class="next-action-agent" data-next-action-agent \${disabled}>
+            \${renderAgentOptions(node)}
+          </select>
+          <button class="next-action-send" data-next-action-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled}>
+            <span class="codicon codicon-send"></span><span>\${escapeHtml(t('nextActionSend'))}</span>
+          </button>
+        </div>
+      \`;
+      const sendButton = nextActionPanel.querySelector('[data-next-action-send]');
+      if (sendButton) {
+        sendButton.addEventListener('click', () => {
+          const input = nextActionPanel.querySelector('[data-next-action-input]');
+          const agentSelect = nextActionPanel.querySelector('[data-next-action-agent]');
+          runNodeAgent(sendButton.getAttribute('data-next-node-id'), input ? input.value : '', agentSelect ? agentSelect.value : '');
+          if (input) input.value = '';
+        });
+      }
+    }
+
     function renderPortfolio(portfolio, selectedProjectPath) {
       if (!portfolio || portfolio.length === 0) {
         portfolioList.innerHTML = '<div class="empty-portfolio">' + t('emptyPortfolio') + '</div>';
@@ -1486,6 +1703,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function renderSidebar(nodes) {
       tasksList.innerHTML = '';
+      renderNextAction(nodes || []);
 
       if (!nodes || nodes.length === 0) {
         const emptyState = document.createElement('div');
@@ -1540,7 +1758,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const runButton = card.querySelector('[data-run-node-id]');
         if (runButton) {
           runButton.addEventListener('click', () => {
-            runNodeAgent(node.id);
+            runNodeAgent(node.id, '', node.agentCli || '');
           });
         }
 
@@ -1548,10 +1766,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
-    function runNodeAgent(nodeId) {
+    function runNodeAgent(nodeId, userMessage, agentCli) {
       vscode.postMessage({
         command: 'runAgent',
-        nodeId: nodeId
+        nodeId: nodeId,
+        userMessage: userMessage || '',
+        agentCli: agentCli || ''
       });
     }
   </script>

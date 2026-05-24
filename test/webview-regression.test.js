@@ -200,6 +200,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
+    'next-action-panel',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -334,6 +335,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
   assert.match(html, /id="portfolio-list"/);
+  assert.match(html, /id="next-action-panel"/);
+  assert.match(html, /getNextActionNode/);
+  assert.match(html, /data-next-action-send/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
@@ -344,7 +348,8 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
     [
-      'module.exports.__buildProjectPortfolioSummaries = buildProjectPortfolioSummaries;'
+      'module.exports.__buildProjectPortfolioSummaries = buildProjectPortfolioSummaries;',
+      'module.exports.__getRecommendedNode = getRecommendedNode;'
     ].join('\n')
   );
 
@@ -381,6 +386,10 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].progressPercent, 33);
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
+  assert.equal(sidebarModule.__getRecommendedNode([
+    { id: '1', title: 'Failed step', status: 'Failed', stage: '产品与 MVP', dependencies: '' },
+    { id: '2', title: 'Running step', status: 'Running', stage: '产品与 MVP', dependencies: '' }
+  ]).title, 'Running step');
 });
 
 test('agent command builder uses Codex exec and preserves Antigravity run path', () => {
@@ -393,6 +402,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
+      'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
@@ -719,7 +729,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   const writeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-write-agent-'));
   fs.mkdirSync(path.join(writeRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(writeRoot, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n', 'utf8');
-  const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.appendFileSync(".solopreneur/roadmap.csv","1,Init,,商业规划,,codex,Prompt,Pending,2026-01-01T00:00:00.000Z,\\n");')}`;
+  const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.appendFileSync(".solopreneur/roadmap.csv","1,Init,,问题与客户发现,,codex,Prompt,Pending,2026-01-01T00:00:00.000Z,\\n");')}`;
   const writeRun = extensionModule.__buildAgentShellScript('codex', writeCommand, writeRoot, 'write', 8, '', undefined, '', writeCommand);
   childProcess.execSync(writeRun.finalCommand, { cwd: writeRoot, stdio: 'ignore' });
   const touchedFiles = fs.readFileSync(path.join(writeRoot, '.solopreneur/agent-runs/write/touched-files.txt'), 'utf8');
@@ -729,7 +739,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   fs.mkdirSync(path.join(invalidBootstrapRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(invalidBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-    '1,生成初始路线图,desc,商业规划,,agy,"你的唯一主任务是直接重写 .solopreneur/roadmap.csv",Pending,2026-01-01T00:00:00.000Z,'
+    '1,生成初始路线图,desc,问题与客户发现,,agy,"你的唯一主任务是直接重写 .solopreneur/roadmap.csv",Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'));
   const invalidBootstrap = extensionModule.__validateBootstrapRoadmapRewrite(invalidBootstrapRoot, '1');
   assert.equal(invalidBootstrap.valid, false);
@@ -739,23 +749,45 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   fs.mkdirSync(path.join(validBootstrapRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-    '10,梳理目标客户,整理 ICP 与定价假设,商业规划,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
-    '20,校准品牌表达,整理着陆页与 README,品牌与设置,10,agy,修改 README.md 和 landing/page.html,Pending,2026-01-01T00:00:00.000Z,',
-    '30,实现首个 MVP 切片,完成最小闭环,产品与 MVP,20,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
-    '40,准备首轮外联,输出外联材料,营销与增长,30,agy,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,'
+    '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
+    '20,实现首个 MVP 切片,完成最小闭环,产品与 MVP,10,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
+    '30,准备首轮外联,输出外联材料,营销与销售,20,agy,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,',
+    '40,建立反馈循环,整理反馈和改进任务,反馈与规模化,30,agy,创建 docs/learning-loop.md 并记录指标,Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'));
   const validBootstrap = extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1');
   assert.equal(validBootstrap.valid, true);
 
+  fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
+    '30,实现首个 MVP 切片,完成最小闭环,产品与 MVP,20,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
+    '40,准备首轮外联,输出外联材料,营销与销售,30,agy,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,',
+    '50,准备第二轮外联,补充销售材料,营销与销售,40,agy,创建 outreach/follow-up.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+  assert.equal(extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1').valid, false);
+  assert.match(extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1').reason, /缺少方法论阶段/);
+
+  fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
+    '20,实现首个 MVP 切片,完成最小闭环,产品与 MVP,10,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
+    '30,准备首轮外联,输出外联材料,营销与销售,20,agy,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,',
+    '40,建立反馈循环,整理反馈和改进任务,反馈与规模化,30,agy,创建 docs/learning-loop.md 并记录指标,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+
   assert.equal(extensionModule.__validateRoadmapRevision(validBootstrapRoot).valid, true);
   fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-    '10,梳理目标客户,整理 ICP,商业规划,99,agy,创建 docs/icp.md,Pending,2026-01-01T00:00:00.000Z,'
+    '10,梳理目标客户,整理 ICP,问题与客户发现,99,agy,创建 docs/icp.md,Pending,2026-01-01T00:00:00.000Z,',
+    '20,实现 MVP,完成切片,产品与 MVP,10,agy,修改 src/app.js,Pending,2026-01-01T00:00:00.000Z,',
+    '30,准备外联,输出材料,营销与销售,20,agy,创建 outreach/email.md,Pending,2026-01-01T00:00:00.000Z,',
+    '40,建立反馈,记录指标,反馈与规模化,30,agy,创建 docs/learning-loop.md,Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'));
   assert.match(extensionModule.__validateRoadmapRevision(validBootstrapRoot).reason, /无效依赖/);
 
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
   const bootstrapInstructions = extensionModule.__buildBootstrapRoadmapInstructions('codex');
+  const methodologyInstructions = extensionModule.__buildRoadmapMethodologyInstructions();
   assert.match(dataReadme, /SoloMap Project Data/);
   assert.match(dataReadme, /roadmap\.csv/);
   assert.match(dataReadme, /step-memory/);
@@ -763,7 +795,9 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(dataReadme, /project_journal\.db/);
   assert.match(dataReadme, /Git\/GitHub/);
   assert.match(bootstrapInstructions, /Bootstrap Roadmap Instructions/);
+  assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
+  assert.match(methodologyInstructions, /发现问题 -> 打造产品 -> 卖给客户 -> 持续改进/);
 });
 
 test('failed conversations render retry action in roadmap webview', () => {
@@ -803,7 +837,8 @@ test('local roadmap fallback produces runnable dependent tasks', () => {
   assert.match(nodes[0].title, /生成初始路线图/);
   assert.match(nodes[0].agentPrompt, /\.solopreneur\/bootstrap-roadmap-instructions\.md/);
   assert.doesNotMatch(nodes[0].agentPrompt, /字段顺序必须严格是/);
-  assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/product-brief.md')));
+  assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/problem-discovery.md')));
+  assert.deepEqual([...new Set(nodes.map((node) => node.stage))], ['问题与客户发现', '产品与 MVP', '营销与销售', '反馈与规模化']);
 });
 
 test('roadmap csv generated by an agent is not overwritten by stale node state', async () => {
@@ -821,10 +856,10 @@ test('roadmap csv generated by an agent is not overwritten by stale node state',
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-    '10,梳理目标客户,整理 ICP 与定价假设,商业规划,,codex,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
-    '20,校准品牌表达,整理着陆页与 README,品牌与设置,10,codex,修改 README.md 和 landing/page.html,Pending,2026-01-01T00:00:00.000Z,',
-    '30,实现首个 MVP 切片,完成最小闭环,产品与 MVP,20,codex,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
-    '40,准备首轮外联,输出外联材料,营销与增长,30,codex,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,'
+    '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,codex,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
+    '20,实现首个 MVP 切片,完成最小闭环,产品与 MVP,10,codex,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
+    '30,准备首轮外联,输出外联材料,营销与销售,20,codex,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,',
+    '40,建立反馈循环,整理反馈和改进任务,反馈与规模化,30,codex,创建 docs/learning-loop.md 并记录指标,Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'));
   fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
   fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
@@ -852,7 +887,7 @@ test('roadmap csv generated by an agent is not overwritten by stale node state',
       id: '1',
       title: '生成初始路线图',
       description: 'starter',
-      stage: '商业规划',
+      stage: '问题与客户发现',
       dependencies: '',
       agentCli: 'codex',
       agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md',
@@ -977,8 +1012,10 @@ test('roadmap revision accepts valid CSV updates and restores the previous roadm
   };
   const validCsv = [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-    '1,Original step,Keep existing work,规划,,codex,Continue original work,Completed,2026-01-01T00:00:00.000Z,2026-05-24T00:00:00.000Z',
-    '2,Validate payment,Confirm checkout direction,产品,1,codex,Create a payment validation plan,Pending,2026-05-24T00:00:00.000Z,'
+    '1,Validate customer problem,Keep existing discovery,问题与客户发现,,codex,Create docs/problem-discovery.md,Completed,2026-01-01T00:00:00.000Z,2026-05-24T00:00:00.000Z',
+    '2,Validate payment MVP,Confirm checkout direction,产品与 MVP,1,codex,Create a payment validation plan,Pending,2026-05-24T00:00:00.000Z,',
+    '3,Prepare checkout launch,Write launch message,营销与销售,2,codex,Create docs/launch-message.md,Pending,2026-05-24T00:00:00.000Z,',
+    '4,Create learning loop,Track feedback and metrics,反馈与规模化,3,codex,Create docs/learning-loop.md,Pending,2026-05-24T00:00:00.000Z,'
   ].join('\n');
   const validRun = createRevisionRun('valid', validCsv);
   let validStatus = '';
