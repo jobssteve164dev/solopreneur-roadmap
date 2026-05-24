@@ -6,8 +6,6 @@ import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 
 interface SolopreneurSettings {
-  apiProvider: string;
-  apiKey: string;
   cliPath: string;
   language: string;
 }
@@ -228,7 +226,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _extensionUri: vscode.Uri,
     private readonly _syncEngine: SyncEngine,
     private readonly _onRunAgent: (nodeId: string) => Promise<void>,
-    private readonly _onGenerateRoadmap: (prompt: string) => Promise<void>,
     private readonly _getSettings: () => SolopreneurSettings,
     private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>,
     private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string },
@@ -260,9 +257,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'runAgent':
           await this._onRunAgent(data.nodeId);
           break;
-        case 'generateRoadmap':
-          await this._onGenerateRoadmap(data.prompt);
-          break;
         case 'showFullRoadmap':
           vscode.commands.executeCommand('solopreneur.showRoadmap');
           break;
@@ -271,8 +265,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
         case 'updateSettings':
           await this._updateSettings({
-            apiProvider: data.apiProvider,
-            apiKey: data.apiKey,
             cliPath: data.cliPath,
             language: data.language
           });
@@ -1022,25 +1014,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
     
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-provider">AI Provider</label>
-      <select class="settings-select" id="setting-provider">
-        <option value="Gemini">Gemini</option>
-        <option value="OpenAI">OpenAI</option>
-        <option value="VS Code Copilot (Native)">VS Code Copilot (Native)</option>
-        <option value="Codex CLI (Local)">Codex CLI (Local)</option>
-        <option value="Antigravity CLI (Local)">Antigravity CLI (Local)</option>
-      </select>
-    </div>
-
-    <div class="settings-field" id="api-key-container">
-      <label class="settings-lbl-title" id="label-api-key">API Key</label>
-      <input type="password" class="settings-input" id="setting-key" placeholder="Enter API Key...">
-      <div id="help-api-key" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.
-      </div>
-    </div>
-
-    <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
       <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy">
       <div id="help-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
@@ -1093,9 +1066,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
-    const settingProvider = document.getElementById('setting-provider');
-    const settingKey = document.getElementById('setting-key');
-    const apiKeyContainer = document.getElementById('api-key-container');
     const settingCliPath = document.getElementById('setting-clipath');
     const settingLanguage = document.getElementById('setting-language');
     const btnTestCli = document.getElementById('btn-test-cli');
@@ -1126,10 +1096,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         selected: '当前项目',
         settingsTitle: '⚙️ 设置',
         language: '界面语言',
-        provider: 'AI 服务',
-        apiKey: 'API Key',
-        apiKeyPlaceholder: '输入 API Key...',
-        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 Copilot、本地 Codex CLI 或 agy 生成路线图时不需要。',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
         testCli: '测试 CLI',
@@ -1138,7 +1104,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         progress: '路线图进度',
         tasks: '个任务',
         openFull: '打开路线图大图',
-        empty: '还没有路线图。输入项目想法来生成计划。',
+        empty: '还没有路线图。请先添加项目文件夹，或在路线图中推进“生成初始路线图”环节。',
         run: '对话',
         testing: '正在测试连接...',
         connectionOk: '连接正常：',
@@ -1164,10 +1130,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         selected: 'Current project',
         settingsTitle: '⚙️ Solopreneur Settings',
         language: 'Language',
-        provider: 'AI Provider',
-        apiKey: 'API Key',
-        apiKeyPlaceholder: 'Enter API Key...',
-        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
         testCli: 'Test CLI',
@@ -1176,7 +1138,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         progress: 'Roadmap Sync Progress',
         tasks: 'Tasks',
         openFull: 'Open Visual Roadmap Graph',
-        empty: 'No tasks in roadmap. Enter a prompt above to generate your plan.',
+        empty: 'No roadmap yet. Add a project folder, or run the "Generate Initial Roadmap" step first.',
         run: 'Run',
         testing: 'Testing connection...',
         connectionOk: 'Connection OK: ',
@@ -1216,10 +1178,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       btnAddProject.title = t('chooseProject');
       setText('settings-title', t('settingsTitle'));
       setText('label-language', t('language'));
-      setText('label-provider', t('provider'));
-      setText('label-api-key', t('apiKey'));
-      settingKey.placeholder = t('apiKeyPlaceholder');
-      setText('help-api-key', t('apiKeyHelp'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
       setText('text-test-cli', t('testCli'));
@@ -1247,18 +1205,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       cliTestBadge.style.display = 'none';
     });
 
-    settingProvider.addEventListener('change', () => {
-      if (
-        settingProvider.value === 'VS Code Copilot (Native)'
-        || settingProvider.value === 'Codex CLI (Local)'
-        || settingProvider.value === 'Antigravity CLI (Local)'
-      ) {
-        apiKeyContainer.style.display = 'none';
-      } else {
-        apiKeyContainer.style.display = 'flex';
-      }
-    });
-
     settingLanguage.addEventListener('change', () => {
       currentLanguage = settingLanguage.value;
       applyLanguage();
@@ -1282,21 +1228,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'settingsLoaded':
-          settingProvider.value = message.settings.apiProvider || 'Gemini';
-          settingKey.value = message.settings.apiKey || '';
           settingCliPath.value = message.settings.cliPath || 'agy';
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
-          
-          if (
-            settingProvider.value === 'VS Code Copilot (Native)'
-            || settingProvider.value === 'Codex CLI (Local)'
-            || settingProvider.value === 'Antigravity CLI (Local)'
-          ) {
-            apiKeyContainer.style.display = 'none';
-          } else {
-            apiKeyContainer.style.display = 'flex';
-          }
           applyLanguage();
           break;
 
@@ -1335,8 +1269,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     btnSaveSettings.addEventListener('click', () => {
       vscode.postMessage({
         command: 'updateSettings',
-        apiProvider: settingProvider.value,
-        apiKey: settingKey.value.trim(),
         cliPath: settingCliPath.value.trim(),
         language: settingLanguage.value
       });

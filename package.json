@@ -49,24 +49,6 @@
     "configuration": {
       "title": "Solopreneur AI Roadmap Settings",
       "properties": {
-        "solopreneur.apiProvider": {
-          "type": "string",
-          "default": "Gemini",
-          "enum": [
-            "Gemini",
-            "OpenAI",
-            "VS Code Copilot (Native)",
-            "Codex CLI (Local)",
-            "Antigravity CLI (Local)"
-          ],
-          "description": "The AI provider used to generate visual roadmaps. Supports hosted APIs, Copilot Chat, and local Codex/Antigravity CLIs."
-        },
-        "solopreneur.apiKey": {
-          "type": "string",
-          "default": "",
-          "description": "Your API key for the selected standalone AI provider (Gemini or OpenAI).",
-          "scope": "application"
-        },
         "solopreneur.cliPath": {
           "type": "string",
           "default": "agy",

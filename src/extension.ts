@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as https from 'https';
 import * as childProcess from 'child_process';
 import { SyncEngine } from './db/syncEngine';
 import { RoadmapNode } from './db/types';
@@ -15,8 +14,6 @@ let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let activeProjectRoot: string | null = null;
 
 interface SolopreneurSettings {
-  apiProvider: string;
-  apiKey: string;
   cliPath: string;
   language: string;
 }
@@ -95,12 +92,6 @@ export async function activate(context: vscode.ExtensionContext) {
         await handleRunAgent(context, nodeId, '');
       }
     },
-    async (prompt) => {
-      const ready = await ensureSyncEngine(context);
-      if (ready) {
-        await handleGenerateRoadmap(context, prompt);
-      }
-    },
     () => getPersistedSettings(context),
     async (settings) => {
       await updatePersistedSettings(context, settings);
@@ -129,8 +120,6 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   const config = vscode.workspace.getConfiguration('solopreneur');
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
   return {
-    apiProvider: saved.apiProvider || config.get('apiProvider') || 'Gemini',
-    apiKey: saved.apiKey || config.get('apiKey') || '',
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
     language: saved.language || config.get('language') || 'zh'
   };
@@ -138,16 +127,12 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
   const nextSettings: SolopreneurSettings = {
-    apiProvider: settings.apiProvider || 'Gemini',
-    apiKey: settings.apiKey || '',
     cliPath: settings.cliPath || 'agy',
     language: settings.language === 'en' ? 'en' : 'zh'
   };
   await context.globalState.update(settingsKey, nextSettings);
 
   const config = vscode.workspace.getConfiguration('solopreneur');
-  await config.update('apiProvider', nextSettings.apiProvider, vscode.ConfigurationTarget.Global);
-  await config.update('apiKey', nextSettings.apiKey, vscode.ConfigurationTarget.Global);
   await config.update('cliPath', nextSettings.cliPath, vscode.ConfigurationTarget.Global);
   await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
 }
@@ -248,7 +233,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '',
     '- `roadmap.csv`：路线图主数据，包括环节、依赖、状态和 Agent prompt。',
     '- `step-memory/`：每个路线图环节的 JSON 交接总结。没有可续接的 Agent 原生会话时，下一轮 Agent 对话会读取这里的结构化上下文。',
-    '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会优先续接同一个 Agent 会话。',
+    '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会把这些会话 ID 作为可选参考交给 Agent，而不是强制续接。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
     '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
@@ -297,14 +282,6 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
   syncEngine = null;
   activeProjectRoot = null;
   await ensureSyncEngine(context);
-  const projectIdea = await vscode.window.showInputBox({
-    title: '告诉 Solopreneur 这个项目的想法',
-    prompt: '用于生成定制路线图。留空则使用默认路线图。',
-    placeHolder: '例如：给独立咨询顾问使用的轻量 CRM，先做本地优先的 MVP...'
-  });
-  if (projectIdea && projectIdea.trim()) {
-    await handleGenerateRoadmap(context, projectIdea.trim());
-  }
   sendProjectsToWebviews(context);
   sendNodesToWebview();
 }
@@ -484,10 +461,6 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           }
           break;
 
-        case 'generateRoadmap':
-          await handleGenerateRoadmap(context, message.prompt);
-          break;
-
         case 'getSettings':
           if (activePanel) {
             activePanel.webview.postMessage({
@@ -499,8 +472,6 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'updateSettings':
           await updatePersistedSettings(context, {
-            apiProvider: message.apiProvider,
-            apiKey: message.apiKey,
             cliPath: message.cliPath,
             language: message.language
           });
@@ -848,13 +819,19 @@ function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: s
     'const path=require("path");',
     'const root=process.argv[1];',
     'const out=process.argv[2];',
-    'const skip=new Set([".git",".solopreneur","node_modules"]);',
     'const snapshot={};',
+    'function shouldSkip(rel){',
+    'if(rel===".git" || rel.startsWith(".git/")) return true;',
+    'if(rel==="node_modules" || rel.startsWith("node_modules/")) return true;',
+    'if(rel===".solopreneur") return false;',
+    'if(rel.startsWith(".solopreneur/")) return rel !== ".solopreneur/roadmap.csv";',
+    'return false;',
+    '}',
     'function walk(dir){',
     'for(const entry of fs.readdirSync(dir,{withFileTypes:true})){',
-    'if(skip.has(entry.name)) continue;',
     'const full=path.join(dir,entry.name);',
     'const rel=path.relative(root,full).replace(/\\\\/g,"/");',
+    'if(shouldSkip(rel)) continue;',
     'if(entry.isDirectory()){ walk(full); continue; }',
     'if(!entry.isFile() || rel===".agent_status.json") continue;',
     'const stat=fs.statSync(full);',
@@ -874,15 +851,21 @@ function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: strin
     'const root=process.argv[1];',
     'const beforeFile=process.argv[2];',
     'const out=process.argv[3];',
-    'const skip=new Set([".git",".solopreneur","node_modules"]);',
     'let before={};',
     'try{ before=JSON.parse(fs.readFileSync(beforeFile,"utf8"))||{}; } catch {}',
     'const after={};',
+    'function shouldSkip(rel){',
+    'if(rel===".git" || rel.startsWith(".git/")) return true;',
+    'if(rel==="node_modules" || rel.startsWith("node_modules/")) return true;',
+    'if(rel===".solopreneur") return false;',
+    'if(rel.startsWith(".solopreneur/")) return rel !== ".solopreneur/roadmap.csv";',
+    'return false;',
+    '}',
     'function walk(dir){',
     'for(const entry of fs.readdirSync(dir,{withFileTypes:true})){',
-    'if(skip.has(entry.name)) continue;',
     'const full=path.join(dir,entry.name);',
     'const rel=path.relative(root,full).replace(/\\\\/g,"/");',
+    'if(shouldSkip(rel)) continue;',
     'if(entry.isDirectory()){ walk(full); continue; }',
     'if(!entry.isFile() || rel===".agent_status.json") continue;',
     'const stat=fs.statSync(full);',
@@ -1286,10 +1269,37 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
   return [
     {
       id: '1',
+      title: '生成初始路线图',
+      description: `基于当前项目文件和你对“${safePrompt}”的理解，直接重写 .solopreneur/roadmap.csv，生成这个项目真正要执行的定制化路线图。`,
+      stage: '商业规划',
+      dependencies: '',
+      agentCli: cliPath,
+      agentPrompt: [
+        `你现在要为“${safePrompt}”生成真正的项目路线图。`,
+        '必须先阅读当前项目目录里已有的 README、docs、源码入口和 .solopreneur/README.md（如果存在），理解这个项目想做什么。',
+        '你的唯一交付物是直接重写 .solopreneur/roadmap.csv，不要只输出建议，不要把路线图打印在终端里代替写文件。',
+        '硬性要求：',
+        '1. 保留 CSV 表头且字段顺序必须严格是：id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+        '2. 生成 4 到 6 个环节，全部使用中文标题、中文描述、中文 agentPrompt',
+        '3. stage 只能使用这四个值：商业规划、品牌与设置、产品与 MVP、营销与增长',
+        `4. 每一行 agentCli 都写 ${cliPath}`,
+        '5. dependencies 必须反映真实前置关系；第一步留空，后续环节按需要依赖前面的 id',
+        '6. status 全部写 Pending，completedAt 留空，createdAt 写当前 ISO 时间',
+        '7. 每个 agentPrompt 都必须要求 Agent 去修改或创建项目本地文件，并在适用时执行最窄验证命令',
+        '8. 不要生成空泛咨询任务；每个环节都必须有看得见的本地交付物',
+        '9. 除了 .solopreneur/roadmap.csv 和为了完成路线图必要的少量项目说明文件外，不要顺手改无关文件',
+        '写完后你必须重新读取 .solopreneur/roadmap.csv，自检列名、环节数量、依赖关系、stage 枚举和值是否正确；确认无误后再结束本轮。'
+      ].join('\n'),
+      status: 'Pending',
+      createdAt: now,
+      completedAt: '',
+    },
+    {
+      id: '2',
       title: '明确产品承诺',
       description: `把“${safePrompt}”整理成清晰的目标用户、核心承诺、成功指标和第一版边界。`,
       stage: '商业规划',
-      dependencies: '',
+      dependencies: '1',
       agentCli: cliPath,
       agentPrompt: `为“${safePrompt}”创建一份简洁的产品简报，写入 docs/product-brief.md，包含目标用户、核心承诺、MVP 边界、风险和验收标准。`,
       status: 'Pending',
@@ -1297,11 +1307,11 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
       completedAt: '',
     },
     {
-      id: '2',
+      id: '3',
       title: '制定实现计划',
       description: '把产品简报转成可执行的构建顺序、关键文件、里程碑和验证命令。',
       stage: '产品与 MVP',
-      dependencies: '1',
+      dependencies: '2',
       agentCli: cliPath,
       agentPrompt: `阅读 docs/product-brief.md，为“${safePrompt}”创建 docs/implementation-plan.md，包含里程碑、预期文件、验证命令和第一个最小可用切片。`,
       status: 'Pending',
@@ -1309,11 +1319,11 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
       completedAt: '',
     },
     {
-      id: '3',
+      id: '4',
       title: '构建第一个可用切片',
       description: '实现最小可用产品路径，并留下可运行、可验证的交付说明。',
       stage: '产品与 MVP',
-      dependencies: '2',
+      dependencies: '3',
       agentCli: cliPath,
       agentPrompt: '实现 docs/implementation-plan.md 中定义的第一个垂直切片。改动保持在当前工作区内，更新 README.md 的运行方式，并执行最窄的相关验证命令。',
       status: 'Pending',
@@ -1321,11 +1331,11 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
       completedAt: '',
     },
     {
-      id: '4',
+      id: '5',
       title: '准备发布素材',
       description: '基于已经交付的切片，准备基础发布文案、检查清单和下一步增长动作。',
       stage: '营销与增长',
-      dependencies: '3',
+      dependencies: '4',
       agentCli: cliPath,
       agentPrompt: `基于当前文件，为“${safePrompt}”创建 docs/launch-checklist.md，包含定位文案、发布检查清单、已知缺口和下一个可衡量增长动作。`,
       status: 'Pending',
@@ -1466,7 +1476,12 @@ async function handleRetryConversation(context: vscode.ExtensionContext, nodeId:
   await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '');
 }
 
-function processAgentStatusFile(statusFilePath: string): void {
+function didRoadmapCsvChange(changedFilesSummary: string, touchedFilesSummary: string): boolean {
+  const combined = [changedFilesSummary, touchedFilesSummary].join('\n');
+  return combined.includes('.solopreneur/roadmap.csv');
+}
+
+async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   if (!fs.existsSync(statusFilePath)) {
     return;
   }
@@ -1568,6 +1583,10 @@ function processAgentStatusFile(statusFilePath: string): void {
       );
     }
 
+    if (workspaceRoot && didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary)) {
+      await syncEngine.initAndSync();
+    }
+
     sendNodesToWebview();
     if (activePanel) {
       activePanel.webview.postMessage({
@@ -1611,322 +1630,13 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
     new vscode.RelativePattern(workspaceRoot, '.agent_status.json')
   );
 
-  const handleSentinelChange = () => processAgentStatusFile(statusFilePath);
+  const handleSentinelChange = () => {
+    void processAgentStatusFile(statusFilePath);
+  };
   watcher.onDidChange(handleSentinelChange);
   watcher.onDidCreate(handleSentinelChange);
   statusPoller = setInterval(handleSentinelChange, 2000);
   handleSentinelChange();
-}
-
-/**
- * Helper to make robust, zero-dependency https POST requests
- */
-function httpsRequest(url: string, options: https.RequestOptions, postData?: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const parsedUrl = new URL(url);
-    const requestOptions: https.RequestOptions = {
-      hostname: parsedUrl.hostname,
-      path: parsedUrl.pathname + parsedUrl.search,
-      method: options.method || 'GET',
-      headers: options.headers || {}
-    };
-
-    const req = https.request(requestOptions, (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-      res.on('end', () => {
-        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-          resolve(data);
-        } else {
-          reject(new Error(`HTTP Error ${res.statusCode}: ${data}`));
-        }
-      });
-    });
-
-    req.on('error', (err) => {
-      reject(err);
-    });
-
-    if (postData) {
-      req.write(postData);
-    }
-    req.end();
-  });
-}
-
-function cleanAndParseJson(text: string): any {
-  let cleaned = text.trim();
-  if (cleaned.startsWith('```')) {
-    cleaned = cleaned.replace(/^```[a-zA-Z0-9]*\n?/, '');
-    cleaned = cleaned.replace(/\n?```$/, '');
-  }
-  cleaned = cleaned.trim();
-  if (!cleaned.startsWith('[')) {
-    const match = cleaned.match(/\[\s*\{[\s\S]*\}\s*\]/);
-    if (match) {
-      cleaned = match[0];
-    }
-  }
-  return JSON.parse(cleaned);
-}
-
-function resolveRoadmapProviderCli(apiProvider: string, configuredCliPath: string): string {
-  const configuredName = path.basename((configuredCliPath || '').trim()).toLowerCase();
-  if (apiProvider === 'Codex CLI (Local)') {
-    if (configuredName === 'codex' || configuredName === 'codex-cli') {
-      return resolveAgentCli('codex', configuredCliPath);
-    }
-    return resolveAgentCli('codex', '');
-  }
-  if (apiProvider === 'Antigravity CLI (Local)') {
-    if (configuredName === 'agy' || configuredName === 'antigravity' || configuredName === 'antigravity-cli') {
-      return resolveAgentCli('agy', configuredCliPath);
-    }
-    return resolveAgentCli('agy', '');
-  }
-  return resolveAgentCli('antigravity-cli', configuredCliPath);
-}
-
-function buildRoadmapGenerationSystemInstruction(agentCli: string): string {
-  return `You are Solopreneur AI, a product strategist and software delivery planner for solo builders.
-Your task is to generate a customized local-first project roadmap as a JSON array of tasks based on the user's project idea and requirements.
-
-Return ONLY a valid JSON array of roadmap nodes. Do NOT wrap it in HTML, do NOT add any markdown formatting (like \`\`\`json), and do NOT include any introductory or concluding text. Your entire response must be a single parseable JSON array.
-
-Each node in the array must strictly conform to the following JSON structure:
-{
-  "id": "unique_string_number_e.g_1_2_3",
-  "title": "Short concise task title in Chinese",
-  "description": "Clear explanation in Chinese of what outcome this roadmap step should achieve",
-  "stage": "商业规划" | "品牌与设置" | "产品与 MVP" | "营销与增长",
-  "dependencies": "comma_separated_dependency_ids_or_empty_string",
-  "agentCli": "${agentCli}",
-  "agentPrompt": "A concrete Chinese instruction prompt to send to the AI agent for this step"
-}
-
-Guidelines:
-1. The roadmap must always follow this clear framework, customized to the user's idea:
-   - "商业规划": target user, promise, market position, MVP boundary, risks, acceptance criteria.
-   - "品牌与设置": naming/voice, README/project docs, workspace structure, lightweight operating assets.
-   - "产品与 MVP": implementation plan, first vertical slice, local run path, verification commands.
-   - "营销与增长": launch checklist, initial copy, distribution experiment, measurable next action.
-2. Create a logical progression of 4 to 6 tasks. Each task should be small enough to support multiple Agent conversations.
-3. Make sure dependencies are correctly set. For example, "2" depends on "1", "3" depends on "2", etc. Dependencies should reflect actual prerequisite outcomes.
-4. Set "agentCli" to the exact string: "${agentCli}".
-5. Create descriptive but action-oriented "agentPrompt" prompts. Each prompt should ask the agent to write or modify concrete local project files and run narrow verification where relevant.
-6. Do not generate vague consulting tasks. Every roadmap step must have a visible local deliverable.`;
-}
-
-function runLocalRoadmapGenerator(apiProvider: string, prompt: string, workspaceRoot: string, configuredCliPath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const cli = resolveRoadmapProviderCli(apiProvider, configuredCliPath);
-    if (!commandExists(cli)) {
-      reject(new Error(`${apiProvider} is not installed or not discoverable on this machine.`));
-      return;
-    }
-
-    const instruction = `${buildRoadmapGenerationSystemInstruction(cli)}\n\nProject Description: ${prompt}`;
-    const executableName = path.basename(cli).toLowerCase();
-    let args: string[] = [];
-
-    if (executableName === 'codex' || executableName === 'codex-cli') {
-      args = ['exec', '-C', workspaceRoot, instruction];
-    } else if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-      args = ['--print', '--print-timeout=2m', `--add-dir=${workspaceRoot}`, instruction];
-    } else {
-      reject(new Error(`Unsupported local roadmap generator CLI: ${cli}`));
-      return;
-    }
-
-    childProcess.execFile(cli, args, {
-      cwd: workspaceRoot,
-      timeout: 2 * 60 * 1000,
-      maxBuffer: 8 * 1024 * 1024
-    }, (error, stdout, stderr) => {
-      if (error) {
-        reject(new Error(stderr?.trim() || stdout?.trim() || error.message));
-        return;
-      }
-      const text = String(stdout || '').trim() || String(stderr || '').trim();
-      if (!text) {
-        reject(new Error(`${apiProvider} returned no roadmap output.`));
-        return;
-      }
-      resolve(text);
-    });
-  });
-}
-
-/**
- * Handles AI Generation of the Roadmap using LLM API
- */
-async function handleGenerateRoadmap(context: vscode.ExtensionContext, prompt: string) {
-  if (!syncEngine) {
-    return;
-  }
-
-  const savedSettings = getPersistedSettings(context);
-  let apiProvider = savedSettings.apiProvider;
-  const apiKey = savedSettings.apiKey;
-  const cliPath = resolveAgentCli('antigravity-cli', savedSettings.cliPath);
-  const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || getWorkspaceRoot();
-
-  if (
-    apiProvider !== 'VS Code Copilot (Native)'
-    && apiProvider !== 'Codex CLI (Local)'
-    && apiProvider !== 'Antigravity CLI (Local)'
-    && !apiKey
-  ) {
-    if ((vscode as any).lm && (vscode as any).lm.selectChatModels) {
-      apiProvider = 'VS Code Copilot (Native)';
-    } else {
-      const localNodes = buildLocalRoadmap(prompt, cliPath);
-      syncEngine.setNodes(localNodes);
-      sendNodesToWebview();
-      vscode.window.showWarningMessage(`No API key is configured for ${apiProvider}; generated a local starter roadmap so the project can continue.`);
-      return;
-    }
-  }
-
-  const systemInstruction = buildRoadmapGenerationSystemInstruction(cliPath);
-
-  await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: 'Generating your project roadmap with AI...',
-      cancellable: false,
-    },
-    async (progress) => {
-      try {
-        let responseText = '';
-
-        if (apiProvider === 'VS Code Copilot (Native)') {
-          const models = await vscode.lm.selectChatModels();
-          if (models.length === 0) {
-            throw new Error('No Copilot Chat models available. Please ensure GitHub Copilot Chat extension is active.');
-          }
-          const model = models.find((m) => m.id.includes('gpt-4') || m.id.includes('gemini')) || models[0];
-          const messages = [
-            new vscode.LanguageModelChatMessage(vscode.LanguageModelChatMessageRole.User, `${systemInstruction}\n\nProject Description: ${prompt}`)
-          ];
-          const response = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
-          for await (const chunk of response.text) {
-            responseText += chunk;
-          }
-        } else if (apiProvider === 'Codex CLI (Local)' || apiProvider === 'Antigravity CLI (Local)') {
-          responseText = await runLocalRoadmapGenerator(apiProvider, prompt, workspaceRoot, savedSettings.cliPath);
-        } else if (apiProvider === 'Gemini') {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-          const postData = JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  {
-                    text: `User Project Description: ${prompt}`
-                  }
-                ]
-              }
-            ],
-            systemInstruction: {
-              parts: [
-                {
-                  text: systemInstruction
-                }
-              ]
-            },
-            generationConfig: {
-              responseMimeType: "application/json"
-            }
-          });
-
-          const responseStr = await httpsRequest(
-            url,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              }
-            },
-            postData
-          );
-
-          const resJson = JSON.parse(responseStr);
-          if (resJson.candidates && resJson.candidates[0] && resJson.candidates[0].content && resJson.candidates[0].content.parts[0]) {
-            responseText = resJson.candidates[0].content.parts[0].text;
-          } else {
-            throw new Error('Invalid response structure received from Gemini API');
-          }
-        } else if (apiProvider === 'OpenAI') {
-          const url = 'https://api.openai.com/v1/chat/completions';
-          const postData = JSON.stringify({
-            model: 'gpt-4o',
-            messages: [
-              {
-                role: 'system',
-                content: systemInstruction
-              },
-              {
-                role: 'user',
-                content: `Project Description: ${prompt}`
-              }
-            ]
-          });
-
-          const responseStr = await httpsRequest(
-            url,
-            {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-              }
-            },
-            postData
-          );
-
-          const resJson = JSON.parse(responseStr);
-          if (resJson.choices && resJson.choices[0] && resJson.choices[0].message) {
-            responseText = resJson.choices[0].message.content;
-          } else {
-            throw new Error('Invalid response structure received from OpenAI API');
-          }
-        }
-
-        const cleanJson = cleanAndParseJson(responseText);
-        if (!Array.isArray(cleanJson)) {
-          throw new Error('LLM did not return a valid array of roadmap tasks');
-        }
-
-        // Map response to proper RoadmapNode types
-        const now = new Date().toISOString();
-        const customNodes: RoadmapNode[] = cleanJson.map((node: any, idx: number) => ({
-          id: node.id || String(idx + 1),
-          title: node.title || `Task ${idx + 1}`,
-          description: node.description || '',
-          stage: node.stage || '商业规划',
-          dependencies: node.dependencies || '',
-          agentCli: node.agentCli || cliPath,
-          agentPrompt: node.agentPrompt || '',
-          status: 'Pending',
-          createdAt: now,
-          completedAt: '',
-        }));
-
-        if (syncEngine) {
-          syncEngine.setNodes(customNodes);
-          sendNodesToWebview();
-          vscode.window.showInformationMessage('AI Roadmap generated successfully!');
-        }
-      } catch (error: any) {
-        const localNodes = buildLocalRoadmap(prompt, cliPath);
-        syncEngine?.setNodes(localNodes);
-        sendNodesToWebview();
-        vscode.window.showWarningMessage(`AI roadmap generation failed, so Solopreneur created a local starter roadmap instead: ${error.message || error}`);
-      }
-    }
-  );
 }
 
 /**
@@ -2656,25 +2366,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-provider">AI Provider</label>
-      <select class="settings-select" id="setting-provider">
-        <option value="Gemini">Gemini</option>
-        <option value="OpenAI">OpenAI</option>
-        <option value="VS Code Copilot (Native)">VS Code Copilot (Native)</option>
-        <option value="Codex CLI (Local)">Codex CLI (Local)</option>
-        <option value="Antigravity CLI (Local)">Antigravity CLI (Local)</option>
-      </select>
-    </div>
-
-    <div class="settings-field" id="api-key-container">
-      <label class="settings-lbl-title" id="label-api-key">API Key</label>
-      <input type="password" class="settings-input" id="setting-key" placeholder="Enter API Key...">
-      <div id="help-api-key" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.
-      </div>
-    </div>
-
-    <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
       <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy">
       <div id="help-cli-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
@@ -2700,9 +2391,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
-    const settingProvider = document.getElementById('setting-provider');
-    const settingKey = document.getElementById('setting-key');
-    const apiKeyContainer = document.getElementById('api-key-container');
     const settingCliPath = document.getElementById('setting-clipath');
     const settingLanguage = document.getElementById('setting-language');
     const btnTestCli = document.getElementById('btn-test-cli');
@@ -2721,11 +2409,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         addProject: '添加项目文件夹',
         settingsTitle: '⚙️ 设置',
         language: '界面语言',
-        provider: 'AI 服务',
         removeProject: '删除项目',
-        apiKey: 'API Key',
-        apiKeyPlaceholder: '输入 API Key...',
-        apiKeyHelp: 'Gemini 或 OpenAI 需要填写；使用 Copilot、本地 Codex CLI 或 agy 生成路线图时不需要。',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex）或可执行文件绝对路径。',
         testCli: '测试 CLI',
@@ -2754,11 +2438,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         addProject: 'Add project folder',
         settingsTitle: '⚙️ Solopreneur Settings',
         language: 'Language',
-        provider: 'AI Provider',
         removeProject: 'Remove project',
-        apiKey: 'API Key',
-        apiKeyPlaceholder: 'Enter API Key...',
-        apiKeyHelp: 'Required for Gemini or OpenAI. Not needed for Copilot or local Codex/Antigravity CLI roadmap generation.',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy or codex, or an absolute executable path.',
         testCli: 'Test CLI',
@@ -2817,10 +2497,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       btnRemoveProject.title = t('removeProject');
       setText('settings-title', t('settingsTitle'));
       setText('label-language', t('language'));
-      setText('label-provider', t('provider'));
-      setText('label-api-key', t('apiKey'));
-      settingKey.placeholder = t('apiKeyPlaceholder');
-      setText('help-api-key', t('apiKeyHelp'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
       setText('text-test-cli', t('testCli'));
@@ -2846,18 +2522,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       cliTestBadge.style.display = 'none';
     });
 
-    settingProvider.addEventListener('change', () => {
-      if (
-        settingProvider.value === 'VS Code Copilot (Native)'
-        || settingProvider.value === 'Codex CLI (Local)'
-        || settingProvider.value === 'Antigravity CLI (Local)'
-      ) {
-        apiKeyContainer.style.display = 'none';
-      } else {
-        apiKeyContainer.style.display = 'flex';
-      }
-    });
-
     settingLanguage.addEventListener('change', () => {
       currentLanguage = settingLanguage.value;
       applyLanguage();
@@ -2880,22 +2544,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderRoadmap(message.nodes);
           break;
         case 'settingsLoaded':
-          settingProvider.value = message.settings.apiProvider || 'Gemini';
-          settingKey.value = message.settings.apiKey || '';
           settingCliPath.value = message.settings.cliPath || 'agy';
           currentCliPath = settingCliPath.value || 'agy';
           settingLanguage.value = message.settings.language || 'zh';
           currentLanguage = settingLanguage.value;
-
-          if (
-            settingProvider.value === 'VS Code Copilot (Native)'
-            || settingProvider.value === 'Codex CLI (Local)'
-            || settingProvider.value === 'Antigravity CLI (Local)'
-          ) {
-            apiKeyContainer.style.display = 'none';
-          } else {
-            apiKeyContainer.style.display = 'flex';
-          }
           applyLanguage();
           break;
         case 'projectsLoaded':
@@ -2937,8 +2589,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     btnSaveSettings.addEventListener('click', () => {
       vscode.postMessage({
         command: 'updateSettings',
-        apiProvider: settingProvider.value,
-        apiKey: settingKey.value.trim(),
         cliPath: settingCliPath.value.trim(),
         language: settingLanguage.value
       });

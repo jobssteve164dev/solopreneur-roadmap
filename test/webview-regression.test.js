@@ -94,8 +94,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     {},
     { getNodes: () => [] },
     async () => {},
-    async () => {},
-    () => ({ apiProvider: 'Gemini', apiKey: '', cliPath: 'codex', language: 'zh' }),
+    () => ({ cliPath: 'codex', language: 'zh' }),
     async () => {},
     () => ({ projects: [{ name: 'app', path: '/workspace/app' }], selectedProjectPath: '/workspace/app' }),
     async () => {},
@@ -119,10 +118,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
-    'setting-provider',
-    'setting-key',
     'setting-language',
-    'api-key-container',
     'setting-clipath',
     'btn-test-cli',
     'btn-save-settings',
@@ -153,10 +149,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
-    'setting-provider',
-    'setting-key',
     'setting-language',
-    'api-key-container',
     'setting-clipath',
     'btn-test-cli',
     'btn-save-settings',
@@ -181,8 +174,8 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /id="setting-language"/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
-  assert.match(html, /Codex CLI \(Local\)/);
-  assert.match(html, /Antigravity CLI \(Local\)/);
+  assert.doesNotMatch(html, /id="setting-provider"/);
+  assert.doesNotMatch(html, /id="setting-key"/);
   assert.doesNotMatch(html, /id="ai-prompt"/);
   assert.doesNotMatch(html, /id="btn-generate"/);
   assert.match(script, /getNodeConversations/);
@@ -211,8 +204,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
     {},
     { getNodes: () => [] },
     async () => {},
-    async () => {},
-    () => ({ apiProvider: 'Gemini', apiKey: '', cliPath: 'codex', language: 'zh' }),
+    () => ({ cliPath: 'codex', language: 'zh' }),
     async () => {},
     () => ({ projects: [{ name: 'app', path: '/workspace/app' }], selectedProjectPath: '/workspace/app' }),
     async () => {},
@@ -225,8 +217,6 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="portfolio-list"/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
-  assert.match(html, /Codex CLI \(Local\)/);
-  assert.match(html, /Antigravity CLI \(Local\)/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
 });
@@ -296,8 +286,6 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__clearStoredAgentSession = clearStoredAgentSession;',
       'module.exports.__extractUserSupplementFromExecutionOutput = extractUserSupplementFromExecutionOutput;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
-      'module.exports.__buildRoadmapGenerationSystemInstruction = buildRoadmapGenerationSystemInstruction;',
-      'module.exports.__resolveRoadmapProviderCli = resolveRoadmapProviderCli;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__shellQuote = shellQuote;'
     ].join('\n')
@@ -381,9 +369,6 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(shellScript.finalCommand.includes('In Progress'));
   assert.ok(shellScript.finalCommand.includes('markCompleted'));
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
-  assert.match(extensionModule.__buildRoadmapGenerationSystemInstruction('codex'), /"agentCli": "codex"/);
-  assert.equal(path.basename(extensionModule.__resolveRoadmapProviderCli('Codex CLI (Local)', 'agy')), 'codex');
-  assert.equal(path.basename(extensionModule.__resolveRoadmapProviderCli('Antigravity CLI (Local)', 'codex')), 'agy');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     "'agy' --print --print-timeout=2m --add-dir='/workspace/app' 'Ship the MVP'",
@@ -546,12 +531,13 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(fs.readFileSync(noopRun.outputFilePath, 'utf8'), /without project file changes/);
 
   const writeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-write-agent-'));
-  fs.mkdirSync(path.join(writeRoot, 'docs'), { recursive: true });
-  const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.writeFileSync("docs/out.txt","done\\n",{flag:"a"});')}`;
+  fs.mkdirSync(path.join(writeRoot, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(writeRoot, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n', 'utf8');
+  const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.appendFileSync(".solopreneur/roadmap.csv","1,Init,,商业规划,,codex,Prompt,Pending,2026-01-01T00:00:00.000Z,\\n");')}`;
   const writeRun = extensionModule.__buildAgentShellScript(writeCommand, writeRoot, 'write', 'codex', 8, '');
   childProcess.execSync(writeRun.finalCommand, { cwd: writeRoot, stdio: 'ignore' });
   const touchedFiles = fs.readFileSync(path.join(writeRoot, '.solopreneur/agent-runs/write/touched-files.txt'), 'utf8');
-  assert.match(touchedFiles, /[AM] docs\/out\.txt/);
+  assert.match(touchedFiles, /[AM] \.solopreneur\/roadmap\.csv/);
 
   const dataReadme = extensionModule.__buildSolopreneurDirectoryReadme();
   assert.match(dataReadme, /Solopreneur Project Data/);
@@ -584,12 +570,18 @@ test('local roadmap fallback produces runnable dependent tasks', () => {
   );
   const nodes = extensionModule.__buildLocalRoadmap('AI CRM for freelancers', 'codex');
 
-  assert.equal(nodes.length, 4);
+  assert.equal(nodes.length, 5);
   assert.equal(nodes[0].dependencies, '');
   assert.equal(nodes[1].dependencies, '1');
   assert.equal(nodes[2].dependencies, '2');
   assert.equal(nodes[3].dependencies, '3');
+  assert.equal(nodes[4].dependencies, '4');
   assert.ok(nodes.every((node) => node.agentCli === 'codex'));
+  assert.match(nodes[0].title, /生成初始路线图/);
+  assert.match(nodes[0].agentPrompt, /\.solopreneur\/roadmap\.csv/);
+  assert.match(nodes[0].agentPrompt, /字段顺序必须严格是/);
+  assert.match(nodes[0].agentPrompt, /stage 只能使用/);
+  assert.match(nodes[0].agentPrompt, /重新读取 \.solopreneur\/roadmap\.csv/);
   assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/product-brief.md')));
 });
 
