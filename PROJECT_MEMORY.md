@@ -50,6 +50,7 @@
 - Agent commands run in the opened workspace root, and the sentinel file is written with an absolute path so sidebar-only usage can still complete.
 - If the configured/default CLI is unavailable, runtime discovery falls back to installed candidates such as `codex` before failing.
 - Task dependencies are enforced before running a node: dependent tasks must be `Completed`.
+- Before enforcing task dependencies for a step-card composer run, the extension must call `syncEngine.initAndSync()` so the dependency check uses the latest `.solopreneur/roadmap.csv` state rather than stale in-memory/SQLite state after roadmap revisions or external CSV edits.
 - Agent execution uses `bash` plus `tee` for normal task runs so users see output while the extension captures it for the execution log. Native TTY continuation is a separate manual terminal action.
 - Agent execution records touched project files outside `.solopreneur`, `.git`, and `node_modules`. If the CLI exits without project file changes and without a completion decision, the sentinel records `Failed` instead of silently advancing the roadmap step.
 - Settings-panel CLI tests must use the same candidate ordering as Agent dispatch in both the full roadmap and sidebar webviews. The result message should show the actual resolved command so users know which local CLI will be used.

@@ -2048,6 +2048,15 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     return;
   }
 
+  const workspaceRoot = activeProjectRoot || '';
+  if (!workspaceRoot) {
+    vscode.window.showErrorMessage('Choose a project folder before running an Agent task.');
+    return;
+  }
+
+  await syncEngine.initAndSync();
+  sendNodesToWebview();
+
   const nodes = syncEngine.getNodes();
   const node = nodes.find((n) => n.id === nodeId);
 
@@ -2067,11 +2076,6 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     return;
   }
 
-  const workspaceRoot = activeProjectRoot || '';
-  if (!workspaceRoot) {
-    vscode.window.showErrorMessage('Choose a project folder before running an Agent task.');
-    return;
-  }
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
   if (hasRunningAgentConversation(workspaceRoot, nodes)) {
     vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before starting a new one.');
