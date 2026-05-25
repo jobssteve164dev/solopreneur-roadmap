@@ -84,9 +84,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Setup wrapper for SyncEngine to allow safe initialization later
   const syncEngineWrapper = {
     getNodes: () => {
-      return syncEngine
-        ? ensureCompletionCriteriaForNodes(activeProjectRoot || '', syncEngine.getNodes())
-        : [];
+      return syncEngine ? syncEngine.getNodes() : [];
     }
   } as any;
 
@@ -110,12 +108,6 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async () => {
       await addProjectFromDialog(context);
-    },
-    async (nodeId) => {
-      const ready = await ensureSyncEngine(context);
-      if (ready) {
-        markNodeCompleted(nodeId);
-      }
     }
   );
 
@@ -684,7 +676,13 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'completeNode':
-          markNodeCompleted(message.nodeId);
+          if (syncEngine) {
+            syncEngine.updateNode(message.nodeId, {
+              status: 'Completed',
+              completedAt: new Date().toISOString()
+            });
+            sendNodesToWebview();
+          }
           break;
 
         case 'runAgent':
@@ -838,17 +836,6 @@ function sendNodesToWebview() {
   if (sidebarProvider) {
     sidebarProvider.sendNodesToWebview();
   }
-}
-
-function markNodeCompleted(nodeId: string): void {
-  if (!syncEngine) {
-    return;
-  }
-  syncEngine.updateNode(nodeId, {
-    status: 'Completed',
-    completedAt: new Date().toISOString()
-  });
-  sendNodesToWebview();
 }
 
 function shellQuote(value: string): string {
@@ -2386,7 +2373,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
     const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
     const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
-    let shouldWriteNodeStatus = true;
+    // Preserve an explicit user completion if an in-flight Agent run reports back afterward.
+    let shouldWriteNodeStatus = currentNode?.status !== 'Completed';
     let shouldRefreshRoadmap = false;
     if (workspaceRoot && runKind === 'roadmap_revision') {
       shouldWriteNodeStatus = false;
@@ -2997,13 +2985,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       color: #000;
       border-color: #00e5ff;
       box-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
-    }
-
-    .node-card.status-Running .btn-run {
-      pointer-events: none;
-      opacity: 0.5;
-      background: rgba(255,255,255,0.02);
-      color: var(--text-muted);
     }
 
     .conversation-panel {

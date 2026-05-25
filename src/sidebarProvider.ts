@@ -266,8 +266,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>,
     private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string },
     private readonly _selectProject: (projectPath: string) => Promise<void>,
-    private readonly _addProject: () => Promise<void>,
-    private readonly _onCompleteNode: (nodeId: string) => Promise<void> = async () => {}
+    private readonly _addProject: () => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -293,9 +292,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
         case 'runAgent':
           await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '');
-          break;
-        case 'completeNode':
-          await this._onCompleteNode(data.nodeId);
           break;
         case 'showFullRoadmap':
           vscode.commands.executeCommand('solopreneur.showRoadmap');
@@ -1026,11 +1022,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       margin-top: 2px;
     }
 
-    .node-action-buttons {
-      display: flex;
-      gap: 5px;
-    }
-
     .status-lbl {
       font-size: 10px;
       font-weight: 600;
@@ -1061,23 +1052,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       background: #00e5ff;
       color: #000;
       border-color: #00e5ff;
-    }
-
-    .btn-complete-small {
-      background: rgba(0, 230, 118, 0.1);
-      border: 1px solid rgba(0, 230, 118, 0.35);
-      color: #00e676;
-      padding: 3px 6px;
-      font-size: 10px;
-      font-weight: 600;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-
-    .btn-complete-small:hover {
-      background: #00e676;
-      border-color: #00e676;
-      color: #07110b;
     }
 
     .node-card.status-Running .btn-run-small {
@@ -1271,9 +1245,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         openFull: '打开路线图大图',
         empty: '还没有路线图。请先添加项目文件夹，或在路线图中推进“生成初始路线图”环节。',
         run: '对话',
-        markComplete: '完成环节',
-        completionCriteria: '完成标准',
-        completeConfirm: '确认这个环节已经达到以下完成标准？',
         testing: '正在测试连接...',
         connectionOk: '连接正常：',
         connectionFailed: '连接失败：',
@@ -1321,9 +1292,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         openFull: 'Open Visual Roadmap Graph',
         empty: 'No roadmap yet. Add a project folder, or run the "Generate Initial Roadmap" step first.',
         run: 'Run',
-        markComplete: 'Complete Step',
-        completionCriteria: 'Completion criteria',
-        completeConfirm: 'Confirm this step has met these completion criteria?',
         testing: 'Testing connection...',
         connectionOk: 'Connection OK: ',
         connectionFailed: 'Connection Failed: ',
@@ -1604,21 +1572,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         .replace(/'/g, '&#39;');
     }
 
-    function getCompletionCriteria(node) {
-      const criteria = Array.isArray(node.completionCriteria)
-        ? node.completionCriteria.map(item => String(item || '').trim()).filter(Boolean)
-        : [];
-      if (criteria.length > 0) return criteria;
-      return [node.description || node.agentPrompt || ''].filter(Boolean);
-    }
-
-    function confirmStepCompletion(node) {
-      const criteriaText = getCompletionCriteria(node)
-        .map((item, index) => (index + 1) + '. ' + item)
-        .join('\\n');
-      return confirm(t('completeConfirm') + (criteriaText ? '\\n\\n' + t('completionCriteria') + '\\n' + criteriaText : ''));
-    }
-
     function renderAgentOptions(node) {
       const options = [];
       function add(value) {
@@ -1791,22 +1744,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         // Small run button if applicable
         const actionHtml = (node.status === 'Pending' || node.status === 'Failed' || node.status === 'In Progress')
-          ? '<button class="btn-run-small" data-run-node-id="' + escapeHtml(node.id) + '"><span class="codicon codicon-comment-discussion"></span>' + escapeHtml(t('run')) + '</button>'
-          : '';
-        const completionHtml = node.status !== 'Completed'
-          ? '<button class="btn-complete-small" data-complete-node-id="' + escapeHtml(node.id) + '">' + escapeHtml(t('markComplete')) + '</button>'
+          ? '<button class="btn-run-small" data-run-node-id="' + node.id + '"><span class="codicon codicon-comment-discussion"></span>' + t('run') + '</button>'
           : '';
 
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
 
         card.innerHTML = \`
           <div class="node-meta">
-            <span class="node-title">\${escapeHtml(node.title)}</span>
-            <span class="node-badge stage-\${cleanStage}">\${escapeHtml(node.stage)}</span>
+            <span class="node-title">\${node.title}</span>
+            <span class="node-badge stage-\${cleanStage}">\${node.stage}</span>
           </div>
           <div class="node-action-bar">
             <span class="status-lbl \${statusClass(node.status)}">\${statusText(node.status)}</span>
-            <div class="node-action-buttons">\${actionHtml}\${completionHtml}</div>
+            \${actionHtml}
           </div>
         \`;
 
@@ -1814,15 +1764,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (runButton) {
           runButton.addEventListener('click', () => {
             runNodeAgent(node.id, '', node.agentCli || '');
-          });
-        }
-
-        const completeButton = card.querySelector('[data-complete-node-id]');
-        if (completeButton) {
-          completeButton.addEventListener('click', () => {
-            if (confirmStepCompletion(node)) {
-              vscode.postMessage({ command: 'completeNode', nodeId: node.id });
-            }
           });
         }
 

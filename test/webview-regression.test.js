@@ -336,6 +336,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.doesNotMatch(script, /data-toggle-roadmap-revision/);
   assert.match(script, /completeNode/);
   assert.match(script, /Complete Step|完成环节/);
+  assert.doesNotMatch(html, /\.node-card\.status-Running \.btn-run\s*\{[\s\S]*?pointer-events:\s*none/);
   assert.match(script, /resetProjectScopedState/);
   assert.match(script, /projectPath/);
 });
@@ -369,49 +370,8 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /selectProject/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
-  assert.match(html, /data-complete-node-id/);
-  assert.match(html, /confirmStepCompletion/);
-  assert.match(html, /completionCriteria/);
-  assert.match(html, /completeNode/);
-  assert.match(html, /Complete Step|完成环节/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
-});
-
-test('sidebar forwards manual step completion to the extension handler', async () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule(
-    'out/sidebarProvider.js',
-    ''
-  );
-  let receiveMessage;
-  let completedNodeId = '';
-  const provider = new SolopreneurSidebarProvider(
-    createUri(projectRoot),
-    { getNodes: () => [] },
-    async () => {},
-    () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '' }),
-    async () => {},
-    () => ({ projects: [], selectedProjectPath: '/workspace/app' }),
-    async () => {},
-    async () => {},
-    async (nodeId) => {
-      completedNodeId = nodeId;
-    }
-  );
-
-  provider.resolveWebviewView({
-    webview: {
-      options: {},
-      asWebviewUri: createWebviewStub().asWebviewUri,
-      postMessage() {},
-      onDidReceiveMessage(callback) {
-        receiveMessage = callback;
-      }
-    }
-  }, {}, {});
-
-  await receiveMessage({ command: 'completeNode', nodeId: '2' });
-  assert.equal(completedNodeId, '2');
 });
 
 test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
@@ -1207,6 +1167,52 @@ test('invalid Agent completion state is recorded as a visible failed conversatio
   assert.equal(loggedStatus, 'Failed');
   assert.match(loggedOutput, /Failure category: completion_state_invalid/);
   assert.match(loggedOutput, /Failure reason:\nAgent completion decision file could not be parsed/);
+});
+
+test('manual completion is not overwritten when an in-flight Agent run finishes afterward', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-manual-complete-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":false}', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M docs/work.md\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M docs/work.md\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'output.log'), 'Agent finished additional work.\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.agent_status.json');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '2',
+    status: 'In Progress',
+    agentCli: 'codex',
+    executionLogId: 10,
+    outputFilePath: path.join(runDir, 'output.log'),
+    changesFilePath: path.join(runDir, 'changes.txt'),
+    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
+    completionDecisionFilePath: path.join(runDir, 'completion.json')
+  }), 'utf8');
+
+  let nodeUpdateCount = 0;
+  let loggedStatus = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Completed', completedAt: '2026-05-25T00:00:00.000Z' }],
+    updateNode: () => { nodeUpdateCount += 1; },
+    updateAgentExecution: (_id, _cli, _command, _output, status) => {
+      loggedStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 1,
+    getAgentExecutions: () => []
+  }, tempRoot);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(nodeUpdateCount, 0);
+  assert.equal(loggedStatus, 'In Progress');
 });
 
 test('roadmap revision accepts valid CSV updates and restores the previous roadmap after invalid output', async () => {
