@@ -734,6 +734,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /将发布准备提前，并增加支付验证环节/);
   assert.match(revisionPrompt, /直接更新项目目录中的 `\.solopreneur\/roadmap\.csv`/);
   assert.match(revisionPrompt, /不要把本段提示词、解释文字或执行日志写进 CSV/);
+  assert.match(revisionPrompt, /面向外部用户并需要获客或转化/);
+  assert.match(revisionPrompt, /不要虚构营销或销售任务/);
   assert.match(revisionPrompt, /Always run focused checks/);
 
   const criteriaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-criteria-'));
@@ -877,7 +879,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   ].join('\n'));
   const invalidBootstrap = extensionModule.__validateBootstrapRoadmapRewrite(invalidBootstrapRoot, '1');
   assert.equal(invalidBootstrap.valid, false);
-  assert.match(invalidBootstrap.reason, /环节数量不在 4 到 6 个之间|残留了初始化提示词|保留了原始 bootstrap 节点/);
+  assert.match(invalidBootstrap.reason, /环节数量不在 2 到 8 个之间|残留了初始化提示词|保留了原始 bootstrap 节点/);
 
   const validBootstrapRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-bootstrap-valid-'));
   fs.mkdirSync(path.join(validBootstrapRoot, '.solopreneur'), { recursive: true });
@@ -893,13 +895,18 @@ test('agent command builder uses non-interactive task runs and native continuati
 
   fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-    '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
-    '30,实现首个 MVP 切片,完成最小闭环,产品与 MVP,20,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
-    '40,准备首轮外联,输出外联材料,营销与销售,30,agy,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,',
-    '50,准备第二轮外联,补充销售材料,营销与销售,40,agy,创建 outreach/follow-up.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,'
+    '10,确认迁移边界,整理系统约束与验收条件,范围确认,,agy,创建 docs/migration-scope.md,Pending,2026-01-01T00:00:00.000Z,',
+    '20,执行数据迁移,完成可验证迁移脚本,迁移交付,10,agy,修改 scripts/migrate.js 并运行验证,Pending,2026-01-01T00:00:00.000Z,',
+    '30,验证回滚与验收,保存验收记录,验收与复盘,20,agy,创建 docs/migration-verification.md,Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'));
-  assert.equal(extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1').valid, false);
-  assert.match(extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1').reason, /缺少方法论阶段/);
+  assert.equal(extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1').valid, true);
+
+  fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,确认迁移边界,整理验收条件,范围确认,,agy,创建 docs/migration-scope.md,Pending,2026-01-01T00:00:00.000Z,',
+    '20,执行数据迁移,完成迁移脚本,迁移交付,404,agy,修改 scripts/migrate.js 并运行验证,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+  assert.match(extensionModule.__validateBootstrapRoadmapRewrite(validBootstrapRoot, '1').reason, /无效依赖/);
 
   fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
@@ -909,6 +916,12 @@ test('agent command builder uses non-interactive task runs and native continuati
     '40,建立反馈循环,整理反馈和改进任务,反馈与规模化,30,agy,创建 docs/learning-loop.md 并记录指标,Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'));
 
+  assert.equal(extensionModule.__validateRoadmapRevision(validBootstrapRoot).valid, true);
+  fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,确认内部迁移目标,整理验收边界,范围确认,,agy,创建 docs/migration-scope.md,Completed,2026-01-01T00:00:00.000Z,2026-01-02T00:00:00.000Z',
+    '20,验证迁移工具,完成验证结果,交付与验收,10,agy,运行迁移校验并记录结果,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
   assert.equal(extensionModule.__validateRoadmapRevision(validBootstrapRoot).valid, true);
   fs.writeFileSync(path.join(validBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
@@ -931,8 +944,11 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(dataReadme, /Git\/GitHub/);
   assert.match(bootstrapInstructions, /Bootstrap Roadmap Instructions/);
   assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
+  assert.match(bootstrapInstructions, /按项目真实目标选择适用的推进框架/);
+  assert.match(bootstrapInstructions, /内部工具、迁移、研究、内容或基础设施项目不得被强行改写成营销销售路线/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
-  assert.match(methodologyInstructions, /发现问题 -> 打造产品 -> 卖给客户 -> 持续改进/);
+  assert.match(methodologyInstructions, /商业化产品的默认四阶段/);
+  assert.match(methodologyInstructions, /不要为了满足模板/);
   assert.match(methodologyInstructions, /完成标准判断/);
 });
 
@@ -963,18 +979,38 @@ test('local roadmap fallback produces runnable dependent tasks', () => {
   );
   const nodes = extensionModule.__buildLocalRoadmap('AI CRM for freelancers', 'codex');
 
-  assert.equal(nodes.length, 5);
+  assert.equal(nodes.length, 4);
   assert.equal(nodes[0].dependencies, '');
   assert.equal(nodes[1].dependencies, '1');
   assert.equal(nodes[2].dependencies, '2');
   assert.equal(nodes[3].dependencies, '3');
-  assert.equal(nodes[4].dependencies, '4');
   assert.ok(nodes.every((node) => node.agentCli === 'codex'));
   assert.match(nodes[0].title, /生成初始路线图/);
   assert.match(nodes[0].agentPrompt, /\.solopreneur\/bootstrap-roadmap-instructions\.md/);
   assert.doesNotMatch(nodes[0].agentPrompt, /字段顺序必须严格是/);
-  assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/problem-discovery.md')));
-  assert.deepEqual([...new Set(nodes.map((node) => node.stage))], ['问题与客户发现', '产品与 MVP', '营销与销售', '反馈与规模化']);
+  assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/project-brief.md')));
+  assert.deepEqual([...new Set(nodes.map((node) => node.stage))], ['目标与路径确认', '交付与验证', '结果反馈与迭代']);
+});
+
+test('new empty project seed does not assume a commercial product workflow', async () => {
+  const { SyncEngine } = require(path.join(projectRoot, 'out/db/syncEngine.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-neutral-seed-'));
+  const solopreneurDir = path.join(tempRoot, '.solopreneur');
+  fs.mkdirSync(solopreneurDir, { recursive: true });
+  const engine = new SyncEngine(
+    path.join(solopreneurDir, 'roadmap.csv'),
+    path.join(solopreneurDir, 'project_journal.db'),
+    projectRoot
+  );
+
+  await engine.initAndSync();
+  const nodes = engine.getNodes();
+
+  assert.equal(nodes.length, 4);
+  assert.ok(nodes.some((node) => node.title === '明确交付目标与成功标准'));
+  assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/project-brief.md')));
+  assert.equal(nodes.some((node) => node.stage === '营销与销售'), false);
+  assert.equal(nodes.some((node) => node.stage === '反馈与规模化'), false);
 });
 
 test('step conversation can start while roadmap dependencies are still incomplete', async () => {
