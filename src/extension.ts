@@ -702,6 +702,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           showAgentTerminal();
           break;
 
+        case 'continueNativeConversation':
+          await handleContinueNativeConversation(context, message.nodeId, Number(message.conversationId || 0));
+          break;
+
         case 'stopAgentRun':
           await stopAgentRun(message.nodeId, Number(message.conversationId || 0));
           break;
@@ -1012,11 +1016,11 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
@@ -1034,11 +1038,11 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   const quotedPromptFile = shellQuote(promptFilePath);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} -C ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
+    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
@@ -1056,11 +1060,11 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   const promptExpression = `"$${promptVarName}"`;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} -C ${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
@@ -1070,6 +1074,22 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   }
 
   return `${quotedCli} run --task ${promptExpression}`;
+}
+
+function buildNativeContinueCommand(agentCli: string, sessionId: string, workspaceRoot: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedSessionId = shellQuote(sessionId);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} resume -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --conversation ${quotedSessionId} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)}`;
+  }
+
+  return `${quotedCli} ${quotedSessionId}`;
 }
 
 function getCliVersionArgs(agentCli: string): string[] {
@@ -1660,14 +1680,9 @@ function buildAgentShellScript(
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
   const terminalExecutionScript = [
-    'if command -v script >/dev/null 2>&1 && script -q -e -c true /dev/null >/dev/null 2>&1; then',
     'export agent_prompt;',
-    `script -q -e -c ${shellQuote(executionCommand)} ${shellQuote(outputFilePath)};`,
-    'status=$?;',
-    'else',
     `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
-    'status=${PIPESTATUS[0]};',
-    'fi'
+    'status=${PIPESTATUS[0]}'
   ].join(' ');
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(promptFilePath, conversationPrompt, 'utf8');
@@ -1824,6 +1839,54 @@ function showAgentTerminal(): void {
     return;
   }
   vscode.window.showInformationMessage('No active SoloMap Agent terminal is available.');
+}
+
+function extractNativeSessionIdFromExecutionOutput(output: string): string {
+  const text = String(output || '');
+  const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/);
+  return match ? match[1] : '';
+}
+
+async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
+  void context;
+  if (!syncEngine || !activeProjectRoot || !nodeId || !conversationId) {
+    return;
+  }
+
+  if (hasRunningAgentConversation(activeProjectRoot, syncEngine.getNodes())) {
+    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before continuing a native session.');
+    return;
+  }
+
+  const conversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId));
+  if (!conversation) {
+    vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
+    return;
+  }
+
+  const sessionId = extractNativeSessionIdFromExecutionOutput(conversation.output || '');
+  if (!sessionId) {
+    vscode.window.showInformationMessage('No native Agent session ID was recorded for this conversation.');
+    return;
+  }
+
+  const agentCli = resolveAgentCli(conversation.agentCli || '', '');
+  if (!commandExists(agentCli)) {
+    vscode.window.showErrorMessage(`Agent CLI not found for native continuation: ${conversation.agentCli || agentCli}`);
+    return;
+  }
+
+  let terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
+  if (!terminal) {
+    terminal = vscode.window.createTerminal({
+      name: 'SoloMap Agent Console',
+      iconPath: new vscode.ThemeIcon('robot'),
+      color: new vscode.ThemeColor('terminal.ansiCyan'),
+      cwd: activeProjectRoot,
+    });
+  }
+  terminal.show(true);
+  terminal.sendText(buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot));
 }
 
 function readAgentStatus(statusFilePath: string): any | null {
@@ -3707,6 +3770,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeAttachment: '移除',
         send: '发送',
         retry: '重试',
+        continueNative: '继续',
         openTerminal: '打开终端',
         stopRun: '停止',
         elapsed: '已运行',
@@ -3769,6 +3833,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeAttachment: 'Remove',
         send: 'Send',
         retry: 'Retry',
+        continueNative: 'Continue',
         openTerminal: 'Open terminal',
         stopRun: 'Stop',
         elapsed: 'Elapsed',
@@ -3822,6 +3887,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     function failureCategoryText(category) {
       return (i18n[currentLanguage].failureCategories || {})[category] || '';
+    }
+
+    function extractNativeSessionId(output) {
+      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/);
+      return match ? match[1] : '';
     }
 
     function setText(id, value) {
@@ -4236,6 +4306,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             vscode.postMessage({ command: 'showAgentTerminal' });
           });
         });
+        row.querySelectorAll('[data-continue-native-conversation-id]').forEach(item => {
+          item.addEventListener('click', (event) => {
+            event.stopPropagation();
+            vscode.postMessage({
+              command: 'continueNativeConversation',
+              nodeId: node.id,
+              conversationId: item.getAttribute('data-continue-native-conversation-id')
+            });
+          });
+        });
         row.querySelectorAll('[data-stop-agent-run]').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -4336,6 +4416,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           vscode.postMessage({ command: 'showAgentTerminal' });
         });
       });
+      container.querySelectorAll('[data-continue-native-conversation-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'continueNativeConversation',
+            nodeId,
+            conversationId: item.getAttribute('data-continue-native-conversation-id')
+          });
+        });
+      });
       container.querySelectorAll('[data-stop-agent-run]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -4374,6 +4464,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const retryButton = conversation.status === 'Failed'
           ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
           : '';
+        const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
+          ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
+          : '';
         const runningButtons = conversation.status === 'Running'
           ? \`
             <button class="conversation-control-btn" data-show-agent-terminal title="\${escapeHtml(t('openTerminal'))}">\${t('openTerminal')}</button>
@@ -4391,6 +4484,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
               </div>
               <div class="conversation-actions">
                 \${runningButtons}
+                \${continueButton}
                 \${retryButton}
                 <span class="status-badge \${statusClass(conversation.status)}">\${statusText(conversation.status)}</span>
               </div>
