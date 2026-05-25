@@ -302,6 +302,10 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /runRoadmapRevision/);
   assert.match(script, /Roadmap Revision History|路线图调整历史/);
   assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
+  assert.match(script, /completionCriteria/);
+  assert.match(script, /renderCompletionCriteria/);
+  assert.match(script, /confirmStepCompletion/);
+  assert.match(script, /Completion criteria|完成标准/);
   assert.match(html, /id="btn-toggle-roadmap-revision"/);
   assert.match(html, /id="roadmap-revision-panel"/);
   assert.match(html, /id="roadmap-revision-body"/);
@@ -414,6 +418,10 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
       'module.exports.__updateStepHandoffSummary = updateStepHandoffSummary;',
       'module.exports.__readStepHandoffSummary = readStepHandoffSummary;',
       'module.exports.__buildSolopreneurDirectoryReadme = buildSolopreneurDirectoryReadme;',
+      'module.exports.__buildCompletionCriteriaForNode = buildCompletionCriteriaForNode;',
+      'module.exports.__ensureCompletionCriteriaForNodes = ensureCompletionCriteriaForNodes;',
+      'module.exports.__readCompletionCriteria = readCompletionCriteria;',
+      'module.exports.__getStepMemoryFilePath = getStepMemoryFilePath;',
       'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
       'module.exports.__getAgentProvider = getAgentProvider;',
       'module.exports.__getStepSessionFilePath = getStepSessionFilePath;',
@@ -603,6 +611,9 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.doesNotMatch(prompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(prompt, /Created README and ran npm test/);
   assert.match(prompt, /markCompleted/);
+  assert.match(prompt, /本环节完成标准/);
+  assert.match(prompt, /MVP 或产品切片已经能被运行/);
+  assert.match(prompt, /本轮交付和最终完成判断必须对照这些标准/);
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /唯一任务/);
   assert.match(prompt, /SoloMap/);
@@ -659,6 +670,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(attachedPrompt, /用户设置的全局默认要求/);
   assert.match(attachedPrompt, /Always preserve public API compatibility/);
   assert.match(attachedPrompt, /本次用户补充为准/);
+  assert.match(attachedPrompt, /本环节完成标准/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
@@ -675,6 +687,31 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(revisionPrompt, /直接更新项目目录中的 `\.solopreneur\/roadmap\.csv`/);
   assert.match(revisionPrompt, /不要把本段提示词、解释文字或执行日志写进 CSV/);
   assert.match(revisionPrompt, /Always run focused checks/);
+
+  const criteriaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-criteria-'));
+  const criteriaNodes = extensionModule.__ensureCompletionCriteriaForNodes(criteriaRoot, [{
+    id: '2',
+    title: '构建第一个可用 MVP 切片',
+    stage: '产品与 MVP',
+    description: '完成第一个可验证产品路径。',
+    dependencies: '1',
+    agentCli: 'codex',
+    agentPrompt: '实现 MVP 并运行 npm test。',
+    status: 'Pending',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    completedAt: ''
+  }]);
+  assert.ok(Array.isArray(criteriaNodes[0].completionCriteria));
+  assert.ok(criteriaNodes[0].completionCriteria.length >= 3);
+  const criteriaFilePath = extensionModule.__getStepMemoryFilePath(criteriaRoot, '2');
+  assert.ok(fs.existsSync(criteriaFilePath));
+  const criteriaFile = JSON.parse(fs.readFileSync(criteriaFilePath, 'utf8'));
+  assert.ok(criteriaFile.completionCriteria.some((line) => /MVP|产品切片/.test(line)));
+  assert.ok(Array.isArray(criteriaFile.entries));
+  assert.equal(
+    JSON.stringify(extensionModule.__readCompletionCriteria(criteriaRoot, criteriaNodes[0])),
+    JSON.stringify(criteriaFile.completionCriteria)
+  );
 
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-session-'));
   const sessionState = extensionModule.__updateStoredAgentSession(
@@ -836,6 +873,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(dataReadme, /SoloMap Project Data/);
   assert.match(dataReadme, /roadmap\.csv/);
   assert.match(dataReadme, /step-memory/);
+  assert.match(dataReadme, /完成标准/);
   assert.match(dataReadme, /step-sessions/);
   assert.match(dataReadme, /project_journal\.db/);
   assert.match(dataReadme, /Git\/GitHub/);
@@ -843,6 +881,7 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
   assert.match(methodologyInstructions, /发现问题 -> 打造产品 -> 卖给客户 -> 持续改进/);
+  assert.match(methodologyInstructions, /完成标准判断/);
 });
 
 test('failed conversations render retry action in roadmap webview', () => {

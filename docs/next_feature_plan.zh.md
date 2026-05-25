@@ -154,7 +154,7 @@ Next Action 卡片应展示：
 - 运行状态、失败、完成后，Next Action 会自动切换。
 - 项目切换后，Next Action 与当前项目隔离。
 
-## P1：环节完成标准模板
+## P1：环节完成标准模板（已落地）
 
 ### 用户价值
 
@@ -202,6 +202,13 @@ Next Action 卡片应展示：
 - Agent 对话 prompt 会要求 Agent 对照完成标准交付。
 - 用户点击完成时能看到该环节标准。
 - 旧项目无标准时不会报错。
+
+### 落地说明
+
+- 完成标准保存在 `.solopreneur/step-memory/<nodeId>.json` 的 `completionCriteria` 中，不改变 `roadmap.csv` schema。
+- 旧项目打开时会按环节标题、阶段和 Agent prompt 自动补齐默认完成标准。
+- Agent prompt 会读取并注入该环节完成标准；只有达到标准时才应写入完成判断。
+- 大图中展开环节会展示完成标准，用户点击完成环节前会看到确认提示。
 
 ## P1：Build -> Sell -> Learn -> Improve 循环面板
 
@@ -338,4 +345,3 @@ Improve：下一次改进任务
 - 每个 Agent 对话都绑定在路线图环节和完成标准上。
 - Agent 交付后，用户能看到文件变化、状态变化和下一步变化。
 - SoloMap 更像一人公司的操作系统，而不是 AI 聊天记录管理器。
-

@@ -238,7 +238,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '## 主要文件',
     '',
     '- `roadmap.csv`：路线图主数据，包括环节、依赖、状态和 Agent prompt。',
-    '- `step-memory/`：每个路线图环节的 JSON 交接总结。没有可续接的 Agent 原生会话时，下一轮 Agent 对话会读取这里的结构化上下文。',
+    '- `step-memory/`：每个路线图环节的 JSON 完成标准和交接总结。下一轮 Agent 对话会读取这里的结构化上下文。',
     '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会把这些会话 ID 作为可选参考交给 Agent，而不是强制续接。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
@@ -312,6 +312,7 @@ function buildRoadmapMethodologyInstructions(): string {
     '- 不要只生成研究、分析、规划这类无本地交付物的任务。',
     '- 每个阶段至少有一个可执行环节。',
     '- 每个环节都必须能通过 Agent 对话推进，并产生本地文件、验证结果、市场材料或反馈记录。',
+    '- 每个环节都必须能被完成标准判断：交付物是什么、证据在哪里、是否还需要下一轮推进。',
     '- 如果项目还没有代码，也要先产出项目文档、访谈问题、MVP 边界或发布材料等可提交文件。',
     '- 路线图应该让用户始终知道下一步，而不是让用户阅读一份静态计划。',
     '',
@@ -338,6 +339,101 @@ function ensureBootstrapRoadmapInstructions(solopreneurDir: string, cliPath: str
 function ensureRoadmapMethodologyInstructions(solopreneurDir: string): void {
   const instructionsPath = path.join(solopreneurDir, 'roadmap-methodology.md');
   fs.writeFileSync(instructionsPath, buildRoadmapMethodologyInstructions(), 'utf8');
+}
+
+function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
+  return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.json`);
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean)
+    .filter((entry, index, all) => all.indexOf(entry) === index)
+    .slice(0, 8);
+}
+
+function buildCompletionCriteriaForNode(node: RoadmapNode): string[] {
+  const stage = String(node.stage || '').trim();
+  const title = String(node.title || '当前环节').trim();
+  const prompt = String(node.agentPrompt || '').trim();
+  const criteria: string[] = [
+    `已经围绕“${title}”产出可提交的本地文件、页面、配置、市场材料或反馈记录。`
+  ];
+
+  if (stage === '问题与客户发现') {
+    criteria.push('问题假设、目标用户、验证方式、风险和下一步行动已经写入项目文件。');
+  } else if (stage === '产品与 MVP') {
+    criteria.push('MVP 或产品切片已经能被运行、查看或按文档验证。');
+  } else if (stage === '营销与销售') {
+    criteria.push('定位、触达、官网、发布、销售或转化材料已经形成可直接使用的版本。');
+  } else if (stage === '反馈与规模化') {
+    criteria.push('反馈来源、关键指标、支持信号、单位经济假设或下一轮改进任务已经记录清楚。');
+  } else {
+    criteria.push('本环节说明中的核心交付物已经落到项目文件中。');
+  }
+
+  if (/测试|验证|校验|运行|test|check|build/i.test(prompt)) {
+    criteria.push('已经运行最窄必要验证命令；如果无法运行，原因和替代检查已记录。');
+  } else {
+    criteria.push('已经完成一次最小自检，并在输出中说明本轮结果。');
+  }
+
+  criteria.push('如果仍需后续推进，已经留下明确的下一次建议；如果不需要，Agent 或用户可以安全标记该环节完成。');
+  return criteria;
+}
+
+function readStepMemoryObject(filePath: string): Record<string, unknown> {
+  if (!filePath || !fs.existsSync(filePath)) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function readCompletionCriteria(workspaceRoot: string, node: RoadmapNode): string[] {
+  const filePath = getStepMemoryFilePath(workspaceRoot, node.id || '');
+  const memory = readStepMemoryObject(filePath);
+  const existing = normalizeStringList(memory.completionCriteria);
+  return existing.length > 0 ? existing : buildCompletionCriteriaForNode(node);
+}
+
+function ensureCompletionCriteriaForNodes(workspaceRoot: string, nodes: RoadmapNode[]): RoadmapNode[] {
+  if (!workspaceRoot) {
+    return nodes;
+  }
+  return nodes.map((node) => {
+    const filePath = getStepMemoryFilePath(workspaceRoot, node.id || '');
+    const legacyFilePath = getLegacyStepMemoryFilePath(workspaceRoot, node.id || '');
+    const memory = readStepMemoryObject(filePath);
+    const existingCriteria = normalizeStringList(memory.completionCriteria);
+    const completionCriteria = existingCriteria.length > 0 ? existingCriteria : buildCompletionCriteriaForNode(node);
+    if (existingCriteria.length === 0) {
+      const legacyEntries = !fs.existsSync(filePath) && fs.existsSync(legacyFilePath)
+        ? parseStepHandoffEntries(fs.readFileSync(legacyFilePath, 'utf8'))
+        : [];
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, JSON.stringify({
+        version: Number(memory.version || 1),
+        format: String(memory.format || 'solopreneur.stepHandoff'),
+        description: String(memory.description || 'Step memory used by SoloMap. completionCriteria defines when this roadmap step can be closed. entries keeps real Agent run handoffs.'),
+        completionCriteria,
+        lastCompletionEvidence: normalizeStringList(memory.lastCompletionEvidence),
+        entries: Array.isArray(memory.entries) ? memory.entries : legacyEntries
+      }, null, 2), 'utf8');
+    }
+    return {
+      ...node,
+      completionCriteria
+    };
+  });
 }
 
 function normalizeSupplementFiles(files: unknown): string[] {
@@ -517,6 +613,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   try {
     await syncEngine.initAndSync();
     activeProjectRoot = projectRoot;
+    ensureCompletionCriteriaForNodes(projectRoot, syncEngine.getNodes());
     setupFileSentinelWatcher(projectRoot);
     // Refresh sidebar when successfully initialized
     if (sidebarProvider) {
@@ -719,7 +816,9 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
  * Sends current node and edge states back to the Webview frontend.
  */
 function sendNodesToWebview() {
-  const nodes = syncEngine ? syncEngine.getNodes() : [];
+  const nodes = syncEngine
+    ? ensureCompletionCriteriaForNodes(activeProjectRoot || '', syncEngine.getNodes())
+    : [];
   if (activePanel) {
     activePanel.webview.postMessage({
       command: 'nodesUpdated',
@@ -1127,10 +1226,6 @@ function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: strin
   ].join(''))} ${shellQuote(workspaceRoot)} ${shellQuote(snapshotFilePath)} ${shellQuote(touchedFilesPath)}`;
 }
 
-function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
-  return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.json`);
-}
-
 function getLegacyStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
   return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.md`);
 }
@@ -1147,6 +1242,28 @@ function readStepHandoffSummary(filePath: string): string {
   }
 
   const content = fs.readFileSync(sourceFilePath, 'utf8').trim();
+  if (content.startsWith('{')) {
+    const memory = readStepMemoryObject(sourceFilePath);
+    const entries = parseStepHandoffEntries(content);
+    if (Object.keys(memory).length > 0) {
+      return JSON.stringify({
+        version: 1,
+        format: String(memory.format || 'solopreneur.stepHandoff'),
+        description: String(memory.description || 'Step memory used by SoloMap. completionCriteria defines when this roadmap step can be closed. entries keeps real Agent run handoffs.'),
+        ...(
+          normalizeStringList(memory.completionCriteria).length > 0
+            ? { completionCriteria: normalizeStringList(memory.completionCriteria) }
+            : {}
+        ),
+        ...(
+          normalizeStringList(memory.lastCompletionEvidence).length > 0
+            ? { lastCompletionEvidence: normalizeStringList(memory.lastCompletionEvidence) }
+            : {}
+        ),
+        entries
+      }, null, 2);
+    }
+  }
   return buildStepHandoffSummary(parseStepHandoffEntries(content)) || '暂无交接总结。';
 }
 
@@ -1327,9 +1444,28 @@ function updateStepHandoffSummary(filePath: string, entry: Record<string, unknow
     : legacyFilePath && fs.existsSync(legacyFilePath)
       ? fs.readFileSync(legacyFilePath, 'utf8')
       : '';
+  const existingObject = readStepMemoryObject(filePath);
   const normalizedEntry = normalizeStepHandoffEntry(entry);
   const entries = normalizedEntry ? [normalizedEntry, ...parseStepHandoffEntries(existing)] : parseStepHandoffEntries(existing);
-  const nextContent = buildStepHandoffSummary(entries).slice(0, 12000);
+  const completionCriteria = normalizeStringList(existingObject.completionCriteria);
+  const existingCompletionEvidence = normalizeStringList(existingObject.lastCompletionEvidence);
+  const entryEvidence = normalizedEntry
+    ? [
+      ...normalizeStringList(normalizedEntry.changedFiles),
+      String(normalizedEntry.completionReason || '').trim()
+    ].filter(Boolean)
+    : [];
+  const lastCompletionEvidence = entryEvidence.length > 0
+    ? [...entryEvidence, ...existingCompletionEvidence].filter((item, index, all) => all.indexOf(item) === index).slice(0, 8)
+    : existingCompletionEvidence;
+  const nextContent = JSON.stringify({
+    version: 1,
+    format: 'solopreneur.stepHandoff',
+    description: 'Step memory used by SoloMap. completionCriteria defines when this roadmap step can be closed. entries keeps real Agent run handoffs.',
+    ...(completionCriteria.length > 0 ? { completionCriteria } : {}),
+    ...(lastCompletionEvidence.length > 0 ? { lastCompletionEvidence } : {}),
+    entries: parseStepHandoffEntries(buildStepHandoffSummary(entries))
+  }, null, 2).slice(0, 12000);
 
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, nextContent, 'utf8');
@@ -1379,6 +1515,14 @@ function buildAgentConversationPrompt(
     : '';
   const memoryFileDisplay = toProjectRelativeRuntimePath(workspaceRoot, memoryFile);
   const runsDirDisplay = toProjectRelativeRuntimePath(workspaceRoot, runsDir);
+  const completionCriteria = readCompletionCriteria(workspaceRoot, node);
+  const completionCriteriaInstructions = completionCriteria.length > 0
+    ? [
+      '本环节完成标准：',
+      ...completionCriteria.map((criterion, index) => `${index + 1}. ${criterion}`),
+      '本轮交付和最终完成判断必须对照这些标准；如果只完成其中一部分，请保持环节为继续推进状态。'
+    ].join('\n')
+    : '';
   const memoryInstructions = [
     '开始前必须先读取 SoloMap 为本环节保存的项目上下文文件：',
     `- 环节交接 JSON：${memoryFileDisplay}`,
@@ -1419,6 +1563,7 @@ function buildAgentConversationPrompt(
     `阶段：${node.stage}`,
     `环节说明：${node.description}`,
     `当前环节状态：${node.status}`,
+    ...(completionCriteriaInstructions ? ['', completionCriteriaInstructions] : []),
     '',
     userPriorityInstructions,
     '',
@@ -2696,6 +2841,33 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       margin-top: 6px;
     }
 
+    .completion-criteria {
+      margin-top: 8px;
+      background: rgba(0, 229, 255, 0.06);
+      border: 1px solid rgba(0, 229, 255, 0.16);
+      border-radius: 8px;
+      padding: 9px 10px;
+    }
+
+    .completion-criteria-title {
+      font-size: 11px;
+      font-weight: 800;
+      color: #67e8f9;
+      margin-bottom: 6px;
+    }
+
+    .completion-criteria-list {
+      margin: 0;
+      padding-left: 18px;
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .completion-criteria-list li + li {
+      margin-top: 4px;
+    }
+
     .node-actions {
       display: flex;
       flex-direction: column;
@@ -3520,6 +3692,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         changedCount: '本轮修改文件数',
         agentConclusion: 'Agent 结论',
         failureLabel: '失败原因',
+        completionCriteria: '完成标准',
+        completeConfirm: '确认这个环节已经达到以下完成标准？',
         failureCategories: {
           cli_not_found: '未找到所选 Agent CLI。',
           stopped_by_user: '任务已由用户停止。',
@@ -3580,6 +3754,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         changedCount: 'Files changed in this run',
         agentConclusion: 'Agent conclusion',
         failureLabel: 'Failure reason',
+        completionCriteria: 'Completion criteria',
+        completeConfirm: 'Confirm this step has met these completion criteria?',
         failureCategories: {
           cli_not_found: 'The selected Agent CLI was not found.',
           stopped_by_user: 'The task was stopped by the user.',
@@ -3863,6 +4039,35 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         .replace(/'/g, '&#39;');
     }
 
+    function getCompletionCriteria(node) {
+      const criteria = Array.isArray(node.completionCriteria)
+        ? node.completionCriteria.map(item => String(item || '').trim()).filter(Boolean)
+        : [];
+      if (criteria.length > 0) return criteria;
+      return [node.description || node.agentPrompt || ''];
+    }
+
+    function renderCompletionCriteria(node) {
+      const criteria = getCompletionCriteria(node).filter(Boolean);
+      if (!criteria.length) return '';
+      return \`
+        <div class="completion-criteria" data-completion-criteria-id="\${escapeHtml(node.id)}">
+          <div class="completion-criteria-title">\${escapeHtml(t('completionCriteria'))}</div>
+          <ol class="completion-criteria-list">
+            \${criteria.map(item => \`<li>\${escapeHtml(item)}</li>\`).join('')}
+          </ol>
+        </div>
+      \`;
+    }
+
+    function confirmStepCompletion(node) {
+      const criteriaText = getCompletionCriteria(node)
+        .filter(Boolean)
+        .map((item, index) => (index + 1) + '. ' + item)
+        .join('\\n');
+      return confirm(t('completeConfirm') + (criteriaText ? '\\n\\n' + criteriaText : ''));
+    }
+
     function renderRoadmap(nodes) {
       // Clear canvas keeping the flow line
       const flowLine = canvas.querySelector('.flow-line');
@@ -3893,6 +4098,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             <div class="node-agent-prompt">
               <strong>\${escapeHtml(node.agentCli)}:</strong> \${escapeHtml(node.agentPrompt)}
             </div>
+            \${renderCompletionCriteria(node)}
             <div class="conversation-composer">
               <div class="conversation-compose">
                 <button class="conversation-tool-btn" data-attach-node-id="\${escapeHtml(node.id)}" title="\${t('attachFiles')}" \${conversationDisabled}>
@@ -3972,7 +4178,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         if (completeButton) {
           completeButton.addEventListener('click', (event) => {
             event.stopPropagation();
-            vscode.postMessage({ command: 'completeNode', nodeId: node.id });
+            if (confirmStepCompletion(node)) {
+              vscode.postMessage({ command: 'completeNode', nodeId: node.id });
+            }
           });
         }
         row.querySelectorAll('[data-conversation-id]').forEach(item => {

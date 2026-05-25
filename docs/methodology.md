@@ -100,6 +100,16 @@ The user should not need perfect requirements, a complete team, or a finished pl
 
 An Agent response is not enough. SoloMap should treat local project changes, visible run status, and user-controlled closure as the real proof of progress.
 
+### Completion Criteria Before Completion Buttons
+
+Each roadmap step should have lightweight completion criteria. The criteria should not become a heavy form. They should help the user and the Agent agree on:
+
+- what this step must deliver
+- which local files, pages, configuration, market assets, or feedback records prove progress
+- what the next run should continue if the step is not ready to close
+
+Agent conversations should deliver against these criteria, and the user should see them before marking a step complete.
+
 ### Market Path Before Internal Completion
 
 The roadmap should include how the product reaches customers, not only how the code is built.
@@ -120,4 +130,3 @@ A strong SoloMap roadmap should usually cover these layers:
 ```
 
 This is not a rigid template. It is the minimum mental model that keeps a solo project from becoming only code, only chat, or only planning.
-
