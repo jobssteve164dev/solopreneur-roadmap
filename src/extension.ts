@@ -43,6 +43,9 @@ const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
 const roadmapRevisionId = '__roadmap_revision__';
+const agentTerminalBaseName = 'SoloMap Agent Console';
+let activeAgentTerminalName = '';
+let agentTerminalCounter = 0;
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
@@ -1832,8 +1835,36 @@ function postNodeConversations(nodeId: string): void {
   }
 }
 
+function makeAgentTerminalName(label: string): string {
+  agentTerminalCounter += 1;
+  const cleanLabel = String(label || 'run').replace(/[^a-zA-Z0-9_.:-]+/g, '-').slice(0, 40) || 'run';
+  return `${agentTerminalBaseName} · ${cleanLabel} · ${agentTerminalCounter}`;
+}
+
+function findActiveAgentTerminal(): vscode.Terminal | undefined {
+  const terminals = [...vscode.window.terminals];
+  if (activeAgentTerminalName) {
+    const active = terminals.find((candidate) => candidate.name === activeAgentTerminalName);
+    if (active) {
+      return active;
+    }
+  }
+  return terminals.reverse().find((candidate) => candidate.name.startsWith(agentTerminalBaseName));
+}
+
+function createAgentTerminal(workspaceRoot: string, label: string): vscode.Terminal {
+  const terminalName = makeAgentTerminalName(label);
+  activeAgentTerminalName = terminalName;
+  return vscode.window.createTerminal({
+    name: terminalName,
+    iconPath: new vscode.ThemeIcon('robot'),
+    color: new vscode.ThemeColor('terminal.ansiCyan'),
+    cwd: workspaceRoot,
+  });
+}
+
 function showAgentTerminal(): void {
-  const terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
+  const terminal = findActiveAgentTerminal();
   if (terminal) {
     terminal.show(true);
     return;
@@ -1876,15 +1907,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
 
-  let terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
-  if (!terminal) {
-    terminal = vscode.window.createTerminal({
-      name: 'SoloMap Agent Console',
-      iconPath: new vscode.ThemeIcon('robot'),
-      color: new vscode.ThemeColor('terminal.ansiCyan'),
-      cwd: activeProjectRoot,
-    });
-  }
+  const terminal = createAgentTerminal(activeProjectRoot, `native-${sessionId.slice(0, 8)}`);
   terminal.show(true);
   terminal.sendText(buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot));
 }
@@ -1924,7 +1947,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     return;
   }
 
-  const terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
+  const terminal = findActiveAgentTerminal();
   terminal?.dispose();
   const failureReason = 'Stopped by user.';
   const finishedAt = new Date().toISOString();
@@ -2014,16 +2037,6 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   );
   postNodeConversations(roadmapRevisionId);
 
-  let terminal = vscode.window.terminals.find((candidate) => candidate.name === 'SoloMap Agent Console');
-  if (!terminal) {
-    terminal = vscode.window.createTerminal({
-      name: 'SoloMap Agent Console',
-      iconPath: new vscode.ThemeIcon('robot'),
-      color: new vscode.ThemeColor('terminal.ansiCyan'),
-      cwd: activeProjectRoot
-    });
-  }
-  terminal.show(true);
   const { finalCommand } = buildAgentShellScript(
     agentCli,
     conversationPrompt,
@@ -2037,6 +2050,8 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     'roadmap_revision',
     roadmapBackupFilePath
   );
+  const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`);
+  terminal.show(true);
   terminal.sendText(finalCommand);
 }
 
@@ -2113,19 +2128,6 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   syncEngine.updateNode(nodeId, { status: 'Running' });
   sendNodesToWebview();
 
-  // Create or retrieve agent terminal
-  let terminal = vscode.window.terminals.find((t) => t.name === 'SoloMap Agent Console');
-  if (!terminal) {
-    terminal = vscode.window.createTerminal({
-      name: 'SoloMap Agent Console',
-      iconPath: new vscode.ThemeIcon('robot'),
-      color: new vscode.ThemeColor('terminal.ansiCyan'),
-      cwd: workspaceRoot,
-    });
-  }
-
-  terminal.show(true);
-
   // Command execution with sentinel file generation on success or fail
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const completionDecisionFilePath = path.join(runDir, 'completion.json');
@@ -2166,6 +2168,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId);
 
+  const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`);
+  terminal.show(true);
   terminal.sendText(finalCommand);
 }
 

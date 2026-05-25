@@ -409,6 +409,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentCommandForPromptFile = buildAgentCommandForPromptFile;',
       'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
       'module.exports.__buildNativeContinueCommand = buildNativeContinueCommand;',
+      'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
@@ -506,6 +507,11 @@ test('agent command builder uses non-interactive task runs and native continuati
     extensionModule.__buildNativeContinueCommand('agy', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
     "'agy' --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --prompt-interactive --add-dir='/workspace/app'"
   );
+  const firstTerminalName = extensionModule.__makeAgentTerminalName('step-2-42');
+  const secondTerminalName = extensionModule.__makeAgentTerminalName('step-2-43');
+  assert.match(firstTerminalName, /^SoloMap Agent Console · step-2-42 · \d+$/);
+  assert.match(secondTerminalName, /^SoloMap Agent Console · step-2-43 · \d+$/);
+  assert.notEqual(firstTerminalName, secondTerminalName);
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('claude', 'agent_prompt', '/workspace/app'),
     "'claude' -p --add-dir '/workspace/app' \"$agent_prompt\""
