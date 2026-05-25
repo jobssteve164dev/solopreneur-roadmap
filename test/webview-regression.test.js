@@ -561,6 +561,8 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -e -c/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /FORCE_COLOR/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /timed out waiting for response|Error: timed out/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.agent_status\.json/);

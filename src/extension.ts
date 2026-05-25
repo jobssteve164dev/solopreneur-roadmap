@@ -1659,19 +1659,29 @@ function buildAgentShellScript(
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  const terminalExecutionScript = [
+    'if command -v script >/dev/null 2>&1 && script -q -e -c true /dev/null >/dev/null 2>&1; then',
+    'export agent_prompt;',
+    `script -q -e -c ${shellQuote(executionCommand)} /dev/null 2>&1 | tee ${shellQuote(outputFilePath)};`,
+    'status=${PIPESTATUS[0]};',
+    'else',
+    `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
+    'status=${PIPESTATUS[0]};',
+    'fi'
+  ].join(' ');
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(promptFilePath, conversationPrompt, 'utf8');
   fs.writeFileSync(commandFilePath, loggedCommand, 'utf8');
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
+    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
     workspaceSnapshotScript,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
     `agent_prompt=$(cat ${shellQuote(promptFilePath)})`,
-    `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)}`,
-    `status=\${PIPESTATUS[0]}`,
+    terminalExecutionScript,
     sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
@@ -2713,11 +2723,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       align-items: center;
       width: 100%;
       max-width: min(920px, 100%);
+      min-width: 0;
       z-index: 2;
     }
 
     .node-card {
       width: 100%;
+      min-width: 0;
       background: var(--bg-glass);
       backdrop-filter: blur(10px);
       border: 1px solid var(--border-glass);
@@ -2786,6 +2798,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       flex-direction: column;
       gap: 6px;
+      min-width: 0;
     }
 
     .node-summary {
@@ -2816,6 +2829,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       margin-top: 10px;
       padding-top: 12px;
       border-top: 1px solid var(--border-glass);
+      min-width: 0;
+      max-width: 100%;
     }
 
     .node-title {
@@ -2923,6 +2938,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       border: 1px solid var(--border-glass);
       border-radius: 8px;
       padding: 10px;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
     }
 
     .conversation-composer {
@@ -3065,6 +3083,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.04);
       overflow: hidden;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .conversation-row {
@@ -3082,6 +3102,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       flex-direction: column;
       gap: 2px;
       min-width: 0;
+      flex: 1 1 auto;
     }
 
     .conversation-actions {
@@ -3171,6 +3192,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       padding: 10px;
       color: var(--text-muted);
       font-size: 12px;
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
     }
 
     .conversation-outcome {
@@ -3190,11 +3214,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .conversation-detail pre {
       white-space: pre-wrap;
       word-break: break-word;
+      overflow-wrap: anywhere;
       max-height: 260px;
       overflow: auto;
       margin: 6px 0 0;
       font-size: 11px;
       color: #cbd5e1;
+      max-width: 100%;
     }
 
     .conversation-files {
