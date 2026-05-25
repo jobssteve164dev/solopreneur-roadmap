@@ -2080,17 +2080,6 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     return;
   }
 
-  const unmetDependencies = (node.dependencies || '')
-    .split(',')
-    .map((dep) => dep.trim())
-    .filter(Boolean)
-    .filter((dep) => nodes.find((candidate) => candidate.id === dep)?.status !== 'Completed');
-
-  if (unmetDependencies.length > 0) {
-    vscode.window.showErrorMessage(`Complete prerequisite task(s) first: ${unmetDependencies.join(', ')}`);
-    return;
-  }
-
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
   if (hasRunningAgentConversation(workspaceRoot, nodes)) {
     vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before starting a new one.');

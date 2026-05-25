@@ -49,8 +49,8 @@
 - Previous conversation IDs are not passed as forced resume parameters in normal step composer runs, and SoloMap should not add its own task timeout.
 - Agent commands run in the opened workspace root, and the sentinel file is written with an absolute path so sidebar-only usage can still complete.
 - If the configured/default CLI is unavailable, runtime discovery falls back to installed candidates such as `codex` before failing.
-- Task dependencies are enforced before running a node: dependent tasks must be `Completed`.
-- Before enforcing task dependencies for a step-card composer run, the extension must call `syncEngine.initAndSync()` so the dependency check uses the latest `.solopreneur/roadmap.csv` state rather than stale in-memory/SQLite state after roadmap revisions or external CSV edits.
+- Task dependencies describe roadmap order and support recommended-next-step selection, but they do not block a user from starting an Agent conversation in any step. Users must be able to explore, prepare, or revise downstream work before prior steps are completed.
+- Before a step-card composer run, the extension calls `syncEngine.initAndSync()` so the selected conversation uses the latest `.solopreneur/roadmap.csv` node after roadmap revisions or external CSV edits.
 - Agent execution uses `bash` plus `tee` for normal task runs so users see output while the extension captures it for the execution log. Native TTY continuation is a separate manual terminal action.
 - Every Agent task conversation and native continuation must create a fresh VS Code terminal with a unique `SoloMap Agent Console · ...` name. Do not reuse a previous terminal by name, because later runs can inherit stale terminal/session state and fail to start correctly. `Open terminal` and `Stop` should target the current active SoloMap terminal name.
 - Agent execution records touched project files outside `.solopreneur`, `.git`, and `node_modules`. If the CLI exits without project file changes and without a completion decision, the sentinel records `Failed` instead of silently advancing the roadmap step.
