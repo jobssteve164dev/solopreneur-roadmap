@@ -208,7 +208,7 @@ Next Action 卡片应展示：
 - 完成标准保存在 `.solopreneur/step-memory/<nodeId>.json` 的 `completionCriteria` 中，不改变 `roadmap.csv` schema。
 - 旧项目打开时会按环节标题、阶段和 Agent prompt 自动补齐默认完成标准。
 - Agent prompt 会读取并注入该环节完成标准；只有达到标准时才应写入完成判断。
-- 大图中展开环节会展示完成标准，用户点击完成环节前会看到确认提示。
+- 大图中展开环节会展示完成标准；侧边栏环节卡片也提供“完成环节”按钮，用户点击完成前会看到同一份标准确认提示。
 
 ## P1：Build -> Sell -> Learn -> Improve 循环面板
 

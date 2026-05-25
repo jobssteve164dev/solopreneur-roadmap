@@ -84,7 +84,9 @@ export async function activate(context: vscode.ExtensionContext) {
   // Setup wrapper for SyncEngine to allow safe initialization later
   const syncEngineWrapper = {
     getNodes: () => {
-      return syncEngine ? syncEngine.getNodes() : [];
+      return syncEngine
+        ? ensureCompletionCriteriaForNodes(activeProjectRoot || '', syncEngine.getNodes())
+        : [];
     }
   } as any;
 
@@ -108,6 +110,12 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async () => {
       await addProjectFromDialog(context);
+    },
+    async (nodeId) => {
+      const ready = await ensureSyncEngine(context);
+      if (ready) {
+        markNodeCompleted(nodeId);
+      }
     }
   );
 
@@ -676,13 +684,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'completeNode':
-          if (syncEngine) {
-            syncEngine.updateNode(message.nodeId, {
-              status: 'Completed',
-              completedAt: new Date().toISOString()
-            });
-            sendNodesToWebview();
-          }
+          markNodeCompleted(message.nodeId);
           break;
 
         case 'runAgent':
@@ -836,6 +838,17 @@ function sendNodesToWebview() {
   if (sidebarProvider) {
     sidebarProvider.sendNodesToWebview();
   }
+}
+
+function markNodeCompleted(nodeId: string): void {
+  if (!syncEngine) {
+    return;
+  }
+  syncEngine.updateNode(nodeId, {
+    status: 'Completed',
+    completedAt: new Date().toISOString()
+  });
+  sendNodesToWebview();
 }
 
 function shellQuote(value: string): string {

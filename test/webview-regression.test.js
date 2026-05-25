@@ -369,8 +369,49 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /selectProject/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
+  assert.match(html, /data-complete-node-id/);
+  assert.match(html, /confirmStepCompletion/);
+  assert.match(html, /completionCriteria/);
+  assert.match(html, /completeNode/);
+  assert.match(html, /Complete Step|完成环节/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
+});
+
+test('sidebar forwards manual step completion to the extension handler', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  let receiveMessage;
+  let completedNodeId = '';
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    async () => {},
+    () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '' }),
+    async () => {},
+    () => ({ projects: [], selectedProjectPath: '/workspace/app' }),
+    async () => {},
+    async () => {},
+    async (nodeId) => {
+      completedNodeId = nodeId;
+    }
+  );
+
+  provider.resolveWebviewView({
+    webview: {
+      options: {},
+      asWebviewUri: createWebviewStub().asWebviewUri,
+      postMessage() {},
+      onDidReceiveMessage(callback) {
+        receiveMessage = callback;
+      }
+    }
+  }, {}, {});
+
+  await receiveMessage({ command: 'completeNode', nodeId: '2' });
+  assert.equal(completedNodeId, '2');
 });
 
 test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
