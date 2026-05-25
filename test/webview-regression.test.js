@@ -399,7 +399,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   ]).title, 'Running step');
 });
 
-test('agent command builder uses Codex exec and preserves Antigravity run path', () => {
+test('agent command builder uses native TTY CLIs and preserves Antigravity run path', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -440,27 +440,27 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
 
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Ship the MVP', '/workspace/app'),
-    "'codex' exec --color always -C '/workspace/app' 'Ship the MVP'"
+    "'codex' -C '/workspace/app' 'Ship the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex-cli', "Don't skip tests", '/workspace/app'),
-    "'codex-cli' exec --color always -C '/workspace/app' 'Don'\\''t skip tests'"
+    "'codex-cli' -C '/workspace/app' 'Don'\\''t skip tests'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Continue the MVP', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
-    "'codex' exec --color always -C '/workspace/app' 'Continue the MVP'"
+    "'codex' -C '/workspace/app' 'Continue the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
-    "'antigravity-cli' --print --add-dir='/workspace/app' 'Build landing page'"
+    "'antigravity-cli' --prompt-interactive --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
-    "'agy' --print --add-dir='/workspace/app' 'Build landing page'"
+    "'agy' --prompt-interactive --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Continue landing page', '/workspace/app', '3350a3b7-7761-4ed5-9661-2e9c9de8f924'),
-    "'agy' --print --add-dir='/workspace/app' 'Continue landing page'"
+    "'agy' --prompt-interactive --add-dir='/workspace/app' 'Continue landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('claude', 'Ship the MVP', '/workspace/app'),
@@ -472,11 +472,11 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'agy' --print --add-dir='/workspace/app' @prompt-file:'/workspace/app/.solopreneur/agent-runs/2/prompt.txt'"
+    "'agy' --prompt-interactive --add-dir='/workspace/app' \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\""
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
+    "'codex' -C '/workspace/app' \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\""
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('claude', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
@@ -488,7 +488,11 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
-    "printf %s \"$agent_prompt\" | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
+    "'codex' -C '/workspace/app' \"$agent_prompt\""
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandFromShellVar('agy', 'agent_prompt', '/workspace/app'),
+    "'agy' --prompt-interactive --add-dir='/workspace/app' \"$agent_prompt\""
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('claude', 'agent_prompt', '/workspace/app'),
@@ -557,11 +561,13 @@ test('agent command builder uses Codex exec and preserves Antigravity run path',
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec --color always -C .*--skip-git-repo-check -/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /codex' -C .*cat .*prompt\.txt/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -e -c/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -e -c[\s\S]*output\.log'; status=\$\?; else/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /codex' -C .*"\$agent_prompt"/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /FORCE_COLOR/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /timed out waiting for response|Error: timed out/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
@@ -950,7 +956,7 @@ test('roadmap csv generated by an agent is not overwritten by stale node state',
   fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
   fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
   fs.writeFileSync(path.join(runDir, 'output.log'), 'Codex updated roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex -C .\n', 'utf8');
   fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":true,"reason":"路线图已生成"}', 'utf8');
   const statusFilePath = path.join(projectRoot, '.agent_status.json');
   fs.writeFileSync(statusFilePath, JSON.stringify({
@@ -1202,7 +1208,7 @@ test('stopping an Agent run records the user decision on the active conversation
   extensionModule.__setRuntimeForTest({
     getNodes: () => [{ id: '3', title: '完善体验', status: 'Running' }],
     updateNode: () => {},
-    getAgentExecutions: () => [{ id: 11, nodeId: '3', agentCli: 'codex', command: 'codex exec', output: 'Agent conversation started.', status: 'Running' }],
+    getAgentExecutions: () => [{ id: 11, nodeId: '3', agentCli: 'codex', command: 'codex -C .', output: 'Agent conversation started.', status: 'Running' }],
     updateAgentExecution: (_id, _cli, _command, output, status) => {
       updatedOutput = output;
       updatedStatus = status;

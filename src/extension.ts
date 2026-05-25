@@ -1012,11 +1012,11 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
@@ -1034,11 +1034,11 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   const quotedPromptFile = shellQuote(promptFilePath);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `${quotedCli} -C ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
+    return `${quotedCli} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
@@ -1056,11 +1056,11 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   const promptExpression = `"$${promptVarName}"`;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `${quotedCli} -C ${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
@@ -1662,8 +1662,8 @@ function buildAgentShellScript(
   const terminalExecutionScript = [
     'if command -v script >/dev/null 2>&1 && script -q -e -c true /dev/null >/dev/null 2>&1; then',
     'export agent_prompt;',
-    `script -q -e -c ${shellQuote(executionCommand)} /dev/null 2>&1 | tee ${shellQuote(outputFilePath)};`,
-    'status=${PIPESTATUS[0]};',
+    `script -q -e -c ${shellQuote(executionCommand)} ${shellQuote(outputFilePath)};`,
+    'status=$?;',
     'else',
     `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
     'status=${PIPESTATUS[0]};',

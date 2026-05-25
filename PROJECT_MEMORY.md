@@ -37,19 +37,19 @@
 - Step handoff files must contain only real run entries. The parser/writer must dedupe entries by content and migrate old `.md` handoff files by stripping nested `# 环节交接总结` blocks so previous summaries cannot recursively copy themselves into future prompts.
 - Webview node state and conversation history caches must be scoped by selected project path. Project switching must clear expanded node state and cached conversations because different projects often reuse the same roadmap node IDs.
 - Solopreneur intentionally keeps project data inside the project folder under `.solopreneur/` so Git can manage it and the user can move between machines/IDEs without a Solopreneur backend. The extension must generate `.solopreneur/README.md` explaining the directory contents and deletion risk.
-- Local Agent CLI discovery must treat Antigravity as the `agy` CLI first, while still supporting `antigravity`, `antigravity-cli`, `codex`, and `codex-cli`. `agy` and `antigravity-cli` run non-interactively through `--print --add-dir=<workspace> <prompt>` without a SoloMap-imposed print timeout.
+- Local Agent CLI discovery must treat Antigravity as the `agy` CLI first, while still supporting `antigravity`, `antigravity-cli`, `codex`, and `codex-cli`. `agy` and `antigravity-cli` run task conversations through their interactive prompt mode (`--prompt-interactive --add-dir=<workspace> <prompt>`) without a SoloMap-imposed print timeout.
 - Antigravity/agy print mode can emit progress text while still returning a zero shell exit code. Solopreneur must not treat exit code alone as successful progress; a run needs project file changes or a completion decision before it can advance out of failure handling.
 
 ## CLI Orchestration Contract
 
 - User-facing setting `solopreneur.cliPath` controls the local agent executable.
-- `codex` and `codex-cli` sessions must be invoked through `codex exec -C <workspace> <prompt>`, even when a previous same-step session ID exists.
-- Codex task invocations use `--color always` because output is piped through `tee`; captured output tails must strip ANSI escape sequences before rendering in conversation history.
-- `agy` / `antigravity-cli` sessions use the `--print --add-dir=<workspace> <prompt>` shape for every run. Previous conversation IDs are not passed as forced `--conversation` arguments, and SoloMap should not add its own task timeout.
+- `codex` and `codex-cli` task conversations must invoke the top-level interactive TUI shape `codex -C <workspace> <prompt>`, even when a previous same-step session ID exists.
+- Agent terminal output is captured by running the CLI under `script -q -e -c ... <output.log>` so the CLI sees a real pseudo-terminal. Do not wrap the primary CLI command in `agent | tee output.log`; that downgrades Codex/agy to pipe output and breaks their native terminal layout/theme. Captured output tails must strip ANSI escape sequences before rendering in conversation history.
+- `agy` / `antigravity-cli` sessions use the `--prompt-interactive --add-dir=<workspace> <prompt>` shape for every run. Previous conversation IDs are not passed as forced `--conversation` arguments, and SoloMap should not add its own task timeout.
 - Agent commands run in the opened workspace root, and the sentinel file is written with an absolute path so sidebar-only usage can still complete.
 - If the configured/default CLI is unavailable, runtime discovery falls back to installed candidates such as `codex` before failing.
 - Task dependencies are enforced before running a node: dependent tasks must be `Completed`.
-- Agent execution uses `bash -lc` plus `tee` so users see terminal output while the extension also captures it for the execution log.
+- Agent execution uses `bash` plus `script` so users see native TTY output while the extension also captures it for the execution log. `tee` is only a no-`script` fallback, not the normal path.
 - Agent execution records touched project files outside `.solopreneur`, `.git`, and `node_modules`. If the CLI exits without project file changes and without a completion decision, the sentinel records `Failed` instead of silently advancing the roadmap step.
 - Settings-panel CLI tests must use the same candidate ordering as Agent dispatch in both the full roadmap and sidebar webviews. The result message should show the actual resolved command so users know which local CLI will be used.
 - Roadmap creation and revision use the local Agent conversation chain. New projects seed a starter roadmap first; later revision runs update `roadmap.csv` only after validation rather than depending on a separate hosted AI provider path.
