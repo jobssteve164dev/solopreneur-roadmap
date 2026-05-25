@@ -676,13 +676,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'completeNode':
-          if (syncEngine) {
-            syncEngine.updateNode(message.nodeId, {
-              status: 'Completed',
-              completedAt: new Date().toISOString()
-            });
-            sendNodesToWebview();
-          }
+          completeNodeManually(message.nodeId);
           break;
 
         case 'runAgent':
@@ -836,6 +830,36 @@ function sendNodesToWebview() {
   if (sidebarProvider) {
     sidebarProvider.sendNodesToWebview();
   }
+}
+
+function completeNodeManually(nodeId: string): void {
+  if (!syncEngine || !nodeId) {
+    return;
+  }
+
+  syncEngine.updateNode(nodeId, {
+    status: 'Completed',
+    completedAt: new Date().toISOString()
+  });
+
+  if (activeProjectRoot) {
+    const statusFilePath = path.join(activeProjectRoot, '.agent_status.json');
+    const currentStatus = readAgentStatus(statusFilePath);
+    const completionDecisionFilePath = String(currentStatus?.completionDecisionFilePath || '').trim();
+    if (currentStatus?.nodeId === nodeId && completionDecisionFilePath) {
+      try {
+        fs.writeFileSync(completionDecisionFilePath, JSON.stringify({
+          markCompleted: true,
+          reason: '用户已手动确认完成该环节。',
+          source: 'user'
+        }), 'utf8');
+      } catch (error) {
+        console.warn('Failed to persist manual completion decision:', error);
+      }
+    }
+  }
+
+  sendNodesToWebview();
 }
 
 function shellQuote(value: string): string {
@@ -2373,8 +2397,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
     const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
     const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
-    // Preserve an explicit user completion if an in-flight Agent run reports back afterward.
-    let shouldWriteNodeStatus = currentNode?.status !== 'Completed';
+    // User-confirmed completion remains authoritative over any in-flight Agent result.
+    const preserveCompletedNode = currentNode?.status === 'Completed';
+    let shouldWriteNodeStatus = !preserveCompletedNode;
     let shouldRefreshRoadmap = false;
     if (workspaceRoot && runKind === 'roadmap_revision') {
       shouldWriteNodeStatus = false;
@@ -2504,6 +2529,12 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     if (workspaceRoot && shouldRefreshRoadmap) {
       await syncEngine.initAndSync();
+      if (preserveCompletedNode && nodeId !== roadmapRevisionId && syncEngine.getNodes().some((node) => node.id === nodeId)) {
+        syncEngine.updateNode(nodeId, {
+          status: 'Completed',
+          completedAt: currentNode?.completedAt || new Date().toISOString()
+        });
+      }
     }
 
     sendNodesToWebview();
@@ -3774,7 +3805,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent 结论',
         failureLabel: '失败原因',
         completionCriteria: '完成标准',
-        completeConfirm: '确认这个环节已经达到以下完成标准？',
         failureCategories: {
           cli_not_found: '未找到所选 Agent CLI。',
           stopped_by_user: '任务已由用户停止。',
@@ -3837,7 +3867,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent conclusion',
         failureLabel: 'Failure reason',
         completionCriteria: 'Completion criteria',
-        completeConfirm: 'Confirm this step has met these completion criteria?',
         failureCategories: {
           cli_not_found: 'The selected Agent CLI was not found.',
           stopped_by_user: 'The task was stopped by the user.',
@@ -4147,14 +4176,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       \`;
     }
 
-    function confirmStepCompletion(node) {
-      const criteriaText = getCompletionCriteria(node)
-        .filter(Boolean)
-        .map((item, index) => (index + 1) + '. ' + item)
-        .join('\\n');
-      return confirm(t('completeConfirm') + (criteriaText ? '\\n\\n' + criteriaText : ''));
-    }
-
     function renderRoadmap(nodes) {
       // Clear canvas keeping the flow line
       const flowLine = canvas.querySelector('.flow-line');
@@ -4265,9 +4286,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         if (completeButton) {
           completeButton.addEventListener('click', (event) => {
             event.stopPropagation();
-            if (confirmStepCompletion(node)) {
-              vscode.postMessage({ command: 'completeNode', nodeId: node.id });
-            }
+            vscode.postMessage({ command: 'completeNode', nodeId: node.id });
           });
         }
         row.querySelectorAll('[data-conversation-id]').forEach(item => {

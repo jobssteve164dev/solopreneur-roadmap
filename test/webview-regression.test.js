@@ -326,7 +326,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
   assert.match(script, /completionCriteria/);
   assert.match(script, /renderCompletionCriteria/);
-  assert.match(script, /confirmStepCompletion/);
+  assert.doesNotMatch(script, /confirmStepCompletion|completeConfirm/);
   assert.match(script, /Completion criteria|完成标准/);
   assert.match(html, /id="btn-toggle-roadmap-revision"/);
   assert.match(html, /id="roadmap-revision-panel"/);
@@ -336,6 +336,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.doesNotMatch(script, /data-toggle-roadmap-revision/);
   assert.match(script, /completeNode/);
   assert.match(script, /Complete Step|完成环节/);
+  assert.match(script, /vscode\.postMessage\(\{ command: 'completeNode', nodeId: node\.id \}\)/);
   assert.doesNotMatch(html, /\.node-card\.status-Running \.btn-run\s*\{[\s\S]*?pointer-events:\s*none/);
   assert.match(script, /resetProjectScopedState/);
   assert.match(script, /projectPath/);
@@ -1169,7 +1170,39 @@ test('invalid Agent completion state is recorded as a visible failed conversatio
   assert.match(loggedOutput, /Failure reason:\nAgent completion decision file could not be parsed/);
 });
 
-test('manual completion is not overwritten when an in-flight Agent run finishes afterward', async () => {
+test('manual completion immediately persists the user decision for an active Agent run', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__completeNodeManually = completeNodeManually;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-manual-action-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
+  fs.mkdirSync(runDir, { recursive: true });
+  const completionDecisionFilePath = path.join(runDir, 'completion.json');
+  fs.writeFileSync(completionDecisionFilePath, '{"markCompleted":false}', 'utf8');
+  fs.writeFileSync(path.join(tempRoot, '.agent_status.json'), JSON.stringify({
+    nodeId: '2',
+    status: 'Running',
+    completionDecisionFilePath
+  }), 'utf8');
+  let nodeUpdate = null;
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    updateNode: (_nodeId, update) => { nodeUpdate = update; }
+  }, tempRoot);
+
+  extensionModule.__completeNodeManually('2');
+
+  assert.equal(nodeUpdate.status, 'Completed');
+  const decision = JSON.parse(fs.readFileSync(completionDecisionFilePath, 'utf8'));
+  assert.equal(decision.markCompleted, true);
+  assert.equal(decision.source, 'user');
+});
+
+test('manual completion is not overwritten when an in-flight Agent run refreshes the roadmap afterward', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -1181,8 +1214,8 @@ test('manual completion is not overwritten when an in-flight Agent run finishes 
   const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":false}', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M docs/work.md\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M docs/work.md\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
   fs.writeFileSync(path.join(runDir, 'output.log'), 'Agent finished additional work.\n', 'utf8');
   const statusFilePath = path.join(tempRoot, '.agent_status.json');
   fs.writeFileSync(statusFilePath, JSON.stringify({
@@ -1196,11 +1229,20 @@ test('manual completion is not overwritten when an in-flight Agent run finishes 
     completionDecisionFilePath: path.join(runDir, 'completion.json')
   }), 'utf8');
 
-  let nodeUpdateCount = 0;
+  let nodes = [{ id: '2', title: '实现 MVP', status: 'Completed', completedAt: '2026-05-25T00:00:00.000Z' }];
+  let nodeUpdate = null;
+  let refreshed = false;
   let loggedStatus = '';
   extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Completed', completedAt: '2026-05-25T00:00:00.000Z' }],
-    updateNode: () => { nodeUpdateCount += 1; },
+    getNodes: () => nodes,
+    updateNode: (_nodeId, update) => {
+      nodeUpdate = update;
+      nodes = [{ ...nodes[0], ...update }];
+    },
+    initAndSync: async () => {
+      refreshed = true;
+      nodes = [{ id: '2', title: '实现 MVP', status: 'Pending', completedAt: '' }];
+    },
     updateAgentExecution: (_id, _cli, _command, _output, status) => {
       loggedStatus = status;
       return true;
@@ -1211,7 +1253,9 @@ test('manual completion is not overwritten when an in-flight Agent run finishes 
 
   await extensionModule.__processAgentStatusFile(statusFilePath);
 
-  assert.equal(nodeUpdateCount, 0);
+  assert.equal(refreshed, true);
+  assert.equal(nodeUpdate.status, 'Completed');
+  assert.equal(nodes[0].status, 'Completed');
   assert.equal(loggedStatus, 'In Progress');
 });
 
