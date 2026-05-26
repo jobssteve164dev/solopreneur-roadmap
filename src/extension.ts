@@ -3542,7 +3542,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .conversation-compose {
       display: flex;
       gap: 8px;
-      align-items: center;
+      align-items: stretch;
       min-width: 0;
     }
 
@@ -3550,11 +3550,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       flex: 1;
       width: auto;
       min-width: 0;
+      min-height: 34px;
     }
 
     .conversation-tool-btn {
       width: 34px;
-      height: 34px;
+      min-height: 34px;
       padding: 0;
       display: inline-flex;
       align-items: center;
@@ -3576,14 +3577,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .conversation-agent-select {
       width: 132px;
       min-width: 120px;
-      height: 34px;
+      min-height: 34px;
       font-size: 12px;
       flex-shrink: 0;
     }
 
     .btn-send-conversation {
       min-width: 42px;
-      height: 34px;
+      min-height: 34px;
       padding: 0 12px;
       display: inline-flex;
       align-items: center;
@@ -5434,20 +5435,25 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function getAgentOptions(node) {
       const options = [];
       function addOption(value, label) {
-        const normalized = String(value || '').trim();
+        const normalized = normalizeAgentOption(value);
         if (!normalized || options.some(option => option.value === normalized)) return;
         options.push({ value: normalized, label: label || normalized });
       }
       addOption(node.agentCli || currentCliPath || 'agy');
       addOption(currentCliPath || 'agy');
-      addOption('agy');
+      addOption('antigravity');
       addOption('codex');
       addOption('claude');
       addOption('opencode');
-      addOption('antigravity');
-      addOption('antigravity-cli');
-      addOption('codex-cli');
       return options;
+    }
+
+    function normalizeAgentOption(value) {
+      const normalized = String(value || '').trim();
+      const name = normalized.split(/[\\\\/]/).pop().toLowerCase();
+      if (name === 'codex-cli') return 'codex';
+      if (name === 'agy' || name === 'antigravity-cli') return 'antigravity';
+      return normalized;
     }
 
     function mergeSupplementFiles(existing, incoming) {

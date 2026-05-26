@@ -817,7 +817,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .sidebar-solo-compose {
       display: flex;
       gap: 6px;
-      align-items: flex-end;
+      align-items: stretch;
     }
 
     .sidebar-solo-tool {
@@ -905,6 +905,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      align-self: stretch;
     }
 
     .sidebar-solo-history {
@@ -1005,6 +1006,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       font-size: 10px;
       cursor: pointer;
       white-space: nowrap;
+    }
+
+    .sidebar-conversation-footer {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 7px;
     }
 
     .sidebar-conversation-detail pre {
@@ -2233,7 +2240,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
             </div>
             <div class="sidebar-conversation-actions">
-              \${continueButton}
               <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(statusText(conversation.status))}</span>
             </div>
           </div>
@@ -2247,6 +2253,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <pre>\${escapeHtml(conversation.output || '')}</pre>
             </div>
           \` : ''}
+          \${continueButton ? \`<div class="sidebar-conversation-footer">\${continueButton}</div>\` : ''}
         </div>
       \`;
       const card = sidebarSoloHistory.querySelector('[data-sidebar-solo-conversation]');
@@ -2434,20 +2441,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function getAgentOptions(node) {
       const options = [];
       function add(value) {
-        const normalized = String(value || '').trim();
+        const normalized = normalizeAgentOption(value);
         if (!normalized || options.includes(normalized)) return;
         options.push(normalized);
       }
       add(node && node.agentCli);
       add(settingCliPath.value || 'agy');
-      add('agy');
+      add('antigravity');
       add('codex');
       add('claude');
       add('opencode');
-      add('antigravity');
-      add('antigravity-cli');
-      add('codex-cli');
       return options.map(option => ({ value: option, label: option }));
+    }
+
+    function normalizeAgentOption(value) {
+      const normalized = String(value || '').trim();
+      const name = normalized.split(/[\\\\/]/).pop().toLowerCase();
+      if (name === 'codex-cli') return 'codex';
+      if (name === 'agy' || name === 'antigravity-cli') return 'antigravity';
+      return normalized;
     }
 
     function renderSidebarSoloAgents() {

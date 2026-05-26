@@ -376,6 +376,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['sidebar-solo-history'].innerHTML, /codex/);
   assert.match(elements['sidebar-solo-history'].innerHTML, /耗时|Duration/);
   assert.match(elements['sidebar-solo-history'].innerHTML, /data-continue-sidebar-solo-id/);
+  assert.match(elements['sidebar-solo-history'].innerHTML, /sidebar-conversation-footer/);
+  const actionsHtml = elements['sidebar-solo-history'].innerHTML.match(/<div class="sidebar-conversation-actions">([\s\S]*?)<\/div>/)[1];
+  assert.doesNotMatch(actionsHtml, /data-continue-sidebar-solo-id/);
 
   elements['sidebar-solo-project'].setAttribute('data-value', '/workspace/app');
   elements['sidebar-solo-agent'].setAttribute('data-value', 'codex');
@@ -484,6 +487,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /Agent Conversation History|Agent 对话历史/);
   assert.match(script, /conversationPlaceholder/);
   assert.match(script, /conversation-composer/);
+  assert.match(html, /\.conversation-compose\s*\{[\s\S]*?align-items:\s*stretch/);
   assert.match(script, /data-attach-node-id/);
   assert.match(script, /chooseSupplementFiles/);
   assert.match(script, /supplementFilesSelected/);
@@ -492,6 +496,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /data-agent-select-id/);
   assert.match(script, /data-retry-conversation-id/);
   assert.match(script, /getAgentOptions/);
+  assert.match(script, /normalizeAgentOption/);
   assert.match(script, /summarizeConversation/);
   assert.match(script, /retryConversation/);
   assert.match(script, /continueNativeConversation/);
@@ -574,9 +579,15 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /renderSidebarSoloHistory/);
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
+  assert.match(html, /\.sidebar-solo-compose\s*\{[\s\S]*?align-items:\s*stretch/);
+  assert.match(html, /\.sidebar-conversation-footer\s*\{[\s\S]*?justify-content:\s*flex-end/);
   assert.match(html, /\.sidebar-conversation-detail\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.match(html, /\.sidebar-conversation-detail pre\s*\{[\s\S]*?max-width:\s*100%/);
   assert.match(html, /\.sidebar-solo-card\s*\{[\s\S]*?z-index:\s*20/);
+  assert.match(html, /function normalizeAgentOption/);
+  assert.match(html, /add\('antigravity'\)/);
+  assert.doesNotMatch(html, /add\('codex-cli'\)/);
+  assert.doesNotMatch(html, /add\('antigravity-cli'\)/);
   assert.match(html, /\.portfolio-panel\s*\{[\s\S]*?z-index:\s*1/);
   assert.match(html, /Solo 对话|Solo conversation/);
   assert.match(html, /id="portfolio-list"/);
