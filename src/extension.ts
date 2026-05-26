@@ -109,6 +109,19 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async () => {
       await addProjectFromDialog(context);
+    },
+    async (projectPath, userMessage = '', agentCli = '') => {
+      if (!getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+        return;
+      }
+      if (getSelectedProjectPath(context) !== projectPath) {
+        await selectProject(context, projectPath);
+      }
+      const ready = await ensureSyncEngine(context);
+      if (ready && activeProjectRoot === projectPath) {
+        await handleRunSoloConversation(context, userMessage, agentCli);
+      }
     }
   );
 

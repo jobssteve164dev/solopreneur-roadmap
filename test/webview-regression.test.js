@@ -178,6 +178,11 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'en', label: 'English' }
   ]);
   wireSoloSelect(elements['project-select'], []);
+  wireSoloSelect(elements['sidebar-solo-project'], []);
+  wireSoloSelect(elements['sidebar-solo-agent'], [
+    { value: 'agy', label: 'agy' },
+    { value: 'codex', label: 'codex' }
+  ]);
 
   const context = {
     document: {
@@ -262,6 +267,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-open-full',
     'project-select',
     'btn-add-project',
+    'sidebar-solo-project',
+    'sidebar-solo-agent',
+    'sidebar-solo-input',
+    'btn-send-sidebar-solo',
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
@@ -287,6 +296,15 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
+
+  elements['sidebar-solo-project'].setAttribute('data-value', '/workspace/app');
+  elements['sidebar-solo-agent'].setAttribute('data-value', 'codex');
+  elements['sidebar-solo-input'].value = '讨论当前页面的易用性问题';
+  elements['btn-send-sidebar-solo'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'runSoloConversation'
+    && message.projectPath === '/workspace/app'
+    && message.agentCli === 'codex'
+    && message.userMessage === '讨论当前页面的易用性问题'));
 });
 
 test('full roadmap webview runtime script parses and opens settings panel', () => {
@@ -443,6 +461,12 @@ test('sidebar keeps project creation focused on the project switcher', () => {
 
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
+  assert.match(html, /id="sidebar-solo-project"/);
+  assert.match(html, /id="sidebar-solo-agent"/);
+  assert.match(html, /id="sidebar-solo-input"/);
+  assert.match(html, /id="btn-send-sidebar-solo"/);
+  assert.match(html, /runSoloConversation/);
+  assert.match(html, /Solo 对话|Solo conversation/);
   assert.match(html, /id="portfolio-list"/);
   assert.doesNotMatch(html, /id="next-action-panel"/);
   assert.match(html, /getNextActionNode/);
