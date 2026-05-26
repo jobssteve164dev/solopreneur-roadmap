@@ -307,6 +307,10 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'project-select',
     'btn-add-project',
     'btn-remove-project',
+    'btn-toggle-solo',
+    'btn-close-solo',
+    'solo-panel',
+    'solo-body',
     'btn-toggle-roadmap-revision',
     'btn-close-roadmap-revision',
     'roadmap-revision-panel',
@@ -334,6 +338,13 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
+
+  elements['btn-toggle-solo'].listeners.click();
+
+  assert.ok(elements['solo-panel'].classList.contains('open'));
+  assert.ok(elements['solo-body'].innerHTML.includes('data-solo-input'));
+  assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__solo__'));
+  elements['btn-close-solo'].listeners.click();
 
   elements['btn-toggle-roadmap-revision'].listeners.click();
 
@@ -386,6 +397,12 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /runRoadmapRevision/);
   assert.match(script, /Roadmap Revision History|路线图调整历史/);
   assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
+  assert.match(script, /runSoloConversation/);
+  assert.match(script, /linkSoloConversation/);
+  assert.match(script, /Start directly|直接开始/);
+  assert.match(script, /This Solo conversation has finished|本次 Solo 对话已结束/);
+  assert.match(script, /renderSoloPanel/);
+  assert.match(script, /data-link-solo-id/);
   assert.match(script, /completionCriteria/);
   assert.match(script, /renderCompletionCriteria/);
   assert.doesNotMatch(script, /confirmStepCompletion|completeConfirm/);
@@ -393,6 +410,9 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /id="btn-toggle-roadmap-revision"/);
   assert.match(html, /id="roadmap-revision-panel"/);
   assert.match(html, /id="roadmap-revision-body"/);
+  assert.match(html, /id="btn-toggle-solo"/);
+  assert.match(html, /id="solo-panel"/);
+  assert.match(html, /id="solo-body"/);
   assert.match(script, /renderRoadmapRevisionPanel/);
   assert.doesNotMatch(script, /canvas\.appendChild\(panel\)/);
   assert.doesNotMatch(script, /data-toggle-roadmap-revision/);
@@ -497,6 +517,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
+      'module.exports.__buildSoloConversationPrompt = buildSoloConversationPrompt;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
@@ -800,6 +821,18 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /不要虚构营销或销售任务/);
   assert.match(revisionPrompt, /Always run focused checks/);
 
+  const soloPrompt = extensionModule.__buildSoloConversationPrompt(
+    '帮我判断这个文案方向。',
+    '/workspace/app',
+    'Keep answers brief.'
+  );
+  assert.match(soloPrompt, /Solo 模式/);
+  assert.match(soloPrompt, /尚未归属于任何路线图环节/);
+  assert.match(soloPrompt, /不要求产生文件修改/);
+  assert.match(soloPrompt, /关联某个已有环节/);
+  assert.match(soloPrompt, /Keep answers brief/);
+  assert.doesNotMatch(soloPrompt, /本环节完成标准/);
+
   const criteriaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-criteria-'));
   const criteriaNodes = extensionModule.__ensureCompletionCriteriaForNodes(criteriaRoot, [{
     id: '2',
@@ -923,6 +956,13 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(noopStatus.failureReason, /without project file changes/);
   assert.match(noopStatus.startedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.match(fs.readFileSync(noopRun.outputFilePath, 'utf8'), /without project file changes/);
+
+  const soloRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-agent-'));
+  const soloRun = extensionModule.__buildAgentShellScript('agy', 'printf ok', soloRoot, '__solo__', 71, 'brainstorm', undefined, '', 'printf ok', 'solo');
+  childProcess.execSync(soloRun.finalCommand, { cwd: soloRoot, stdio: 'ignore' });
+  const soloStatus = JSON.parse(fs.readFileSync(path.join(soloRoot, '.agent_status.json'), 'utf8'));
+  assert.equal(soloStatus.status, 'In Progress');
+  assert.equal(soloStatus.runKind, 'solo');
 
   const writeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-write-agent-'));
   fs.mkdirSync(path.join(writeRoot, '.solopreneur'), { recursive: true });
@@ -1472,6 +1512,92 @@ test('roadmap revision accepts valid CSV updates and restores the previous roadm
   assert.match(stoppedOutput, /Failure category: stopped_by_user/);
   assert.match(stoppedOutput, /Stopped by user\. 已保留调整前的路线图。/);
   assert.equal(fs.readFileSync(path.join(stoppedRun.root, '.solopreneur', 'roadmap.csv'), 'utf8'), stoppedRun.originalCsv);
+});
+
+test('Solo completion stays project-scoped and preserves the existing roadmap', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-completion-'));
+  const solopreneurDir = path.join(root, '.solopreneur');
+  const runDir = path.join(solopreneurDir, 'agent-runs', '__solo__');
+  fs.mkdirSync(runDir, { recursive: true });
+  const originalCsv = [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '2,实现 MVP,完成可运行切片,产品与 MVP,,codex,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'
+  ].join('\n');
+  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), originalCsv.replace('实现 MVP', 'Changed without permission'), 'utf8');
+  fs.writeFileSync(path.join(runDir, 'roadmap-before.csv'), originalCsv, 'utf8');
+  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'output.log'), '建议将这个想法留在 Solo。\n', 'utf8');
+  const statusFilePath = path.join(root, '.agent_status.json');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '__solo__',
+    runKind: 'solo',
+    roadmapBackupFilePath: path.join(runDir, 'roadmap-before.csv'),
+    status: 'In Progress',
+    agentCli: 'codex',
+    executionLogId: 77,
+    outputFilePath: path.join(runDir, 'output.log'),
+    changesFilePath: path.join(runDir, 'changes.txt'),
+    touchedFilesPath: path.join(runDir, 'touched-files.txt')
+  }), 'utf8');
+
+  let loggedOutput = '';
+  let loggedStatus = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
+    updateNode: () => { throw new Error('Solo conversation must not update a roadmap node'); },
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      loggedOutput = output;
+      loggedStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 77,
+    getAgentExecutions: () => []
+  }, root);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(loggedStatus, 'Completed');
+  assert.match(loggedOutput, /Solo conversation state: Completed/);
+  assert.match(loggedOutput, /等待用户决定是否关联到路线图环节/);
+  assert.match(loggedOutput, /Solo 对话不会直接调整路线图/);
+  assert.equal(fs.readFileSync(path.join(solopreneurDir, 'roadmap.csv'), 'utf8'), originalCsv);
+});
+
+test('linking a Solo conversation records a reference without changing the step state', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__linkSoloConversationToNode = linkSoloConversationToNode;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  let linkedRecord = null;
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
+    updateNode: () => { throw new Error('linking a Solo reference must not change step status'); },
+    getAgentExecutions: (nodeId) => nodeId === '__solo__'
+      ? [{ id: 12, nodeId, agentCli: 'codex', command: 'codex exec', output: '结论：关联实现 MVP。', status: 'Completed' }]
+      : [],
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      linkedRecord = { nodeId, agentCli, command, output, status };
+      return 88;
+    }
+  }, '/workspace/app');
+
+  extensionModule.__linkSoloConversationToNode(12, '2');
+
+  assert.equal(linkedRecord.nodeId, '2');
+  assert.equal(linkedRecord.status, 'Linked');
+  assert.match(linkedRecord.output, /Linked from Solo conversation/);
+  assert.match(linkedRecord.output, /Solo reference ID: 12/);
 });
 
 test('stopping an Agent run records the user decision on the active conversation', async () => {

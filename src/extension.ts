@@ -43,6 +43,7 @@ const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
 const roadmapRevisionId = '__roadmap_revision__';
+const soloConversationId = '__solo__';
 const agentTerminalBaseName = 'SoloMap Agent Console';
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
@@ -693,6 +694,14 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'runRoadmapRevision':
           await handleRoadmapRevision(context, message.userMessage || '', message.agentCli || '');
+          break;
+
+        case 'runSoloConversation':
+          await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '');
+          break;
+
+        case 'linkSoloConversation':
+          linkSoloConversationToNode(Number(message.conversationId || 0), String(message.nodeId || ''));
           break;
 
         case 'chooseSupplementFiles':
@@ -1674,6 +1683,38 @@ function buildRoadmapRevisionPrompt(
   ].join('\n');
 }
 
+function buildSoloConversationPrompt(
+  userMessage: string,
+  workspaceRoot: string,
+  globalPrompt = ''
+): string {
+  const normalizedUserMessage = userMessage.trim();
+  const globalPromptInstructions = globalPrompt.trim()
+    ? [
+      '用户设置的全局默认要求：',
+      globalPrompt.trim(),
+      '如与本次用户要求冲突，始终以本次用户要求为准。'
+    ].join('\n')
+    : '';
+  return [
+    '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
+    '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
+    '',
+    `项目目录：${workspaceRoot}`,
+    '',
+    '用户本次要求（最高优先级）：',
+    normalizedUserMessage,
+    ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
+    '',
+    '执行边界：',
+    '1. 可以读取当前项目文件与 `.solopreneur/roadmap.csv` 了解背景，但不要自行修改路线图、环节状态、完成标准或环节交接记录。',
+    '2. 如果用户要的是讨论、判断或头脑风暴，直接给出有用结论即可，不要求产生文件修改。',
+    '3. 如果用户明确要求实现或修复，直接交付可验证的最小改动并运行必要验证。',
+    '4. 完成后在结论中用一句话说明本次对话更适合：仅保留在 Solo、关联某个已有环节（写明环节标题），或进入路线图调整。',
+    '5. 完成后正常退出 CLI 进程；SoloMap 会保存本次 Solo 对话，由用户决定是否关联路线图环节。'
+  ].join('\n');
+}
+
 function buildAgentShellScript(
   agentCli: string,
   conversationPrompt: string,
@@ -1735,7 +1776,7 @@ function buildAgentShellScript(
     sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
-    `if [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
+    `if [ ${shellQuote(runKind)} != 'solo' ] && [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
 
@@ -1951,6 +1992,9 @@ function hasRunningAgentConversation(workspaceRoot: string, nodes: RoadmapNode[]
   if (syncEngine?.getAgentExecutions(roadmapRevisionId).some((conversation) => conversation.status === 'Running')) {
     return true;
   }
+  if (syncEngine?.getAgentExecutions(soloConversationId).some((conversation) => conversation.status === 'Running')) {
+    return true;
+  }
   const status = readAgentStatus(path.join(workspaceRoot, '.agent_status.json'));
   return Boolean(status && status.status === 'Running');
 }
@@ -1986,7 +2030,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     return;
   }
 
-  if (nodeId !== roadmapRevisionId) {
+  if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
     syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
   }
   syncEngine.updateAgentExecution(
@@ -2073,6 +2117,121 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`);
   terminal.show(true);
   terminal.sendText(finalCommand);
+}
+
+async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = ''): Promise<void> {
+  if (!syncEngine || !activeProjectRoot) {
+    return;
+  }
+  const request = userMessage.trim();
+  if (!request) {
+    vscode.window.showWarningMessage('Describe what you want to handle before starting a Solo conversation.');
+    return;
+  }
+
+  await syncEngine.initAndSync();
+  const nodes = syncEngine.getNodes();
+  if (hasRunningAgentConversation(activeProjectRoot, nodes)) {
+    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before starting Solo.');
+    return;
+  }
+
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = (selectedAgentCli || settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath);
+  if (!commandExists(agentCli)) {
+    const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath).join(', ');
+    const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
+    syncEngine.logAgentExecution(
+      soloConversationId,
+      requestedAgentCli || agentCli,
+      requestedAgentCli || agentCli,
+      `User supplement:\n${request}\n\nFailure category: cli_not_found\n\nFailure reason:\n${failureReason}`,
+      'Failed'
+    );
+    postNodeConversations(soloConversationId);
+    vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
+    return;
+  }
+
+  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', soloConversationId);
+  const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
+  const roadmapBackupFilePath = path.join(runDir, 'roadmap-before.csv');
+  fs.mkdirSync(runDir, { recursive: true });
+  if (fs.existsSync(roadmapPath)) {
+    fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
+  }
+  const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
+  const nativeSessionId = storedSession?.sessionId || '';
+  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot);
+  const executionLogId = syncEngine.logAgentExecution(
+    soloConversationId,
+    agentCli,
+    agentCommand,
+    [
+      'Solo conversation started.',
+      `Run started at: ${new Date().toISOString()}`,
+      nativeSessionId
+        ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
+        : `Starting a new native ${getAgentProvider(agentCli)} session.`,
+      `User supplement:\n${request}`
+    ].join('\n\n'),
+    'Running'
+  );
+  postNodeConversations(soloConversationId);
+
+  const { finalCommand } = buildAgentShellScript(
+    agentCli,
+    conversationPrompt,
+    activeProjectRoot,
+    soloConversationId,
+    executionLogId,
+    request,
+    undefined,
+    nativeSessionId,
+    '',
+    'solo',
+    roadmapBackupFilePath
+  );
+  const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`);
+  terminal.show(true);
+  terminal.sendText(finalCommand);
+}
+
+function linkSoloConversationToNode(conversationId: number, nodeId: string): void {
+  if (!syncEngine || !conversationId || !nodeId) {
+    return;
+  }
+  const node = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
+  const conversation = syncEngine.getAgentExecutions(soloConversationId)
+    .find((entry) => Number(entry.id) === conversationId);
+  if (!node || !conversation || conversation.status === 'Running') {
+    vscode.window.showWarningMessage('This Solo conversation cannot be associated with that step.');
+    return;
+  }
+  const marker = `Solo reference ID: ${conversationId}`;
+  if (syncEngine.getAgentExecutions(nodeId).some((entry) => String(entry.output || '').includes(marker))) {
+    vscode.window.showInformationMessage('This Solo conversation is already associated with that step.');
+    return;
+  }
+  syncEngine.logAgentExecution(
+    nodeId,
+    conversation.agentCli,
+    conversation.command,
+    [
+      'Linked from Solo conversation.',
+      marker,
+      `Linked at: ${new Date().toISOString()}`,
+      `Original Solo status: ${conversation.status}`,
+      '',
+      conversation.output
+    ].join('\n'),
+    'Linked'
+  );
+  postNodeConversations(nodeId);
+  postNodeConversations(soloConversationId);
+  vscode.window.showInformationMessage(`Solo conversation associated with step: ${node.title}`);
 }
 
 /**
@@ -2207,6 +2366,10 @@ async function handleRetryConversation(context: vscode.ExtensionContext, nodeId:
   const retryUserMessage = extractUserSupplementFromExecutionOutput(conversation.output || '');
   if (nodeId === roadmapRevisionId) {
     await handleRoadmapRevision(context, retryUserMessage, conversation.agentCli || '');
+    return;
+  }
+  if (nodeId === soloConversationId) {
+    await handleRunSoloConversation(context, retryUserMessage, conversation.agentCli || '');
     return;
   }
   await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '');
@@ -2368,6 +2531,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       return;
     }
 
+    const isSoloConversation = runKind === 'solo' || nodeId === soloConversationId;
     let nextStatus = status as RoadmapNode['status'];
     let completionReason = '';
     let failureCode = String(statusData.failureCode || '').trim();
@@ -2395,9 +2559,24 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
     // User-confirmed completion remains authoritative over any in-flight Agent result.
     const preserveCompletedNode = currentNode?.status === 'Completed';
-    let shouldWriteNodeStatus = !preserveCompletedNode;
+    let shouldWriteNodeStatus = !preserveCompletedNode && !isSoloConversation;
     let shouldRefreshRoadmap = false;
-    if (workspaceRoot && runKind === 'roadmap_revision') {
+    if (workspaceRoot && isSoloConversation) {
+      shouldWriteNodeStatus = false;
+      if (status === 'In Progress') {
+        nextStatus = 'Completed';
+        completionReason = 'Solo 对话已完成，等待用户决定是否关联到路线图环节。';
+      } else {
+        nextStatus = 'Failed';
+        failureCode = failureCode || 'agent_exit_failed';
+        failureReason = failureReason || 'Agent CLI 在完成 Solo 对话前退出。';
+        completionReason = failureReason;
+      }
+      if (roadmapCsvChanged && restoreRoadmapBackup(roadmapBackupFilePath, workspaceRoot)) {
+        const protectedRoadmapReason = 'Solo 对话不会直接调整路线图，已保留对话前路线图。';
+        completionReason = completionReason ? `${completionReason} ${protectedRoadmapReason}` : protectedRoadmapReason;
+      }
+    } else if (workspaceRoot && runKind === 'roadmap_revision') {
       shouldWriteNodeStatus = false;
       if (status === 'In Progress' && roadmapCsvChanged) {
         const validation = validateRoadmapRevision(workspaceRoot);
@@ -2474,7 +2653,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const finishedAt = new Date().toISOString();
     const startedTime = startedAt ? Date.parse(String(startedAt)) : NaN;
     const runDurationMs = Number.isFinite(startedTime) ? Math.max(0, Date.now() - startedTime) : 0;
-    const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision'
+    const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation
       ? buildRunHandoffEntry(
         nextStatus,
         [changedFilesSummary, touchedFilesSummary].filter(Boolean).join('\n'),
@@ -2490,7 +2669,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       sessionMode ? `Native session mode: ${sessionMode}` : '',
       nativeSessionSummary,
       `Sentinel captured state: ${status}`,
-      `Roadmap step state: ${nextStatus}`,
+      isSoloConversation ? `Solo conversation state: ${nextStatus}` : `Roadmap step state: ${nextStatus}`,
       startedAt ? `Run started at: ${startedAt}` : '',
       `Run finished at: ${finishedAt}`,
       startedAt ? `Run duration ms: ${runDurationMs}` : '',
@@ -2535,8 +2714,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     sendNodesToWebview();
     postNodeConversations(nodeId);
-    if (nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
+    if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
+    } else if (isSoloConversation) {
+      vscode.window.showInformationMessage(`Solo conversation finished with state: ${nextStatus}`);
     } else {
       vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${nextStatus}`);
     }
@@ -2816,6 +2997,27 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
     }
 
+    .btn-solo {
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 12px;
+      color: #e9ddff;
+      background: rgba(124, 77, 255, 0.14);
+      border: 1px solid rgba(124, 77, 255, 0.34);
+      border-radius: 8px;
+      flex-shrink: 0;
+    }
+
+    .btn-solo:hover,
+    .btn-solo.active {
+      color: #fff;
+      background: rgba(124, 77, 255, 0.42);
+      border-color: rgba(167, 139, 250, 0.7);
+      box-shadow: 0 0 12px rgba(124, 77, 255, 0.3);
+    }
+
     input[type="text"] {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-glass);
@@ -2889,6 +3091,55 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     .roadmap-revision-body .conversation-composer {
       margin-top: 0;
+    }
+
+    .solo-conversation-body {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .solo-conversation-body .conversation-composer {
+      margin-top: 0;
+    }
+
+    .solo-closure {
+      border-top: 1px solid var(--border-glass);
+      margin-top: 10px;
+      padding-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .solo-closure-title {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .solo-closure-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .solo-link-select {
+      flex: 1 1 180px;
+      min-width: 150px;
+    }
+
+    .solo-action-btn {
+      font-size: 11px;
+      padding: 8px 10px;
+      white-space: nowrap;
+    }
+
+    .solo-action-btn.secondary {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border-glass);
+      color: var(--text-main);
     }
 
     /* Node Stack (Unified Roadmap Flow layout) */
@@ -3467,6 +3718,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
     }
 
+    .solo-conversation-popover {
+      right: 110px;
+      width: clamp(360px, 46vw, 620px);
+    }
+
     .roadmap-revision-header {
       display: flex;
       justify-content: space-between;
@@ -3712,7 +3968,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
 
       .settings-overlay,
-      .roadmap-revision-popover {
+      .roadmap-revision-popover,
+      .solo-conversation-popover {
         top: 118px;
         left: 12px;
         right: 12px;
@@ -3732,6 +3989,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
       .btn-project-add,
       .btn-project-remove,
+      .btn-solo,
       .btn-roadmap-revision {
         width: 34px;
         min-width: 34px;
@@ -3766,6 +4024,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         </div>
         <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
         <button class="btn-project-remove" id="btn-remove-project" title="Remove project"><span class="codicon codicon-trash"></span></button>
+        <button class="btn-solo" id="btn-toggle-solo" title="Solo"><span class="codicon codicon-comment-discussion"></span><span>Solo</span></button>
         <button class="btn-roadmap-revision" id="btn-toggle-roadmap-revision" title="Revise Roadmap"><span class="codicon codicon-git-compare"></span></button>
         <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
       </div>
@@ -3783,6 +4042,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <button class="btn-close-revision" id="btn-close-roadmap-revision" title="Close"><span class="codicon codicon-close"></span></button>
     </div>
     <div class="roadmap-revision-body" id="roadmap-revision-body"></div>
+  </div>
+
+  <div class="roadmap-revision-popover solo-conversation-popover" id="solo-panel">
+    <div class="roadmap-revision-header">
+      <h3><span class="codicon codicon-comment-discussion"></span><span id="solo-title">直接开始</span></h3>
+      <button class="btn-close-revision" id="btn-close-solo" title="Close"><span class="codicon codicon-close"></span></button>
+    </div>
+    <div class="solo-conversation-body" id="solo-body"></div>
   </div>
 
   <!-- Settings Panel Overlay -->
@@ -3835,6 +4102,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
     const btnRemoveProject = document.getElementById('btn-remove-project');
+    const btnToggleSolo = document.getElementById('btn-toggle-solo');
+    const btnCloseSolo = document.getElementById('btn-close-solo');
+    const soloPanel = document.getElementById('solo-panel');
+    const soloBody = document.getElementById('solo-body');
     const btnToggleRoadmapRevision = document.getElementById('btn-toggle-roadmap-revision');
     const btnCloseRoadmapRevision = document.getElementById('btn-close-roadmap-revision');
     const roadmapRevisionPanel = document.getElementById('roadmap-revision-panel');
@@ -3857,7 +4128,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let activeProjectPath = '';
     let currentCliPath = 'agy';
     const roadmapRevisionId = '__roadmap_revision__';
+    const soloConversationId = '__solo__';
     let roadmapRevisionExpanded = false;
+    let soloExpanded = false;
     const nodeConversations = {};
     const nodeSupplementFiles = {};
     const i18n = {
@@ -3899,6 +4172,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent 结论',
         failureLabel: '失败原因',
         completionCriteria: '完成标准',
+        soloTitle: '直接开始',
+        soloPlaceholder: '描述你现在想处理的问题或想法...',
+        soloHistory: 'Solo 对话历史',
+        noSoloConversations: '还没有 Solo 对话。',
+        sendSolo: '发送',
+        soloCompleted: '本次 Solo 对话已结束。',
+        soloClosure: '这次对话是否需要进入路线图？',
+        linkToStep: '关联到环节',
+        keepInSolo: '无需关联时，这次对话会保留在 Solo。',
+        adjustRoadmap: '调整路线图',
+        chooseStep: '选择关联环节',
+        linkedFromSolo: '这是一条从 Solo 关联的参考记录，不会改变环节状态。',
         failureCategories: {
           cli_not_found: '未找到所选 Agent CLI。',
           stopped_by_user: '任务已由用户停止。',
@@ -3921,7 +4206,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         revisionHistory: '路线图调整历史',
         noRevisionConversations: '还没有路线图调整记录。',
         sendRevision: '发送调整',
-        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败' }
+        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败', Linked: '已关联' }
       },
       en: {
         title: 'SoloMap',
@@ -3961,6 +4246,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent conclusion',
         failureLabel: 'Failure reason',
         completionCriteria: 'Completion criteria',
+        soloTitle: 'Start directly',
+        soloPlaceholder: 'Describe the issue or idea you want to handle...',
+        soloHistory: 'Solo conversation history',
+        noSoloConversations: 'No Solo conversations yet.',
+        sendSolo: 'Send',
+        soloCompleted: 'This Solo conversation has finished.',
+        soloClosure: 'Should this conversation be connected to the roadmap?',
+        linkToStep: 'Link to step',
+        keepInSolo: 'Leave unlinked to keep this conversation in Solo.',
+        adjustRoadmap: 'Revise roadmap',
+        chooseStep: 'Choose a step',
+        linkedFromSolo: 'This is a reference linked from Solo and does not change the step state.',
         failureCategories: {
           cli_not_found: 'The selected Agent CLI was not found.',
           stopped_by_user: 'The task was stopped by the user.',
@@ -3983,7 +4280,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         revisionHistory: 'Roadmap Revision History',
         noRevisionConversations: 'No roadmap revisions yet.',
         sendRevision: 'Send revision',
-        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
+        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed', Linked: 'Linked' }
       }
     };
 
@@ -4017,7 +4314,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       activeProjectPath = projectPath || '';
       expandedNodeId = '';
       roadmapRevisionExpanded = false;
+      soloExpanded = false;
       activeConversationId = '';
+      if (soloPanel) soloPanel.classList.remove('open');
+      if (btnToggleSolo) btnToggleSolo.classList.remove('active');
+      if (soloBody) soloBody.innerHTML = '';
       if (roadmapRevisionPanel) roadmapRevisionPanel.classList.remove('open');
       if (btnToggleRoadmapRevision) btnToggleRoadmapRevision.classList.remove('active');
       if (roadmapRevisionBody) roadmapRevisionBody.innerHTML = '';
@@ -4032,9 +4333,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('app-title', t('title'));
       btnAddProject.title = t('addProject');
       btnRemoveProject.title = t('removeProject');
+      btnToggleSolo.title = t('soloTitle');
       btnToggleRoadmapRevision.title = t('reviseRoadmap');
       setText('settings-title', t('settingsTitle'));
       setText('roadmap-revision-title', t('reviseRoadmap'));
+      setText('solo-title', t('soloTitle'));
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
@@ -4045,6 +4348,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('text-save-settings', t('save'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderRoadmap(currentNodes);
+      renderSoloPanel(currentNodes);
       renderRoadmapRevisionPanel(currentNodes);
     }
 
@@ -4058,6 +4362,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         roadmapRevisionExpanded = false;
         roadmapRevisionPanel.classList.remove('open');
         btnToggleRoadmapRevision.classList.remove('active');
+        soloExpanded = false;
+        soloPanel.classList.remove('open');
+        btnToggleSolo.classList.remove('active');
         settingsPanel.style.display = 'flex';
         vscode.postMessage({ command: 'getSettings' });
       }
@@ -4068,6 +4375,32 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       cliTestBadge.style.display = 'none';
     });
 
+    btnToggleSolo.addEventListener('click', () => {
+      soloExpanded = !soloExpanded;
+      activeConversationId = '';
+      soloPanel.classList.toggle('open', soloExpanded);
+      btnToggleSolo.classList.toggle('active', soloExpanded);
+      if (soloExpanded) {
+        settingsPanel.style.display = 'none';
+        cliTestBadge.style.display = 'none';
+        roadmapRevisionExpanded = false;
+        roadmapRevisionPanel.classList.remove('open');
+        btnToggleRoadmapRevision.classList.remove('active');
+        if (!nodeConversations[soloConversationId]) {
+          vscode.postMessage({ command: 'getNodeConversations', nodeId: soloConversationId });
+        }
+      }
+      renderSoloPanel(currentNodes);
+    });
+
+    btnCloseSolo.addEventListener('click', () => {
+      soloExpanded = false;
+      activeConversationId = '';
+      soloPanel.classList.remove('open');
+      btnToggleSolo.classList.remove('active');
+      renderSoloPanel(currentNodes);
+    });
+
     btnToggleRoadmapRevision.addEventListener('click', () => {
       roadmapRevisionExpanded = !roadmapRevisionExpanded;
       activeConversationId = '';
@@ -4076,6 +4409,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (roadmapRevisionExpanded) {
         settingsPanel.style.display = 'none';
         cliTestBadge.style.display = 'none';
+        soloExpanded = false;
+        soloPanel.classList.remove('open');
+        btnToggleSolo.classList.remove('active');
         if (!nodeConversations[roadmapRevisionId]) {
           vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
         }
@@ -4110,6 +4446,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         if (roadmapRevisionExpanded && revisionRunning) {
           renderRoadmapRevisionPanel(currentNodes);
         }
+        const soloRunning = (nodeConversations[soloConversationId] || [])
+          .some(conversation => conversation.status === 'Running');
+        if (soloExpanded && soloRunning) {
+          renderSoloPanel(currentNodes);
+        }
       }, 1000);
     }
 
@@ -4123,6 +4464,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           }
           currentNodes = message.nodes || [];
           renderRoadmap(message.nodes);
+          renderSoloPanel(currentNodes);
           renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'settingsLoaded':
@@ -4154,6 +4496,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           }
           nodeConversations[message.nodeId] = message.conversations || [];
           renderRoadmap(currentNodes);
+          renderSoloPanel(currentNodes);
           renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'supplementFilesSelected':
@@ -4530,6 +4873,69 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     }
 
+    function renderSoloClosure(conversation) {
+      const options = (currentNodes || []).map(node => ({ value: node.id, label: node.title }));
+      return \`
+        <div class="solo-closure" data-solo-closure-id="\${escapeHtml(conversation.id)}">
+          <div class="solo-closure-title">\${escapeHtml(t('soloClosure'))}</div>
+          <div class="solo-closure-actions">
+            \${options.length ? renderSoloSelect('solo-link-select', 'data-solo-link-select', options, false) : ''}
+            \${options.length ? \`<button class="solo-action-btn" data-link-solo-id="\${escapeHtml(conversation.id)}">\${escapeHtml(t('linkToStep'))}</button>\` : ''}
+            <button class="solo-action-btn secondary" data-open-revision-from-solo>\${escapeHtml(t('adjustRoadmap'))}</button>
+          </div>
+          <div class="conversation-runtime">\${escapeHtml(t('keepInSolo'))}</div>
+        </div>
+      \`;
+    }
+
+    function renderSoloPanel(nodes) {
+      if (!soloPanel || !soloBody) {
+        return;
+      }
+      const conversations = nodeConversations[soloConversationId] || [];
+      const running = conversations.some(conversation => conversation.status === 'Running')
+        || (nodes || []).some(node => node.status === 'Running');
+      const disabled = running ? 'disabled' : '';
+      soloPanel.classList.toggle('open', soloExpanded);
+      btnToggleSolo.classList.toggle('active', soloExpanded);
+      if (!soloExpanded) {
+        soloBody.innerHTML = '';
+        return;
+      }
+      soloBody.innerHTML = \`
+        <div class="conversation-composer">
+          <div class="conversation-compose">
+            <input type="text" class="conversation-input" data-solo-input placeholder="\${escapeHtml(t('soloPlaceholder'))}" \${disabled}>
+            \${renderSoloSelect('conversation-agent-select', 'data-solo-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), running)}
+            <button class="btn-send-conversation" data-send-solo title="\${escapeHtml(t('sendSolo'))}" \${disabled}>
+              <span class="codicon codicon-send"></span>
+            </button>
+          </div>
+        </div>
+        <div class="conversation-panel">
+          <div class="conversation-title">\${escapeHtml(t('soloHistory'))}</div>
+          \${renderConversations(soloConversationId, conversations, t('noSoloConversations'))}
+        </div>
+      \`;
+      const sendButton = soloBody.querySelector('[data-send-solo]');
+      if (sendButton) {
+        sendButton.addEventListener('click', () => {
+          const input = soloBody.querySelector('[data-solo-input]');
+          const agentSelect = soloBody.querySelector('[data-solo-agent]');
+          const request = input ? input.value.trim() : '';
+          if (!request) return;
+          vscode.postMessage({
+            command: 'runSoloConversation',
+            userMessage: request,
+            agentCli: getSoloSelectValue(agentSelect)
+          });
+          input.value = '';
+        });
+      }
+      bindSoloSelects(soloBody);
+      bindConversationActions(soloBody, soloConversationId);
+    }
+
     function renderRoadmapRevisionPanel(nodes) {
       if (!roadmapRevisionPanel || !roadmapRevisionBody) {
         return;
@@ -4579,6 +4985,35 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     function bindConversationActions(container, nodeId) {
+      container.querySelectorAll('[data-link-solo-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const closure = item.closest('[data-solo-closure-id]');
+          const select = closure ? closure.querySelector('[data-solo-link-select]') : null;
+          const targetNodeId = getSoloSelectValue(select);
+          if (!targetNodeId) return;
+          vscode.postMessage({
+            command: 'linkSoloConversation',
+            conversationId: item.getAttribute('data-link-solo-id'),
+            nodeId: targetNodeId
+          });
+        });
+      });
+      container.querySelectorAll('[data-open-revision-from-solo]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          soloExpanded = false;
+          soloPanel.classList.remove('open');
+          btnToggleSolo.classList.remove('active');
+          roadmapRevisionExpanded = true;
+          roadmapRevisionPanel.classList.add('open');
+          btnToggleRoadmapRevision.classList.add('active');
+          if (!nodeConversations[roadmapRevisionId]) {
+            vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
+          }
+          renderRoadmapRevisionPanel(currentNodes);
+        });
+      });
       container.querySelectorAll('[data-conversation-id]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -4588,6 +5023,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderRoadmap(currentNodes);
           if (nodeId === roadmapRevisionId) {
             renderRoadmapRevisionPanel(currentNodes);
+          } else if (nodeId === soloConversationId) {
+            renderSoloPanel(currentNodes);
           }
         });
       });
@@ -4682,8 +5119,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             </div>
             \${open ? \`
               <div class="conversation-detail">
-                \${renderConversationOutcome(conversation)}
+                \${renderConversationOutcome(conversation, nodeId)}
                 \${renderConversationFiles(conversation)}
+                \${nodeId === soloConversationId && conversation.status !== 'Running' ? renderSoloClosure(conversation) : ''}
                 <strong>\${t('command')}</strong>
                 <pre>\${escapeHtml(conversation.command)}</pre>
                 <strong>\${t('output')}</strong>
@@ -4718,7 +5156,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return formatDurationMs(Date.now() - new Date(conversation.timestamp).getTime());
     }
 
-    function renderConversationOutcome(conversation) {
+    function renderConversationOutcome(conversation, nodeId = '') {
       const output = String(conversation.output || '');
       const failureCategory = (output.match(/Failure category:\\s*([^\\n]+)/) || [])[1] || '';
       const failureReason = (output.match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
@@ -4728,6 +5166,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         result = t('stillWorking');
       } else if (conversation.status === 'Failed') {
         result = failureCategoryText(failureCategory.trim()) || failureReason.trim() || statusText(conversation.status);
+      } else if (conversation.status === 'Linked') {
+        result = t('linkedFromSolo');
+      } else if (conversation.status === 'Completed' && nodeId === soloConversationId) {
+        result = t('soloCompleted');
       } else if (conversation.status === 'Completed') {
         result = t('stepCompleted');
       } else {
