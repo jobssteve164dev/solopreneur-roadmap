@@ -4,7 +4,8 @@ import * as fs from 'fs';
 import * as childProcess from 'child_process';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
-import { RoadmapNode } from './db/types';
+import { SqliteStore } from './db/sqliteStore';
+import { AgentConversation, RoadmapNode } from './db/types';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
 
 let syncEngine: SyncEngine | null = null;
@@ -129,6 +130,9 @@ export async function activate(context: vscode.ExtensionContext) {
         return [];
       }
       return chooseSupplementFilesForProject(projectPath);
+    },
+    async (projectPath) => {
+      return getSoloConversationHistoryForProject(context, projectPath);
     }
   );
 
@@ -620,6 +624,26 @@ function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
   }
 }
 
+async function getSoloConversationHistoryForProject(context: vscode.ExtensionContext, projectPath: string): Promise<AgentConversation[]> {
+  if (!getProjects(context).some((project) => project.path === projectPath)) {
+    return [];
+  }
+  if (syncEngine && activeProjectRoot === projectPath) {
+    return syncEngine.getAgentExecutions(soloConversationId).slice(0, 1);
+  }
+  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  if (!fs.existsSync(journalPath)) {
+    return [];
+  }
+  const store = new SqliteStore(journalPath, context.extensionPath);
+  await store.init();
+  try {
+    return store.getExecutionLogs(soloConversationId).slice(0, 1);
+  } finally {
+    store.close();
+  }
+}
+
 /**
  * Ensures the sync engine is initialized if a workspace is open.
  */
@@ -720,7 +744,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'runSoloConversation':
-          await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '');
+          await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
         case 'linkSoloConversation':
@@ -1926,6 +1950,9 @@ function postNodeConversations(nodeId: string): void {
       conversations: syncEngine.getAgentExecutions(nodeId),
       projectPath: activeProjectRoot || ''
     });
+  }
+  if (nodeId === soloConversationId && sidebarProvider && activeProjectRoot) {
+    void sidebarProvider.sendSoloConversationHistory(activeProjectRoot);
   }
 }
 
@@ -4535,11 +4562,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'supplementFilesSelected':
+          const soloDraft = message.nodeId === soloConversationId
+            ? (soloBody.querySelector('[data-solo-input]')?.value || '')
+            : '';
           nodeSupplementFiles[message.nodeId] = mergeSupplementFiles(
             nodeSupplementFiles[message.nodeId] || [],
             message.files || []
           );
           renderRoadmap(currentNodes);
+          if (message.nodeId === soloConversationId) {
+            renderSoloPanel(currentNodes);
+            const input = soloBody.querySelector('[data-solo-input]');
+            if (input) {
+              input.value = soloDraft;
+            }
+          }
           break;
         case 'cliTestResult':
           cliTestBadge.style.display = 'block';
@@ -4928,6 +4965,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         return;
       }
       const conversations = nodeConversations[soloConversationId] || [];
+      const supplementFiles = nodeSupplementFiles[soloConversationId] || [];
       const running = conversations.some(conversation => conversation.status === 'Running')
         || (nodes || []).some(node => node.status === 'Running');
       const disabled = running ? 'disabled' : '';
@@ -4940,12 +4978,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       soloBody.innerHTML = \`
         <div class="conversation-composer">
           <div class="conversation-compose">
+            <button class="conversation-tool-btn" data-attach-solo title="\${escapeHtml(t('attachFiles'))}" \${disabled}>
+              <span class="codicon codicon-attach"></span>
+            </button>
             <input type="text" class="conversation-input" data-solo-input placeholder="\${escapeHtml(t('soloPlaceholder'))}" \${disabled}>
             \${renderSoloSelect('conversation-agent-select', 'data-solo-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), running)}
             <button class="btn-send-conversation" data-send-solo title="\${escapeHtml(t('sendSolo'))}" \${disabled}>
               <span class="codicon codicon-send"></span>
             </button>
           </div>
+          \${renderSupplementFiles(soloConversationId, supplementFiles)}
         </div>
         <div class="conversation-panel">
           <div class="conversation-title">\${escapeHtml(t('soloHistory'))}</div>
@@ -4953,6 +4995,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         </div>
       \`;
       const sendButton = soloBody.querySelector('[data-send-solo]');
+      const attachButton = soloBody.querySelector('[data-attach-solo]');
+      if (attachButton) {
+        attachButton.addEventListener('click', () => {
+          vscode.postMessage({ command: 'chooseSupplementFiles', nodeId: soloConversationId });
+        });
+      }
       if (sendButton) {
         sendButton.addEventListener('click', () => {
           const input = soloBody.querySelector('[data-solo-input]');
@@ -4962,11 +5010,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           vscode.postMessage({
             command: 'runSoloConversation',
             userMessage: request,
-            agentCli: getSoloSelectValue(agentSelect)
+            agentCli: getSoloSelectValue(agentSelect),
+            supplementFiles: nodeSupplementFiles[soloConversationId] || []
           });
           input.value = '';
+          nodeSupplementFiles[soloConversationId] = [];
+          renderSoloPanel(currentNodes);
         });
       }
+      soloBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
+        item.addEventListener('click', () => {
+          const file = item.getAttribute('data-remove-supplement-file');
+          nodeSupplementFiles[soloConversationId] = (nodeSupplementFiles[soloConversationId] || []).filter(candidate => candidate !== file);
+          renderSoloPanel(currentNodes);
+        });
+      });
       bindSoloSelects(soloBody);
       bindConversationActions(soloBody, soloConversationId);
     }

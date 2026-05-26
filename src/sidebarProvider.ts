@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as childProcess from 'child_process';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
+import { AgentConversation } from './db/types';
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -268,7 +269,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _selectProject: (projectPath: string) => Promise<void>,
     private readonly _addProject: () => Promise<void>,
     private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, supplementFiles?: string[]) => Promise<void>,
-    private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>
+    private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
+    private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>
   ) {}
 
   public resolveWebviewView(
@@ -298,6 +300,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'runSoloConversation':
           if (this._onRunSolo) {
             await this._onRunSolo(data.projectPath || '', data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
+            await this.sendSoloConversationHistory(data.projectPath || '');
           }
           break;
         case 'chooseSoloSupplementFiles':
@@ -305,6 +308,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             const files = await this._chooseSoloSupplementFiles(data.projectPath || '');
             this._view?.webview.postMessage({ command: 'soloSupplementFilesSelected', files });
           }
+          break;
+        case 'getSoloConversationHistory':
+          await this.sendSoloConversationHistory(data.projectPath || '');
           break;
         case 'showFullRoadmap':
           vscode.commands.executeCommand('solopreneur.showRoadmap');
@@ -406,7 +412,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           portfolio: buildProjectPortfolioSummaries(projectState.projects)
         }
       });
+      void this.sendSoloConversationHistory(projectState.selectedProjectPath);
     }
+  }
+
+  public async sendSoloConversationHistory(projectPath: string) {
+    if (!this._view || !this._getSoloConversationHistory || !projectPath) {
+      return;
+    }
+    const conversations = await this._getSoloConversationHistory(projectPath);
+    this._view.webview.postMessage({
+      command: 'sidebarSoloConversationLoaded',
+      projectPath,
+      conversations
+    });
   }
 
   private _getHtmlForWebview(webview: vscode.Webview): string {
@@ -842,6 +861,90 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: inline-flex;
       align-items: center;
       justify-content: center;
+    }
+
+    .sidebar-solo-history {
+      margin-top: 10px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 8px;
+    }
+
+    .sidebar-solo-history-title {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .sidebar-solo-empty {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .sidebar-conversation {
+      border: 1px solid var(--border-glass);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 7px;
+      cursor: pointer;
+    }
+
+    .sidebar-conversation-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .sidebar-conversation-meta {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .sidebar-conversation-cli {
+      color: #38bdf8;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .sidebar-conversation-summary {
+      font-size: 10px;
+      color: var(--text-main);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .sidebar-conversation-time,
+    .sidebar-conversation-runtime {
+      font-size: 9px;
+      color: var(--text-muted);
+    }
+
+    .sidebar-conversation-detail {
+      margin-top: 7px;
+      padding-top: 7px;
+      border-top: 1px solid var(--border-glass);
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .sidebar-conversation-detail strong {
+      color: var(--text-main);
+    }
+
+    .sidebar-conversation-detail pre {
+      margin: 5px 0 0;
+      padding: 6px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.2);
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text-muted);
+      font-size: 9px;
     }
 
     .portfolio-header {
@@ -1368,6 +1471,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       <textarea class="sidebar-solo-input" id="sidebar-solo-input" placeholder="说说你现在想处理的问题..."></textarea>
       <button class="sidebar-solo-send" id="btn-send-sidebar-solo" title="发送"><span class="codicon codicon-send"></span></button>
     </div>
+    <div class="sidebar-solo-history" id="sidebar-solo-history"></div>
   </div>
 
   <div class="portfolio-panel">
@@ -1459,6 +1563,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnAttachSidebarSolo = document.getElementById('btn-attach-sidebar-solo');
     const sidebarSoloInput = document.getElementById('sidebar-solo-input');
     const btnSendSidebarSolo = document.getElementById('btn-send-sidebar-solo');
+    const sidebarSoloHistory = document.getElementById('sidebar-solo-history');
     const portfolioList = document.getElementById('portfolio-list');
     const portfolioFilters = document.getElementById('portfolio-filters');
 
@@ -1477,6 +1582,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let activeProjectPath = '';
     let activePortfolioFilter = 'all';
     let sidebarSoloFiles = [];
+    let sidebarSoloConversations = [];
+    let sidebarSoloConversationExpanded = false;
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [] };
     const i18n = {
       zh: {
@@ -1487,6 +1594,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         soloPlaceholder: '说说你现在想处理的问题...',
         soloSend: '发送',
         soloAttach: '添加补充文件',
+        soloHistory: '最近一次 Solo 对话',
+        noSoloConversations: '还没有 Solo 对话。',
+        soloCompleted: '本次 Solo 对话已结束。',
+        stillWorking: 'Agent 正在执行这次对话。',
+        runResult: '本轮结果',
+        failureLabel: '失败原因',
+        agentConclusion: 'Agent 结论',
+        command: '命令',
+        output: '输出',
+        elapsed: '已运行',
+        duration: '耗时',
+        changedCount: '本轮修改文件数',
         filterAll: '全部',
         filterActive: '进行中',
         filterFailed: '有失败',
@@ -1539,6 +1658,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         soloPlaceholder: 'Describe what you want to handle...',
         soloSend: 'Send',
         soloAttach: 'Attach files',
+        soloHistory: 'Latest Solo conversation',
+        noSoloConversations: 'No Solo conversations yet.',
+        soloCompleted: 'This Solo conversation has finished.',
+        stillWorking: 'The Agent is running this conversation.',
+        runResult: 'Run result',
+        failureLabel: 'Failure reason',
+        agentConclusion: 'Agent conclusion',
+        command: 'Command',
+        output: 'Output',
+        elapsed: 'Elapsed',
+        duration: 'Duration',
+        changedCount: 'Files changed in this run',
         filterAll: 'All',
         filterActive: 'Active',
         filterFailed: 'Failed',
@@ -1634,6 +1765,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       renderSidebarSoloProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderSidebarSoloAgents();
       renderSidebarSoloAttachments();
+      renderSidebarSoloHistory();
       renderPortfolioFilters();
       renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderSidebar(currentNodes);
@@ -1719,6 +1851,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           sidebarSoloFiles = (message.files || []).slice(0, 10);
           renderSidebarSoloAttachments();
           break;
+
+        case 'sidebarSoloConversationLoaded':
+          if (message.projectPath !== getSoloSelectValue(sidebarSoloProject)) return;
+          sidebarSoloConversations = message.conversations || [];
+          sidebarSoloConversationExpanded = false;
+          renderSidebarSoloHistory();
+          break;
       }
     });
 
@@ -1766,6 +1905,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     bindSoloSelect(sidebarSoloProject, () => {
       sidebarSoloFiles = [];
       renderSidebarSoloAttachments();
+      sidebarSoloConversations = [];
+      sidebarSoloConversationExpanded = false;
+      renderSidebarSoloHistory();
+      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: getSoloSelectValue(sidebarSoloProject) });
     });
     bindSoloSelect(sidebarSoloAgent);
 
@@ -1783,6 +1926,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       sidebarSoloInput.value = '';
       sidebarSoloFiles = [];
       renderSidebarSoloAttachments();
+      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
     }
 
     btnAttachSidebarSolo.addEventListener('click', () => {
@@ -1848,6 +1992,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         sidebarSoloFiles = [];
         renderSidebarSoloAttachments();
       }
+      if (selectedProjectPath) {
+        vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: selectedProjectPath });
+      }
     }
 
     function renderSidebarSoloAttachments() {
@@ -1863,6 +2010,96 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderSidebarSoloAttachments();
         });
       });
+    }
+
+    function summarizeSoloConversation(conversation) {
+      const output = String(conversation.output || '');
+      const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
+      if (userMatch && userMatch[1].trim()) {
+        return userMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
+      const changedMatch = output.match(/Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
+      if (changedMatch && changedMatch[1].trim() && !changedMatch[1].includes('No project files')) {
+        return changedMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
+      const tailMatch = output.match(/Agent output tail:\\n([\\s\\S]*)$/);
+      const fallback = tailMatch ? tailMatch[1] : output;
+      return fallback.trim().replace(/\\s+/g, ' ').slice(0, 120) || statusText(conversation.status);
+    }
+
+    function soloConclusion(output) {
+      const match = String(output || '').match(/Agent output tail:\\n([\\s\\S]*)$/);
+      return match && match[1]
+        ? match[1].split('\\n').map(line => line.trim()).filter(line => line && !line.startsWith('SoloMap:')).slice(-3).join(' ').replace(/\\s+/g, ' ').slice(0, 240)
+        : '';
+    }
+
+    function formatSoloDuration(conversation) {
+      const stored = String(conversation.output || '').match(/Run duration ms:\\s*(\\d+)/);
+      const durationMs = stored
+        ? Number(stored[1])
+        : conversation.status === 'Running' && conversation.timestamp
+          ? Date.now() - new Date(conversation.timestamp).getTime()
+          : 0;
+      if (!durationMs) return '';
+      const seconds = Math.max(0, Math.floor(durationMs / 1000));
+      const minutes = Math.floor(seconds / 60);
+      const remainder = seconds % 60;
+      return minutes > 0 ? minutes + 'm ' + remainder + 's' : remainder + 's';
+    }
+
+    function countSoloChangedFiles(output) {
+      const match = String(output || '').match(/Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
+      if (!match || !match[1]) return 0;
+      return match[1].split('\\n').map(line => line.trim()).filter(line => line && !/^No (workspace|git|project) /i.test(line)).length;
+    }
+
+    function renderSidebarSoloHistory() {
+      const conversation = sidebarSoloConversations[0];
+      if (!conversation) {
+        sidebarSoloHistory.innerHTML = '<div class="sidebar-solo-history-title">' + escapeHtml(t('soloHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noSoloConversations')) + '</div>';
+        return;
+      }
+      const failedReason = (String(conversation.output || '').match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
+      const outcome = conversation.status === 'Running' ? t('stillWorking')
+        : conversation.status === 'Failed' ? (failedReason.trim() || statusText(conversation.status))
+        : t('soloCompleted');
+      const conclusion = conversation.status === 'Running' ? '' : soloConclusion(conversation.output);
+      const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
+      const duration = formatSoloDuration(conversation);
+      const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
+      const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
+      sidebarSoloHistory.innerHTML = \`
+        <div class="sidebar-solo-history-title">\${escapeHtml(t('soloHistory'))}</div>
+        <div class="sidebar-conversation" data-sidebar-solo-conversation>
+          <div class="sidebar-conversation-row">
+            <div class="sidebar-conversation-meta">
+              <span class="sidebar-conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
+              <span class="sidebar-conversation-summary">\${escapeHtml(summarizeSoloConversation(conversation))}</span>
+              <span class="sidebar-conversation-time">\${escapeHtml(when)}</span>
+              \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
+            </div>
+            <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(statusText(conversation.status))}</span>
+          </div>
+          \${sidebarSoloConversationExpanded ? \`
+            <div class="sidebar-conversation-detail">
+              <strong>\${escapeHtml(conversation.status === 'Failed' ? t('failureLabel') : t('runResult'))}:</strong> \${escapeHtml(result)}
+              \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
+              <strong>\${escapeHtml(t('command'))}</strong>
+              <pre>\${escapeHtml(conversation.command || '')}</pre>
+              <strong>\${escapeHtml(t('output'))}</strong>
+              <pre>\${escapeHtml(conversation.output || '')}</pre>
+            </div>
+          \` : ''}
+        </div>
+      \`;
+      const card = sidebarSoloHistory.querySelector('[data-sidebar-solo-conversation]');
+      if (card) {
+        card.addEventListener('click', () => {
+          sidebarSoloConversationExpanded = !sidebarSoloConversationExpanded;
+          renderSidebarSoloHistory();
+        });
+      }
     }
 
     function formatRelativeTime(value) {
