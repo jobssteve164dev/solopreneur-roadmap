@@ -154,12 +154,29 @@ function runScriptWithMinimalDom(script, ids) {
     const trigger = createElement(`${element.id}-trigger`);
     const label = createElement(`${element.id}-label`);
     const menu = createElement(`${element.id}-menu`);
-    const options = choices.map(({ value, label: text }) => {
+    let options = choices.map(({ value, label: text }) => {
       const option = createElement(`${element.id}-${value}`);
       option.setAttribute('data-solo-option-value', value);
       option.textContent = text;
       option.closest = (selector) => selector === '[data-solo-option-value]' ? option : null;
       return option;
+    });
+    Object.defineProperty(menu, 'innerHTML', {
+      set(value) {
+        this._innerHTML = value;
+        options = [...String(value).matchAll(/data-solo-option-value="([^"]+)"[^>]*>([^<]*)<\/button>/g)]
+          .map((match) => {
+            const option = createElement(`${element.id}-${match[1]}`);
+            option.setAttribute('data-solo-option-value', match[1]);
+            option.textContent = match[2];
+            option.closest = (selector) => selector === '[data-solo-option-value]' ? option : null;
+            return option;
+          });
+        element.__options = options;
+      },
+      get() {
+        return this._innerHTML || '';
+      }
     });
     trigger.closest = (selector) => selector === '[data-solo-trigger]' ? trigger : null;
     element.setAttribute('data-value', choices[0]?.value || '');
@@ -194,7 +211,11 @@ function runScriptWithMinimalDom(script, ids) {
       addEventListener() {}
     },
     window: {
-      addEventListener() {}
+      addEventListener(type, listener) {
+        if (type === 'message') {
+          context.__messageListener = listener;
+        }
+      }
     },
     acquireVsCodeApi: () => ({
       postMessage: (message) => postedMessages.push(message)
@@ -202,7 +223,13 @@ function runScriptWithMinimalDom(script, ids) {
   };
 
   vm.runInNewContext(script, context);
-  return { elements, postedMessages };
+  return {
+    elements,
+    postedMessages,
+    dispatchMessage(message) {
+      context.__messageListener({ data: message });
+    }
+  };
 }
 
 test('extension manifest uses SoloMap visible branding', () => {
@@ -260,7 +287,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /data-solo-select/);
   assert.match(script, /bindSoloSelect/);
 
-  const { elements, postedMessages } = runScriptWithMinimalDom(script, [
+  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'tasks-list',
     'progress-bar',
     'progress-text',
@@ -269,6 +296,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-add-project',
     'sidebar-solo-project',
     'sidebar-solo-agent',
+    'sidebar-solo-attachments',
+    'btn-attach-sidebar-solo',
     'sidebar-solo-input',
     'btn-send-sidebar-solo',
     'portfolio-title',
@@ -297,13 +326,28 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
 
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'app', path: '/workspace/app' }, { name: 'second', path: '/workspace/second' }],
+      selectedProjectPath: '/workspace/second',
+      portfolio: []
+    }
+  });
+  assert.equal(elements['sidebar-solo-project'].getAttribute('data-value'), '/workspace/second');
+
   elements['sidebar-solo-project'].setAttribute('data-value', '/workspace/app');
   elements['sidebar-solo-agent'].setAttribute('data-value', 'codex');
+  elements['btn-attach-sidebar-solo'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'chooseSoloSupplementFiles'
+    && message.projectPath === '/workspace/app'));
+  dispatchMessage({ command: 'soloSupplementFilesSelected', files: ['docs/brief.md'] });
   elements['sidebar-solo-input'].value = '讨论当前页面的易用性问题';
   elements['btn-send-sidebar-solo'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'runSoloConversation'
     && message.projectPath === '/workspace/app'
     && message.agentCli === 'codex'
+    && message.supplementFiles[0] === 'docs/brief.md'
     && message.userMessage === '讨论当前页面的易用性问题'));
 });
 
@@ -463,9 +507,15 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="btn-add-project"/);
   assert.match(html, /id="sidebar-solo-project"/);
   assert.match(html, /id="sidebar-solo-agent"/);
+  assert.match(html, /id="sidebar-solo-attachments"/);
+  assert.match(html, /id="btn-attach-sidebar-solo"/);
   assert.match(html, /id="sidebar-solo-input"/);
   assert.match(html, /id="btn-send-sidebar-solo"/);
   assert.match(html, /runSoloConversation/);
+  assert.match(html, /chooseSoloSupplementFiles/);
+  assert.match(html, /soloSupplementFilesSelected/);
+  assert.match(html, /\.sidebar-solo-card\s*\{[\s\S]*?z-index:\s*20/);
+  assert.match(html, /\.portfolio-panel\s*\{[\s\S]*?z-index:\s*1/);
   assert.match(html, /Solo 对话|Solo conversation/);
   assert.match(html, /id="portfolio-list"/);
   assert.doesNotMatch(html, /id="next-action-panel"/);
@@ -856,6 +906,19 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /关联某个已有环节/);
   assert.match(soloPrompt, /Keep answers brief/);
   assert.doesNotMatch(soloPrompt, /本环节完成标准/);
+
+  const soloAttachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-attached-files-'));
+  fs.mkdirSync(path.join(soloAttachmentRoot, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(soloAttachmentRoot, 'docs', 'brief.md'), 'Brief', 'utf8');
+  const attachedSoloPrompt = extensionModule.__buildSoloConversationPrompt(
+    '根据补充资料判断方向。',
+    soloAttachmentRoot,
+    '',
+    ['docs/brief.md', '../outside.md']
+  );
+  assert.match(attachedSoloPrompt, /用户为本次 Solo 对话选择了补充文件/);
+  assert.match(attachedSoloPrompt, /docs\/brief\.md/);
+  assert.doesNotMatch(attachedSoloPrompt, /\.\.\/outside\.md/);
 
   const criteriaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-criteria-'));
   const criteriaNodes = extensionModule.__ensureCompletionCriteriaForNodes(criteriaRoot, [{

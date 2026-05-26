@@ -110,7 +110,7 @@ export async function activate(context: vscode.ExtensionContext) {
     async () => {
       await addProjectFromDialog(context);
     },
-    async (projectPath, userMessage = '', agentCli = '') => {
+    async (projectPath, userMessage = '', agentCli = '', supplementFiles: string[] = []) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
         vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
         return;
@@ -120,8 +120,15 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const ready = await ensureSyncEngine(context);
       if (ready && activeProjectRoot === projectPath) {
-        await handleRunSoloConversation(context, userMessage, agentCli);
+        await handleRunSoloConversation(context, userMessage, agentCli, normalizeSupplementFiles(supplementFiles));
       }
+    },
+    async (projectPath) => {
+      if (!getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+        return [];
+      }
+      return chooseSupplementFilesForProject(projectPath);
     }
   );
 
@@ -491,30 +498,33 @@ async function chooseSupplementFilesForNode(nodeId: string): Promise<void> {
     return;
   }
 
+  const files = await chooseSupplementFilesForProject(activeProjectRoot);
+  activePanel.webview.postMessage({
+    command: 'supplementFilesSelected',
+    nodeId,
+    files
+  });
+}
+
+async function chooseSupplementFilesForProject(projectRoot: string): Promise<string[]> {
   const selected = await vscode.window.showOpenDialog({
     canSelectFiles: true,
     canSelectFolders: false,
     canSelectMany: true,
     openLabel: 'Attach Files',
-    defaultUri: vscode.Uri.file(activeProjectRoot)
+    defaultUri: vscode.Uri.file(projectRoot)
   });
 
-  const files = (selected || [])
+  return (selected || [])
     .map((uri) => {
       const absolutePath = uri.fsPath;
-      const relativeToRoot = path.relative(activeProjectRoot as string, absolutePath);
+      const relativeToRoot = path.relative(projectRoot, absolutePath);
       if (!relativeToRoot || relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
         return '';
       }
       return relativeToRoot.split(path.sep).join('/');
     })
     .filter(Boolean);
-
-  activePanel.webview.postMessage({
-    command: 'supplementFilesSelected',
-    nodeId,
-    files
-  });
 }
 
 async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
@@ -1699,9 +1709,18 @@ function buildRoadmapRevisionPrompt(
 function buildSoloConversationPrompt(
   userMessage: string,
   workspaceRoot: string,
-  globalPrompt = ''
+  globalPrompt = '',
+  supplementFiles: string[] = []
 ): string {
   const normalizedUserMessage = userMessage.trim();
+  const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
+  const supplementFileInstructions = attachedFiles.length > 0
+    ? [
+      '用户为本次 Solo 对话选择了补充文件：',
+      ...attachedFiles.map((file) => `- ${file}`),
+      '请先读取这些文件，并仅将它们作为本次问题的背景材料。'
+    ].join('\n')
+    : '';
   const globalPromptInstructions = globalPrompt.trim()
     ? [
       '用户设置的全局默认要求：',
@@ -1717,6 +1736,7 @@ function buildSoloConversationPrompt(
     '',
     '用户本次要求（最高优先级）：',
     normalizedUserMessage,
+    ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行边界：',
@@ -2132,7 +2152,7 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   terminal.sendText(finalCommand);
 }
 
-async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = ''): Promise<void> {
+async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', supplementFiles: string[] = []): Promise<void> {
   if (!syncEngine || !activeProjectRoot) {
     return;
   }
@@ -2176,7 +2196,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   }
   const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
-  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt);
+  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
+  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles);
   const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot);
   const executionLogId = syncEngine.logAgentExecution(
     soloConversationId,
@@ -2188,8 +2209,9 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
       nativeSessionId
         ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
         : `Starting a new native ${getAgentProvider(agentCli)} session.`,
-      `User supplement:\n${request}`
-    ].join('\n\n'),
+      `User supplement:\n${request}`,
+      attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
+    ].filter(Boolean).join('\n\n'),
     'Running'
   );
   postNodeConversations(soloConversationId);
