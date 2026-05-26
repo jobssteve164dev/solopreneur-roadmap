@@ -348,12 +348,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       status: 'Completed',
       timestamp: '2026-05-26T10:00:00.000Z',
       command: 'codex exec',
-      output: 'User supplement:\n判断首页方向\n\nTouched project files:\nsrc/view.ts\n\nRun duration ms: 2000\n\nAgent output tail:\n方向可继续验证。'
+      output: 'User supplement:\n判断首页方向\n\nTouched project files:\nsrc/view.ts\n\nRun duration ms: 2000\n\nNative Agent session saved: .solopreneur/step-sessions/__solo__.json (3350a3b7-7761-4ed5-9661-2e9c9de8f924)\n\nAgent output tail:\n方向可继续验证。'
     }]
   });
   assert.match(elements['sidebar-solo-history'].innerHTML, /判断首页方向/);
   assert.match(elements['sidebar-solo-history'].innerHTML, /codex/);
   assert.match(elements['sidebar-solo-history'].innerHTML, /耗时|Duration/);
+  assert.match(elements['sidebar-solo-history'].innerHTML, /data-continue-sidebar-solo-id/);
 
   elements['sidebar-solo-project'].setAttribute('data-value', '/workspace/app');
   elements['sidebar-solo-agent'].setAttribute('data-value', 'codex');
@@ -540,6 +541,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /getSoloConversationHistory/);
   assert.match(html, /sidebarSoloConversationLoaded/);
   assert.match(html, /renderSidebarSoloHistory/);
+  assert.match(html, /continueSoloConversation/);
+  assert.match(html, /data-continue-sidebar-solo-id/);
+  assert.match(html, /\.sidebar-conversation-detail\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
+  assert.match(html, /\.sidebar-conversation-detail pre\s*\{[\s\S]*?max-width:\s*100%/);
   assert.match(html, /\.sidebar-solo-card\s*\{[\s\S]*?z-index:\s*20/);
   assert.match(html, /\.portfolio-panel\s*\{[\s\S]*?z-index:\s*1/);
   assert.match(html, /Solo 对话|Solo conversation/);

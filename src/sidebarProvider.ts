@@ -270,7 +270,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _addProject: () => Promise<void>,
     private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, supplementFiles?: string[]) => Promise<void>,
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
-    private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>
+    private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
+    private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -311,6 +312,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
         case 'getSoloConversationHistory':
           await this.sendSoloConversationHistory(data.projectPath || '');
+          break;
+        case 'continueSoloConversation':
+          if (this._continueSoloConversation) {
+            await this._continueSoloConversation(data.projectPath || '', Number(data.conversationId || 0));
+          }
           break;
         case 'showFullRoadmap':
           vscode.commands.executeCommand('solopreneur.showRoadmap');
@@ -887,6 +893,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       background: rgba(255, 255, 255, 0.03);
       padding: 7px;
       cursor: pointer;
+      box-sizing: border-box;
+      max-width: 100%;
+      overflow: hidden;
     }
 
     .sidebar-conversation-row {
@@ -894,9 +903,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       align-items: flex-start;
       justify-content: space-between;
       gap: 6px;
+      min-width: 0;
     }
 
     .sidebar-conversation-meta {
+      flex: 1 1 auto;
       min-width: 0;
       display: flex;
       flex-direction: column;
@@ -930,10 +941,32 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       color: var(--text-muted);
       font-size: 10px;
       line-height: 1.45;
+      max-width: 100%;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .sidebar-conversation-detail strong {
       color: var(--text-main);
+    }
+
+    .sidebar-conversation-actions {
+      display: flex;
+      align-items: flex-start;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+
+    .sidebar-conversation-continue {
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      border-radius: 4px;
+      padding: 2px 6px;
+      background: rgba(56, 189, 248, 0.12);
+      color: #7dd3fc;
+      font-size: 10px;
+      cursor: pointer;
+      white-space: nowrap;
     }
 
     .sidebar-conversation-detail pre {
@@ -942,9 +975,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       border-radius: 4px;
       background: rgba(0, 0, 0, 0.2);
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
       word-break: break-word;
       color: var(--text-muted);
       font-size: 9px;
+      box-sizing: border-box;
+      max-width: 100%;
+      max-height: 220px;
+      overflow: auto;
     }
 
     .portfolio-header {
@@ -1606,6 +1644,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         elapsed: '已运行',
         duration: '耗时',
         changedCount: '本轮修改文件数',
+        continueNative: '继续',
         filterAll: '全部',
         filterActive: '进行中',
         filterFailed: '有失败',
@@ -1670,6 +1709,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         elapsed: 'Elapsed',
         duration: 'Duration',
         changedCount: 'Files changed in this run',
+        continueNative: 'Continue',
         filterAll: 'All',
         filterActive: 'Active',
         filterFailed: 'Failed',
@@ -2034,6 +2074,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         : '';
     }
 
+    function extractNativeSessionId(output) {
+      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/);
+      return match ? match[1] : '';
+    }
+
     function formatSoloDuration(conversation) {
       const stored = String(conversation.output || '').match(/Run duration ms:\\s*(\\d+)/);
       const durationMs = stored
@@ -2069,6 +2114,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const duration = formatSoloDuration(conversation);
       const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
       const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
+      const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
+        ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-solo-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
+        : '';
       sidebarSoloHistory.innerHTML = \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('soloHistory'))}</div>
         <div class="sidebar-conversation" data-sidebar-solo-conversation>
@@ -2079,7 +2127,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <span class="sidebar-conversation-time">\${escapeHtml(when)}</span>
               \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
             </div>
-            <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(statusText(conversation.status))}</span>
+            <div class="sidebar-conversation-actions">
+              \${continueButton}
+              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(statusText(conversation.status))}</span>
+            </div>
           </div>
           \${sidebarSoloConversationExpanded ? \`
             <div class="sidebar-conversation-detail">
@@ -2100,6 +2151,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderSidebarSoloHistory();
         });
       }
+      sidebarSoloHistory.querySelectorAll('[data-continue-sidebar-solo-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'continueSoloConversation',
+            projectPath: getSoloSelectValue(sidebarSoloProject),
+            conversationId: item.getAttribute('data-continue-sidebar-solo-id')
+          });
+        });
+      });
     }
 
     function formatRelativeTime(value) {

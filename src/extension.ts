@@ -133,6 +133,19 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async (projectPath) => {
       return getSoloConversationHistoryForProject(context, projectPath);
+    },
+    async (projectPath, conversationId) => {
+      if (!getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+        return;
+      }
+      if (getSelectedProjectPath(context) !== projectPath) {
+        await selectProject(context, projectPath);
+      }
+      const ready = await ensureSyncEngine(context);
+      if (ready && activeProjectRoot === projectPath) {
+        await handleContinueNativeConversation(context, soloConversationId, Number(conversationId || 0));
+      }
     }
   );
 
