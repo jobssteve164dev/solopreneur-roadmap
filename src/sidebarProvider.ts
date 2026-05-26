@@ -547,7 +547,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       letter-spacing: 0.2px;
     }
 
-    .settings-input, .settings-select {
+    .settings-input {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-glass);
       border-radius: 4px;
@@ -558,7 +558,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       outline: none;
     }
 
-    .settings-input:focus, .settings-select:focus {
+    .settings-input:focus {
       border-color: #00e5ff;
     }
 
@@ -577,14 +577,100 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .project-select {
       flex: 1;
       min-width: 0;
+    }
+
+    .solo-select {
+      position: relative;
+      min-width: 0;
+      font-size: 11px;
+    }
+
+    .solo-select-trigger {
+      width: 100%;
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-glass);
-      border-radius: 4px;
-      padding: 5px 6px;
+      border-radius: 5px;
+      padding: 5px 7px;
       color: var(--text-main);
-      font-family: inherit;
-      font-size: 11px;
+      font: inherit;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .solo-select-trigger-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .solo-select-caret {
+      flex-shrink: 0;
+      color: var(--text-muted);
+      transition: transform 0.18s ease;
+    }
+
+    .solo-select.open .solo-select-caret {
+      transform: rotate(180deg);
+    }
+
+    .solo-select.open .solo-select-trigger,
+    .solo-select-trigger:focus {
+      border-color: rgba(0, 229, 255, 0.7);
+      box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.18);
       outline: none;
+    }
+
+    .solo-select-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      z-index: 80;
+      padding: 4px;
+      border: 1px solid rgba(0, 229, 255, 0.22);
+      border-radius: 7px;
+      background: #151a29;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.42);
+      max-height: 190px;
+      overflow-y: auto;
+    }
+
+    .solo-select.open .solo-select-menu {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .solo-select-option {
+      border: none;
+      border-radius: 5px;
+      padding: 6px 7px;
+      background: transparent;
+      color: var(--text-main);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .solo-select-option:hover,
+    .solo-select-option[aria-selected="true"] {
+      background: rgba(0, 229, 255, 0.12);
+      color: #d8fbff;
+    }
+
+    .solo-select.is-disabled {
+      opacity: 0.52;
+    }
+
+    .solo-select.is-disabled .solo-select-trigger {
+      cursor: not-allowed;
     }
 
     .btn-project-add {
@@ -777,14 +863,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-agent {
       flex: 1 1 120px;
       min-width: 0;
-      background: rgba(255, 255, 255, 0.06);
-      border: 1px solid var(--border-glass);
-      border-radius: 5px;
-      color: var(--text-main);
-      font-family: inherit;
-      font-size: 11px;
-      padding: 5px 6px;
-      outline: none;
     }
 
     .portfolio-compose-send {
@@ -1103,7 +1181,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div class="project-switcher">
-    <select class="project-select" id="project-select"></select>
+    <div class="solo-select project-select" id="project-select" data-solo-select data-value="">
+      <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+        <span class="solo-select-trigger-label" data-solo-label></span>
+        <span class="codicon codicon-chevron-down solo-select-caret"></span>
+      </button>
+      <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+    </div>
     <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
   </div>
 
@@ -1124,10 +1208,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-language">Language</label>
-      <select class="settings-select" id="setting-language">
-        <option value="zh">中文</option>
-        <option value="en">English</option>
-      </select>
+      <div class="solo-select settings-select" id="setting-language" data-solo-select data-value="zh">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>中文</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="zh" aria-selected="true">中文</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="en" aria-selected="false">English</button>
+        </div>
+      </div>
     </div>
     
     <div class="settings-field">
@@ -1360,8 +1450,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       cliTestBadge.style.display = 'none';
     });
 
-    settingLanguage.addEventListener('change', () => {
-      currentLanguage = settingLanguage.value;
+    bindSoloSelect(settingLanguage, (value) => {
+      currentLanguage = value;
       applyLanguage();
     });
 
@@ -1386,8 +1476,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'settingsLoaded':
           settingCliPath.value = message.settings.cliPath || 'agy';
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
-          settingLanguage.value = message.settings.language || 'zh';
-          currentLanguage = settingLanguage.value;
+          setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
+          currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
           break;
 
@@ -1427,7 +1517,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({
         command: 'updateSettings',
         cliPath: settingCliPath.value.trim(),
-        language: settingLanguage.value,
+        language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim()
       });
       settingsPanel.style.display = 'none';
@@ -1452,10 +1542,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ command: 'showFullRoadmap' });
     });
 
-    projectSelect.addEventListener('change', () => {
+    bindSoloSelect(projectSelect, (value) => {
       vscode.postMessage({
         command: 'selectProject',
-        projectPath: projectSelect.value
+        projectPath: value
       });
     });
 
@@ -1485,25 +1575,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function renderProjects(projects, selectedProjectPath) {
-      projectSelect.innerHTML = '';
       if (!projects || projects.length === 0) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = t('chooseProject');
-        projectSelect.appendChild(option);
+        setSoloSelectOptions(projectSelect, [{ value: '', label: t('chooseProject') }], '');
         return;
       }
 
-      projects.forEach(project => {
-        const option = document.createElement('option');
-        option.value = project.path;
-        option.textContent = project.name;
-        option.title = project.path;
-        if (project.path === selectedProjectPath) {
-          option.selected = true;
-        }
-        projectSelect.appendChild(option);
-      });
+      setSoloSelectOptions(projectSelect, projects.map(project => ({
+        value: project.path,
+        label: project.name,
+        title: project.path
+      })), selectedProjectPath);
     }
 
     function formatRelativeTime(value) {
@@ -1572,7 +1653,104 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         .replace(/'/g, '&#39;');
     }
 
-    function renderAgentOptions(node) {
+    function closeSoloSelects(except) {
+      document.querySelectorAll('[data-solo-select]').forEach(select => {
+        if (select !== except) {
+          select.classList.remove('open');
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
+
+    function setSoloSelectValue(select, value) {
+      if (!select) return;
+      const choices = Array.from(select.querySelectorAll('[data-solo-option-value]'));
+      const selected = choices.find(choice => choice.getAttribute('data-solo-option-value') === String(value || '')) || choices[0];
+      const selectedValue = selected ? selected.getAttribute('data-solo-option-value') || '' : '';
+      select.setAttribute('data-value', selectedValue);
+      const label = select.querySelector('[data-solo-label]');
+      if (label) label.textContent = selected ? selected.textContent || '' : '';
+      choices.forEach(choice => choice.setAttribute('aria-selected', choice === selected ? 'true' : 'false'));
+    }
+
+    function getSoloSelectValue(select) {
+      return select ? select.getAttribute('data-value') || '' : '';
+    }
+
+    function setSoloSelectOptions(select, options, selectedValue) {
+      const menu = select && select.querySelector('[data-solo-menu]');
+      if (!menu) return;
+      menu.innerHTML = (options || []).map(option => (
+        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
+        '" title="' + escapeHtml(option.title || option.label) + '" aria-selected="false">' +
+        escapeHtml(option.label) + '</button>'
+      )).join('');
+      setSoloSelectValue(select, selectedValue);
+    }
+
+    function renderSoloSelect(className, attributes, options, disabled) {
+      const selected = options[0] || { value: '', label: '' };
+      const disabledClass = disabled ? ' is-disabled' : '';
+      const disabledAttribute = disabled ? ' disabled' : '';
+      return '<div class="solo-select ' + className + disabledClass + '" data-solo-select data-value="' + escapeHtml(selected.value) + '" ' + attributes + '>' +
+        '<button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false"' + disabledAttribute + '>' +
+        '<span class="solo-select-trigger-label" data-solo-label>' + escapeHtml(selected.label) + '</span>' +
+        '<span class="codicon codicon-chevron-down solo-select-caret"></span></button>' +
+        '<div class="solo-select-menu" data-solo-menu role="listbox">' +
+        options.map((option, index) => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
+          '" aria-selected="' + (index === 0 ? 'true' : 'false') + '">' + escapeHtml(option.label) + '</button>').join('') +
+        '</div></div>';
+    }
+
+    function bindSoloSelect(select, onChange) {
+      if (!select || select.getAttribute('data-solo-bound') === 'true') return;
+      select.setAttribute('data-solo-bound', 'true');
+      select.addEventListener('click', event => {
+        event.stopPropagation();
+        const option = event.target.closest('[data-solo-option-value]');
+        if (option) {
+          const previousValue = getSoloSelectValue(select);
+          setSoloSelectValue(select, option.getAttribute('data-solo-option-value'));
+          select.classList.remove('open');
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', 'false');
+          if (onChange && previousValue !== getSoloSelectValue(select)) {
+            onChange(getSoloSelectValue(select));
+          }
+          return;
+        }
+        if (event.target.closest('[data-solo-trigger]') && !select.classList.contains('is-disabled')) {
+          const open = !select.classList.contains('open');
+          closeSoloSelects(select);
+          select.classList.toggle('open', open);
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+      });
+      select.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          select.classList.remove('open');
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', 'false');
+          return;
+        }
+        if ((event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') && event.target.closest('[data-solo-trigger]')) {
+          event.preventDefault();
+          closeSoloSelects(select);
+          select.classList.add('open');
+          event.target.setAttribute('aria-expanded', 'true');
+        }
+      });
+    }
+
+    function bindSoloSelects(container) {
+      container.querySelectorAll('[data-solo-select]').forEach(select => bindSoloSelect(select));
+    }
+
+    document.addEventListener('click', () => closeSoloSelects());
+
+    function getAgentOptions(node) {
       const options = [];
       function add(value) {
         const normalized = String(value || '').trim();
@@ -1588,7 +1766,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       add('antigravity');
       add('antigravity-cli');
       add('codex-cli');
-      return options.map(option => '<option value="' + escapeHtml(option) + '">' + escapeHtml(option) + '</option>').join('');
+      return options.map(option => ({ value: option, label: option }));
     }
 
     function renderProjectContinueComposer(nodes) {
@@ -1596,15 +1774,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!node) {
         return '';
       }
-      const disabled = node.status === 'Running' || node.status === 'Completed' ? 'disabled' : '';
+      const disabled = node.status === 'Running' || node.status === 'Completed';
       return \`
         <div class="portfolio-compose" data-project-continue-composer>
           <div class="portfolio-compose-row">
-            <input class="portfolio-compose-input" data-project-continue-input placeholder="\${escapeHtml(t('continuePlaceholder'))}" \${disabled}>
-            <select class="portfolio-compose-agent" data-project-continue-agent \${disabled}>
-              \${renderAgentOptions(node)}
-            </select>
-            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled}>
+            <input class="portfolio-compose-input" data-project-continue-input placeholder="\${escapeHtml(t('continuePlaceholder'))}" \${disabled ? 'disabled' : ''}>
+            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent', getAgentOptions(node), disabled)}
+            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled ? 'disabled' : ''}>
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
@@ -1613,13 +1789,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function bindProjectContinueComposer(container) {
+      bindSoloSelects(container);
       container.querySelectorAll('[data-project-continue-send]').forEach(sendButton => {
         sendButton.addEventListener('click', (event) => {
           event.stopPropagation();
           const panel = sendButton.closest('[data-project-continue-composer]');
           const input = panel ? panel.querySelector('[data-project-continue-input]') : null;
           const agentSelect = panel ? panel.querySelector('[data-project-continue-agent]') : null;
-          runNodeAgent(sendButton.getAttribute('data-next-node-id'), input ? input.value : '', agentSelect ? agentSelect.value : '');
+          runNodeAgent(sendButton.getAttribute('data-next-node-id'), input ? input.value : '', getSoloSelectValue(agentSelect));
           if (input) input.value = '';
         });
       });
@@ -1680,7 +1857,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
       portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
         card.addEventListener('click', (event) => {
-          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('select')) return;
+          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('[data-solo-select]')) return;
           vscode.postMessage({
             command: 'selectProject',
             projectPath: card.getAttribute('data-select-project-path')

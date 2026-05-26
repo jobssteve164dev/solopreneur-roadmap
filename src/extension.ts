@@ -2670,13 +2670,110 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .project-select {
       width: clamp(150px, 18vw, 240px);
       min-width: 0;
+    }
+
+    .solo-select {
+      position: relative;
+      min-width: 0;
+      font-size: 12px;
+    }
+
+    .solo-select-trigger {
+      width: 100%;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 10px;
+      color: var(--text-main);
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-glass);
-      border-radius: 6px;
-      padding: 8px;
-      color: var(--text-main);
-      font-family: inherit;
+      border-radius: 7px;
+      font: inherit;
+      font-weight: 400;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .solo-select-trigger:hover {
+      transform: none;
+      box-shadow: none;
+      border-color: rgba(0, 229, 255, 0.38);
+    }
+
+    .solo-select-trigger-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .solo-select-caret {
+      flex-shrink: 0;
+      font-size: 13px;
+      color: var(--text-muted);
+      transition: transform 0.18s ease;
+    }
+
+    .solo-select.open .solo-select-caret {
+      transform: rotate(180deg);
+    }
+
+    .solo-select.open .solo-select-trigger,
+    .solo-select-trigger:focus {
       outline: none;
+      border-color: rgba(0, 229, 255, 0.7);
+      box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.18);
+    }
+
+    .solo-select-menu {
+      display: none;
+      position: absolute;
+      top: calc(100% + 5px);
+      left: 0;
+      right: 0;
+      z-index: 120;
+      padding: 5px;
+      max-height: 224px;
+      overflow-y: auto;
+      border: 1px solid rgba(0, 229, 255, 0.2);
+      border-radius: 9px;
+      background: #141a29;
+      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.48);
+    }
+
+    .solo-select.open .solo-select-menu {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .solo-select-option {
+      padding: 8px 9px;
+      background: transparent;
+      border-radius: 6px;
+      color: var(--text-main);
+      font: inherit;
+      font-weight: 400;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .solo-select-option:hover,
+    .solo-select-option[aria-selected="true"] {
+      transform: none;
+      box-shadow: none;
+      color: #d8fbff;
+      background: rgba(0, 229, 255, 0.12);
+    }
+
+    .solo-select.is-disabled {
+      opacity: 0.55;
+    }
+
+    .solo-select.is-disabled .solo-select-trigger {
+      cursor: not-allowed;
     }
 
     .btn-project-add {
@@ -3072,11 +3169,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       width: 132px;
       min-width: 120px;
       height: 34px;
-      background: rgba(0, 0, 0, 0.24);
-      border: 1px solid var(--border-glass);
-      color: var(--text-main);
-      border-radius: 6px;
-      padding: 0 8px;
       font-size: 12px;
       flex-shrink: 0;
     }
@@ -3093,7 +3185,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     .conversation-compose input:disabled,
-    .conversation-agent-select:disabled,
     .btn-send-conversation:disabled,
     .conversation-tool-btn:disabled {
       opacity: 0.55;
@@ -3460,7 +3551,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       letter-spacing: 0.5px;
     }
 
-    .settings-input, .settings-select {
+    .settings-input {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-glass);
       border-radius: 6px;
@@ -3477,13 +3568,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       line-height: 1.45;
     }
 
-    .settings-input:focus, .settings-select:focus, .settings-textarea:focus {
+    .settings-input:focus, .settings-textarea:focus {
       border-color: #00e5ff;
-    }
-
-    .settings-select option {
-      background: #0f111a;
-      color: #e2e8f0;
     }
 
     .settings-actions {
@@ -3671,7 +3757,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <header>
       <h1 class="brand-title"><span class="codicon codicon-map"></span><span id="app-title">SoloMap</span></h1>
       <div class="controls">
-        <select class="project-select" id="project-select"></select>
+        <div class="solo-select project-select" id="project-select" data-solo-select data-value="">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+            <span class="solo-select-trigger-label" data-solo-label></span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+        </div>
         <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
         <button class="btn-project-remove" id="btn-remove-project" title="Remove project"><span class="codicon codicon-trash"></span></button>
         <button class="btn-roadmap-revision" id="btn-toggle-roadmap-revision" title="Revise Roadmap"><span class="codicon codicon-git-compare"></span></button>
@@ -3702,10 +3794,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-language">Language</label>
-      <select class="settings-select" id="setting-language">
-        <option value="zh">中文</option>
-        <option value="en">English</option>
-      </select>
+      <div class="solo-select settings-select" id="setting-language" data-solo-select data-value="zh">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>中文</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="zh" aria-selected="true">中文</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="en" aria-selected="false">English</button>
+        </div>
+      </div>
     </div>
 
     <div class="settings-field">
@@ -3993,8 +4091,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       renderRoadmapRevisionPanel(currentNodes);
     });
 
-    settingLanguage.addEventListener('change', () => {
-      currentLanguage = settingLanguage.value;
+    bindSoloSelect(settingLanguage, (value) => {
+      currentLanguage = value;
       applyLanguage();
     });
 
@@ -4031,8 +4129,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           settingCliPath.value = message.settings.cliPath || 'agy';
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           currentCliPath = settingCliPath.value || 'agy';
-          settingLanguage.value = message.settings.language || 'zh';
-          currentLanguage = settingLanguage.value;
+          setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
+          currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
           break;
         case 'projectsLoaded':
@@ -4083,7 +4181,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       vscode.postMessage({
         command: 'updateSettings',
         cliPath: settingCliPath.value.trim(),
-        language: settingLanguage.value,
+        language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim()
       });
       settingsPanel.style.display = 'none';
@@ -4104,10 +4202,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     });
 
-    projectSelect.addEventListener('change', () => {
+    bindSoloSelect(projectSelect, (value) => {
       vscode.postMessage({
         command: 'selectProject',
-        projectPath: projectSelect.value
+        projectPath: value
       });
     });
 
@@ -4116,30 +4214,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     });
 
     btnRemoveProject.addEventListener('click', () => {
-      if (!projectSelect.value) return;
-      vscode.postMessage({ command: 'removeProject', projectPath: projectSelect.value });
+      const projectPath = getSoloSelectValue(projectSelect);
+      if (!projectPath) return;
+      vscode.postMessage({ command: 'removeProject', projectPath });
     });
 
     function renderProjects(projects, selectedProjectPath) {
-      projectSelect.innerHTML = '';
       if (!projects || projects.length === 0) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = t('chooseProject');
-        projectSelect.appendChild(option);
+        setSoloSelectOptions(projectSelect, [{ value: '', label: t('chooseProject') }], '');
         return;
       }
 
-      projects.forEach(project => {
-        const option = document.createElement('option');
-        option.value = project.path;
-        option.textContent = project.name;
-        option.title = project.path;
-        if (project.path === selectedProjectPath) {
-          option.selected = true;
-        }
-        projectSelect.appendChild(option);
-      });
+      setSoloSelectOptions(projectSelect, projects.map(project => ({
+        value: project.path,
+        label: project.name,
+        title: project.path
+      })), selectedProjectPath);
     }
 
     function escapeHtml(value) {
@@ -4150,6 +4240,103 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
     }
+
+    function closeSoloSelects(except) {
+      document.querySelectorAll('[data-solo-select]').forEach(select => {
+        if (select !== except) {
+          select.classList.remove('open');
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', 'false');
+        }
+      });
+    }
+
+    function setSoloSelectValue(select, value) {
+      if (!select) return;
+      const choices = Array.from(select.querySelectorAll('[data-solo-option-value]'));
+      const selected = choices.find(choice => choice.getAttribute('data-solo-option-value') === String(value || '')) || choices[0];
+      const selectedValue = selected ? selected.getAttribute('data-solo-option-value') || '' : '';
+      select.setAttribute('data-value', selectedValue);
+      const label = select.querySelector('[data-solo-label]');
+      if (label) label.textContent = selected ? selected.textContent || '' : '';
+      choices.forEach(choice => choice.setAttribute('aria-selected', choice === selected ? 'true' : 'false'));
+    }
+
+    function getSoloSelectValue(select) {
+      return select ? select.getAttribute('data-value') || '' : '';
+    }
+
+    function setSoloSelectOptions(select, options, selectedValue) {
+      const menu = select && select.querySelector('[data-solo-menu]');
+      if (!menu) return;
+      menu.innerHTML = (options || []).map(option => (
+        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
+        '" title="' + escapeHtml(option.title || option.label) + '" aria-selected="false">' +
+        escapeHtml(option.label) + '</button>'
+      )).join('');
+      setSoloSelectValue(select, selectedValue);
+    }
+
+    function renderSoloSelect(className, attributes, options, disabled) {
+      const selected = options[0] || { value: '', label: '' };
+      const disabledClass = disabled ? ' is-disabled' : '';
+      const disabledAttribute = disabled ? ' disabled' : '';
+      return '<div class="solo-select ' + className + disabledClass + '" data-solo-select data-value="' + escapeHtml(selected.value) + '" ' + attributes + '>' +
+        '<button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false"' + disabledAttribute + '>' +
+        '<span class="solo-select-trigger-label" data-solo-label>' + escapeHtml(selected.label) + '</span>' +
+        '<span class="codicon codicon-chevron-down solo-select-caret"></span></button>' +
+        '<div class="solo-select-menu" data-solo-menu role="listbox">' +
+        options.map((option, index) => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
+          '" aria-selected="' + (index === 0 ? 'true' : 'false') + '">' + escapeHtml(option.label) + '</button>').join('') +
+        '</div></div>';
+    }
+
+    function bindSoloSelect(select, onChange) {
+      if (!select || select.getAttribute('data-solo-bound') === 'true') return;
+      select.setAttribute('data-solo-bound', 'true');
+      select.addEventListener('click', event => {
+        event.stopPropagation();
+        const option = event.target.closest('[data-solo-option-value]');
+        if (option) {
+          const previousValue = getSoloSelectValue(select);
+          setSoloSelectValue(select, option.getAttribute('data-solo-option-value'));
+          select.classList.remove('open');
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', 'false');
+          if (onChange && previousValue !== getSoloSelectValue(select)) {
+            onChange(getSoloSelectValue(select));
+          }
+          return;
+        }
+        if (event.target.closest('[data-solo-trigger]') && !select.classList.contains('is-disabled')) {
+          const open = !select.classList.contains('open');
+          closeSoloSelects(select);
+          select.classList.toggle('open', open);
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+        }
+      });
+      select.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+          select.classList.remove('open');
+          const trigger = select.querySelector('[data-solo-trigger]');
+          if (trigger) trigger.setAttribute('aria-expanded', 'false');
+          return;
+        }
+        if ((event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') && event.target.closest('[data-solo-trigger]')) {
+          event.preventDefault();
+          closeSoloSelects(select);
+          select.classList.add('open');
+          event.target.setAttribute('aria-expanded', 'true');
+        }
+      });
+    }
+
+    function bindSoloSelects(container) {
+      container.querySelectorAll('[data-solo-select]').forEach(select => bindSoloSelect(select));
+    }
+
+    document.addEventListener('click', () => closeSoloSelects());
 
     function getCompletionCriteria(node) {
       const criteria = Array.isArray(node.completionCriteria)
@@ -4209,9 +4396,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                   <span class="codicon codicon-attach"></span>
                 </button>
                 <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" \${conversationDisabled}>
-                <select class="conversation-agent-select" data-agent-select-id="\${escapeHtml(node.id)}" title="\${t('agentSelector')}" \${conversationDisabled}>
-                  \${renderAgentOptions(node)}
-                </select>
+                \${renderSoloSelect('conversation-agent-select', 'data-agent-select-id="' + escapeHtml(node.id) + '" title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions(node), node.status === 'Running')}
                 <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" title="\${t('send')}" \${conversationDisabled}>
                   <span class="codicon codicon-send"></span>
                 </button>
@@ -4246,7 +4431,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const card = row.querySelector('[data-node-card-id]');
         if (card) {
           card.addEventListener('click', (event) => {
-            if (event.target.closest('button') || event.target.closest('input') || event.target.closest('select') || event.target.closest('[data-conversation-id]')) {
+            if (event.target.closest('button') || event.target.closest('input') || event.target.closest('[data-solo-select]') || event.target.closest('[data-conversation-id]')) {
               return;
             }
             toggleNode(node.id);
@@ -4258,7 +4443,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             event.stopPropagation();
             const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
             const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
-            triggerRun(node.id, input ? input.value : '', agentSelect ? agentSelect.value : '', nodeSupplementFiles[node.id] || []);
+            triggerRun(node.id, input ? input.value : '', getSoloSelectValue(agentSelect), nodeSupplementFiles[node.id] || []);
             if (input) input.value = '';
             nodeSupplementFiles[node.id] = [];
             renderRoadmap(currentNodes);
@@ -4340,6 +4525,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             vscode.postMessage({ command: 'openProjectFile', relativePath });
           });
         });
+        bindSoloSelects(row);
         canvas.appendChild(row);
       });
     }
@@ -4362,9 +4548,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         <div class="conversation-composer">
           <div class="conversation-compose">
             <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" \${disabled}>
-            <select class="conversation-agent-select" data-roadmap-revision-agent title="\${escapeHtml(t('agentSelector'))}" \${disabled}>
-              \${renderAgentOptions({ agentCli: currentCliPath || 'agy' })}
-            </select>
+            \${renderSoloSelect('conversation-agent-select', 'data-roadmap-revision-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), revisionRunning)}
             <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${disabled}>
               <span class="codicon codicon-send"></span>
             </button>
@@ -4385,11 +4569,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           vscode.postMessage({
             command: 'runRoadmapRevision',
             userMessage: request,
-            agentCli: agentSelect ? agentSelect.value : ''
+            agentCli: getSoloSelectValue(agentSelect)
           });
           input.value = '';
         });
       }
+      bindSoloSelects(roadmapRevisionBody);
       bindConversationActions(roadmapRevisionBody, roadmapRevisionId);
     }
 
@@ -4576,7 +4761,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         .slice(0, 240);
     }
 
-    function renderAgentOptions(node) {
+    function getAgentOptions(node) {
       const options = [];
       function addOption(value, label) {
         const normalized = String(value || '').trim();
@@ -4592,9 +4777,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       addOption('antigravity');
       addOption('antigravity-cli');
       addOption('codex-cli');
-      return options.map(option => \`
-        <option value="\${escapeHtml(option.value)}">\${escapeHtml(option.label)}</option>
-      \`).join('');
+      return options;
     }
 
     function mergeSupplementFiles(existing, incoming) {

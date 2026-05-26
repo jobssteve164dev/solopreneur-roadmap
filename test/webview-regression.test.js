@@ -94,6 +94,7 @@ function extractLastScript(html) {
 function createElement(id) {
   return {
     id,
+    attributes: {},
     style: { display: '' },
     listeners: {},
     value: '',
@@ -122,6 +123,12 @@ function createElement(id) {
     addEventListener(type, listener) {
       this.listeners[type] = listener;
     },
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
+    },
     appendChild() {},
     querySelector() {
       return null;
@@ -141,10 +148,45 @@ function createElement(id) {
 function runScriptWithMinimalDom(script, ids) {
   const elements = Object.fromEntries(ids.map((id) => [id, createElement(id)]));
   const postedMessages = [];
+
+  function wireSoloSelect(element, choices) {
+    if (!element) return;
+    const trigger = createElement(`${element.id}-trigger`);
+    const label = createElement(`${element.id}-label`);
+    const menu = createElement(`${element.id}-menu`);
+    const options = choices.map(({ value, label: text }) => {
+      const option = createElement(`${element.id}-${value}`);
+      option.setAttribute('data-solo-option-value', value);
+      option.textContent = text;
+      option.closest = (selector) => selector === '[data-solo-option-value]' ? option : null;
+      return option;
+    });
+    trigger.closest = (selector) => selector === '[data-solo-trigger]' ? trigger : null;
+    element.setAttribute('data-value', choices[0]?.value || '');
+    element.querySelector = (selector) => {
+      if (selector === '[data-solo-trigger]') return trigger;
+      if (selector === '[data-solo-label]') return label;
+      if (selector === '[data-solo-menu]') return menu;
+      return null;
+    };
+    element.querySelectorAll = (selector) => selector === '[data-solo-option-value]' ? options : [];
+    element.__options = options;
+  }
+
+  wireSoloSelect(elements['setting-language'], [
+    { value: 'zh', label: '中文' },
+    { value: 'en', label: 'English' }
+  ]);
+  wireSoloSelect(elements['project-select'], []);
+
   const context = {
     document: {
       getElementById: (id) => elements[id] || null,
-      createElement
+      createElement,
+      querySelectorAll() {
+        return [];
+      },
+      addEventListener() {}
     },
     window: {
       addEventListener() {}
@@ -209,6 +251,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   const script = extractLastScript(html);
 
   assert.doesNotThrow(() => new vm.Script(script));
+  assert.doesNotMatch(html, /<select\b|<option\b/);
+  assert.match(html, /data-solo-select/);
+  assert.match(script, /bindSoloSelect/);
 
   const { elements, postedMessages } = runScriptWithMinimalDom(script, [
     'tasks-list',
@@ -232,9 +277,16 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   ]);
 
   elements['btn-toggle-settings'].listeners.click();
-
   assert.equal(elements['settings-panel'].style.display, 'block');
+  elements['setting-language'].listeners.click({
+    target: elements['setting-language'].__options[1],
+    stopPropagation() {}
+  });
+  elements['btn-save-settings'].listeners.click();
+
+  assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
 });
 
 test('full roadmap webview runtime script parses and opens settings panel', () => {
@@ -246,6 +298,9 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   const script = extractLastScript(html);
 
   assert.doesNotThrow(() => new vm.Script(script));
+  assert.doesNotMatch(html, /<select\b|<option\b/);
+  assert.match(html, /data-solo-select/);
+  assert.match(script, /renderSoloSelect/);
 
   const { elements, postedMessages } = runScriptWithMinimalDom(script, [
     'canvas',
@@ -269,9 +324,16 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   elements.canvas.querySelector = () => createElement('flow-line');
 
   elements['btn-toggle-settings'].listeners.click();
-
   assert.equal(elements['settings-panel'].style.display, 'flex');
+  elements['setting-language'].listeners.click({
+    target: elements['setting-language'].__options[1],
+    stopPropagation() {}
+  });
+  elements['btn-save-settings'].listeners.click();
+
+  assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
 
   elements['btn-toggle-roadmap-revision'].listeners.click();
 
@@ -309,7 +371,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /data-send-node-id/);
   assert.match(script, /data-agent-select-id/);
   assert.match(script, /data-retry-conversation-id/);
-  assert.match(script, /renderAgentOptions/);
+  assert.match(script, /getAgentOptions/);
   assert.match(script, /summarizeConversation/);
   assert.match(script, /retryConversation/);
   assert.match(script, /continueNativeConversation/);
