@@ -77,6 +77,7 @@ function loadCompiledModule(relativePath, exportPatch) {
     },
     console,
     URL,
+    Buffer,
     __dirname: path.dirname(filename),
     __filename: filename
   };
@@ -263,6 +264,23 @@ test('readme uses bilingual marketplace copy and stable remote logo', () => {
   assert.match(readme, /Feedback \/ 反馈/);
 });
 
+test('pasted image attachments are saved as project-relative SoloMap files', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__savePastedImageAttachments = savePastedImageAttachments;'
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-pasted-attachment-'));
+  const files = extensionModule.__savePastedImageAttachments(root, 'step:1', [{
+    name: 'clipboard.png',
+    mimeType: 'image/png',
+    dataUrl: 'data:image/png;base64,aGVsbG8='
+  }]);
+
+  assert.equal(files.length, 1);
+  assert.match(files[0], /^\.solopreneur\/attachments\/step-1\/.+\.png$/);
+  assert.equal(fs.readFileSync(path.join(root, files[0]), 'utf8'), 'hello');
+});
+
 test('sidebar webview runtime script parses and opens settings panel', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -285,6 +303,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.doesNotMatch(html, /<select\b|<option\b/);
   assert.match(html, /data-solo-select/);
   assert.match(script, /bindSoloSelect/);
+  assert.match(script, /bindPastedImageAttachments/);
+  assert.match(script, /savePastedAttachments/);
 
   const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'tasks-list',
@@ -363,12 +383,15 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.ok(postedMessages.some((message) => message.command === 'chooseSoloSupplementFiles'
     && message.projectPath === '/workspace/app'));
   dispatchMessage({ command: 'soloSupplementFilesSelected', files: ['docs/brief.md'] });
+  dispatchMessage({ command: 'pastedAttachmentsSaved', targetId: 'sidebar-solo', files: ['.solopreneur/attachments/solo/paste.png'] });
+  assert.match(elements['sidebar-solo-attachments'].innerHTML, /paste\.png/);
   elements['sidebar-solo-input'].value = '讨论当前页面的易用性问题';
   elements['btn-send-sidebar-solo'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'runSoloConversation'
     && message.projectPath === '/workspace/app'
     && message.agentCli === 'codex'
     && message.supplementFiles[0] === 'docs/brief.md'
+    && message.supplementFiles[1] === '.solopreneur/attachments/solo/paste.png'
     && message.userMessage === '讨论当前页面的易用性问题'));
 });
 
@@ -384,6 +407,9 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.doesNotMatch(html, /<select\b|<option\b/);
   assert.match(html, /data-solo-select/);
   assert.match(script, /renderSoloSelect/);
+  assert.match(script, /bindPastedImageAttachments/);
+  assert.match(script, /savePastedAttachments/);
+  assert.match(script, /runRoadmapRevision[\s\S]*supplementFiles/);
 
   const { elements, postedMessages } = runScriptWithMinimalDom(script, [
     'canvas',

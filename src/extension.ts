@@ -94,10 +94,10 @@ export async function activate(context: vscode.ExtensionContext) {
   sidebarProvider = new SolopreneurSidebarProvider(
     context.extensionUri,
     syncEngineWrapper,
-    async (nodeId, userMessage = '', agentCli = '') => {
+    async (nodeId, userMessage = '', agentCli = '', supplementFiles: string[] = []) => {
       const ready = await ensureSyncEngine(context);
       if (ready) {
-        await handleRunAgent(context, nodeId, userMessage, agentCli);
+        await handleRunAgent(context, nodeId, userMessage, agentCli, normalizeSupplementFiles(supplementFiles));
       }
     },
     () => getPersistedSettings(context),
@@ -146,6 +146,13 @@ export async function activate(context: vscode.ExtensionContext) {
       if (ready && activeProjectRoot === projectPath) {
         await handleContinueNativeConversation(context, soloConversationId, Number(conversationId || 0));
       }
+    },
+    async (projectPath, scope, attachments) => {
+      if (!getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+        return [];
+      }
+      return savePastedImageAttachments(projectPath, scope, attachments);
     }
   );
 
@@ -509,6 +516,57 @@ function filterProjectRelativeFiles(workspaceRoot: string, files: string[]): str
   });
 }
 
+interface PastedImageAttachment {
+  name?: string;
+  mimeType?: string;
+  dataUrl?: string;
+}
+
+function sanitizeAttachmentScope(scope: string): string {
+  const normalized = String(scope || 'conversation')
+    .replace(/[^a-zA-Z0-9_-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return normalized || 'conversation';
+}
+
+function imageExtensionFromMimeType(mimeType: string): string {
+  const normalized = String(mimeType || '').toLowerCase();
+  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return 'jpg';
+  if (normalized === 'image/webp') return 'webp';
+  if (normalized === 'image/gif') return 'gif';
+  return 'png';
+}
+
+function savePastedImageAttachments(projectRoot: string, scope: string, attachments: PastedImageAttachment[]): string[] {
+  if (!projectRoot || !Array.isArray(attachments) || attachments.length === 0) {
+    return [];
+  }
+
+  const safeScope = sanitizeAttachmentScope(scope);
+  const targetDir = path.join(projectRoot, '.solopreneur', 'attachments', safeScope);
+  fs.mkdirSync(targetDir, { recursive: true });
+
+  return attachments.slice(0, 10).map((attachment, index) => {
+    const dataUrl = String(attachment?.dataUrl || '');
+    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\r\n]+)$/);
+    if (!match) {
+      return '';
+    }
+    const mimeType = String(attachment.mimeType || match[1] || 'image/png').toLowerCase();
+    if (!mimeType.startsWith('image/')) {
+      return '';
+    }
+    const extension = imageExtensionFromMimeType(mimeType);
+    const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+    const randomId = Math.random().toString(16).slice(2, 8);
+    const fileName = `${timestamp}-${randomId}-${index + 1}.${extension}`;
+    const filePath = path.join(targetDir, fileName);
+    fs.writeFileSync(filePath, Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
+    return path.relative(projectRoot, filePath).split(path.sep).join('/');
+  }).filter(Boolean);
+}
+
 async function chooseSupplementFilesForNode(nodeId: string): Promise<void> {
   if (!activeProjectRoot || !activePanel) {
     vscode.window.showErrorMessage('Choose a project folder before attaching task files.');
@@ -753,7 +811,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'runRoadmapRevision':
-          await handleRoadmapRevision(context, message.userMessage || '', message.agentCli || '');
+          await handleRoadmapRevision(context, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
         case 'runSoloConversation':
@@ -766,6 +824,18 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'chooseSupplementFiles':
           await chooseSupplementFilesForNode(message.nodeId);
+          break;
+
+        case 'savePastedAttachments':
+          if (!activeProjectRoot || !activePanel) {
+            vscode.window.showErrorMessage('Choose a project folder before attaching images.');
+            return;
+          }
+          activePanel.webview.postMessage({
+            command: 'supplementFilesSelected',
+            nodeId: message.nodeId,
+            files: savePastedImageAttachments(activeProjectRoot, message.nodeId || 'conversation', message.attachments || [])
+          });
           break;
 
         case 'retryConversation':
@@ -1713,9 +1783,18 @@ function buildAgentConversationPrompt(
 function buildRoadmapRevisionPrompt(
   userMessage: string,
   workspaceRoot: string,
-  globalPrompt = ''
+  globalPrompt = '',
+  supplementFiles: string[] = []
 ): string {
   const normalizedUserMessage = userMessage.trim();
+  const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
+  const supplementFileInstructions = attachedFiles.length > 0
+    ? [
+      '用户为本次路线图调整附加了补充文件，开始执行前必须先读取这些文件：',
+      ...attachedFiles.map((file) => `- ${file}`),
+      '这些文件是本轮调整的重要上下文；如果它们与历史路线图描述冲突，以这些文件和本次调整要求为准。'
+    ].join('\n')
+    : '';
   const globalPromptInstructions = globalPrompt.trim()
     ? [
       '用户设置的全局默认要求：',
@@ -1731,6 +1810,7 @@ function buildRoadmapRevisionPrompt(
     '',
     '本次路线图调整要求（最高优先级）：',
     normalizedUserMessage,
+    ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行要求：',
@@ -2118,7 +2198,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   vscode.window.showInformationMessage(`Agent task [${nodeId}] was stopped.`);
 }
 
-async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = ''): Promise<void> {
+async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', supplementFiles: string[] = []): Promise<void> {
   if (!syncEngine || !activeProjectRoot) {
     return;
   }
@@ -2158,7 +2238,8 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   if (fs.existsSync(roadmapPath)) {
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
-  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt);
+  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
+  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles);
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot);
   const executionLogId = syncEngine.logAgentExecution(
@@ -2168,7 +2249,8 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     [
       'Roadmap revision started.',
       `Run started at: ${new Date().toISOString()}`,
-      `User supplement:\n${revisionRequest}`
+      `User supplement:\n${revisionRequest}`,
+      attachedFiles.length > 0 ? `Supplement files:\n${attachedFiles.join('\n')}` : ''
     ].join('\n\n'),
     'Running'
   );
@@ -4208,6 +4290,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let soloExpanded = false;
     const nodeConversations = {};
     const nodeSupplementFiles = {};
+    const conversationDrafts = {};
     const i18n = {
       zh: {
         title: 'SoloMap',
@@ -4399,6 +4482,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (roadmapRevisionBody) roadmapRevisionBody.innerHTML = '';
       Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
       Object.keys(nodeSupplementFiles).forEach(key => delete nodeSupplementFiles[key]);
+      Object.keys(conversationDrafts).forEach(key => delete conversationDrafts[key]);
       if (clearNodes) {
         currentNodes = [];
       }
@@ -4578,6 +4662,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           const soloDraft = message.nodeId === soloConversationId
             ? (soloBody.querySelector('[data-solo-input]')?.value || '')
             : '';
+          const revisionDraft = message.nodeId === roadmapRevisionId
+            ? (roadmapRevisionBody.querySelector('[data-roadmap-revision-input]')?.value || '')
+            : '';
+          if (message.nodeId && message.nodeId !== soloConversationId && message.nodeId !== roadmapRevisionId) {
+            const input = canvas.querySelector('[data-conversation-input-id="' + cssEscape(message.nodeId) + '"]');
+            conversationDrafts[message.nodeId] = input ? input.value : (conversationDrafts[message.nodeId] || '');
+          }
           nodeSupplementFiles[message.nodeId] = mergeSupplementFiles(
             nodeSupplementFiles[message.nodeId] || [],
             message.files || []
@@ -4588,6 +4679,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             const input = soloBody.querySelector('[data-solo-input]');
             if (input) {
               input.value = soloDraft;
+            }
+          }
+          if (message.nodeId === roadmapRevisionId) {
+            renderRoadmapRevisionPanel(currentNodes);
+            const input = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
+            if (input) {
+              input.value = revisionDraft;
             }
           }
           break;
@@ -4823,7 +4921,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 <button class="conversation-tool-btn" data-attach-node-id="\${escapeHtml(node.id)}" title="\${t('attachFiles')}" \${conversationDisabled}>
                   <span class="codicon codicon-attach"></span>
                 </button>
-                <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" \${conversationDisabled}>
+                <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" value="\${escapeHtml(conversationDrafts[node.id] || '')}" \${conversationDisabled}>
                 \${renderSoloSelect('conversation-agent-select', 'data-agent-select-id="' + escapeHtml(node.id) + '" title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions(node), node.status === 'Running')}
                 <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" title="\${t('send')}" \${conversationDisabled}>
                   <span class="codicon codicon-send"></span>
@@ -4873,15 +4971,24 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
             triggerRun(node.id, input ? input.value : '', getSoloSelectValue(agentSelect), nodeSupplementFiles[node.id] || []);
             if (input) input.value = '';
+            conversationDrafts[node.id] = '';
             nodeSupplementFiles[node.id] = [];
             renderRoadmap(currentNodes);
           });
         }
+        row.querySelectorAll('[data-conversation-input-id]').forEach(input => {
+          input.addEventListener('input', () => {
+            conversationDrafts[node.id] = input.value;
+          });
+        });
         row.querySelectorAll('[data-attach-node-id]').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
             vscode.postMessage({ command: 'chooseSupplementFiles', nodeId: node.id });
           });
+        });
+        row.querySelectorAll('[data-conversation-input-id]').forEach(input => {
+          bindPastedImageAttachments(input, node.id, () => renderRoadmap(currentNodes));
         });
         row.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
           item.addEventListener('click', (event) => {
@@ -5038,6 +5145,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderSoloPanel(currentNodes);
         });
       });
+      const soloInput = soloBody.querySelector('[data-solo-input]');
+      bindPastedImageAttachments(soloInput, soloConversationId, () => renderSoloPanel(currentNodes));
       bindSoloSelects(soloBody);
       bindConversationActions(soloBody, soloConversationId);
     }
@@ -5065,6 +5174,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
               <span class="codicon codicon-send"></span>
             </button>
           </div>
+          \${renderSupplementFiles(roadmapRevisionId, nodeSupplementFiles[roadmapRevisionId] || [])}
         </div>
         <div class="conversation-panel">
           <div class="conversation-title">\${escapeHtml(t('revisionHistory'))}</div>
@@ -5081,11 +5191,23 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           vscode.postMessage({
             command: 'runRoadmapRevision',
             userMessage: request,
-            agentCli: getSoloSelectValue(agentSelect)
+            agentCli: getSoloSelectValue(agentSelect),
+            supplementFiles: nodeSupplementFiles[roadmapRevisionId] || []
           });
           input.value = '';
+          nodeSupplementFiles[roadmapRevisionId] = [];
+          renderRoadmapRevisionPanel(currentNodes);
         });
       }
+      const revisionInput = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
+      bindPastedImageAttachments(revisionInput, roadmapRevisionId, () => renderRoadmapRevisionPanel(currentNodes));
+      roadmapRevisionBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
+        item.addEventListener('click', () => {
+          const file = item.getAttribute('data-remove-supplement-file');
+          nodeSupplementFiles[roadmapRevisionId] = (nodeSupplementFiles[roadmapRevisionId] || []).filter(candidate => candidate !== file);
+          renderRoadmapRevisionPanel(currentNodes);
+        });
+      });
       bindSoloSelects(roadmapRevisionBody);
       bindConversationActions(roadmapRevisionBody, roadmapRevisionId);
     }
@@ -5339,6 +5461,44 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           return true;
         })
         .slice(0, 10);
+    }
+
+    function readClipboardImage(file) {
+      return new Promise((resolve) => {
+        if (typeof FileReader === 'undefined' || !file) {
+          resolve(null);
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => resolve({
+          name: file.name || 'pasted-image',
+          mimeType: file.type || 'image/png',
+          dataUrl: String(reader.result || '')
+        });
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function bindPastedImageAttachments(input, nodeId, afterPaste) {
+      if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
+      input.setAttribute('data-paste-image-bound', 'true');
+      input.addEventListener('paste', async (event) => {
+        const items = Array.from((event.clipboardData && event.clipboardData.items) || []);
+        const files = items
+          .filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))
+          .map(item => item.getAsFile())
+          .filter(Boolean);
+        if (!files.length) return;
+        event.preventDefault();
+        const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
+        if (!attachments.length) return;
+        vscode.postMessage({
+          command: 'savePastedAttachments',
+          nodeId,
+          attachments
+        });
+      });
     }
 
     function renderSupplementFiles(nodeId, files) {

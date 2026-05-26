@@ -262,7 +262,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _syncEngine: SyncEngine,
-    private readonly _onRunAgent: (nodeId: string, userMessage?: string, agentCli?: string) => Promise<void>,
+    private readonly _onRunAgent: (nodeId: string, userMessage?: string, agentCli?: string, supplementFiles?: string[]) => Promise<void>,
     private readonly _getSettings: () => SolopreneurSettings,
     private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>,
     private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string },
@@ -271,7 +271,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, supplementFiles?: string[]) => Promise<void>,
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
-    private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>
+    private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
+    private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>
   ) {}
 
   public resolveWebviewView(
@@ -296,7 +297,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           this.sendNodesToWebview();
           break;
         case 'runAgent':
-          await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '');
+          await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
           break;
         case 'runSoloConversation':
           if (this._onRunSolo) {
@@ -308,6 +309,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (this._chooseSoloSupplementFiles) {
             const files = await this._chooseSoloSupplementFiles(data.projectPath || '');
             this._view?.webview.postMessage({ command: 'soloSupplementFilesSelected', files });
+          }
+          break;
+        case 'savePastedAttachments':
+          if (this._savePastedAttachments) {
+            const files = await this._savePastedAttachments(data.projectPath || '', data.scope || data.targetId || 'conversation', data.attachments || []);
+            this._view?.webview.postMessage({ command: 'pastedAttachmentsSaved', targetId: data.targetId || '', files });
           }
           break;
         case 'getSoloConversationHistory':
@@ -1650,6 +1657,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let sidebarSoloFiles = [];
     let sidebarSoloConversations = [];
     let sidebarSoloConversationExpanded = false;
+    const projectContinueFiles = {};
+    const projectContinueDrafts = {};
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [] };
     const i18n = {
       zh: {
@@ -1803,6 +1812,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function resetProjectScopedState(projectPath, clearNodes) {
       activeProjectPath = projectPath || '';
+      Object.keys(projectContinueFiles).forEach(key => delete projectContinueFiles[key]);
+      Object.keys(projectContinueDrafts).forEach(key => delete projectContinueDrafts[key]);
       if (clearNodes) {
         currentNodes = [];
       }
@@ -1920,6 +1931,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderSidebarSoloAttachments();
           break;
 
+        case 'pastedAttachmentsSaved':
+          if (message.targetId === 'sidebar-solo') {
+            sidebarSoloFiles = mergeAttachmentFiles(sidebarSoloFiles, message.files || []);
+            renderSidebarSoloAttachments();
+          } else if (message.targetId) {
+            const input = portfolioList.querySelector('[data-project-continue-input]');
+            projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
+            projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          }
+          break;
+
         case 'sidebarSoloConversationLoaded':
           if (message.projectPath !== getSoloSelectValue(sidebarSoloProject)) return;
           sidebarSoloConversations = message.conversations || [];
@@ -1996,6 +2019,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
 
     btnSendSidebarSolo.addEventListener('click', sendSidebarSoloConversation);
+    bindPastedImageAttachments(sidebarSoloInput, 'sidebar-solo', () => getSoloSelectValue(sidebarSoloProject), 'solo');
     sidebarSoloInput.addEventListener('keydown', (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault();
@@ -2061,6 +2085,61 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       sidebarSoloProject.classList.toggle('is-empty', !projectPath);
       const label = document.getElementById('sidebar-solo-project-name');
       if (label) label.textContent = projectName || t('chooseProject');
+    }
+
+    function mergeAttachmentFiles(existing, incoming) {
+      const seen = new Set();
+      return [...(existing || []), ...(incoming || [])]
+        .map(file => String(file || '').trim())
+        .filter(Boolean)
+        .filter(file => {
+          if (seen.has(file)) return false;
+          seen.add(file);
+          return true;
+        })
+        .slice(0, 10);
+    }
+
+    function readClipboardImage(file) {
+      return new Promise((resolve) => {
+        if (typeof FileReader === 'undefined' || !file) {
+          resolve(null);
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => resolve({
+          name: file.name || 'pasted-image',
+          mimeType: file.type || 'image/png',
+          dataUrl: String(reader.result || '')
+        });
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function bindPastedImageAttachments(input, targetId, getProjectPath, scope) {
+      if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
+      input.setAttribute('data-paste-image-bound', 'true');
+      input.addEventListener('paste', async (event) => {
+        const items = Array.from((event.clipboardData && event.clipboardData.items) || []);
+        const files = items
+          .filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))
+          .map(item => item.getAsFile())
+          .filter(Boolean);
+        if (!files.length) return;
+        const projectPath = getProjectPath ? getProjectPath() : '';
+        if (!projectPath) return;
+        event.preventDefault();
+        const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
+        if (!attachments.length) return;
+        vscode.postMessage({
+          command: 'savePastedAttachments',
+          projectPath,
+          targetId,
+          scope: scope || targetId,
+          attachments
+        });
+      });
     }
 
     function renderSidebarSoloAttachments() {
@@ -2383,15 +2462,31 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return '';
       }
       const disabled = node.status === 'Running' || node.status === 'Completed';
+      const files = projectContinueFiles[node.id] || [];
       return \`
         <div class="portfolio-compose" data-project-continue-composer>
           <div class="portfolio-compose-row">
-            <input class="portfolio-compose-input" data-project-continue-input placeholder="\${escapeHtml(t('continuePlaceholder'))}" \${disabled ? 'disabled' : ''}>
+            <input class="portfolio-compose-input" data-project-continue-input placeholder="\${escapeHtml(t('continuePlaceholder'))}" value="\${escapeHtml(projectContinueDrafts[node.id] || '')}" \${disabled ? 'disabled' : ''}>
             \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent', getAgentOptions(node), disabled)}
             <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled ? 'disabled' : ''}>
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
+          \${renderProjectContinueFiles(node.id, files)}
+        </div>
+      \`;
+    }
+
+    function renderProjectContinueFiles(nodeId, files) {
+      if (!files || files.length === 0) return '';
+      return \`
+        <div class="sidebar-solo-attachments">
+          \${files.map((file, index) => \`
+            <span class="sidebar-solo-file" title="\${escapeHtml(file)}">
+              <span class="sidebar-solo-file-name">\${escapeHtml(file)}</span>
+              <button class="sidebar-solo-file-remove" data-remove-project-continue-file="\${escapeHtml(nodeId)}::\${index}" title="Remove">&times;</button>
+            </span>
+          \`).join('')}
         </div>
       \`;
     }
@@ -2404,12 +2499,36 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const panel = sendButton.closest('[data-project-continue-composer]');
           const input = panel ? panel.querySelector('[data-project-continue-input]') : null;
           const agentSelect = panel ? panel.querySelector('[data-project-continue-agent]') : null;
-          runNodeAgent(sendButton.getAttribute('data-next-node-id'), input ? input.value : '', getSoloSelectValue(agentSelect));
+          const nodeId = sendButton.getAttribute('data-next-node-id');
+          runNodeAgent(nodeId, input ? input.value : '', getSoloSelectValue(agentSelect), projectContinueFiles[nodeId] || []);
           if (input) input.value = '';
+          projectContinueDrafts[nodeId] = '';
+          projectContinueFiles[nodeId] = [];
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
       container.querySelectorAll('[data-project-continue-input], [data-project-continue-agent]').forEach(item => {
         item.addEventListener('click', (event) => event.stopPropagation());
+      });
+      container.querySelectorAll('[data-project-continue-input]').forEach(input => {
+        const composer = input.closest('[data-project-continue-composer]');
+        const sendButton = composer ? composer.querySelector('[data-project-continue-send]') : null;
+        const nodeId = sendButton ? sendButton.getAttribute('data-next-node-id') : '';
+        input.addEventListener('input', () => {
+          projectContinueDrafts[nodeId] = input.value;
+        });
+        bindPastedImageAttachments(input, nodeId, () => currentProjects.selectedProjectPath, nodeId);
+      });
+      container.querySelectorAll('[data-remove-project-continue-file]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const value = button.getAttribute('data-remove-project-continue-file') || '';
+          const parts = value.split('::');
+          const nodeId = parts[0] || '';
+          const index = Number(parts[1] || 0);
+          projectContinueFiles[nodeId] = (projectContinueFiles[nodeId] || []).filter((_, fileIndex) => fileIndex !== index);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
       });
     }
 
@@ -2561,12 +2680,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
-    function runNodeAgent(nodeId, userMessage, agentCli) {
+    function runNodeAgent(nodeId, userMessage, agentCli, supplementFiles) {
       vscode.postMessage({
         command: 'runAgent',
         nodeId: nodeId,
         userMessage: userMessage || '',
-        agentCli: agentCli || ''
+        agentCli: agentCli || '',
+        supplementFiles: supplementFiles || []
       });
     }
   </script>
