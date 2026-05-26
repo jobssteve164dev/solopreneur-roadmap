@@ -771,6 +771,37 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       min-width: 0;
     }
 
+    .sidebar-solo-current-project {
+      min-height: 28px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      border: 1px solid rgba(124, 77, 255, 0.28);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.045);
+      padding: 5px 7px;
+      color: var(--text-main);
+      font-size: 11px;
+      box-sizing: border-box;
+    }
+
+    .sidebar-solo-current-project .codicon {
+      flex-shrink: 0;
+      color: #b79cff;
+    }
+
+    .sidebar-solo-current-project-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .sidebar-solo-current-project.is-empty {
+      color: var(--text-muted);
+      border-color: var(--border-glass);
+    }
+
     .sidebar-solo-agent {
       width: 92px;
       flex-shrink: 0;
@@ -1488,12 +1519,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="sidebar-solo-title"><span class="codicon codicon-comment-discussion"></span><span id="sidebar-solo-title">Solo 对话</span></div>
     <div class="sidebar-solo-subtitle" id="sidebar-solo-subtitle">直接开始，结束后可在项目的 Solo 历史中查看。</div>
     <div class="sidebar-solo-controls">
-      <div class="solo-select sidebar-solo-project" id="sidebar-solo-project" data-solo-select data-value="">
-        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label></span>
-          <span class="codicon codicon-chevron-down solo-select-caret"></span>
-        </button>
-        <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+      <div class="sidebar-solo-project sidebar-solo-current-project is-empty" id="sidebar-solo-project" data-value="">
+        <span class="codicon codicon-folder-opened"></span>
+        <span class="sidebar-solo-current-project-name" id="sidebar-solo-project-name">选择项目文件夹</span>
       </div>
       <div class="solo-select sidebar-solo-agent" id="sidebar-solo-agent" data-solo-select data-value="agy">
         <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
@@ -1802,7 +1830,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('progress-label', t('progress'));
       setText('text-open-full', t('openFull'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
-      renderSidebarSoloProjects(currentProjects.projects, currentProjects.selectedProjectPath);
+      renderSidebarSoloProjectDisplay(currentProjects.projects, currentProjects.selectedProjectPath);
       renderSidebarSoloAgents();
       renderSidebarSoloAttachments();
       renderSidebarSoloHistory();
@@ -1872,7 +1900,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           currentProjects.portfolio = message.projects.portfolio || [];
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
-          renderSidebarSoloProjects(message.projects.projects, message.projects.selectedProjectPath);
+          renderSidebarSoloProjectDisplay(message.projects.projects, message.projects.selectedProjectPath);
           renderPortfolio(message.projects.portfolio || [], message.projects.selectedProjectPath || '');
           break;
 
@@ -1942,14 +1970,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ command: 'addProject' });
     });
 
-    bindSoloSelect(sidebarSoloProject, () => {
-      sidebarSoloFiles = [];
-      renderSidebarSoloAttachments();
-      sidebarSoloConversations = [];
-      sidebarSoloConversationExpanded = false;
-      renderSidebarSoloHistory();
-      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: getSoloSelectValue(sidebarSoloProject) });
-    });
     bindSoloSelect(sidebarSoloAgent);
 
     function sendSidebarSoloConversation() {
@@ -2017,17 +2037,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       })), selectedProjectPath);
     }
 
-    function renderSidebarSoloProjects(projects, selectedProjectPath) {
+    function renderSidebarSoloProjectDisplay(projects, selectedProjectPath) {
       const existingSelection = getSoloSelectValue(sidebarSoloProject);
+      const project = (projects || []).find(candidate => candidate.path === selectedProjectPath);
       if (!projects || projects.length === 0) {
-        setSoloSelectOptions(sidebarSoloProject, [{ value: '', label: t('chooseProject') }], '');
+        setSidebarSoloProjectValue('', t('chooseProject'), '');
         return;
       }
-      setSoloSelectOptions(sidebarSoloProject, projects.map(project => ({
-        value: project.path,
-        label: project.name,
-        title: project.path
-      })), selectedProjectPath);
+      setSidebarSoloProjectValue(selectedProjectPath, project ? project.name : t('chooseProject'), project ? project.path : '');
       if (existingSelection && existingSelection !== selectedProjectPath) {
         sidebarSoloFiles = [];
         renderSidebarSoloAttachments();
@@ -2035,6 +2052,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (selectedProjectPath) {
         vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: selectedProjectPath });
       }
+    }
+
+    function setSidebarSoloProjectValue(projectPath, projectName, title) {
+      if (!sidebarSoloProject) return;
+      sidebarSoloProject.setAttribute('data-value', projectPath || '');
+      sidebarSoloProject.setAttribute('title', title || projectName || '');
+      sidebarSoloProject.classList.toggle('is-empty', !projectPath);
+      const label = document.getElementById('sidebar-solo-project-name');
+      if (label) label.textContent = projectName || t('chooseProject');
     }
 
     function renderSidebarSoloAttachments() {
@@ -2441,7 +2467,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         card.addEventListener('click', (event) => {
           if (event.target.closest('button') || event.target.closest('input') || event.target.closest('[data-solo-select]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
-          setSoloSelectValue(sidebarSoloProject, projectPath);
+          const project = (currentProjects.projects || []).find(candidate => candidate.path === projectPath);
+          setSidebarSoloProjectValue(projectPath, project ? project.name : t('chooseProject'), project ? project.path : '');
           sidebarSoloFiles = [];
           renderSidebarSoloAttachments();
           vscode.postMessage({

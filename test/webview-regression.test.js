@@ -195,7 +195,6 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'en', label: 'English' }
   ]);
   wireSoloSelect(elements['project-select'], []);
-  wireSoloSelect(elements['sidebar-solo-project'], []);
   wireSoloSelect(elements['sidebar-solo-agent'], [
     { value: 'agy', label: 'agy' },
     { value: 'codex', label: 'codex' }
@@ -295,6 +294,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'project-select',
     'btn-add-project',
     'sidebar-solo-project',
+    'sidebar-solo-project-name',
     'sidebar-solo-agent',
     'sidebar-solo-attachments',
     'btn-attach-sidebar-solo',
@@ -336,6 +336,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     }
   });
   assert.equal(elements['sidebar-solo-project'].getAttribute('data-value'), '/workspace/second');
+  assert.equal(elements['sidebar-solo-project-name'].textContent, 'second');
   assert.ok(postedMessages.some((message) => message.command === 'getSoloConversationHistory'
     && message.projectPath === '/workspace/second'));
 
@@ -529,6 +530,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
   assert.match(html, /id="sidebar-solo-project"/);
+  assert.match(html, /id="sidebar-solo-project-name"/);
+  assert.match(html, /sidebar-solo-current-project/);
+  assert.doesNotMatch(html, /id="sidebar-solo-project"[^>]*data-solo-select/);
   assert.match(html, /id="sidebar-solo-agent"/);
   assert.match(html, /id="sidebar-solo-attachments"/);
   assert.match(html, /id="btn-attach-sidebar-solo"/);
@@ -540,6 +544,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /soloSupplementFilesSelected/);
   assert.match(html, /getSoloConversationHistory/);
   assert.match(html, /sidebarSoloConversationLoaded/);
+  assert.match(html, /renderSidebarSoloProjectDisplay/);
   assert.match(html, /renderSidebarSoloHistory/);
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
