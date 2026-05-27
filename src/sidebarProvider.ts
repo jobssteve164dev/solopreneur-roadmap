@@ -82,6 +82,7 @@ function getAgentCliFamily(command: string): string {
   const name = path.basename((command || '').trim()).toLowerCase();
   if (['codex', 'codex-cli'].includes(name)) return 'codex';
   if (['claude', 'claude-code', 'claude-code-cli'].includes(name)) return 'claude';
+  if (['copilot', 'copilot-cli'].includes(name)) return 'copilot';
   if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
   if (['', 'agy', 'antigravity', 'antigravity-cli'].includes(name)) return 'antigravity';
   return name;
@@ -90,6 +91,7 @@ function getAgentCliFamily(command: string): string {
 function getKnownAgentCliCandidates(family: string): string[] {
   if (family === 'codex') return ['codex', 'codex-cli'];
   if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
+  if (family === 'copilot') return ['copilot', 'copilot-cli'];
   if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
   if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
   return family ? [family] : [];
@@ -108,6 +110,7 @@ function getAgentCliCandidates(agentCli: string, configuredCliPath: string): str
     'antigravity',
     'codex',
     'claude',
+    'copilot',
     'opencode'
   ].filter(Boolean);
   const candidates = [
@@ -1585,9 +1588,32 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
-      <input type="text" class="settings-input" id="setting-clipath" placeholder="e.g. agy, codex, claude, opencode">
+      <div class="settings-cli-select-wrap">
+        <div class="solo-select settings-select" id="setting-cli-select" data-solo-select data-value="agy">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+            <span class="solo-select-trigger-label" data-solo-label>agy</span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox">
+            <button type="button" class="solo-select-option" data-solo-option-value="agy" aria-selected="true">agy</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="codex" aria-selected="false">codex</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="cursor" aria-selected="false">cursor</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="copilot" aria-selected="false">copilot</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="claude" aria-selected="false">claude</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="opencode" aria-selected="false">opencode</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="custom" aria-selected="false">Custom...</button>
+          </div>
+        </div>
+        <input
+          type="text"
+          class="settings-input"
+          id="setting-clipath-custom"
+          placeholder="e.g. /usr/local/bin/cursor-cli or my-copilot"
+          style="display:none; margin-top: 6px;"
+        >
+      </div>
       <div id="help-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Name of globally installed CLI (e.g. <code>agy</code>, <code>codex</code>, <code>claude</code>, <code>opencode</code>) or the absolute path to its executable.
+        Name of globally installed CLI (e.g. <code>agy</code>, <code>codex</code>, <code>cursor</code>, <code>claude</code>, <code>copilot</code>, <code>opencode</code>) or the absolute path to its executable.
       </div>
     </div>
 
@@ -1651,7 +1677,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
-    const settingCliPath = document.getElementById('setting-clipath');
+    const settingCliSelect = document.getElementById('setting-cli-select');
+    const settingCliPathCustom = document.getElementById('setting-clipath-custom');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const btnTestCli = document.getElementById('btn-test-cli');
@@ -1716,7 +1743,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         settingsTitle: 'SoloMap 设置',
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
-        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、claude、opencode）或可执行文件绝对路径。',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode）或可执行文件绝对路径。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -1781,7 +1808,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         settingsTitle: 'SoloMap Settings',
         language: 'Language',
         cliPath: 'CLI Command or Path',
-        cliPathHelp: 'Name of a globally installed CLI such as agy, codex, claude, or opencode, or an absolute executable path.',
+        cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, or opencode, or an absolute executable path.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
@@ -1877,6 +1904,47 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       applyLanguage();
     });
 
+    bindSoloSelect(settingCliSelect, () => {
+      const selected = getSoloSelectValue(settingCliSelect);
+      settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
+    });
+
+    function getCliPresetFromCliPath(cliPath) {
+      const raw = String(cliPath || '').trim();
+      if (!raw) return 'agy';
+      // NOTE: this code runs inside a Webview <script> string; escaping must survive TS template literal parsing.
+      if (raw.includes('/') || raw.includes('\\\\')) return 'custom';
+      const base = raw.split(/[\\\\/]/).pop().toLowerCase();
+      if (['agy', 'antigravity', 'antigravity-cli'].includes(base)) return 'agy';
+      if (['codex', 'codex-cli'].includes(base)) return 'codex';
+      if (['cursor', 'cursor-cli'].includes(base)) return 'cursor';
+      if (['copilot', 'copilot-cli'].includes(base)) return 'copilot';
+      if (['claude', 'claude-code', 'claude-code-cli'].includes(base)) return 'claude';
+      if (['opencode', 'open-code', 'open-code-cli'].includes(base)) return 'opencode';
+      return 'custom';
+    }
+
+    function getEffectiveSettingCliPath() {
+      const selected = getSoloSelectValue(settingCliSelect);
+      if (selected === 'custom') {
+        return (settingCliPathCustom.value || '').trim() || 'agy';
+      }
+      return selected || 'agy';
+    }
+
+    function applySettingCliPath(cliPath) {
+      const raw = String(cliPath || '').trim() || 'agy';
+      const preset = getCliPresetFromCliPath(raw);
+      setSoloSelectValue(settingCliSelect, preset);
+      if (preset === 'custom') {
+        settingCliPathCustom.value = raw;
+        settingCliPathCustom.style.display = 'block';
+      } else {
+        settingCliPathCustom.value = '';
+        settingCliPathCustom.style.display = 'none';
+      }
+    }
+
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
@@ -1896,7 +1964,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'settingsLoaded':
-          settingCliPath.value = message.settings.cliPath || 'agy';
+          applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
@@ -1961,9 +2029,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     // Save Settings
     btnSaveSettings.addEventListener('click', () => {
+      const effectiveCliPath = getEffectiveSettingCliPath();
       vscode.postMessage({
         command: 'updateSettings',
-        cliPath: settingCliPath.value.trim(),
+        cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim()
       });
@@ -1981,7 +2050,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
       vscode.postMessage({
         command: 'testCli',
-        cliPath: settingCliPath.value.trim()
+        cliPath: getEffectiveSettingCliPath()
       });
     });
 
@@ -2446,9 +2515,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         options.push(normalized);
       }
       add(node && node.agentCli);
-      add(settingCliPath.value || 'agy');
+      add(getEffectiveSettingCliPath() || 'agy');
       add('antigravity');
       add('codex');
+      add('cursor');
+      add('copilot');
       add('claude');
       add('opencode');
       return options.map(option => ({ value: option, label: option }));
@@ -2458,14 +2529,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const normalized = String(value || '').trim();
       const name = normalized.split(/[\\\\/]/).pop().toLowerCase();
       if (name === 'codex-cli') return 'codex';
+      if (name === 'cursor-cli') return 'cursor';
+      if (name === 'copilot-cli') return 'copilot';
       if (name === 'agy' || name === 'antigravity-cli') return 'antigravity';
       return normalized;
     }
 
     function renderSidebarSoloAgents() {
       const existingSelection = getSoloSelectValue(sidebarSoloAgent);
-      const options = getAgentOptions({ agentCli: existingSelection || settingCliPath.value || 'agy' });
-      setSoloSelectOptions(sidebarSoloAgent, options, existingSelection || settingCliPath.value || 'agy');
+      const currentCli = getEffectiveSettingCliPath() || 'agy';
+      const options = getAgentOptions({ agentCli: existingSelection || currentCli });
+      setSoloSelectOptions(sidebarSoloAgent, options, existingSelection || currentCli);
     }
 
     function renderProjectContinueComposer(nodes) {
