@@ -311,7 +311,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'chooseSoloSupplementFiles':
           if (this._chooseSoloSupplementFiles) {
             const files = await this._chooseSoloSupplementFiles(data.projectPath || '');
-            this._view?.webview.postMessage({ command: 'soloSupplementFilesSelected', files });
+            this._view?.webview.postMessage({ command: 'soloSupplementFilesSelected', targetId: data.targetId || '', files });
           }
           break;
         case 'savePastedAttachments':
@@ -742,88 +742,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       margin-bottom: 14px;
     }
 
-    .sidebar-solo-card {
-      position: relative;
-      z-index: 20;
-      background: linear-gradient(145deg, rgba(124, 77, 255, 0.12), rgba(22, 28, 45, 0.55));
-      backdrop-filter: blur(8px);
-      border: 1px solid rgba(124, 77, 255, 0.28);
-      border-radius: 8px;
-      padding: 10px;
-      margin-bottom: 12px;
-    }
-
-    .sidebar-solo-title {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      font-weight: 700;
-      color: var(--text-main);
-      margin-bottom: 5px;
-    }
-
-    .sidebar-solo-subtitle {
-      color: var(--text-muted);
-      font-size: 10px;
-      line-height: 1.4;
-      margin-bottom: 9px;
-    }
-
-    .sidebar-solo-controls {
-      display: flex;
-      gap: 6px;
-      margin-bottom: 7px;
-    }
-
-    .sidebar-solo-project {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .sidebar-solo-current-project {
-      min-height: 28px;
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      border: 1px solid rgba(124, 77, 255, 0.28);
-      border-radius: 5px;
-      background: rgba(255, 255, 255, 0.045);
-      padding: 5px 7px;
-      color: var(--text-main);
-      font-size: 11px;
-      box-sizing: border-box;
-    }
-
-    .sidebar-solo-current-project .codicon {
-      flex-shrink: 0;
-      color: #b79cff;
-    }
-
-    .sidebar-solo-current-project-name {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .sidebar-solo-current-project.is-empty {
-      color: var(--text-muted);
-      border-color: var(--border-glass);
-    }
-
-    .sidebar-solo-agent {
-      width: 92px;
-      flex-shrink: 0;
-    }
-
-    .sidebar-solo-compose {
-      display: flex;
-      gap: 6px;
-      align-items: stretch;
-    }
-
-    .sidebar-solo-tool {
+    .portfolio-compose-tool {
       min-height: 46px;
       width: 36px;
       flex-shrink: 0;
@@ -837,7 +756,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       justify-content: center;
     }
 
-    .sidebar-solo-tool:hover {
+    .portfolio-compose-tool:hover {
       border-color: rgba(124, 77, 255, 0.48);
       color: #d9ccff;
     }
@@ -877,7 +796,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       padding: 0;
     }
 
-    .sidebar-solo-input {
+    .portfolio-compose-input {
       flex: 1;
       min-height: 46px;
       max-height: 98px;
@@ -893,11 +812,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       outline: none;
     }
 
-    .sidebar-solo-input:focus {
+    .portfolio-compose-input:focus {
       border-color: rgba(124, 77, 255, 0.65);
     }
 
-    .sidebar-solo-send {
+    .portfolio-compose-send {
       border: none;
       border-radius: 5px;
       min-height: 46px;
@@ -909,6 +828,30 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       align-items: center;
       justify-content: center;
       align-self: stretch;
+    }
+
+    .portfolio-mode-toggle {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 7px;
+    }
+
+    .portfolio-mode-btn {
+      flex: 1;
+      border: 1px solid var(--border-glass);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      padding: 5px 7px;
+      font-size: 10px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .portfolio-mode-btn.active {
+      background: rgba(0, 229, 255, 0.14);
+      border-color: rgba(0, 229, 255, 0.35);
+      color: #d8fbff;
     }
 
     .sidebar-solo-history {
@@ -1184,20 +1127,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-row {
       display: flex;
       gap: 6px;
-      align-items: center;
-      flex-wrap: wrap;
+      align-items: stretch;
     }
 
     .portfolio-compose-input {
-      flex: 1 1 100%;
+      flex: 1;
       min-width: 0;
+      min-height: 46px;
+      max-height: 98px;
+      resize: vertical;
       background: rgba(255, 255, 255, 0.06);
       border: 1px solid var(--border-glass);
       border-radius: 5px;
-      padding: 6px 7px;
+      padding: 7px;
       color: var(--text-main);
       font-family: inherit;
       font-size: 11px;
+      line-height: 1.35;
       outline: none;
     }
 
@@ -1209,14 +1155,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-send {
       border: none;
       border-radius: 5px;
-      background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
-      color: #000;
+      min-height: 46px;
+      background: linear-gradient(135deg, #7c4dff 0%, #00b0ff 100%);
+      color: #fff;
       font-size: 11px;
       font-weight: 800;
-      padding: 6px 9px;
+      padding: 0 10px;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 4px;
     }
 
@@ -1532,31 +1480,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
   </div>
 
-  <div class="sidebar-solo-card">
-    <div class="sidebar-solo-title"><span class="codicon codicon-comment-discussion"></span><span id="sidebar-solo-title">Solo 对话</span></div>
-    <div class="sidebar-solo-subtitle" id="sidebar-solo-subtitle">直接开始，结束后可在项目的 Solo 历史中查看。</div>
-    <div class="sidebar-solo-controls">
-      <div class="sidebar-solo-project sidebar-solo-current-project is-empty" id="sidebar-solo-project" data-value="">
-        <span class="codicon codicon-folder-opened"></span>
-        <span class="sidebar-solo-current-project-name" id="sidebar-solo-project-name">选择项目文件夹</span>
-      </div>
-      <div class="solo-select sidebar-solo-agent" id="sidebar-solo-agent" data-solo-select data-value="agy">
-        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label>agy</span>
-          <span class="codicon codicon-chevron-down solo-select-caret"></span>
-        </button>
-        <div class="solo-select-menu" data-solo-menu role="listbox"></div>
-      </div>
-    </div>
-    <div class="sidebar-solo-attachments" id="sidebar-solo-attachments"></div>
-    <div class="sidebar-solo-compose">
-      <button class="sidebar-solo-tool" id="btn-attach-sidebar-solo" title="添加补充文件"><span class="codicon codicon-attach"></span></button>
-      <textarea class="sidebar-solo-input" id="sidebar-solo-input" placeholder="说说你现在想处理的问题..."></textarea>
-      <button class="sidebar-solo-send" id="btn-send-sidebar-solo" title="发送"><span class="codicon codicon-send"></span></button>
-    </div>
-    <div class="sidebar-solo-history" id="sidebar-solo-history"></div>
-  </div>
-
   <div class="portfolio-panel">
     <div class="portfolio-header">
       <div class="portfolio-title" id="portfolio-title">项目总览</div>
@@ -1663,13 +1586,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnOpenFull = document.getElementById('btn-open-full');
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
-    const sidebarSoloProject = document.getElementById('sidebar-solo-project');
-    const sidebarSoloAgent = document.getElementById('sidebar-solo-agent');
-    const sidebarSoloAttachments = document.getElementById('sidebar-solo-attachments');
-    const btnAttachSidebarSolo = document.getElementById('btn-attach-sidebar-solo');
-    const sidebarSoloInput = document.getElementById('sidebar-solo-input');
-    const btnSendSidebarSolo = document.getElementById('btn-send-sidebar-solo');
-    const sidebarSoloHistory = document.getElementById('sidebar-solo-history');
     const portfolioList = document.getElementById('portfolio-list');
     const portfolioFilters = document.getElementById('portfolio-filters');
 
@@ -1688,18 +1604,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let currentNodes = [];
     let activeProjectPath = '';
     let activePortfolioFilter = 'all';
-    let sidebarSoloFiles = [];
     let sidebarSoloConversations = [];
     let sidebarSoloConversationExpanded = false;
+    const projectConversationModes = {};
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
+    const projectSoloFiles = {};
+    const projectSoloDrafts = {};
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [] };
     const i18n = {
       zh: {
         title: 'SoloMap',
         portfolioTitle: '项目总览',
-        soloTitle: 'Solo 对话',
-        soloSubtitle: '直接开始，结束后可在项目的 Solo 历史中查看。',
         soloPlaceholder: '说说你现在想处理的问题...',
         soloSend: '发送',
         soloAttach: '添加补充文件',
@@ -1723,6 +1639,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         projectOpen: '打开',
         projectContinue: '继续推进',
         projectReviewFailure: '处理失败',
+        projectModeContinue: '推进',
+        projectModeSolo: 'Solo',
         emptyPortfolio: '还没有已登记项目。',
         noPortfolioMatch: '当前筛选下没有项目。',
         latestUpdate: '最近更新',
@@ -1763,8 +1681,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       en: {
         title: 'SoloMap',
         portfolioTitle: 'Project Portfolio',
-        soloTitle: 'Solo conversation',
-        soloSubtitle: 'Start directly. The conversation will stay in the selected project history.',
         soloPlaceholder: 'Describe what you want to handle...',
         soloSend: 'Send',
         soloAttach: 'Attach files',
@@ -1788,6 +1704,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         projectOpen: 'Open',
         projectContinue: 'Continue',
         projectReviewFailure: 'Review Failure',
+        projectModeContinue: 'Continue',
+        projectModeSolo: 'Solo',
         emptyPortfolio: 'No registered projects yet.',
         noPortfolioMatch: 'No projects match this filter.',
         latestUpdate: 'Updated',
@@ -1848,6 +1766,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       activeProjectPath = projectPath || '';
       Object.keys(projectContinueFiles).forEach(key => delete projectContinueFiles[key]);
       Object.keys(projectContinueDrafts).forEach(key => delete projectContinueDrafts[key]);
+      Object.keys(projectSoloFiles).forEach(key => delete projectSoloFiles[key]);
+      Object.keys(projectSoloDrafts).forEach(key => delete projectSoloDrafts[key]);
       if (clearNodes) {
         currentNodes = [];
       }
@@ -1856,11 +1776,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function applyLanguage() {
       setText('sidebar-title', t('title'));
       setText('portfolio-title', t('portfolioTitle'));
-      setText('sidebar-solo-title', t('soloTitle'));
-      setText('sidebar-solo-subtitle', t('soloSubtitle'));
-      sidebarSoloInput.placeholder = t('soloPlaceholder');
-      btnSendSidebarSolo.title = t('soloSend');
-      btnAttachSidebarSolo.title = t('soloAttach');
       btnToggleSettings.title = t('settingsTitle');
       btnAddProject.title = t('chooseProject');
       setText('settings-title', t('settingsTitle'));
@@ -1875,10 +1790,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('progress-label', t('progress'));
       setText('text-open-full', t('openFull'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
-      renderSidebarSoloProjectDisplay(currentProjects.projects, currentProjects.selectedProjectPath);
-      renderSidebarSoloAgents();
-      renderSidebarSoloAttachments();
-      renderSidebarSoloHistory();
       renderPortfolioFilters();
       renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderSidebar(currentNodes);
@@ -1986,7 +1897,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           currentProjects.portfolio = message.projects.portfolio || [];
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
-          renderSidebarSoloProjectDisplay(message.projects.projects, message.projects.selectedProjectPath);
           renderPortfolio(message.projects.portfolio || [], message.projects.selectedProjectPath || '');
           break;
 
@@ -2002,16 +1912,24 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'soloSupplementFilesSelected':
-          sidebarSoloFiles = (message.files || []).slice(0, 10);
-          renderSidebarSoloAttachments();
+          if (message.targetId) {
+            if (String(message.targetId).startsWith('solo:')) {
+              projectSoloFiles[message.targetId] = mergeAttachmentFiles(projectSoloFiles[message.targetId] || [], message.files || []);
+            } else {
+              const input = portfolioList.querySelector('[data-project-conversation-input]');
+              projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
+              projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
+            }
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          }
           break;
 
         case 'pastedAttachmentsSaved':
-          if (message.targetId === 'sidebar-solo') {
-            sidebarSoloFiles = mergeAttachmentFiles(sidebarSoloFiles, message.files || []);
-            renderSidebarSoloAttachments();
+          if (message.targetId && String(message.targetId).startsWith('solo:')) {
+            projectSoloFiles[message.targetId] = mergeAttachmentFiles(projectSoloFiles[message.targetId] || [], message.files || []);
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           } else if (message.targetId) {
-            const input = portfolioList.querySelector('[data-project-continue-input]');
+            const input = portfolioList.querySelector('[data-project-conversation-input]');
             projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
             projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
@@ -2019,10 +1937,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'sidebarSoloConversationLoaded':
-          if (message.projectPath !== getSoloSelectValue(sidebarSoloProject)) return;
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
           sidebarSoloConversations = message.conversations || [];
           sidebarSoloConversationExpanded = false;
-          renderSidebarSoloHistory();
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
       }
     });
@@ -2069,40 +1987,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ command: 'addProject' });
     });
 
-    bindSoloSelect(sidebarSoloAgent);
-
-    function sendSidebarSoloConversation() {
-      const userMessage = sidebarSoloInput.value.trim();
-      const projectPath = getSoloSelectValue(sidebarSoloProject);
-      if (!projectPath || !userMessage) return;
-      vscode.postMessage({
-        command: 'runSoloConversation',
-        projectPath,
-        userMessage,
-        agentCli: getSoloSelectValue(sidebarSoloAgent),
-        supplementFiles: sidebarSoloFiles
-      });
-      sidebarSoloInput.value = '';
-      sidebarSoloFiles = [];
-      renderSidebarSoloAttachments();
-      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
-    }
-
-    btnAttachSidebarSolo.addEventListener('click', () => {
-      const projectPath = getSoloSelectValue(sidebarSoloProject);
-      if (!projectPath) return;
-      vscode.postMessage({ command: 'chooseSoloSupplementFiles', projectPath });
-    });
-
-    btnSendSidebarSolo.addEventListener('click', sendSidebarSoloConversation);
-    bindPastedImageAttachments(sidebarSoloInput, 'sidebar-solo', () => getSoloSelectValue(sidebarSoloProject), 'solo');
-    sidebarSoloInput.addEventListener('keydown', (event) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-        event.preventDefault();
-        sendSidebarSoloConversation();
-      }
-    });
-
     function renderPortfolioFilters() {
       const filters = [
         { key: 'all', label: t('filterAll') },
@@ -2135,32 +2019,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         label: project.name,
         title: project.path
       })), selectedProjectPath);
-    }
-
-    function renderSidebarSoloProjectDisplay(projects, selectedProjectPath) {
-      const existingSelection = getSoloSelectValue(sidebarSoloProject);
-      const project = (projects || []).find(candidate => candidate.path === selectedProjectPath);
-      if (!projects || projects.length === 0) {
-        setSidebarSoloProjectValue('', t('chooseProject'), '');
-        return;
-      }
-      setSidebarSoloProjectValue(selectedProjectPath, project ? project.name : t('chooseProject'), project ? project.path : '');
-      if (existingSelection && existingSelection !== selectedProjectPath) {
-        sidebarSoloFiles = [];
-        renderSidebarSoloAttachments();
-      }
-      if (selectedProjectPath) {
-        vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: selectedProjectPath });
-      }
-    }
-
-    function setSidebarSoloProjectValue(projectPath, projectName, title) {
-      if (!sidebarSoloProject) return;
-      sidebarSoloProject.setAttribute('data-value', projectPath || '');
-      sidebarSoloProject.setAttribute('title', title || projectName || '');
-      sidebarSoloProject.classList.toggle('is-empty', !projectPath);
-      const label = document.getElementById('sidebar-solo-project-name');
-      if (label) label.textContent = projectName || t('chooseProject');
     }
 
     function mergeAttachmentFiles(existing, incoming) {
@@ -2218,21 +2076,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
-    function renderSidebarSoloAttachments() {
-      sidebarSoloAttachments.innerHTML = sidebarSoloFiles.map((file, index) => \`
-        <span class="sidebar-solo-file">
-          <span class="sidebar-solo-file-name">\${escapeHtml(file)}</span>
-          <button class="sidebar-solo-file-remove" data-remove-sidebar-solo-file="\${index}" title="Remove">&times;</button>
-        </span>
-      \`).join('');
-      sidebarSoloAttachments.querySelectorAll('[data-remove-sidebar-solo-file]').forEach(button => {
-        button.addEventListener('click', () => {
-          sidebarSoloFiles.splice(Number(button.getAttribute('data-remove-sidebar-solo-file')), 1);
-          renderSidebarSoloAttachments();
-        });
-      });
-    }
-
     function summarizeSoloConversation(conversation) {
       const output = String(conversation.output || '');
       const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
@@ -2280,11 +2123,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return match[1].split('\\n').map(line => line.trim()).filter(line => line && !/^No (workspace|git|project) /i.test(line)).length;
     }
 
-    function renderSidebarSoloHistory() {
+    function renderSidebarSoloHistoryContent() {
       const conversation = sidebarSoloConversations[0];
       if (!conversation) {
-        sidebarSoloHistory.innerHTML = '<div class="sidebar-solo-history-title">' + escapeHtml(t('soloHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noSoloConversations')) + '</div>';
-        return;
+        return '<div class="sidebar-solo-history-title">' + escapeHtml(t('soloHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noSoloConversations')) + '</div>';
       }
       const failedReason = (String(conversation.output || '').match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
       const outcome = conversation.status === 'Running' ? t('stillWorking')
@@ -2298,7 +2140,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
         ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-solo-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
         : '';
-      sidebarSoloHistory.innerHTML = \`
+      return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('soloHistory'))}</div>
         <div class="sidebar-conversation" data-sidebar-solo-conversation>
           <div class="sidebar-conversation-row">
@@ -2325,19 +2167,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           \${continueButton ? \`<div class="sidebar-conversation-footer">\${continueButton}</div>\` : ''}
         </div>
       \`;
-      const card = sidebarSoloHistory.querySelector('[data-sidebar-solo-conversation]');
+    }
+
+    function bindSidebarSoloHistory(container, projectPath) {
+      const card = container.querySelector('[data-sidebar-solo-conversation]');
       if (card) {
         card.addEventListener('click', () => {
           sidebarSoloConversationExpanded = !sidebarSoloConversationExpanded;
-          renderSidebarSoloHistory();
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       }
-      sidebarSoloHistory.querySelectorAll('[data-continue-sidebar-solo-id]').forEach(item => {
+      container.querySelectorAll('[data-continue-sidebar-solo-id]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
             command: 'continueSoloConversation',
-            projectPath: getSoloSelectValue(sidebarSoloProject),
+            projectPath,
             conversationId: item.getAttribute('data-continue-sidebar-solo-id')
           });
         });
@@ -2535,41 +2380,51 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return normalized;
     }
 
-    function renderSidebarSoloAgents() {
-      const currentCli = getEffectiveSettingCliPath() || 'agy';
-      const options = getAgentOptions({ agentCli: currentCli });
-      setSoloSelectOptions(sidebarSoloAgent, options, currentCli);
+    function projectSoloTargetId(projectPath) {
+      return 'solo:' + String(projectPath || '');
     }
 
-    function renderProjectContinueComposer(nodes) {
+    function renderProjectConversationComposer(project, nodes) {
       const node = getNextActionNode(nodes || []);
-      if (!node) {
-        return '';
-      }
-      const disabled = node.status === 'Running' || node.status === 'Completed';
-      const files = projectContinueFiles[node.id] || [];
+      const projectPath = project.path || '';
+      const mode = projectConversationModes[projectPath] || 'continue';
+      const soloTargetId = projectSoloTargetId(projectPath);
+      const activeMode = mode === 'solo' || !node ? 'solo' : 'continue';
+      const targetId = activeMode === 'solo' ? soloTargetId : node.id;
+      const disabled = activeMode === 'continue' && (!node || node.status === 'Running' || node.status === 'Completed');
+      const files = activeMode === 'solo' ? (projectSoloFiles[soloTargetId] || []) : (projectContinueFiles[targetId] || []);
+      const draft = activeMode === 'solo' ? (projectSoloDrafts[projectPath] || '') : (projectContinueDrafts[targetId] || '');
+      const agentOptions = activeMode === 'solo'
+        ? getAgentOptions({ agentCli: getEffectiveSettingCliPath() || 'agy' })
+        : getAgentOptions(node);
       return \`
         <div class="portfolio-compose" data-project-continue-composer>
+          <div class="portfolio-mode-toggle">
+            <button class="portfolio-mode-btn \${activeMode === 'continue' ? 'active' : ''}" data-project-conversation-mode="continue" data-project-path="\${escapeHtml(projectPath)}" \${node ? '' : 'disabled'}>\${escapeHtml(t('projectModeContinue'))}</button>
+            <button class="portfolio-mode-btn \${activeMode === 'solo' ? 'active' : ''}" data-project-conversation-mode="solo" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('projectModeSolo'))}</button>
+          </div>
           <div class="portfolio-compose-row">
-            <input class="portfolio-compose-input" data-project-continue-input placeholder="\${escapeHtml(t('continuePlaceholder'))}" value="\${escapeHtml(projectContinueDrafts[node.id] || '')}" \${disabled ? 'disabled' : ''}>
-            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent', getAgentOptions(node), disabled)}
-            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node.id)}" \${disabled ? 'disabled' : ''}>
+            <button class="portfolio-compose-tool" data-project-attach-files data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" title="\${escapeHtml(t('soloAttach'))}"><span class="codicon codicon-attach"></span></button>
+            <textarea class="portfolio-compose-input" data-project-conversation-input data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" data-project-path="\${escapeHtml(projectPath)}" placeholder="\${escapeHtml(activeMode === 'solo' ? t('soloPlaceholder') : t('continuePlaceholder'))}" \${disabled ? 'disabled' : ''}>\${escapeHtml(draft)}</textarea>
+            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent', agentOptions, disabled)}
+            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${disabled ? 'disabled' : ''}>
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
-          \${renderProjectContinueFiles(node.id, files)}
+          \${renderProjectConversationFiles(targetId, files)}
+          \${activeMode === 'solo' ? \`<div class="sidebar-solo-history" data-sidebar-solo-history>\${renderSidebarSoloHistoryContent()}</div>\` : ''}
         </div>
       \`;
     }
 
-    function renderProjectContinueFiles(nodeId, files) {
+    function renderProjectConversationFiles(targetId, files) {
       if (!files || files.length === 0) return '';
       return \`
         <div class="sidebar-solo-attachments">
           \${files.map((file, index) => \`
             <span class="sidebar-solo-file" title="\${escapeHtml(file)}">
               <span class="sidebar-solo-file-name">\${escapeHtml(file)}</span>
-              <button class="sidebar-solo-file-remove" data-remove-project-continue-file="\${escapeHtml(nodeId)}::\${index}" title="Remove">&times;</button>
+              <button class="sidebar-solo-file-remove" data-remove-project-file="\${escapeHtml(targetId)}::\${index}" title="Remove">&times;</button>
             </span>
           \`).join('')}
         </div>
@@ -2578,43 +2433,107 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function bindProjectContinueComposer(container) {
       bindSoloSelects(container);
+      container.querySelectorAll('[data-project-conversation-mode]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-project-path') || '';
+          const input = container.querySelector('[data-project-conversation-input]');
+          if (input) {
+            const currentMode = input.getAttribute('data-conversation-mode') || 'continue';
+            const currentTargetId = input.getAttribute('data-conversation-target-id') || '';
+            if (currentMode === 'solo') {
+              projectSoloDrafts[projectPath] = input.value;
+            } else if (currentTargetId) {
+              projectContinueDrafts[currentTargetId] = input.value;
+            }
+          }
+          projectConversationModes[projectPath] = button.getAttribute('data-project-conversation-mode') || 'continue';
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      container.querySelectorAll('[data-project-attach-files]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
+          const targetId = button.getAttribute('data-conversation-target-id') || '';
+          if (!projectPath || !targetId) return;
+          vscode.postMessage({ command: 'chooseSoloSupplementFiles', projectPath, targetId });
+        });
+      });
       container.querySelectorAll('[data-project-continue-send]').forEach(sendButton => {
         sendButton.addEventListener('click', (event) => {
           event.stopPropagation();
           const panel = sendButton.closest('[data-project-continue-composer]');
-          const input = panel ? panel.querySelector('[data-project-continue-input]') : null;
+          const input = panel ? panel.querySelector('[data-project-conversation-input]') : null;
           const agentSelect = panel ? panel.querySelector('[data-project-continue-agent]') : null;
+          const mode = sendButton.getAttribute('data-conversation-mode') || 'continue';
+          const projectPath = sendButton.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
+          const targetId = sendButton.getAttribute('data-conversation-target-id') || '';
+          const userMessage = input ? input.value : '';
+          if (mode === 'solo') {
+            if (!projectPath || !userMessage.trim()) return;
+            vscode.postMessage({
+              command: 'runSoloConversation',
+              projectPath,
+              userMessage,
+              agentCli: getSoloSelectValue(agentSelect),
+              supplementFiles: projectSoloFiles[targetId] || []
+            });
+            if (input) input.value = '';
+            projectSoloDrafts[projectPath] = '';
+            projectSoloFiles[targetId] = [];
+            vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            return;
+          }
           const nodeId = sendButton.getAttribute('data-next-node-id');
-          runNodeAgent(nodeId, input ? input.value : '', getSoloSelectValue(agentSelect), projectContinueFiles[nodeId] || []);
+          runNodeAgent(nodeId, userMessage, getSoloSelectValue(agentSelect), projectContinueFiles[nodeId] || []);
           if (input) input.value = '';
           projectContinueDrafts[nodeId] = '';
           projectContinueFiles[nodeId] = [];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      container.querySelectorAll('[data-project-continue-input], [data-project-continue-agent]').forEach(item => {
+      container.querySelectorAll('[data-project-conversation-input], [data-project-continue-agent]').forEach(item => {
         item.addEventListener('click', (event) => event.stopPropagation());
       });
-      container.querySelectorAll('[data-project-continue-input]').forEach(input => {
-        const composer = input.closest('[data-project-continue-composer]');
-        const sendButton = composer ? composer.querySelector('[data-project-continue-send]') : null;
-        const nodeId = sendButton ? sendButton.getAttribute('data-next-node-id') : '';
+      container.querySelectorAll('[data-project-conversation-input]').forEach(input => {
+        const mode = input.getAttribute('data-conversation-mode') || 'continue';
+        const projectPath = input.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
+        const targetId = input.getAttribute('data-conversation-target-id') || '';
         input.addEventListener('input', () => {
-          projectContinueDrafts[nodeId] = input.value;
+          if (mode === 'solo') {
+            projectSoloDrafts[projectPath] = input.value;
+          } else {
+            projectContinueDrafts[targetId] = input.value;
+          }
         });
-        bindPastedImageAttachments(input, nodeId, () => currentProjects.selectedProjectPath, nodeId);
+        bindPastedImageAttachments(input, targetId, () => currentProjects.selectedProjectPath, targetId);
+        input.addEventListener('keydown', (event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            event.preventDefault();
+            const composer = input.closest('[data-project-continue-composer]');
+            const sendButton = composer ? composer.querySelector('[data-project-continue-send]') : null;
+            if (sendButton) sendButton.click();
+          }
+        });
       });
-      container.querySelectorAll('[data-remove-project-continue-file]').forEach(button => {
+      container.querySelectorAll('[data-remove-project-file]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
-          const value = button.getAttribute('data-remove-project-continue-file') || '';
+          const value = button.getAttribute('data-remove-project-file') || '';
           const parts = value.split('::');
-          const nodeId = parts[0] || '';
+          const targetId = parts[0] || '';
           const index = Number(parts[1] || 0);
-          projectContinueFiles[nodeId] = (projectContinueFiles[nodeId] || []).filter((_, fileIndex) => fileIndex !== index);
+          if (targetId.startsWith('solo:')) {
+            projectSoloFiles[targetId] = (projectSoloFiles[targetId] || []).filter((_, fileIndex) => fileIndex !== index);
+          } else {
+            projectContinueFiles[targetId] = (projectContinueFiles[targetId] || []).filter((_, fileIndex) => fileIndex !== index);
+          }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
+      bindSidebarSoloHistory(container, currentProjects.selectedProjectPath);
     }
 
     function renderPortfolio(portfolio, selectedProjectPath) {
@@ -2662,23 +2581,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
               \${isSelected ? '' : \`<button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>\`}
             </div>
-            \${isSelected ? renderProjectContinueComposer(currentNodes) : ''}
+            \${isSelected ? renderProjectConversationComposer(project, currentNodes) : ''}
           </div>
         \`;
       }).join('');
 
       portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
         card.addEventListener('click', (event) => {
-          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('[data-solo-select]')) return;
+          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
-          const project = (currentProjects.projects || []).find(candidate => candidate.path === projectPath);
-          setSidebarSoloProjectValue(projectPath, project ? project.name : t('chooseProject'), project ? project.path : '');
-          sidebarSoloFiles = [];
-          renderSidebarSoloAttachments();
           vscode.postMessage({
             command: 'selectProject',
             projectPath
           });
+          vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
         });
       });
       portfolioList.querySelectorAll('[data-open-project-path]').forEach(button => {

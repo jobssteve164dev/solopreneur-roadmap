@@ -205,11 +205,6 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'custom', label: 'Custom...' }
   ]);
   wireSoloSelect(elements['project-select'], []);
-  wireSoloSelect(elements['sidebar-solo-agent'], [
-    { value: 'agy', label: 'agy' },
-    { value: 'codex', label: 'codex' }
-  ]);
-
   const context = {
     document: {
       getElementById: (id) => elements[id] || null,
@@ -322,14 +317,6 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-open-full',
     'project-select',
     'btn-add-project',
-    'sidebar-solo-project',
-    'sidebar-solo-project-name',
-    'sidebar-solo-agent',
-    'sidebar-solo-attachments',
-    'btn-attach-sidebar-solo',
-    'sidebar-solo-input',
-    'btn-send-sidebar-solo',
-    'sidebar-solo-history',
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
@@ -361,20 +348,49 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     command: 'settingsLoaded',
     settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '' }
   });
-  assert.equal(elements['sidebar-solo-agent'].getAttribute('data-value'), 'copilot');
 
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {
       projects: [{ name: 'app', path: '/workspace/app' }, { name: 'second', path: '/workspace/second' }],
       selectedProjectPath: '/workspace/second',
-      portfolio: []
+      portfolio: [{
+        name: 'second',
+        path: '/workspace/second',
+        totalNodes: 1,
+        completedNodes: 0,
+        failedNodes: 0,
+        runningNodes: 0,
+        inProgressNodes: 0,
+        pendingNodes: 1,
+        progressPercent: 0,
+        currentStage: '产品',
+        recommendedNodeId: 'step-1',
+        recommendedNodeTitle: '验证首页',
+        recommendedStatus: 'Pending',
+        overallStatus: 'Pending',
+        recentActivityAt: '2026-05-26T10:00:00.000Z'
+      }]
     }
   });
-  assert.equal(elements['sidebar-solo-project'].getAttribute('data-value'), '/workspace/second');
-  assert.equal(elements['sidebar-solo-project-name'].textContent, 'second');
-  assert.ok(postedMessages.some((message) => message.command === 'getSoloConversationHistory'
-    && message.projectPath === '/workspace/second'));
+  assert.match(elements['portfolio-list'].innerHTML, /data-project-continue-composer/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
+  dispatchMessage({
+    command: 'nodesUpdated',
+    projectPath: '/workspace/second',
+    nodes: [{
+      id: 'step-1',
+      title: '验证首页',
+      stage: '产品',
+      status: 'Pending',
+      agentCli: 'codex',
+      dependencies: ''
+    }]
+  });
+  dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: 'step-1', files: ['docs/brief.md'] });
+  assert.match(elements['portfolio-list'].innerHTML, /docs\/brief\.md/);
 
   dispatchMessage({
     command: 'sidebarSoloConversationLoaded',
@@ -388,30 +404,20 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       output: 'User supplement:\n判断首页方向\n\nTouched project files:\nsrc/view.ts\n\nRun duration ms: 2000\n\nNative Agent session saved: .solopreneur/step-sessions/__solo__.json (3350a3b7-7761-4ed5-9661-2e9c9de8f924)\n\nAgent output tail:\n方向可继续验证。'
     }]
   });
-  assert.match(elements['sidebar-solo-history'].innerHTML, /判断首页方向/);
-  assert.match(elements['sidebar-solo-history'].innerHTML, /codex/);
-  assert.match(elements['sidebar-solo-history'].innerHTML, /耗时|Duration/);
-  assert.match(elements['sidebar-solo-history'].innerHTML, /data-continue-sidebar-solo-id/);
-  assert.match(elements['sidebar-solo-history'].innerHTML, /sidebar-conversation-footer/);
-  const actionsHtml = elements['sidebar-solo-history'].innerHTML.match(/<div class="sidebar-conversation-actions">([\s\S]*?)<\/div>/)[1];
+  dispatchMessage({
+    command: 'nodesUpdated',
+    projectPath: '/workspace/second',
+    nodes: []
+  });
+  assert.match(elements['portfolio-list'].innerHTML, /判断首页方向/);
+  assert.match(elements['portfolio-list'].innerHTML, /codex/);
+  assert.match(elements['portfolio-list'].innerHTML, /耗时|Duration/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-solo-id/);
+  assert.match(elements['portfolio-list'].innerHTML, /sidebar-conversation-footer/);
+  dispatchMessage({ command: 'pastedAttachmentsSaved', targetId: 'solo:/workspace/second', files: ['.solopreneur/attachments/solo/paste.png'] });
+  assert.match(elements['portfolio-list'].innerHTML, /paste\.png/);
+  const actionsHtml = elements['portfolio-list'].innerHTML.match(/<div class="sidebar-conversation-actions">([\s\S]*?)<\/div>/)[1];
   assert.doesNotMatch(actionsHtml, /data-continue-sidebar-solo-id/);
-
-  elements['sidebar-solo-project'].setAttribute('data-value', '/workspace/app');
-  elements['sidebar-solo-agent'].setAttribute('data-value', 'codex');
-  elements['btn-attach-sidebar-solo'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'chooseSoloSupplementFiles'
-    && message.projectPath === '/workspace/app'));
-  dispatchMessage({ command: 'soloSupplementFilesSelected', files: ['docs/brief.md'] });
-  dispatchMessage({ command: 'pastedAttachmentsSaved', targetId: 'sidebar-solo', files: ['.solopreneur/attachments/solo/paste.png'] });
-  assert.match(elements['sidebar-solo-attachments'].innerHTML, /paste\.png/);
-  elements['sidebar-solo-input'].value = '讨论当前页面的易用性问题';
-  elements['btn-send-sidebar-solo'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'runSoloConversation'
-    && message.projectPath === '/workspace/app'
-    && message.agentCli === 'codex'
-    && message.supplementFiles[0] === 'docs/brief.md'
-    && message.supplementFiles[1] === '.solopreneur/attachments/solo/paste.png'
-    && message.userMessage === '讨论当前页面的易用性问题'));
 });
 
 test('full roadmap webview runtime script parses and opens settings panel', () => {
@@ -588,30 +594,21 @@ test('sidebar keeps project creation focused on the project switcher', () => {
 
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
-  assert.match(html, /id="sidebar-solo-project"/);
-  assert.match(html, /id="sidebar-solo-project-name"/);
-  assert.match(html, /sidebar-solo-current-project/);
-  assert.doesNotMatch(html, /id="sidebar-solo-project"[^>]*data-solo-select/);
-  assert.match(html, /id="sidebar-solo-agent"/);
-  assert.match(html, /id="sidebar-solo-attachments"/);
-  assert.match(html, /id="btn-attach-sidebar-solo"/);
-  assert.match(html, /id="sidebar-solo-input"/);
-  assert.match(html, /id="btn-send-sidebar-solo"/);
-  assert.match(html, /id="sidebar-solo-history"/);
+  assert.doesNotMatch(html, /sidebar-solo-card/);
+  assert.doesNotMatch(html, /id="sidebar-solo-project"/);
+  assert.doesNotMatch(html, /id="sidebar-solo-input"/);
   assert.match(html, /runSoloConversation/);
   assert.match(html, /chooseSoloSupplementFiles/);
   assert.match(html, /soloSupplementFilesSelected/);
   assert.match(html, /getSoloConversationHistory/);
   assert.match(html, /sidebarSoloConversationLoaded/);
-  assert.match(html, /renderSidebarSoloProjectDisplay/);
-  assert.match(html, /renderSidebarSoloHistory/);
+  assert.match(html, /renderSidebarSoloHistoryContent/);
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
-  assert.match(html, /\.sidebar-solo-compose\s*\{[\s\S]*?align-items:\s*stretch/);
+  assert.match(html, /\.portfolio-compose-row\s*\{[\s\S]*?align-items:\s*stretch/);
   assert.match(html, /\.sidebar-conversation-footer\s*\{[\s\S]*?justify-content:\s*flex-end/);
   assert.match(html, /\.sidebar-conversation-detail\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.match(html, /\.sidebar-conversation-detail pre\s*\{[\s\S]*?max-width:\s*100%/);
-  assert.match(html, /\.sidebar-solo-card\s*\{[\s\S]*?z-index:\s*20/);
   assert.match(html, /function normalizeAgentOption/);
   assert.match(html, /add\('antigravity'\)/);
   assert.doesNotMatch(html, /add\('codex-cli'\)/);
@@ -621,8 +618,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="portfolio-list"/);
   assert.doesNotMatch(html, /id="next-action-panel"/);
   assert.match(html, /getNextActionNode/);
-  assert.match(html, /renderProjectContinueComposer/);
+  assert.match(html, /renderProjectConversationComposer/);
   assert.match(html, /data-project-continue-composer/);
+  assert.match(html, /data-project-conversation-mode="continue"/);
+  assert.match(html, /data-project-conversation-mode="solo"/);
+  assert.match(html, /data-project-conversation-input/);
   assert.match(html, /data-project-continue-send/);
   assert.match(html, /data-select-project-path/);
   assert.match(html, /selectProject/);
