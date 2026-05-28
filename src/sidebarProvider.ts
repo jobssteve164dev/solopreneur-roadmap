@@ -743,7 +743,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .portfolio-compose-tool {
-      min-height: 46px;
+      min-height: 84px;
       width: 36px;
       flex-shrink: 0;
       border: 1px solid var(--border-glass);
@@ -765,7 +765,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: flex;
       flex-wrap: wrap;
       gap: 5px;
-      margin: 0 0 7px;
+      margin: 8px 0 2px;
     }
 
     .sidebar-solo-file {
@@ -798,8 +798,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .portfolio-compose-input {
       flex: 1;
-      min-height: 46px;
-      max-height: 98px;
+      min-height: 84px;
+      max-height: 160px;
       resize: vertical;
       background: rgba(255, 255, 255, 0.06);
       border: 1px solid var(--border-glass);
@@ -819,7 +819,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-send {
       border: none;
       border-radius: 5px;
-      min-height: 46px;
+      min-height: 84px;
       padding: 0 10px;
       background: linear-gradient(135deg, #7c4dff 0%, #00b0ff 100%);
       color: #fff;
@@ -852,6 +852,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       background: rgba(0, 229, 255, 0.14);
       border-color: rgba(0, 229, 255, 0.35);
       color: #d8fbff;
+    }
+
+    .portfolio-mode-btn[data-project-conversation-mode="solo"].active {
+      background: rgba(124, 77, 255, 0.2);
+      border-color: rgba(124, 77, 255, 0.55);
+      color: #dfd5ff;
     }
 
     .sidebar-solo-history {
@@ -1133,8 +1139,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-input {
       flex: 1;
       min-width: 0;
-      min-height: 46px;
-      max-height: 98px;
+      min-height: 84px;
+      max-height: 160px;
       resize: vertical;
       background: rgba(255, 255, 255, 0.06);
       border: 1px solid var(--border-glass);
@@ -1148,14 +1154,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .portfolio-compose-agent {
-      flex: 1 1 120px;
+      width: 100%;
       min-width: 0;
+    }
+
+    .portfolio-compose-agent-row {
+      margin-bottom: 7px;
     }
 
     .portfolio-compose-send {
       border: none;
       border-radius: 5px;
-      min-height: 46px;
+      min-height: 84px;
       background: linear-gradient(135deg, #7c4dff 0%, #00b0ff 100%);
       color: #fff;
       font-size: 11px;
@@ -2403,10 +2413,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <button class="portfolio-mode-btn \${activeMode === 'continue' ? 'active' : ''}" data-project-conversation-mode="continue" data-project-path="\${escapeHtml(projectPath)}" \${node ? '' : 'disabled'}>\${escapeHtml(t('projectModeContinue'))}</button>
             <button class="portfolio-mode-btn \${activeMode === 'solo' ? 'active' : ''}" data-project-conversation-mode="solo" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('projectModeSolo'))}</button>
           </div>
+          <div class="portfolio-compose-agent-row">
+            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent', agentOptions, disabled)}
+          </div>
           <div class="portfolio-compose-row">
             <button class="portfolio-compose-tool" data-project-attach-files data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" title="\${escapeHtml(t('soloAttach'))}"><span class="codicon codicon-attach"></span></button>
             <textarea class="portfolio-compose-input" data-project-conversation-input data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" data-project-path="\${escapeHtml(projectPath)}" placeholder="\${escapeHtml(activeMode === 'solo' ? t('soloPlaceholder') : t('continuePlaceholder'))}" \${disabled ? 'disabled' : ''}>\${escapeHtml(draft)}</textarea>
-            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent', agentOptions, disabled)}
             <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${disabled ? 'disabled' : ''}>
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
