@@ -3191,25 +3191,49 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
     }
 
-    .btn-solo {
+    .view-tabs {
+      display: flex;
+      gap: 8px;
+      padding: 10px 24px 0;
+      background: rgba(15, 17, 26, 0.7);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      z-index: 8;
+    }
+
+    .view-tab {
       height: 34px;
       display: inline-flex;
       align-items: center;
       gap: 6px;
       padding: 0 12px;
-      color: #e9ddff;
-      background: rgba(124, 77, 255, 0.14);
-      border: 1px solid rgba(124, 77, 255, 0.34);
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-glass);
       border-radius: 8px;
       flex-shrink: 0;
     }
 
-    .btn-solo:hover,
-    .btn-solo.active {
+    .view-tab:hover,
+    .view-tab.active {
+      color: #d8fbff;
+      background: rgba(0, 229, 255, 0.12);
+      border-color: rgba(0, 229, 255, 0.32);
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.18);
+    }
+
+    .view-tab.solo-tab.active {
       color: #fff;
-      background: rgba(124, 77, 255, 0.42);
-      border-color: rgba(167, 139, 250, 0.7);
-      box-shadow: 0 0 12px rgba(124, 77, 255, 0.3);
+      background: rgba(124, 77, 255, 0.36);
+      border-color: rgba(167, 139, 250, 0.68);
+      box-shadow: 0 0 12px rgba(124, 77, 255, 0.28);
+    }
+
+    .view-panel {
+      display: none;
+    }
+
+    .view-panel.active {
+      display: flex;
     }
 
     input[type="text"] {
@@ -3268,6 +3292,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       flex-direction: column;
       align-items: center;
       gap: 30px;
+    }
+
+    .solo-view {
+      flex: 1;
+      overflow: auto;
+      padding: clamp(18px, 4vw, 40px);
+      background: radial-gradient(circle at 50% 50%, rgba(35, 24, 66, 0.45) 0%, rgba(10, 12, 22, 0.95) 100%);
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .solo-view-inner {
+      width: min(860px, 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
     }
 
     .roadmap-revision-title {
@@ -3913,11 +3953,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
     }
 
-    .solo-conversation-popover {
-      right: 110px;
-      width: clamp(360px, 46vw, 620px);
-    }
-
     .roadmap-revision-header {
       display: flex;
       justify-content: space-between;
@@ -4163,8 +4198,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
 
       .settings-overlay,
-      .roadmap-revision-popover,
-      .solo-conversation-popover {
+      .roadmap-revision-popover {
         top: 118px;
         left: 12px;
         right: 12px;
@@ -4219,15 +4253,25 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         </div>
         <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
         <button class="btn-project-remove" id="btn-remove-project" title="Remove project"><span class="codicon codicon-trash"></span></button>
-        <button class="btn-solo" id="btn-toggle-solo" title="Solo"><span class="codicon codicon-comment-discussion"></span><span>Solo</span></button>
         <button class="btn-roadmap-revision" id="btn-toggle-roadmap-revision" title="Revise Roadmap"><span class="codicon codicon-git-compare"></span></button>
         <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
       </div>
     </header>
 
-    <div class="roadmap-canvas" id="canvas">
+    <div class="view-tabs" role="tablist">
+      <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">路线图</span></button>
+      <button class="view-tab solo-tab" id="btn-toggle-solo" type="button"><span class="codicon codicon-comment-discussion"></span><span id="solo-view-tab-label">Solo</span></button>
+    </div>
+
+    <div class="roadmap-canvas view-panel active" id="canvas">
       <div class="flow-line"></div>
       <!-- Nodes are injected here -->
+    </div>
+
+    <div class="solo-view view-panel" id="solo-panel">
+      <div class="solo-view-inner">
+        <div class="solo-conversation-body" id="solo-body"></div>
+      </div>
     </div>
   </div>
 
@@ -4237,14 +4281,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <button class="btn-close-revision" id="btn-close-roadmap-revision" title="Close"><span class="codicon codicon-close"></span></button>
     </div>
     <div class="roadmap-revision-body" id="roadmap-revision-body"></div>
-  </div>
-
-  <div class="roadmap-revision-popover solo-conversation-popover" id="solo-panel">
-    <div class="roadmap-revision-header">
-      <h3><span class="codicon codicon-comment-discussion"></span><span id="solo-title">直接开始</span></h3>
-      <button class="btn-close-revision" id="btn-close-solo" title="Close"><span class="codicon codicon-close"></span></button>
-    </div>
-    <div class="solo-conversation-body" id="solo-body"></div>
   </div>
 
   <!-- Settings Panel Overlay -->
@@ -4320,8 +4356,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
     const btnRemoveProject = document.getElementById('btn-remove-project');
+    const btnToggleRoadmapView = document.getElementById('btn-toggle-roadmap-view');
     const btnToggleSolo = document.getElementById('btn-toggle-solo');
-    const btnCloseSolo = document.getElementById('btn-close-solo');
     const soloPanel = document.getElementById('solo-panel');
     const soloBody = document.getElementById('solo-body');
     const btnToggleRoadmapRevision = document.getElementById('btn-toggle-roadmap-revision');
@@ -4346,6 +4382,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let activeConversationId = '';
     let activeProjectPath = '';
     let currentCliPath = 'agy';
+    let activeMainView = 'roadmap';
     const roadmapRevisionId = '__roadmap_revision__';
     const soloConversationId = '__solo__';
     let roadmapRevisionExpanded = false;
@@ -4392,6 +4429,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent 结论',
         failureLabel: '失败原因',
         completionCriteria: '完成标准',
+        roadmapView: '路线图',
         soloTitle: '直接开始',
         soloPlaceholder: '描述你现在想处理的问题或想法...',
         soloHistory: 'Solo 对话历史',
@@ -4466,6 +4504,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent conclusion',
         failureLabel: 'Failure reason',
         completionCriteria: 'Completion criteria',
+        roadmapView: 'Roadmap',
         soloTitle: 'Start directly',
         soloPlaceholder: 'Describe the issue or idea you want to handle...',
         soloHistory: 'Solo conversation history',
@@ -4537,6 +4576,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       soloExpanded = false;
       activeConversationId = '';
       if (soloPanel) soloPanel.classList.remove('open');
+      if (soloPanel) soloPanel.classList.remove('active');
+      if (canvas) canvas.classList.add('active');
+      if (btnToggleRoadmapView) btnToggleRoadmapView.classList.add('active');
       if (btnToggleSolo) btnToggleSolo.classList.remove('active');
       if (soloBody) soloBody.innerHTML = '';
       if (roadmapRevisionPanel) roadmapRevisionPanel.classList.remove('open');
@@ -4555,6 +4597,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       btnAddProject.title = t('addProject');
       btnRemoveProject.title = t('removeProject');
       btnToggleSolo.title = t('soloTitle');
+      setText('roadmap-view-tab-label', t('roadmapView'));
+      setText('solo-view-tab-label', 'Solo');
       btnToggleRoadmapRevision.title = t('reviseRoadmap');
       setText('settings-title', t('settingsTitle'));
       setText('roadmap-revision-title', t('reviseRoadmap'));
@@ -4575,6 +4619,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     const currentProjects = { projects: [], selectedProjectPath: '' };
 
+    function setMainView(view) {
+      activeMainView = view === 'solo' ? 'solo' : 'roadmap';
+      soloExpanded = activeMainView === 'solo';
+      activeConversationId = '';
+      canvas.classList.toggle('active', activeMainView === 'roadmap');
+      soloPanel.classList.toggle('active', activeMainView === 'solo');
+      btnToggleRoadmapView.classList.toggle('active', activeMainView === 'roadmap');
+      btnToggleSolo.classList.toggle('active', activeMainView === 'solo');
+      if (activeMainView === 'solo' && !nodeConversations[soloConversationId]) {
+        vscode.postMessage({ command: 'getNodeConversations', nodeId: soloConversationId });
+      }
+      renderSoloPanel(currentNodes);
+    }
+
     // Toggle Settings panel visibility
     btnToggleSettings.addEventListener('click', () => {
       if (settingsPanel.style.display === 'flex') {
@@ -4583,9 +4641,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         roadmapRevisionExpanded = false;
         roadmapRevisionPanel.classList.remove('open');
         btnToggleRoadmapRevision.classList.remove('active');
-        soloExpanded = false;
-        soloPanel.classList.remove('open');
-        btnToggleSolo.classList.remove('active');
         settingsPanel.style.display = 'flex';
         vscode.postMessage({ command: 'getSettings' });
       }
@@ -4596,30 +4651,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       cliTestBadge.style.display = 'none';
     });
 
-    btnToggleSolo.addEventListener('click', () => {
-      soloExpanded = !soloExpanded;
-      activeConversationId = '';
-      soloPanel.classList.toggle('open', soloExpanded);
-      btnToggleSolo.classList.toggle('active', soloExpanded);
-      if (soloExpanded) {
-        settingsPanel.style.display = 'none';
-        cliTestBadge.style.display = 'none';
-        roadmapRevisionExpanded = false;
-        roadmapRevisionPanel.classList.remove('open');
-        btnToggleRoadmapRevision.classList.remove('active');
-        if (!nodeConversations[soloConversationId]) {
-          vscode.postMessage({ command: 'getNodeConversations', nodeId: soloConversationId });
-        }
-      }
-      renderSoloPanel(currentNodes);
+    btnToggleRoadmapView.addEventListener('click', () => {
+      setMainView('roadmap');
     });
 
-    btnCloseSolo.addEventListener('click', () => {
-      soloExpanded = false;
-      activeConversationId = '';
-      soloPanel.classList.remove('open');
-      btnToggleSolo.classList.remove('active');
-      renderSoloPanel(currentNodes);
+    btnToggleSolo.addEventListener('click', () => {
+      settingsPanel.style.display = 'none';
+      cliTestBadge.style.display = 'none';
+      roadmapRevisionExpanded = false;
+      roadmapRevisionPanel.classList.remove('open');
+      btnToggleRoadmapRevision.classList.remove('active');
+      setMainView('solo');
     });
 
     btnToggleRoadmapRevision.addEventListener('click', () => {
@@ -4630,9 +4672,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (roadmapRevisionExpanded) {
         settingsPanel.style.display = 'none';
         cliTestBadge.style.display = 'none';
-        soloExpanded = false;
-        soloPanel.classList.remove('open');
-        btnToggleSolo.classList.remove('active');
+        setMainView('roadmap');
         if (!nodeConversations[roadmapRevisionId]) {
           vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
         }
@@ -5195,7 +5235,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const running = conversations.some(conversation => conversation.status === 'Running')
         || (nodes || []).some(node => node.status === 'Running');
       const disabled = running ? 'disabled' : '';
-      soloPanel.classList.toggle('open', soloExpanded);
+      soloPanel.classList.toggle('active', soloExpanded);
       btnToggleSolo.classList.toggle('active', soloExpanded);
       if (!soloExpanded) {
         soloBody.innerHTML = '';
@@ -5336,9 +5376,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       container.querySelectorAll('[data-open-revision-from-solo]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
-          soloExpanded = false;
-          soloPanel.classList.remove('open');
-          btnToggleSolo.classList.remove('active');
+          setMainView('roadmap');
           roadmapRevisionExpanded = true;
           roadmapRevisionPanel.classList.add('open');
           btnToggleRoadmapRevision.classList.add('active');

@@ -441,8 +441,10 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'project-select',
     'btn-add-project',
     'btn-remove-project',
+    'btn-toggle-roadmap-view',
     'btn-toggle-solo',
-    'btn-close-solo',
+    'roadmap-view-tab-label',
+    'solo-view-tab-label',
     'solo-panel',
     'solo-body',
     'btn-toggle-roadmap-revision',
@@ -477,7 +479,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   postedMessages.length = 0;
   elements['btn-toggle-solo'].listeners.click();
   assert.ok(elements['solo-body'].innerHTML.includes('data-value="antigravity"'));
-  elements['btn-close-solo'].listeners.click();
+  elements['btn-toggle-roadmap-view'].listeners.click();
 
   dispatchMessage({
     command: 'settingsLoaded',
@@ -486,11 +488,11 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   elements['btn-toggle-solo'].listeners.click();
 
-  assert.ok(elements['solo-panel'].classList.contains('open'));
+  assert.ok(elements['solo-panel'].classList.contains('active'));
   assert.ok(elements['solo-body'].innerHTML.includes('data-solo-input'));
   assert.ok(elements['solo-body'].innerHTML.includes('data-value="copilot"'));
   assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__solo__'));
-  elements['btn-close-solo'].listeners.click();
+  elements['btn-toggle-roadmap-view'].listeners.click();
 
   elements['btn-toggle-roadmap-revision'].listeners.click();
 
@@ -561,9 +563,13 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /id="btn-toggle-roadmap-revision"/);
   assert.match(html, /id="roadmap-revision-panel"/);
   assert.match(html, /id="roadmap-revision-body"/);
+  assert.match(html, /id="btn-toggle-roadmap-view"/);
   assert.match(html, /id="btn-toggle-solo"/);
   assert.match(html, /id="solo-panel"/);
   assert.match(html, /id="solo-body"/);
+  assert.match(html, /class="view-tab solo-tab"/);
+  assert.match(html, /class="solo-view view-panel"/);
+  assert.doesNotMatch(html, /solo-conversation-popover/);
   assert.match(script, /renderRoadmapRevisionPanel/);
   assert.doesNotMatch(script, /canvas\.appendChild\(panel\)/);
   assert.doesNotMatch(script, /data-toggle-roadmap-revision/);
