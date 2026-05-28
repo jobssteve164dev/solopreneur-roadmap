@@ -3236,6 +3236,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
     }
 
+    .roadmap-canvas.view-panel:not(.active),
+    .solo-view.view-panel:not(.active) {
+      display: none;
+    }
+
     input[type="text"] {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-glass);

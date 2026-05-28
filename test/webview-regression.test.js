@@ -569,6 +569,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /id="solo-body"/);
   assert.match(html, /class="view-tab solo-tab"/);
   assert.match(html, /class="solo-view view-panel"/);
+  assert.match(html, /\.roadmap-canvas\.view-panel:not\(\.active\),\s*\.solo-view\.view-panel:not\(\.active\)\s*\{[\s\S]*?display:\s*none/);
   assert.doesNotMatch(html, /solo-conversation-popover/);
   assert.match(script, /renderRoadmapRevisionPanel/);
   assert.doesNotMatch(script, /canvas\.appendChild\(panel\)/);
