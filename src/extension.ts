@@ -1061,8 +1061,7 @@ function getKnownAgentCliCandidates(family: string): string[] {
   if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
   // Cursor CLI should behave like Codex for SoloMap: non-interactive exec + native resume.
   if (family === 'cursor') return ['cursor', 'cursor-cli', 'codex', 'codex-cli'];
-  // Copilot CLI should behave like Antigravity/agy for SoloMap: bounded print + native conversation.
-  if (family === 'copilot') return ['copilot', 'copilot-cli', 'agy', 'antigravity', 'antigravity-cli'];
+  if (family === 'copilot') return ['copilot', 'copilot-cli'];
   if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
   if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
   return family ? [family] : [];
@@ -1120,7 +1119,7 @@ function getAgentProvider(agentCli: string): string {
     return 'opencode';
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return 'antigravity';
+    return 'copilot';
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return 'antigravity';
@@ -1203,14 +1202,17 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPrompt})`;
@@ -1225,17 +1227,20 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   const quotedPromptFile = shellQuote(promptFilePath);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
   }
 
-  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli' || executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
+    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -p "$(cat ${quotedPromptFile})" -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run "$(cat ${quotedPromptFile})")`;
@@ -1250,17 +1255,20 @@ function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, 
   const promptExpression = `"$${promptVarName}"`;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check -`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
   }
 
-  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli' || executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} --print --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `${quotedCli} run ${promptExpression}`;
@@ -1281,8 +1289,11 @@ function buildNativeContinueCommand(agentCli: string, sessionId: string, workspa
     return `${quotedCli} resume -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
   }
 
-  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli' || executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} --conversation ${quotedSessionId} --prompt-interactive --add-dir=${shellQuote(workspaceRoot)}`;
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --conversation ${quotedSessionId} --prompt-interactive --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} --connect ${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user`;
   }
 
   return `${quotedCli} ${quotedSessionId}`;
@@ -5533,8 +5544,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         if (!normalized || options.some(option => option.value === normalized)) return;
         options.push({ value: normalized, label: label || normalized });
       }
-      addOption(node.agentCli || currentCliPath || 'agy');
       addOption(currentCliPath || 'agy');
+      addOption(node.agentCli || currentCliPath || 'agy');
       addOption('antigravity');
       addOption('cursor');
       addOption('codex');

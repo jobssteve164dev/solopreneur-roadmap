@@ -195,6 +195,15 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'zh', label: '中文' },
     { value: 'en', label: 'English' }
   ]);
+  wireSoloSelect(elements['setting-cli-select'], [
+    { value: 'agy', label: 'agy' },
+    { value: 'codex', label: 'codex' },
+    { value: 'cursor', label: 'cursor' },
+    { value: 'copilot', label: 'copilot' },
+    { value: 'claude', label: 'claude' },
+    { value: 'opencode', label: 'opencode' },
+    { value: 'custom', label: 'Custom...' }
+  ]);
   wireSoloSelect(elements['project-select'], []);
   wireSoloSelect(elements['sidebar-solo-agent'], [
     { value: 'agy', label: 'agy' },
@@ -328,7 +337,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-close-settings',
     'settings-panel',
     'setting-language',
-    'setting-clipath',
+    'setting-cli-select',
+    'setting-clipath-custom',
     'setting-global-prompt',
     'btn-test-cli',
     'btn-save-settings',
@@ -346,6 +356,12 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
+
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '' }
+  });
+  assert.equal(elements['sidebar-solo-agent'].getAttribute('data-value'), 'copilot');
 
   dispatchMessage({
     command: 'projectsLoaded',
@@ -414,7 +430,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /savePastedAttachments/);
   assert.match(script, /runRoadmapRevision[\s\S]*supplementFiles/);
 
-  const { elements, postedMessages } = runScriptWithMinimalDom(script, [
+  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'canvas',
     'project-select',
     'btn-add-project',
@@ -431,7 +447,8 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'btn-close-settings',
     'settings-panel',
     'setting-language',
-    'setting-clipath',
+    'setting-cli-select',
+    'setting-clipath-custom',
     'setting-global-prompt',
     'btn-test-cli',
     'btn-save-settings',
@@ -451,10 +468,21 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
 
+  postedMessages.length = 0;
+  elements['btn-toggle-solo'].listeners.click();
+  assert.ok(elements['solo-body'].innerHTML.includes('data-value="antigravity"'));
+  elements['btn-close-solo'].listeners.click();
+
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '' }
+  });
+
   elements['btn-toggle-solo'].listeners.click();
 
   assert.ok(elements['solo-panel'].classList.contains('open'));
   assert.ok(elements['solo-body'].innerHTML.includes('data-solo-input'));
+  assert.ok(elements['solo-body'].innerHTML.includes('data-value="copilot"'));
   assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__solo__'));
   elements['btn-close-solo'].listeners.click();
 
@@ -697,31 +725,35 @@ test('agent command builder uses non-interactive task runs and native continuati
 
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Ship the MVP', '/workspace/app'),
-    "'codex' exec --color always -C '/workspace/app' 'Ship the MVP'"
+    "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Ship the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex-cli', "Don't skip tests", '/workspace/app'),
-    "'codex-cli' exec --color always -C '/workspace/app' 'Don'\\''t skip tests'"
+    "'codex-cli' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Don'\\''t skip tests'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Continue the MVP', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
-    "'codex' exec --color always -C '/workspace/app' 'Continue the MVP'"
+    "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Continue the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
-    "'antigravity-cli' --print --add-dir='/workspace/app' 'Build landing page'"
+    "'antigravity-cli' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
-    "'agy' --print --add-dir='/workspace/app' 'Build landing page'"
+    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Continue landing page', '/workspace/app', '3350a3b7-7761-4ed5-9661-2e9c9de8f924'),
-    "'agy' --print --add-dir='/workspace/app' 'Continue landing page'"
+    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Continue landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('claude', 'Ship the MVP', '/workspace/app'),
-    "'claude' -p --add-dir '/workspace/app' 'Ship the MVP'"
+    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' 'Ship the MVP'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommand('copilot', 'Ship the MVP', '/workspace/app'),
+    "'copilot' -p 'Ship the MVP' -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user --output-format text"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('opencode', 'Ship the MVP', '/workspace/app'),
@@ -729,15 +761,19 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'agy' --print --add-dir='/workspace/app' @prompt-file:'/workspace/app/.solopreneur/agent-runs/2/prompt.txt'"
+    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' @prompt-file:'/workspace/app/.solopreneur/agent-runs/2/prompt.txt'"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('claude', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'claude' -p --add-dir '/workspace/app' \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\""
+    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\""
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('copilot', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
+    "'copilot' -p \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\" -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user --output-format text"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('opencode', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
@@ -745,11 +781,15 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
-    "printf %s \"$agent_prompt\" | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check -"
+    "printf %s \"$agent_prompt\" | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('agy', 'agent_prompt', '/workspace/app'),
-    "'agy' --print --add-dir='/workspace/app' \"$agent_prompt\""
+    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' \"$agent_prompt\""
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandFromShellVar('copilot', 'agent_prompt', '/workspace/app'),
+    "'copilot' -p \"$agent_prompt\" -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user --output-format text"
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('codex', '019dc472-6a80-7c70-99a4-b2593a641d11', '/workspace/app'),
@@ -757,7 +797,11 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('agy', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
-    "'agy' --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --prompt-interactive --add-dir='/workspace/app'"
+    "'agy' --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --prompt-interactive --dangerously-skip-permissions --add-dir='/workspace/app'"
+  );
+  assert.equal(
+    extensionModule.__buildNativeContinueCommand('copilot', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
+    "'copilot' --connect '3350a3b7-7761-4ed5-9661-2e9c9de8f924' -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user"
   );
   const firstTerminalName = extensionModule.__makeAgentTerminalName('step-2-42');
   const secondTerminalName = extensionModule.__makeAgentTerminalName('step-2-43');
@@ -766,7 +810,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.notEqual(firstTerminalName, secondTerminalName);
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('claude', 'agent_prompt', '/workspace/app'),
-    "'claude' -p --add-dir '/workspace/app' \"$agent_prompt\""
+    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' \"$agent_prompt\""
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('opencode', 'agent_prompt', '/workspace/app'),
@@ -788,7 +832,12 @@ test('agent command builder uses non-interactive task runs and native continuati
     JSON.stringify(extensionModule.__getAgentCliCandidates('opencode', '').slice(0, 5)),
     JSON.stringify(['opencode', 'open-code', 'open-code-cli', 'agy', 'antigravity'])
   );
+  assert.equal(
+    JSON.stringify(extensionModule.__getAgentCliCandidates('copilot', '').slice(0, 5)),
+    JSON.stringify(['copilot', 'copilot-cli', 'agy', 'antigravity', 'antigravity-cli'])
+  );
   assert.equal(extensionModule.__getAgentProvider('claude'), 'claude');
+  assert.equal(extensionModule.__getAgentProvider('copilot'), 'copilot');
   assert.equal(extensionModule.__getAgentProvider('opencode'), 'opencode');
 
   const sidebarModule = loadCompiledModule(

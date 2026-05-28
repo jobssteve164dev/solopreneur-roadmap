@@ -2514,8 +2514,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!normalized || options.includes(normalized)) return;
         options.push(normalized);
       }
-      add(node && node.agentCli);
       add(getEffectiveSettingCliPath() || 'agy');
+      add(node && node.agentCli);
       add('antigravity');
       add('codex');
       add('cursor');
@@ -2536,10 +2536,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function renderSidebarSoloAgents() {
-      const existingSelection = getSoloSelectValue(sidebarSoloAgent);
       const currentCli = getEffectiveSettingCliPath() || 'agy';
-      const options = getAgentOptions({ agentCli: existingSelection || currentCli });
-      setSoloSelectOptions(sidebarSoloAgent, options, existingSelection || currentCli);
+      const options = getAgentOptions({ agentCli: currentCli });
+      setSoloSelectOptions(sidebarSoloAgent, options, currentCli);
     }
 
     function renderProjectContinueComposer(nodes) {

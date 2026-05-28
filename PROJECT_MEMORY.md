@@ -60,6 +60,9 @@
 - Every Agent task conversation and native continuation must create a fresh VS Code terminal with a unique `SoloMap Agent Console · ...` name. Do not reuse a previous terminal by name, because later runs can inherit stale terminal/session state and fail to start correctly. `Open terminal` and `Stop` should target the current active SoloMap terminal name.
 - Agent execution records touched project files outside `.solopreneur`, `.git`, and `node_modules`. If the CLI exits without project file changes and without a completion decision, the sentinel records `Failed` instead of silently advancing the roadmap step.
 - Settings-panel CLI tests must use the same candidate ordering as Agent dispatch in both the full roadmap and sidebar webviews. The result message should show the actual resolved command so users know which local CLI will be used.
+- Agent selectors in the full roadmap, roadmap revision, Solo panel, sidebar Solo card, and sidebar project-continue composer must default to the persisted `solopreneur.cliPath` value. Step-level `agentCli` remains available as an option, but it must not override the user's current global default in the UI.
+- Copilot CLI task dispatch uses its own non-interactive command shape: `copilot -p <prompt> -C <workspace> --add-dir <workspace> --allow-all --no-ask-user --output-format text`. Do not route Copilot through Antigravity/agy `--print` or `@prompt-file` arguments.
+- Supported local task CLIs should run without interactive approval prompts by default: Codex/Cursor use `--dangerously-bypass-approvals-and-sandbox`, Antigravity/agy and Claude use `--dangerously-skip-permissions`, and Copilot uses `--allow-all --no-ask-user`.
 - Roadmap creation and revision use the local Agent conversation chain. New projects seed a starter roadmap first; later revision runs update `roadmap.csv` only after validation rather than depending on a separate hosted AI provider path.
 
 ## Regression Tests
