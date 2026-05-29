@@ -90,6 +90,11 @@
           "type": "string",
           "default": "",
           "description": "Default instructions injected into every SoloMap Agent task conversation."
+        },
+        "solopreneur.globalDataPath": {
+          "type": "string",
+          "default": "",
+          "description": "Directory path used for SoloMap cross-project data. SoloMap stores .solomap-global data here; if a parent directory is provided, .solomap-global is created inside it."
         }
       }
     }

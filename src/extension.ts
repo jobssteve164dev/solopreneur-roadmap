@@ -19,6 +19,7 @@ interface SolopreneurSettings {
   cliPath: string;
   language: string;
   globalPrompt: string;
+  globalDataPath: string;
 }
 
 interface SolopreneurProject {
@@ -173,15 +174,18 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   return {
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
     language: saved.language || config.get('language') || 'zh',
-    globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? ''
+    globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
+    globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? ''
   };
 }
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
+  const currentSettings = getPersistedSettings(context);
   const nextSettings: SolopreneurSettings = {
     cliPath: settings.cliPath || 'agy',
     language: settings.language === 'en' ? 'en' : 'zh',
-    globalPrompt: String(settings.globalPrompt || '').trim()
+    globalPrompt: String(settings.globalPrompt || '').trim(),
+    globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim()
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -189,6 +193,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('cliPath', nextSettings.cliPath, vscode.ConfigurationTarget.Global);
   await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
   await config.update('globalPrompt', nextSettings.globalPrompt, vscode.ConfigurationTarget.Global);
+  await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
 }
 
 function projectName(projectPath: string): string {
@@ -878,7 +883,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await updatePersistedSettings(context, {
             cliPath: message.cliPath,
             language: message.language,
-            globalPrompt: message.globalPrompt
+            globalPrompt: message.globalPrompt,
+            globalDataPath: message.globalDataPath
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -4468,6 +4474,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-global-data-path"
+        placeholder="e.g. /home/ubuntu/project/.solomap-global"
+      >
+      <div id="help-global-data-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Directory used to store cross-project SoloMap data such as portfolio, dependencies, learning candidates, and metrics.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
       <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Always keep changes minimal and run the narrowest relevant test."></textarea>
       <div id="help-global-prompt" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
@@ -4505,6 +4524,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
+    const settingGlobalDataPath = document.getElementById('setting-global-data-path');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -4534,6 +4554,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
+        globalDataPath: '跨项目数据目录',
+        globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
+        globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -4609,6 +4632,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; guidance in the current conversation takes priority.',
+        globalDataPath: 'Global Data Directory',
+        globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
+        globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -4741,6 +4767,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
+      setText('label-global-data-path', t('globalDataPath'));
+      if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
+      setText('help-global-data-path', t('globalDataPathHelp'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
@@ -4907,6 +4936,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         case 'settingsLoaded':
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
+          if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -4986,7 +5016,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         command: 'updateSettings',
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
-        globalPrompt: settingGlobalPrompt.value.trim()
+        globalPrompt: settingGlobalPrompt.value.trim(),
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';

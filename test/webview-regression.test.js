@@ -335,6 +335,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'setting-cli-select',
     'setting-clipath-custom',
     'setting-global-prompt',
+    'setting-global-data-path',
     'btn-test-cli',
     'btn-save-settings',
     'btn-check-dependencies',
@@ -353,11 +354,12 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     target: elements['setting-language'].__options[1],
     stopPropagation() {}
   });
+  elements['setting-global-data-path'].value = '/workspace/.solomap-global';
   elements['btn-save-settings'].listeners.click();
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global'));
   elements['btn-check-dependencies'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'checkDependencies'));
@@ -365,7 +367,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '' }
+    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }
   });
 
   dispatchMessage({
@@ -675,6 +677,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /portfolio-compose-agent-row/);
   assert.match(html, /data-project-continue-send/);
   assert.match(html, /data-select-project-path/);
+  assert.match(html, /id="global-focus-panel"/);
+  assert.match(html, /id="setting-global-data-path"/);
+  assert.doesNotMatch(html, /id="tasks-list"/);
+  assert.doesNotMatch(html, /id="progress-bar"/);
+  assert.doesNotMatch(html, /id="progress-text"/);
   assert.match(html, /selectProject/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
@@ -722,12 +729,47 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].recommendedNodeTitle, 'Build MVP');
   assert.equal(summaries[0].recommendedStatus, 'Failed');
   assert.equal(summaries[0].progressPercent, 33);
+  assert.equal(summaries[0].globalPriority, 'P0');
+  assert.equal(summaries[0].globalNextAction, 'Build MVP');
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
   assert.equal(sidebarModule.__getRecommendedNode([
     { id: '1', title: 'Failed step', status: 'Failed', stage: '产品与 MVP', dependencies: '' },
     { id: '2', title: 'Running step', status: 'Running', stage: '产品与 MVP', dependencies: '' }
   ]).title, 'Running step');
+});
+
+test('global engineering store writes git-friendly portfolio files', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    [
+      'module.exports.__ensureGlobalEngineeringStore = ensureGlobalEngineeringStore;',
+      'module.exports.__normalizeGlobalDataPath = normalizeGlobalDataPath;'
+    ].join('\n')
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-store-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const snapshot = sidebarModule.__ensureGlobalEngineeringStore(globalRoot, [{
+    name: 'SoloMap',
+    path: '/workspace/solomap',
+    projectType: 'core_product',
+    overallStatus: 'Failed',
+    globalPriority: 'P0',
+    blocker: 'Build MVP',
+    globalNextAction: 'Build MVP',
+    recommendedNodeTitle: 'Build MVP',
+    issues: { available: true, open: 1, byPriority: { P0: 1 }, byCategory: { bug: 1 } }
+  }]);
+
+  assert.equal(snapshot.dataPath, globalRoot);
+  assert.ok(fs.existsSync(path.join(globalRoot, 'portfolio.csv')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'dependencies.csv')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'capability-registry.csv')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'decision-conflicts.csv')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'candidates')));
+  assert.match(fs.readFileSync(path.join(globalRoot, 'portfolio.csv'), 'utf8'), /SoloMap/);
+  assert.match(fs.readFileSync(path.join(globalRoot, 'dependencies.csv'), 'utf8'), /Build MVP/);
+  assert.equal(sidebarModule.__normalizeGlobalDataPath(root, []), globalRoot);
 });
 
 test('sidebar GitHub issue cache is validated and ignored by git', () => {

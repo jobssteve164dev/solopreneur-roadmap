@@ -10,6 +10,7 @@ interface SolopreneurSettings {
   cliPath: string;
   language: string;
   globalPrompt: string;
+  globalDataPath: string;
 }
 
 interface SolopreneurProject {
@@ -34,6 +35,37 @@ interface ProjectPortfolioSummary {
   overallStatus: string;
   recentActivityAt: string;
   issues: ProjectIssueSummary;
+  globalPriority: string;
+  projectType: string;
+  blocker: string;
+  globalNextAction: string;
+  reusableSignals: number;
+  issuePressure: string;
+}
+
+interface GlobalEngineeringSnapshot {
+  dataPath: string;
+  portfolio: Array<{
+    id: string;
+    name: string;
+    path: string;
+    type: string;
+    status: string;
+    priority: string;
+    blocker: string;
+    nextAction: string;
+    updatedAt: string;
+  }>;
+  dependencies: Array<{
+    fromProject: string;
+    toProject: string;
+    capability: string;
+    status: string;
+    priorityImpact: string;
+    reason: string;
+    updatedAt: string;
+  }>;
+  learningCandidateCount: number;
 }
 
 interface ProjectIssueItem {
@@ -675,6 +707,70 @@ function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
   }
 }
 
+function slugifyProjectId(value: string): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'project';
+}
+
+function csvEscape(value: string | number): string {
+  const raw = String(value ?? '');
+  return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
+}
+
+function normalizeGlobalDataPath(rawPath: string, projects: SolopreneurProject[] = []): string {
+  const trimmed = String(rawPath || '').trim();
+  if (trimmed) {
+    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
+  }
+  const firstProjectPath = projects[0]?.path || process.cwd();
+  return path.join(path.dirname(firstProjectPath), '.solomap-global');
+}
+
+function detectProjectType(nodes: RoadmapNodeLike[]): string {
+  const text = nodes.map((node) => `${node.stage} ${node.title}`).join(' ').toLowerCase();
+  if (/能力|契约|接入|治理|infra|infrastructure|adapter|provider/.test(text)) return 'infra';
+  if (/内容|发布|分发|文章|小说|报告|content/.test(text)) return 'content';
+  if (/试验|实验|研究|验证假设|prototype|experiment|research/.test(text)) return 'experiment';
+  if (/工具|脚手架|模板|自动化|tool|scaffold/.test(text)) return 'tool';
+  if (/维护|监控|告警|归档|archive|maintenance/.test(text)) return 'archive';
+  return 'core_product';
+}
+
+function inferGlobalPriority(summary: Pick<ProjectPortfolioSummary, 'failedNodes' | 'runningNodes' | 'inProgressNodes' | 'pendingNodes' | 'issues' | 'overallStatus'>): string {
+  const p0Issues = Number((summary.issues?.byPriority || {}).P0 || 0);
+  if (p0Issues > 0 || Number(summary.failedNodes || 0) > 0) return 'P0';
+  if (Number(summary.runningNodes || 0) > 0 || Number(summary.inProgressNodes || 0) > 0) return 'P1';
+  if (summary.overallStatus === 'Completed') return 'P2';
+  return Number(summary.pendingNodes || 0) > 0 ? 'P1' : 'P2';
+}
+
+function inferIssuePressure(issues: ProjectIssueSummary): string {
+  if (!issues?.available) return '';
+  const p0 = Number((issues.byPriority || {}).P0 || 0);
+  const bugs = Number((issues.byCategory || {}).bug || 0);
+  if (p0 > 0) return `${p0} P0`;
+  if (bugs > 0) return `${bugs} bug`;
+  return issues.open ? `${issues.open} open` : '';
+}
+
+function countReusableSignals(projectPath: string): number {
+  const candidates = [
+    path.join(projectPath, '.solopreneur', 'step-memory'),
+    path.join(projectPath, '.solopreneur', 'agent-runs')
+  ];
+  return candidates.reduce((count, candidate) => {
+    try {
+      return count + (fs.existsSync(candidate) ? fs.readdirSync(candidate).length : 0);
+    } catch {
+      return count;
+    }
+  }, 0);
+}
+
 function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
   if (!nodes.length) {
     return null;
@@ -735,7 +831,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
           ? 'In Progress'
           : 'Pending';
 
-  return {
+  const baseSummary = {
     name: project.name,
     path: project.path,
     totalNodes,
@@ -753,10 +849,115 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     recentActivityAt: getProjectRecentActivityAt(project.path),
     issues: readCachedIssueSummary(project.path)
   };
+  const globalPriority = inferGlobalPriority(baseSummary);
+  return {
+    ...baseSummary,
+    globalPriority,
+    projectType: detectProjectType(nodes),
+    blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : '',
+    globalNextAction: recommendedNode?.title || (totalNodes ? 'Review completed roadmap' : 'Initialize roadmap'),
+    reusableSignals: countReusableSignals(project.path),
+    issuePressure: inferIssuePressure(baseSummary.issues)
+  };
 }
 
 function buildProjectPortfolioSummaries(projects: SolopreneurProject[]): ProjectPortfolioSummary[] {
   return projects.map((project) => buildProjectPortfolioSummary(project));
+}
+
+function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
+  const normalizedPath = normalizeGlobalDataPath(dataPath);
+  const learningDir = path.join(normalizedPath, 'learning', 'candidates');
+  const metricsDir = path.join(normalizedPath, 'metrics');
+  fs.mkdirSync(learningDir, { recursive: true });
+  fs.mkdirSync(metricsDir, { recursive: true });
+
+  const now = new Date().toISOString();
+  const records = portfolio.map((project) => ({
+    id: slugifyProjectId(project.name || path.basename(project.path)),
+    name: project.name,
+    path: project.path,
+    type: project.projectType || 'core_product',
+    status: project.overallStatus || 'Pending',
+    priority: project.globalPriority || 'P2',
+    blocker: project.blocker || '',
+    nextAction: project.globalNextAction || project.recommendedNodeTitle || '',
+    updatedAt: now
+  }));
+  const dependencies = portfolio
+    .filter((project) => project.blocker)
+    .map((project) => ({
+      fromProject: slugifyProjectId(project.name || path.basename(project.path)),
+      toProject: '',
+      capability: project.blocker,
+      status: 'blocked',
+      priorityImpact: 'raise_to_P0',
+      reason: project.blocker,
+      updatedAt: now
+    }));
+
+  const portfolioCsv = [
+    'id,name,path,type,status,priority,blocker,next_action,updated_at',
+    ...records.map((record) => [
+      record.id,
+      record.name,
+      record.path,
+      record.type,
+      record.status,
+      record.priority,
+      record.blocker,
+      record.nextAction,
+      record.updatedAt
+    ].map(csvEscape).join(','))
+  ].join('\n') + '\n';
+  const dependenciesCsv = [
+    'from_project,to_project,capability,status,priority_impact,reason,updated_at',
+    ...dependencies.map((record) => [
+      record.fromProject,
+      record.toProject,
+      record.capability,
+      record.status,
+      record.priorityImpact,
+      record.reason,
+      record.updatedAt
+    ].map(csvEscape).join(','))
+  ].join('\n') + '\n';
+  const capabilityCsvPath = path.join(normalizedPath, 'capability-registry.csv');
+  const decisionsCsvPath = path.join(normalizedPath, 'decision-conflicts.csv');
+  const readmePath = path.join(normalizedPath, 'README.md');
+  fs.writeFileSync(path.join(normalizedPath, 'portfolio.csv'), portfolioCsv, 'utf8');
+  fs.writeFileSync(path.join(normalizedPath, 'dependencies.csv'), dependenciesCsv, 'utf8');
+  if (!fs.existsSync(capabilityCsvPath)) {
+    fs.writeFileSync(capabilityCsvPath, 'capability,first_project,reused_by,status,reuse_success_rate,last_improvement\n', 'utf8');
+  }
+  if (!fs.existsSync(decisionsCsvPath)) {
+    fs.writeFileSync(decisionsCsvPath, 'topic,projects,conflict,resolution,status,owner,updated_at\n', 'utf8');
+  }
+  if (!fs.existsSync(readmePath)) {
+    fs.writeFileSync(readmePath, [
+      '# SoloMap Global Data',
+      '',
+      'This directory stores cross-project SoloMap coordination data.',
+      '',
+      '- `portfolio.csv`: project portfolio, priority, blocker, and next action.',
+      '- `dependencies.csv`: cross-project blockers that affect priority.',
+      '- `capability-registry.csv`: reusable capabilities confirmed or under review.',
+      '- `decision-conflicts.csv`: cross-project decision conflicts.',
+      '- `learning/candidates/`: learning candidates before they are promoted to long-term memory.',
+      '- `metrics/`: low-frequency portfolio review metrics.',
+      '',
+      'Do not delete this directory unless you intentionally want to remove SoloMap global coordination state.',
+      ''
+    ].join('\n'), 'utf8');
+  }
+  const learningCandidateCount = (() => {
+    try {
+      return fs.readdirSync(learningDir).filter((name) => name.endsWith('.md')).length;
+    } catch {
+      return 0;
+    }
+  })();
+  return { dataPath: normalizedPath, portfolio: records, dependencies, learningCandidateCount };
 }
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
@@ -840,7 +1041,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           await this._updateSettings({
             cliPath: data.cliPath,
             language: data.language,
-            globalPrompt: data.globalPrompt
+            globalPrompt: data.globalPrompt,
+            globalDataPath: data.globalDataPath
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -969,11 +1171,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     if (this._view) {
       const projectState = this._getProjects();
       const portfolio = buildProjectPortfolioSummaries(projectState.projects);
+      let globalStore: GlobalEngineeringSnapshot;
+      try {
+        globalStore = ensureGlobalEngineeringStore(this._getSettings().globalDataPath, portfolio);
+      } catch {
+        const fallbackPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
+        globalStore = { dataPath: fallbackPath, portfolio: [], dependencies: [], learningCandidateCount: 0 };
+      }
       this._view.webview.postMessage({
         command: 'projectsLoaded',
         projects: {
           ...projectState,
-          portfolio
+          portfolio,
+          globalStore
         }
       });
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
@@ -1439,6 +1649,138 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       margin-bottom: 14px;
     }
 
+    .global-focus-panel {
+      position: relative;
+      z-index: 1;
+      border: 1px solid rgba(0, 229, 255, 0.18);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      background: linear-gradient(145deg, rgba(0, 229, 255, 0.08), rgba(124, 77, 255, 0.07));
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+    }
+
+    .global-focus-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .global-focus-title {
+      font-size: 11px;
+      font-weight: 800;
+      color: #d8fbff;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .global-focus-path {
+      font-size: 8.5px;
+      color: var(--text-muted);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .global-focus-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .global-focus-item {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.13);
+      padding: 7px;
+      cursor: pointer;
+    }
+
+    .global-focus-item:hover {
+      border-color: rgba(0, 229, 255, 0.28);
+    }
+
+    .global-focus-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .global-focus-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .global-focus-name {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--text-main);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .global-focus-action {
+      font-size: 9.5px;
+      color: var(--text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .global-priority {
+      flex-shrink: 0;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.1);
+      padding: 3px 7px;
+      font-size: 9px;
+      font-weight: 900;
+    }
+
+    .global-priority.P0 {
+      color: #ff8a9c;
+      background: rgba(255, 23, 68, 0.12);
+      border-color: rgba(255, 23, 68, 0.25);
+    }
+
+    .global-priority.P1 {
+      color: #ffddad;
+      background: rgba(255, 183, 77, 0.11);
+      border-color: rgba(255, 183, 77, 0.24);
+    }
+
+    .global-priority.P2,
+    .global-priority.P3 {
+      color: #7dd3fc;
+      background: rgba(56, 189, 248, 0.1);
+      border-color: rgba(56, 189, 248, 0.22);
+    }
+
+    .global-focus-foot {
+      margin-top: 7px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+
+    .global-chip {
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.045);
+      color: var(--text-muted);
+      padding: 3px 7px;
+      font-size: 9px;
+      font-weight: 700;
+    }
+
     .portfolio-compose-tool {
       min-height: 44px;
       width: 36px;
@@ -1779,6 +2121,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-status {
       font-size: 10px;
       font-weight: 700;
+    }
+
+    .portfolio-global-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 7px;
     }
 
     .portfolio-progress {
@@ -2406,6 +2755,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
   </div>
 
+  <div class="global-focus-panel" id="global-focus-panel"></div>
+
   <div class="portfolio-panel">
     <div class="portfolio-header">
       <div class="portfolio-title" id="portfolio-title">项目总览</div>
@@ -2467,6 +2818,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-global-data-path"
+        placeholder="e.g. /home/ubuntu/project/.solomap-global"
+      >
+      <div id="help-global-data-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Directory used to store cross-project SoloMap data such as portfolio, dependencies, learning candidates, and metrics.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
       <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Keep changes minimal and run the narrowest relevant test."></textarea>
       <div id="help-global-prompt" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
@@ -2506,22 +2870,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="cli-badge" id="cli-test-badge" style="display:none;"></div>
   </div>
 
-  <!-- Progress Widget -->
-  <div class="progress-widget">
-    <div class="progress-header">
-      <span id="progress-label">Roadmap Sync Progress</span>
-      <span id="progress-text">0/0 Tasks</span>
-    </div>
-    <div class="progress-bar-bg">
-      <div class="progress-bar-fill" id="progress-bar"></div>
-    </div>
-  </div>
-
-  <!-- Tasks List -->
-  <div class="node-list-container" id="tasks-list">
-    <!-- Items are dynamically injected here -->
-  </div>
-
   <!-- Footer CTA -->
   <div class="sidebar-footer">
     <button class="btn-large" id="btn-open-full">
@@ -2537,6 +2885,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnOpenFull = document.getElementById('btn-open-full');
     const projectSelect = document.getElementById('project-select');
     const btnAddProject = document.getElementById('btn-add-project');
+    const globalFocusPanel = document.getElementById('global-focus-panel');
     const portfolioList = document.getElementById('portfolio-list');
     const portfolioFilters = document.getElementById('portfolio-filters');
 
@@ -2548,6 +2897,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
+    const settingGlobalDataPath = document.getElementById('setting-global-data-path');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -2573,11 +2923,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const projectContinueDrafts = {};
     const projectSoloFiles = {};
     const projectSoloDrafts = {};
-    const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [] };
+    const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
     const i18n = {
       zh: {
         title: 'SoloMap',
         portfolioTitle: '项目总览',
+        globalFocusTitle: '本周推进',
+        globalFocusEmpty: '还没有可推进项目。',
+        globalDataPath: '跨项目数据目录',
+        globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
+        globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
+        globalType: '类型',
+        globalReusable: '可复用线索',
+        globalLearning: '学习候选',
+        globalDependencies: '阻断',
         soloPlaceholder: '说说你现在想处理的问题...',
         soloSend: '发送',
         soloAttach: '添加补充文件',
@@ -2674,6 +3033,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       en: {
         title: 'SoloMap',
         portfolioTitle: 'Project Portfolio',
+        globalFocusTitle: 'Weekly Focus',
+        globalFocusEmpty: 'No projects ready yet.',
+        globalDataPath: 'Global Data Directory',
+        globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
+        globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
+        globalType: 'Type',
+        globalReusable: 'Reusable signals',
+        globalLearning: 'Learning candidates',
+        globalDependencies: 'Blockers',
         soloPlaceholder: 'Describe what you want to handle...',
         soloSend: 'Send',
         soloAttach: 'Attach files',
@@ -2813,6 +3181,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
+      setText('label-global-data-path', t('globalDataPath'));
+      if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
+      setText('help-global-data-path', t('globalDataPathHelp'));
       setText('label-dependencies', t('dependencies'));
       setText('dependency-agent-name', t('dependencyAgent'));
       setText('dependency-github-name', t('dependencyGithub'));
@@ -2825,6 +3196,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('text-open-full', t('openFull'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderPortfolioFilters();
+      renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderSidebar(currentNodes);
     }
@@ -2911,6 +3283,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'settingsLoaded':
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
+          if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -2930,7 +3303,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           currentProjects.portfolio = message.projects.portfolio || [];
+          currentProjects.globalStore = message.projects.globalStore || null;
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolio(message.projects.portfolio || [], message.projects.selectedProjectPath || '');
           break;
 
@@ -2938,6 +3313,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
             project.path === message.projectPath ? { ...project, issues: message.issues } : project
           ));
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -3018,7 +3394,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         command: 'updateSettings',
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
-        globalPrompt: settingGlobalPrompt.value.trim()
+        globalPrompt: settingGlobalPrompt.value.trim(),
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -3700,6 +4077,59 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueTotal')) + ' ' + escapeHtml(issues.total || 0) + ' · ' + escapeHtml(t('issueOpen')) + ' ' + escapeHtml(issues.open || 0) + syncText + '</span>';
     }
 
+    function priorityRank(priority) {
+      return ({ P0: 0, P1: 1, P2: 2, P3: 3 })[priority] ?? 4;
+    }
+
+    function renderGlobalFocus(portfolio, selectedProjectPath) {
+      if (!globalFocusPanel) return;
+      const projects = (portfolio || [])
+        .slice()
+        .sort((a, b) => priorityRank(a.globalPriority) - priorityRank(b.globalPriority) || Number(b.failedNodes || 0) - Number(a.failedNodes || 0))
+        .slice(0, 3);
+      const store = currentProjects.globalStore || {};
+      if (!projects.length) {
+        globalFocusPanel.innerHTML = \`
+          <div class="global-focus-head">
+            <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
+          </div>
+          <div class="empty-portfolio">\${escapeHtml(t('globalFocusEmpty'))}</div>
+        \`;
+        return;
+      }
+      globalFocusPanel.innerHTML = \`
+        <div class="global-focus-head">
+          <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
+          <span class="global-focus-path" title="\${escapeHtml(store.dataPath || '')}">\${escapeHtml(store.dataPath || '')}</span>
+        </div>
+        <div class="global-focus-list">
+          \${projects.map(project => \`
+            <div class="global-focus-item \${project.path === selectedProjectPath ? 'is-selected' : ''}" data-global-focus-project="\${escapeHtml(project.path)}">
+              <div class="global-focus-row">
+                <span class="global-focus-main">
+                  <span class="global-focus-name">\${escapeHtml(project.name || '')}</span>
+                  <span class="global-focus-action">\${escapeHtml(project.blocker || project.globalNextAction || project.recommendedNodeTitle || '-')}</span>
+                </span>
+                <span class="global-priority \${escapeHtml(project.globalPriority || 'P2')}">\${escapeHtml(project.globalPriority || 'P2')}</span>
+              </div>
+            </div>
+          \`).join('')}
+        </div>
+        <div class="global-focus-foot">
+          <span class="global-chip">\${escapeHtml(t('globalLearning'))}: \${escapeHtml(store.learningCandidateCount || 0)}</span>
+          <span class="global-chip">\${escapeHtml(t('globalDependencies'))}: \${escapeHtml((store.dependencies || []).length || 0)}</span>
+        </div>
+      \`;
+      globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {
+        item.addEventListener('click', () => {
+          vscode.postMessage({
+            command: 'selectProject',
+            projectPath: item.getAttribute('data-global-focus-project') || ''
+          });
+        });
+      });
+    }
+
     function renderProjectIssuePanel(project) {
       const issues = project.issues || {};
       if (issues.loading) {
@@ -3823,19 +4253,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       portfolioList.innerHTML = visibleProjects.map(project => {
         const isSelected = project.path === selectedProjectPath;
         const nextActionLabel = Number(project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue');
-        const progressWidth = Math.max(0, Math.min(100, Number(project.progressPercent || 0)));
         const relativeTime = formatRelativeTime(project.recentActivityAt);
         const recommendation = project.recommendedNodeTitle || '';
         return \`
           <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
               <span class="portfolio-project-name">\${escapeHtml(project.name)}</span>
-              <span class="portfolio-status status-lbl \${statusClass(project.overallStatus)}">\${statusText(project.overallStatus)}</span>
+              <span class="global-priority \${escapeHtml(project.globalPriority || 'P2')}">\${escapeHtml(project.globalPriority || 'P2')}</span>
+            </div>
+            <div class="portfolio-global-row">
+              <span class="global-chip">\${escapeHtml(t('globalType'))}: \${escapeHtml(project.projectType || '-')}</span>
+              <span class="global-chip">\${escapeHtml(statusText(project.overallStatus))}</span>
+              \${project.reusableSignals ? \`<span class="global-chip">\${escapeHtml(t('globalReusable'))}: \${escapeHtml(project.reusableSignals)}</span>\` : ''}
+              \${project.issuePressure ? \`<span class="global-chip">\${escapeHtml(t('issues'))}: \${escapeHtml(project.issuePressure)}</span>\` : ''}
             </div>
             <div class="portfolio-card-meta">
-              <span class="portfolio-stage">\${t('currentStage')}: \${escapeHtml(project.currentStage || '-')}</span>
-              <span>\${project.completedNodes}/\${project.totalNodes || 0}</span>
-              <span>\${t('failures')}: \${project.failedNodes || 0}</span>
+              <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
             </div>
             <div class="portfolio-card-meta">
               <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
@@ -3843,14 +4276,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             </div>
             <div class="portfolio-card-meta">
               \${renderIssueStatsLine(project)}
-            </div>
-            <div class="portfolio-card-meta">
-              <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(recommendation || '-')}</span>
-            </div>
-            <div class="portfolio-progress">
-              <div class="portfolio-progress-track">
-                <div class="portfolio-progress-fill" style="width:\${progressWidth}%"></div>
-              </div>
             </div>
             <div class="portfolio-card-actions">
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
@@ -3998,6 +4423,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function renderSidebar(nodes) {
+      if (!tasksList || !progressBar || !progressText) {
+        return;
+      }
       tasksList.innerHTML = '';
 
       if (!nodes || nodes.length === 0) {
