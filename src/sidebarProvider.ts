@@ -39,12 +39,21 @@ interface ProjectPortfolioSummary {
 interface ProjectIssueItem {
   number: number;
   title: string;
+  body: string;
   state: string;
   category: string;
   priority: string;
+  labels: string[];
   comments: number;
   thumbsUp: number;
   url: string;
+  updatedAt: string;
+}
+
+interface ProjectIssueComment {
+  author: string;
+  body: string;
+  createdAt: string;
 }
 
 interface ProjectIssueSummary {
@@ -226,31 +235,68 @@ function getReactionCount(reactionGroups: any[], content: string): number {
   return Number(group?.users?.totalCount || 0);
 }
 
+function toGithubLabel(category: string): string {
+  if (category === 'bug') return 'bug';
+  if (category === 'feature-request') return 'feature-request';
+  if (category === 'tech-debt') return 'tech-debt';
+  if (category === 'documentation') return 'documentation';
+  return 'discussion';
+}
+
+function parseGithubIssue(rawIssue: any): ProjectIssueItem {
+  const labels = Array.isArray(rawIssue.labels) ? rawIssue.labels.map((label: any) => String(label?.name || label || '')) : [];
+  return {
+    number: Number(rawIssue.number || 0),
+    title: String(rawIssue.title || ''),
+    body: String(rawIssue.body || ''),
+    state: String(rawIssue.state || ''),
+    category: normalizeIssueCategory(labels),
+    priority: normalizeIssuePriority(labels),
+    labels,
+    comments: Number(rawIssue.comments || 0),
+    thumbsUp: getReactionCount(rawIssue.reactionGroups || [], 'THUMBS_UP'),
+    url: String(rawIssue.url || ''),
+    updatedAt: String(rawIssue.updatedAt || '')
+  };
+}
+
+function runGhIssueCommand(projectPath: string, args: string[], timeout = 6000): { ok: boolean; stdout: string; stderr: string; repo: string } {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return { ok: false, stdout: '', stderr: 'No GitHub remote', repo: '' };
+  }
+  if (!commandExists('gh')) {
+    return { ok: false, stdout: '', stderr: 'GitHub CLI not found', repo };
+  }
+  const result = childProcess.spawnSync('gh', args.includes('--repo') ? args : [...args, '--repo', repo], {
+    encoding: 'utf8',
+    timeout,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  return {
+    ok: result.status === 0,
+    stdout: String(result.stdout || ''),
+    stderr: String(result.stderr || ''),
+    repo
+  };
+}
+
 function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
     return createEmptyIssueSummary('No GitHub remote');
   }
-  if (!commandExists('gh')) {
-    return createEmptyIssueSummary('GitHub CLI not found');
-  }
-  const result = childProcess.spawnSync('gh', [
+  const result = runGhIssueCommand(projectPath, [
     'issue',
     'list',
-    '--repo',
-    repo,
     '--state',
     'all',
     '--limit',
     '100',
     '--json',
-    'number,title,state,labels,comments,reactionGroups,updatedAt,url'
-  ], {
-    encoding: 'utf8',
-    timeout: 4500,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  if (result.status !== 0) {
+    'number,title,body,state,labels,comments,reactionGroups,updatedAt,url'
+  ], 4500);
+  if (!result.ok) {
     return {
       ...createEmptyIssueSummary(String(result.stderr || result.stdout || 'GitHub issues unavailable').trim()),
       repo
@@ -262,19 +308,7 @@ function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
   } catch {
     return { ...createEmptyIssueSummary('GitHub issue data could not be read'), repo };
   }
-  const items = rawIssues.map((issue) => {
-    const labels = Array.isArray(issue.labels) ? issue.labels.map((label: any) => String(label?.name || label || '')) : [];
-    return {
-      number: Number(issue.number || 0),
-      title: String(issue.title || ''),
-      state: String(issue.state || ''),
-      category: normalizeIssueCategory(labels),
-      priority: normalizeIssuePriority(labels),
-      comments: Number(issue.comments || 0),
-      thumbsUp: getReactionCount(issue.reactionGroups || [], 'THUMBS_UP'),
-      url: String(issue.url || '')
-    };
-  }).filter((issue) => issue.number > 0);
+  const items = rawIssues.map(parseGithubIssue).filter((issue) => issue.number > 0);
   const byCategory: Record<string, number> = {};
   const byPriority: Record<string, number> = {};
   for (const issue of items.filter((issue) => issue.state === 'OPEN')) {
@@ -298,6 +332,55 @@ function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
       })
       .slice(0, 5),
     message: ''
+  };
+}
+
+function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string } {
+  const result = runGhIssueCommand(projectPath, [
+    'issue',
+    'view',
+    String(issueNumber),
+    '--comments',
+    '--json',
+    'number,title,body,state,labels,comments,reactionGroups,updatedAt,url'
+  ], 7000);
+  if (!result.ok) {
+    return { ok: false, comments: [], message: String(result.stderr || result.stdout || 'GitHub issue unavailable').trim() };
+  }
+  try {
+    const issue = parseGithubIssue(JSON.parse(result.stdout || '{}'));
+    const parsed = JSON.parse(result.stdout || '{}');
+    const comments = Array.isArray(parsed.comments)
+      ? parsed.comments.map((comment: any) => ({
+        author: String(comment?.author?.login || ''),
+        body: String(comment?.body || ''),
+        createdAt: String(comment?.createdAt || '')
+      }))
+      : [];
+    return { ok: true, issue, comments, message: '' };
+  } catch {
+    return { ok: false, comments: [], message: 'GitHub issue data could not be read' };
+  }
+}
+
+function createProjectIssue(projectPath: string, title: string, body: string, category: string, priority: string): { ok: boolean; message: string } {
+  const labels = [toGithubLabel(category), priority].filter(Boolean).join(',');
+  const args = ['issue', 'create', '--title', title, '--body', body || title];
+  if (labels) {
+    args.push('--label', labels);
+  }
+  const result = runGhIssueCommand(projectPath, args, 10000);
+  return {
+    ok: result.ok,
+    message: String(result.stdout || result.stderr || '').trim()
+  };
+}
+
+function closeProjectIssue(projectPath: string, issueNumber: number): { ok: boolean; message: string } {
+  const result = runGhIssueCommand(projectPath, ['issue', 'close', String(issueNumber)], 8000);
+  return {
+    ok: result.ok,
+    message: String(result.stdout || result.stderr || '').trim()
   };
 }
 
@@ -568,6 +651,42 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             vscode.env.openExternal(vscode.Uri.parse(String(data.url)));
           }
           break;
+        case 'getIssueDetails':
+          this._view?.webview.postMessage({
+            command: 'issueDetailsLoaded',
+            projectPath: data.projectPath || '',
+            issueNumber: Number(data.issueNumber || 0),
+            ...readProjectIssueDetails(data.projectPath || '', Number(data.issueNumber || 0))
+          });
+          break;
+        case 'createIssue': {
+          const result = createProjectIssue(
+            data.projectPath || '',
+            String(data.title || '').trim(),
+            String(data.body || '').trim(),
+            String(data.category || 'discussion'),
+            String(data.priority || '')
+          );
+          this._view?.webview.postMessage({
+            command: 'issueActionCompleted',
+            projectPath: data.projectPath || '',
+            success: result.ok,
+            message: result.message
+          });
+          this.sendProjects();
+          break;
+        }
+        case 'closeIssue': {
+          const result = closeProjectIssue(data.projectPath || '', Number(data.issueNumber || 0));
+          this._view?.webview.postMessage({
+            command: 'issueActionCompleted',
+            projectPath: data.projectPath || '',
+            success: result.ok,
+            message: result.message
+          });
+          this.sendProjects();
+          break;
+        }
         case 'getProjects':
           this.sendProjects();
           break;
@@ -1505,6 +1624,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       gap: 8px;
     }
 
+    .portfolio-issue-create {
+      border: 1px solid rgba(255, 183, 77, 0.32);
+      border-radius: 5px;
+      background: rgba(255, 183, 77, 0.1);
+      color: #ffddad;
+      padding: 4px 7px;
+      font-size: 10px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
     .portfolio-issue-title {
       font-size: 10.5px;
       font-weight: 800;
@@ -1538,6 +1671,27 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       font-size: 9.5px;
       font-weight: 700;
       white-space: nowrap;
+    }
+
+    .portfolio-issue-tag-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .portfolio-issue-tag {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 5px;
+      padding: 6px;
+      background: rgba(0, 0, 0, 0.12);
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 10px;
+      font-weight: 700;
     }
 
     .portfolio-issue-list {
@@ -1589,10 +1743,86 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       color: var(--text-muted);
     }
 
+    .portfolio-issue-form,
+    .portfolio-issue-detail {
+      margin-top: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.12);
+      padding: 8px;
+    }
+
+    .portfolio-issue-input,
+    .portfolio-issue-textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid var(--border-glass);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.055);
+      color: var(--text-main);
+      font: inherit;
+      font-size: 10.5px;
+      padding: 6px;
+      outline: none;
+    }
+
+    .portfolio-issue-textarea {
+      min-height: 58px;
+      margin-top: 6px;
+      resize: vertical;
+    }
+
+    .portfolio-issue-form-row,
+    .portfolio-issue-detail-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .portfolio-issue-form-row .solo-select {
+      flex: 1;
+    }
+
+    .portfolio-issue-action {
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-main);
+      padding: 5px 7px;
+      font-size: 10px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .portfolio-issue-action.primary {
+      background: rgba(255, 183, 77, 0.16);
+      border-color: rgba(255, 183, 77, 0.35);
+      color: #ffddad;
+    }
+
+    .portfolio-issue-action.danger {
+      background: rgba(255, 23, 68, 0.1);
+      border-color: rgba(255, 23, 68, 0.26);
+      color: #ff8a9c;
+    }
+
+    .portfolio-issue-comment {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      font-size: 10px;
+      color: var(--text-muted);
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .portfolio-issue-comment strong {
+      color: var(--text-main);
+    }
+
     .portfolio-action-zone {
       margin-top: 9px;
       padding-top: 9px;
-      border-top: 1px solid rgba(124, 77, 255, 0.24);
     }
 
     .settings-actions {
@@ -2056,6 +2286,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let activePortfolioFilter = 'all';
     let sidebarSoloConversations = [];
     let sidebarSoloConversationExpanded = false;
+    let expandedIssueNumber = 0;
+    let issueDetails = null;
+    let issueFormOpen = false;
+    let issueActionMessage = '';
     const projectConversationModes = {};
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
@@ -2134,6 +2368,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueDiscussion: '讨论',
         issueDocs: '文档',
         issueComments: '评论',
+        issueCreate: '新建 Issue',
+        issueTitlePlaceholder: '一句话描述问题或想法...',
+        issueBodyPlaceholder: '补充背景、现象、期望结果...',
+        issueCategory: '分类',
+        issuePriority: '优先级',
+        issueClose: '关闭',
+        issueCancel: '取消',
+        issueSubmit: '创建',
+        issueNoComments: '还没有评论。',
+        issueLoading: '正在读取评论...',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -2218,6 +2462,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueDiscussion: 'Discussion',
         issueDocs: 'Docs',
         issueComments: 'comments',
+        issueCreate: 'New Issue',
+        issueTitlePlaceholder: 'Summarize the issue or idea...',
+        issueBodyPlaceholder: 'Add context, observed behavior, and expected outcome...',
+        issueCategory: 'Category',
+        issuePriority: 'Priority',
+        issueClose: 'Close',
+        issueCancel: 'Cancel',
+        issueSubmit: 'Create',
+        issueNoComments: 'No comments yet.',
+        issueLoading: 'Loading comments...',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -2256,6 +2510,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       Object.keys(projectContinueDrafts).forEach(key => delete projectContinueDrafts[key]);
       Object.keys(projectSoloFiles).forEach(key => delete projectSoloFiles[key]);
       Object.keys(projectSoloDrafts).forEach(key => delete projectSoloDrafts[key]);
+      expandedIssueNumber = 0;
+      issueDetails = null;
+      issueFormOpen = false;
+      issueActionMessage = '';
       if (clearNodes) {
         currentNodes = [];
       }
@@ -2438,6 +2696,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           sidebarSoloConversations = message.conversations || [];
           sidebarSoloConversationExpanded = false;
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'issueDetailsLoaded':
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          issueDetails = message.ok ? { issue: message.issue, comments: message.comments || [] } : { error: message.message || '' };
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'issueActionCompleted':
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          issueActionMessage = message.message || '';
+          if (message.success) {
+            issueFormOpen = false;
+            expandedIssueNumber = 0;
+            issueDetails = null;
+          }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
       }
@@ -3095,6 +3370,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return t('issueDiscussion');
     }
 
+    function getIssueCategories() {
+      return [
+        { value: 'bug', label: t('issueBug') },
+        { value: 'feature-request', label: t('issueFeature') },
+        { value: 'tech-debt', label: t('issueDebt') },
+        { value: 'discussion', label: t('issueDiscussion') },
+        { value: 'documentation', label: t('issueDocs') }
+      ];
+    }
+
+    function getIssuePriorities() {
+      return [
+        { value: '', label: '-' },
+        { value: 'P0', label: 'P0' },
+        { value: 'P1', label: 'P1' },
+        { value: 'P2', label: 'P2' }
+      ];
+    }
+
     function renderIssueStatsLine(project) {
       const issues = project.issues || {};
       if (!issues.available) {
@@ -3110,15 +3404,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           <div class="portfolio-issue-panel" data-issue-panel>
             <div class="portfolio-issue-head">
               <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
+              <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
             </div>
             <div class="portfolio-issue-empty">\${escapeHtml(t('issueUnavailable'))}</div>
+            \${issueFormOpen ? renderIssueCreateForm(project.path) : ''}
           </div>
         \`;
       }
-      const categoryPills = ['bug', 'feature-request', 'tech-debt', 'discussion', 'documentation']
-        .map(category => ({ category, count: Number((issues.byCategory || {})[category] || 0) }))
-        .filter(item => item.count > 0)
-        .map(item => \`<span class="portfolio-issue-pill">\${escapeHtml(issueCategoryLabel(item.category))} \${escapeHtml(item.count)}</span>\`)
+      const categoryTags = getIssueCategories()
+        .map(item => \`<span class="portfolio-issue-tag"><span>\${escapeHtml(item.label)}</span><strong>\${escapeHtml(Number((issues.byCategory || {})[item.value] || 0))}</strong></span>\`)
         .join('');
       const priorityPills = ['P0', 'P1', 'P2']
         .map(priority => ({ priority, count: Number((issues.byPriority || {})[priority] || 0) }))
@@ -3126,27 +3420,72 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         .map(item => \`<span class="portfolio-issue-pill">\${escapeHtml(item.priority)} \${escapeHtml(item.count)}</span>\`)
         .join('');
       const issueRows = (issues.items || []).map(issue => \`
-        <button class="portfolio-issue-row" data-open-issue-url="\${escapeHtml(issue.url || '')}">
+        <button class="portfolio-issue-row" data-expand-issue-number="\${escapeHtml(issue.number)}" data-project-path="\${escapeHtml(project.path)}">
           <span class="portfolio-issue-main">
             <span class="portfolio-issue-name">#\${escapeHtml(issue.number)} \${escapeHtml(issue.title || '')}</span>
             <span class="portfolio-issue-sub">\${escapeHtml(issue.priority || issueCategoryLabel(issue.category))} · \${escapeHtml(issueCategoryLabel(issue.category))} · \${escapeHtml(issue.comments || 0)} \${escapeHtml(t('issueComments'))}\${Number(issue.thumbsUp || 0) ? ' · +' + escapeHtml(issue.thumbsUp) : ''}</span>
           </span>
-          <span class="codicon codicon-link-external"></span>
+          <span class="codicon codicon-chevron-down"></span>
         </button>
       \`).join('');
       return \`
         <div class="portfolio-issue-panel" data-issue-panel>
           <div class="portfolio-issue-head">
             <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
-            <span class="portfolio-issue-repo">\${escapeHtml(issues.repo || '')}</span>
+            <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
           </div>
+          <div class="portfolio-issue-repo">\${escapeHtml(issues.repo || '')}</div>
           <div class="portfolio-issue-metrics">
             <span class="portfolio-issue-pill">\${escapeHtml(t('issueTotal'))} \${escapeHtml(issues.total || 0)}</span>
             <span class="portfolio-issue-pill">\${escapeHtml(t('issueOpen'))} \${escapeHtml(issues.open || 0)}</span>
             \${priorityPills}
-            \${categoryPills}
           </div>
+          <div class="portfolio-issue-tag-grid">\${categoryTags}</div>
+          \${issueFormOpen ? renderIssueCreateForm(project.path) : ''}
+          \${issueActionMessage ? \`<div class="portfolio-issue-empty">\${escapeHtml(issueActionMessage)}</div>\` : ''}
           \${issueRows ? \`<div class="portfolio-issue-list">\${issueRows}</div>\` : \`<div class="portfolio-issue-empty">\${escapeHtml(t('noPortfolioMatch'))}</div>\`}
+          \${expandedIssueNumber ? renderIssueDetail(project.path) : ''}
+        </div>
+      \`;
+    }
+
+    function renderIssueCreateForm(projectPath) {
+      return \`
+        <div class="portfolio-issue-form" data-issue-create-form>
+          <input class="portfolio-issue-input" data-issue-title placeholder="\${escapeHtml(t('issueTitlePlaceholder'))}">
+          <textarea class="portfolio-issue-textarea" data-issue-body placeholder="\${escapeHtml(t('issueBodyPlaceholder'))}"></textarea>
+          <div class="portfolio-issue-form-row">
+            \${renderSoloSelect('portfolio-issue-category', 'data-issue-category', getIssueCategories(), false)}
+            \${renderSoloSelect('portfolio-issue-priority', 'data-issue-priority', getIssuePriorities(), false)}
+          </div>
+          <div class="portfolio-issue-form-row">
+            <button class="portfolio-issue-action primary" data-create-issue data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('issueSubmit'))}</button>
+            <button class="portfolio-issue-action" data-cancel-issue-form>\${escapeHtml(t('issueCancel'))}</button>
+          </div>
+        </div>
+      \`;
+    }
+
+    function renderIssueDetail(projectPath) {
+      if (!issueDetails) {
+        return \`<div class="portfolio-issue-detail"><div class="portfolio-issue-empty">\${escapeHtml(t('issueLoading'))}</div></div>\`;
+      }
+      if (issueDetails.error) {
+        return \`<div class="portfolio-issue-detail"><div class="portfolio-issue-empty">\${escapeHtml(issueDetails.error)}</div></div>\`;
+      }
+      const issue = issueDetails.issue || {};
+      const comments = issueDetails.comments || [];
+      return \`
+        <div class="portfolio-issue-detail">
+          <div class="portfolio-issue-name">#\${escapeHtml(issue.number)} \${escapeHtml(issue.title || '')}</div>
+          \${issue.body ? \`<div class="portfolio-issue-comment">\${escapeHtml(issue.body).slice(0, 900)}</div>\` : ''}
+          <div class="portfolio-issue-detail-actions">
+            \${issue.url ? \`<button class="portfolio-issue-action" data-open-issue-url="\${escapeHtml(issue.url)}">\${escapeHtml(t('projectOpen'))}</button>\` : ''}
+            \${issue.state === 'OPEN' ? \`<button class="portfolio-issue-action danger" data-close-issue="\${escapeHtml(issue.number)}" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('issueClose'))}</button>\` : ''}
+          </div>
+          \${comments.length ? comments.map(comment => \`
+            <div class="portfolio-issue-comment"><strong>\${escapeHtml(comment.author || '')}</strong><br>\${escapeHtml(comment.body || '').slice(0, 900)}</div>
+          \`).join('') : \`<div class="portfolio-issue-empty">\${escapeHtml(t('issueNoComments'))}</div>\`}
         </div>
       \`;
     }
@@ -3239,6 +3578,72 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (url) {
             vscode.postMessage({ command: 'openExternal', url });
           }
+        });
+      });
+      portfolioList.querySelectorAll('[data-toggle-issue-form]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          issueFormOpen = !issueFormOpen;
+          issueActionMessage = '';
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      portfolioList.querySelectorAll('[data-cancel-issue-form]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          issueFormOpen = false;
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      portfolioList.querySelectorAll('[data-create-issue]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const form = button.closest('[data-issue-create-form]');
+          const title = form ? form.querySelector('[data-issue-title]') : null;
+          const body = form ? form.querySelector('[data-issue-body]') : null;
+          const category = form ? form.querySelector('[data-issue-category]') : null;
+          const priority = form ? form.querySelector('[data-issue-priority]') : null;
+          if (!title || !title.value.trim()) return;
+          issueActionMessage = '';
+          vscode.postMessage({
+            command: 'createIssue',
+            projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
+            title: title.value.trim(),
+            body: body ? body.value.trim() : '',
+            category: getSoloSelectValue(category),
+            priority: getSoloSelectValue(priority)
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-expand-issue-number]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const issueNumber = Number(button.getAttribute('data-expand-issue-number') || 0);
+          if (!issueNumber) return;
+          if (expandedIssueNumber === issueNumber && issueDetails) {
+            expandedIssueNumber = 0;
+            issueDetails = null;
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            return;
+          }
+          expandedIssueNumber = issueNumber;
+          issueDetails = null;
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'getIssueDetails',
+            projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
+            issueNumber
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-close-issue]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'closeIssue',
+            projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
+            issueNumber: Number(button.getAttribute('data-close-issue') || 0)
+          });
         });
       });
       bindProjectContinueComposer(portfolioList);

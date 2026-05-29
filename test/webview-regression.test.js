@@ -311,8 +311,12 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /savePastedAttachments/);
   assert.match(script, /checkDependencies/);
   assert.match(script, /renderProjectIssuePanel/);
+  assert.match(script, /createIssue/);
+  assert.match(script, /closeIssue/);
+  assert.match(script, /getIssueDetails/);
   assert.match(html, /id="dependency-panel"/);
   assert.match(html, /data-issue-panel/);
+  assert.match(html, /data-toggle-issue-form/);
 
   const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'tasks-list',
@@ -402,6 +406,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-issue-panel/);
   assert.match(elements['portfolio-list'].innerHTML, /页面加载慢/);
   assert.match(elements['portfolio-list'].innerHTML, /待关闭|Open/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-toggle-issue-form/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-expand-issue-number="12"/);
+  assert.match(elements['portfolio-list'].innerHTML, /Bug/);
+  assert.match(elements['portfolio-list'].innerHTML, /需求|Feature/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
@@ -1038,6 +1046,26 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(attachedPrompt, /Always preserve public API compatibility/);
   assert.match(attachedPrompt, /本次用户补充为准/);
   assert.match(attachedPrompt, /本环节完成标准/);
+  const issueContextPrompt = extensionModule.__buildAgentConversationPrompt(
+    {
+      title: 'Fix onboarding bug',
+      stage: '产品与 MVP',
+      description: 'Resolve high priority onboarding defects.',
+      agentPrompt: 'Fix the onboarding flow.',
+      status: 'In Progress'
+    },
+    '',
+    attachedRoot,
+    path.join(attachedRoot, '.solopreneur', 'step-memory', '2.json'),
+    path.join(attachedRoot, '.solopreneur', 'agent-runs', '2'),
+    path.join(attachedRoot, '.solopreneur', 'agent-runs', '2', 'completion.json'),
+    '',
+    [],
+    '',
+    '当前环节关联的 GitHub Issues：\n\n### Issue #12: 页面加载慢\n最近评论：\n1. user: P0'
+  );
+  assert.match(issueContextPrompt, /当前环节关联的 GitHub Issues/);
+  assert.match(issueContextPrompt, /Issue #12: 页面加载慢/);
   assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
   assert.doesNotMatch(followupPrompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);

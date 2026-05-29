@@ -1029,6 +1029,128 @@ function commandExists(command: string): boolean {
   return result.status === 0;
 }
 
+function getGithubRepoSlug(workspaceRoot: string): string {
+  if (!workspaceRoot || !fs.existsSync(workspaceRoot)) {
+    return '';
+  }
+  const result = childProcess.spawnSync('git', ['-C', workspaceRoot, 'remote', 'get-url', 'origin'], {
+    encoding: 'utf8',
+    timeout: 1800,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  const remote = String(result.stdout || '').trim();
+  const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/i);
+  return match ? match[1].replace(/\.git$/i, '') : '';
+}
+
+function normalizeIssueLabel(label: string): string {
+  return String(label || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function normalizeIssueCategory(labels: string[]): string {
+  const normalized = labels.map(normalizeIssueLabel);
+  const has = (candidates: string[]) => normalized.some((label) => candidates.includes(label));
+  if (has(['bug', 'type: bug', 'kind/bug', 'defect', 'regression', 'perf'])) return 'bug';
+  if (has(['tech debt', 'tech-debt', 'debt', 'refactor', 'cleanup', 'maintenance', 'architecture'])) return 'tech-debt';
+  if (has(['feature', 'enhancement', 'request', 'feature request', 'feature-request', 'type: feature', 'customer'])) return 'feature-request';
+  if (has(['docs', 'documentation', 'readme'])) return 'documentation';
+  return 'discussion';
+}
+
+function normalizeIssuePriority(labels: string[]): string {
+  const normalized = labels.map(normalizeIssueLabel);
+  const has = (candidates: string[]) => normalized.some((label) => candidates.includes(label));
+  if (has(['p0', 'priority: critical', 'critical', 'urgent', 'blocker', 'sev1'])) return 'P0';
+  if (has(['p1', 'priority: high', 'high', 'sev2'])) return 'P1';
+  if (has(['p2', 'priority: medium', 'medium', 'normal', 'sev3'])) return 'P2';
+  return '';
+}
+
+function buildGithubIssueContext(workspaceRoot: string, node: RoadmapNode): string {
+  const repo = getGithubRepoSlug(workspaceRoot);
+  if (!repo || !commandExists('gh')) {
+    return '';
+  }
+  const listResult = childProcess.spawnSync('gh', [
+    'issue',
+    'list',
+    '--repo',
+    repo,
+    '--state',
+    'open',
+    '--limit',
+    '20',
+    '--json',
+    'number,title,body,labels,comments,url'
+  ], {
+    encoding: 'utf8',
+    timeout: 4500,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  if (listResult.status !== 0) {
+    return '';
+  }
+  let issues: any[] = [];
+  try {
+    issues = JSON.parse(String(listResult.stdout || '[]'));
+  } catch {
+    return '';
+  }
+  const nodeText = `${node.title || ''} ${node.description || ''} ${node.stage || ''}`.toLowerCase();
+  const candidates = issues.map((issue) => {
+    const labels = Array.isArray(issue.labels) ? issue.labels.map((label: any) => String(label?.name || label || '')) : [];
+    const category = normalizeIssueCategory(labels);
+    const priority = normalizeIssuePriority(labels);
+    const title = String(issue.title || '');
+    const score = (priority === 'P0' ? 5 : priority === 'P1' ? 3 : priority === 'P2' ? 1 : 0)
+      + (category === 'bug' ? 4 : category === 'tech-debt' ? 2 : 0)
+      + (nodeText && title && nodeText.includes(title.toLowerCase().slice(0, 16)) ? 2 : 0)
+      + Math.min(Number(issue.comments || 0), 5);
+    return { issue, labels, category, priority, score };
+  }).sort((a, b) => b.score - a.score).slice(0, 3);
+  if (!candidates.length) {
+    return '';
+  }
+  const sections = candidates.map((candidate) => {
+    const issueNumber = Number(candidate.issue.number || 0);
+    const viewResult = childProcess.spawnSync('gh', [
+      'issue',
+      'view',
+      String(issueNumber),
+      '--repo',
+      repo,
+      '--comments',
+      '--json',
+      'number,title,body,labels,comments,url'
+    ], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    let detail = candidate.issue;
+    if (viewResult.status === 0) {
+      try {
+        detail = JSON.parse(String(viewResult.stdout || '{}'));
+      } catch {}
+    }
+    const comments = Array.isArray(detail.comments)
+      ? detail.comments.slice(-3).map((comment: any, index: number) => {
+        const author = String(comment?.author?.login || `comment-${index + 1}`);
+        const body = String(comment?.body || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+        return `${index + 1}. ${author}: ${body}`;
+      })
+      : [];
+    return [
+      `### Issue #${issueNumber}: ${String(detail.title || '').trim()}`,
+      `分类：${candidate.category}${candidate.priority ? ` / ${candidate.priority}` : ''}`,
+      `链接：${String(detail.url || '').trim()}`,
+      String(detail.body || '').trim() ? `描述：${String(detail.body || '').trim().replace(/\s+/g, ' ').slice(0, 700)}` : '',
+      comments.length ? ['最近评论：', ...comments].join('\n') : ''
+    ].filter(Boolean).join('\n');
+  });
+  return ['当前环节关联的 GitHub Issues：', ...sections].join('\n\n');
+}
+
 function resolveExecutablePath(command: string): string {
   const trimmed = (command || '').trim();
   if (!trimmed) {
@@ -1717,10 +1839,12 @@ function buildAgentConversationPrompt(
   completionDecisionFilePath = '',
   previousSessionId = '',
   supplementFiles: string[] = [],
-  globalPrompt = ''
+  globalPrompt = '',
+  githubIssueContext = ''
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const normalizedGlobalPrompt = globalPrompt.trim();
+  const normalizedGithubIssueContext = githubIssueContext.trim();
   const supplement = userMessage.trim()
     ? `\n\n用户对本次对话的补充要求：\n${userMessage.trim()}`
     : '';
@@ -1801,6 +1925,7 @@ function buildAgentConversationPrompt(
     '本次任务：',
     node.agentPrompt,
     supplement,
+    ...(normalizedGithubIssueContext ? ['', normalizedGithubIssueContext] : []),
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
@@ -2496,6 +2621,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
   const stepMemoryFilePath = getStepMemoryFilePath(workspaceRoot, nodeId);
+  const githubIssueContext = buildGithubIssueContext(workspaceRoot, node);
   const conversationPrompt = buildAgentConversationPrompt(
     node,
     userMessage,
@@ -2505,7 +2631,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     completionDecisionFilePath,
     nativeSessionId,
     attachedFiles,
-    settings.globalPrompt
+    settings.globalPrompt,
+    githubIssueContext
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
