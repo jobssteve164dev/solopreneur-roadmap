@@ -900,6 +900,12 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildSoloConversationPrompt = buildSoloConversationPrompt;',
       'module.exports.__buildSoloMapSystemMemoryPrompt = buildSoloMapSystemMemoryPrompt;',
       'module.exports.__ensureSolomapMemoryStore = ensureSolomapMemoryStore;',
+      'module.exports.__ensureSolomapSkillStore = ensureSolomapSkillStore;',
+      'module.exports.__readSolomapSkillRegistry = readSolomapSkillRegistry;',
+      'module.exports.__writeSolomapSkillRegistry = writeSolomapSkillRegistry;',
+      'module.exports.__buildSolomapSkillCandidateInstructions = buildSolomapSkillCandidateInstructions;',
+      'module.exports.__buildSkillInstallPrompt = buildSkillInstallPrompt;',
+      'module.exports.__validateAndRegisterSkillInstall = validateAndRegisterSkillInstall;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
@@ -1134,6 +1140,80 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(defaultMemoryPrompt, /写入位置/);
   assert.match(defaultMemoryPrompt, /旧 `\.codex-memory\/`/);
   assert.match(defaultMemoryPrompt, /当前用户请求、当前项目文件、测试、日志和命令输出/);
+
+  const skillStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-skill-store-'));
+  const skillStore = extensionModule.__ensureSolomapSkillStore('/workspace/app', skillStoreRoot);
+  assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'installed')));
+  assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'runs')));
+  extensionModule.__writeSolomapSkillRegistry('/workspace/app', skillStoreRoot, {
+    version: 1,
+    updatedAt: '',
+    skills: [{
+      id: 'frontend-ui',
+      title: 'Frontend UI',
+      description: 'Review UI work.',
+      entry: 'installed/frontend-ui/package/SKILL.md',
+      packagePath: 'installed/frontend-ui/package',
+      status: 'installed',
+      activation: {
+        keywords: ['UI', '界面'],
+        useWhen: ['任务涉及前台 UI 实现、交互修复或视觉验收'],
+        doNotUseWhen: ['任务只涉及后端 API']
+      },
+      risk: { hasScripts: false, hasExecutables: false }
+    }, {
+      id: 'manual-only',
+      title: 'Manual Only',
+      entry: 'installed/manual-only/package/SKILL.md',
+      status: 'installed',
+      activation: { keywords: ['UI'], manualOnly: true },
+      risk: {}
+    }]
+  });
+  const skillInstructions = extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '修复侧边栏 UI 交互问题');
+  assert.match(skillInstructions, /Frontend UI/);
+  assert.match(skillInstructions, /installed\/frontend-ui\/package\/SKILL\.md/);
+  assert.match(skillInstructions, /这些只是候选，不是强制项/);
+  assert.doesNotMatch(skillInstructions, /Manual Only/);
+
+  const installPrompt = extensionModule.__buildSkillInstallPrompt('https://skills.sh/owner/repo/skill-name', '/workspace/app', skillStoreRoot, path.join(skillStore.runsRoot, 'run', 'result.json'));
+  assert.match(installPrompt, /受控安装任务/);
+  assert.match(installPrompt, /完整 skill package/);
+  assert.match(installPrompt, /solomap\.skill\.json/);
+  assert.match(installPrompt, /source\.lock\.json/);
+  assert.match(installPrompt, /DISABLE_TELEMETRY=1/);
+
+  const fakeSkillDir = path.join(skillStore.skillsRoot, 'installed', 'frontend-ui');
+  fs.mkdirSync(path.join(fakeSkillDir, 'package'), { recursive: true });
+  fs.writeFileSync(path.join(fakeSkillDir, 'package', 'SKILL.md'), '---\nname: frontend-ui\n---\n# Frontend UI\n', 'utf8');
+  fs.writeFileSync(path.join(fakeSkillDir, 'solomap.skill.json'), JSON.stringify({
+    id: 'frontend-ui',
+    title: 'Frontend UI',
+    description: 'Review UI work.',
+    entry: 'installed/frontend-ui/package/SKILL.md',
+    packagePath: 'installed/frontend-ui/package',
+    status: 'installed',
+    activation: { keywords: ['UI'], useWhen: ['UI work'] },
+    risk: { hasScripts: false, hasExecutables: false }
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(fakeSkillDir, 'source.lock.json'), JSON.stringify({ source: 'owner/repo' }, null, 2), 'utf8');
+  const fakeResultPath = path.join(skillStore.runsRoot, 'fake-result.json');
+  fs.writeFileSync(fakeResultPath, JSON.stringify({
+    ok: true,
+    skillId: 'frontend-ui',
+    installedPath: path.join(skillStore.skillsRoot, 'installed', 'frontend-ui'),
+    packagePath: path.join(fakeSkillDir, 'package'),
+    entryFile: path.join(fakeSkillDir, 'package', 'SKILL.md'),
+    solomapSkillJson: path.join(fakeSkillDir, 'solomap.skill.json'),
+    sourceLockJson: path.join(fakeSkillDir, 'source.lock.json'),
+    metadata: { name: 'frontend-ui', description: 'Review UI work.' },
+    source: { input: 'owner/repo' },
+    risk: { hasScripts: false, hasExecutables: false }
+  }, null, 2), 'utf8');
+  const validation = extensionModule.__validateAndRegisterSkillInstall('/workspace/app', skillStoreRoot, fakeResultPath);
+  assert.equal(validation.ok, true);
+  const registryAfterValidation = extensionModule.__readSolomapSkillRegistry('/workspace/app', skillStoreRoot);
+  assert.equal(registryAfterValidation.skills.some((skill) => skill.id === 'frontend-ui'), true);
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',

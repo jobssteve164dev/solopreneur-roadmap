@@ -1184,7 +1184,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
     private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
-    private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>
+    private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>,
+    private readonly _installSkill?: (skillInput: string) => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -1255,6 +1256,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           this.sendSettings();
           // Trigger updates on the full screen view if active
           vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+          break;
+        case 'installSkill':
+          if (this._installSkill) {
+            await this._installSkill(data.skillInput || '');
+          }
           break;
         case 'testCli':
           const cliToTest = resolveAgentCli('antigravity-cli', data.cliPath || '');
@@ -1371,6 +1377,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         settings: this._getSettings()
       });
     }
+  }
+
+  public postSkillInstallResult(success: boolean, message: string) {
+    this._view?.webview.postMessage({
+      command: 'skillInstallResult',
+      success,
+      message
+    });
   }
 
   public sendProjects() {
@@ -3046,6 +3060,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-skill-install">Install Skill</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-skill-input"
+        placeholder="e.g. https://skills.sh/owner/repo or owner/repo@skill"
+      >
+      <div id="help-skill-install" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Paste a skills.sh or GitHub skill link. SoloMap will install it into the global skill library.
+      </div>
+      <button class="settings-action-btn test-btn" id="btn-install-skill" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-cloud-download"></span><span id="text-install-skill">Install Skill</span></button>
+      <div class="cli-badge" id="skill-install-badge" style="display:none;"></div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
       <div class="dependency-panel" id="dependency-panel">
         <div class="dependency-row">
@@ -3105,6 +3134,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
+    const settingSkillInput = document.getElementById('setting-skill-input');
+    const btnInstallSkill = document.getElementById('btn-install-skill');
+    const skillInstallBadge = document.getElementById('skill-install-badge');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -3140,6 +3172,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         globalDataPath: '跨项目数据目录',
         globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
         globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
+        skillInstall: '安装技能',
+        skillInstallPlaceholder: '例如：https://skills.sh/owner/repo 或 owner/repo@skill',
+        skillInstallHelp: '粘贴 skills.sh 或 GitHub 技能链接，SoloMap 会安装到全局技能库。',
+        installSkill: '安装技能',
+        installingSkill: '正在启动安装...',
         globalType: '类型',
         globalReusable: '可复用线索',
         globalLearning: '学习候选',
@@ -3245,6 +3282,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         globalDataPath: 'Global Data Directory',
         globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
         globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
+        skillInstall: 'Install Skill',
+        skillInstallPlaceholder: 'e.g. https://skills.sh/owner/repo or owner/repo@skill',
+        skillInstallHelp: 'Paste a skills.sh or GitHub skill link. SoloMap installs it into the global skill library.',
+        installSkill: 'Install Skill',
+        installingSkill: 'Starting install...',
         globalType: 'Type',
         globalReusable: 'Reusable signals',
         globalLearning: 'Learning candidates',
@@ -3391,6 +3433,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-global-data-path', t('globalDataPath'));
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
       setText('help-global-data-path', t('globalDataPathHelp'));
+      setText('label-skill-install', t('skillInstall'));
+      if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
+      setText('help-skill-install', t('skillInstallHelp'));
+      setText('text-install-skill', t('installSkill'));
       setText('label-dependencies', t('dependencies'));
       setText('dependency-agent-name', t('dependencyAgent'));
       setText('dependency-github-name', t('dependencyGithub'));
@@ -3539,6 +3585,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderDependencyStatus(message.status || {});
           break;
 
+        case 'skillInstallResult':
+          if (skillInstallBadge) {
+            skillInstallBadge.style.display = 'block';
+            skillInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
+            skillInstallBadge.textContent = message.message || '';
+          }
+          break;
+
         case 'soloSupplementFilesSelected':
           if (message.targetId) {
             if (String(message.targetId).startsWith('solo:')) {
@@ -3621,6 +3675,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         cliPath: getEffectiveSettingCliPath()
       });
     });
+
+    if (btnInstallSkill) {
+      btnInstallSkill.addEventListener('click', () => {
+        const skillInput = (settingSkillInput ? settingSkillInput.value : '').trim();
+        if (!skillInput) {
+          if (skillInstallBadge) {
+            skillInstallBadge.style.display = 'block';
+            skillInstallBadge.className = 'cli-badge error';
+            skillInstallBadge.textContent = t('skillInstallPlaceholder');
+          }
+          return;
+        }
+        if (skillInstallBadge) {
+          skillInstallBadge.style.display = 'block';
+          skillInstallBadge.className = 'cli-badge';
+          skillInstallBadge.style.background = 'rgba(255,255,255,0.05)';
+          skillInstallBadge.style.color = 'var(--text-muted)';
+          skillInstallBadge.textContent = t('installingSkill');
+        }
+        vscode.postMessage({ command: 'installSkill', skillInput });
+      });
+    }
 
     btnCheckDependencies.addEventListener('click', () => {
       setDependencyPending();

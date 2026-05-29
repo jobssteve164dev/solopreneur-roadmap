@@ -41,6 +41,41 @@ interface StepSessionState {
   sessions: Record<string, AgentStepSession>;
 }
 
+interface SolomapSkillRegistryEntry {
+  id: string;
+  title?: string;
+  description?: string;
+  entry?: string;
+  packagePath?: string;
+  status?: string;
+  source?: any;
+  activation?: {
+    keywords?: string[];
+    useWhen?: string[];
+    doNotUseWhen?: string[];
+    projectTypes?: string[];
+    roadmapStages?: string[];
+    taskKinds?: string[];
+    fileGlobs?: string[];
+    manualOnly?: boolean;
+  };
+  risk?: {
+    hasScripts?: boolean;
+    hasExecutables?: boolean;
+    usesNetwork?: boolean | string;
+    writesFiles?: boolean | string;
+    requiresUserApprovalToRunScripts?: boolean;
+  };
+  installedAt?: string;
+  updatedAt?: string;
+}
+
+interface SolomapSkillRegistry {
+  version: number;
+  updatedAt: string;
+  skills: SolomapSkillRegistryEntry[];
+}
+
 const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
@@ -155,6 +190,9 @@ export async function activate(context: vscode.ExtensionContext) {
         return [];
       }
       return savePastedImageAttachments(projectPath, scope, attachments);
+    },
+    async (skillInput) => {
+      await handleInstallSolomapSkill(context, skillInput);
     }
   );
 
@@ -904,6 +942,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
           vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+          break;
+
+        case 'installSkill':
+          await handleInstallSolomapSkill(context, message.skillInput || '');
           break;
 
         case 'getNodeConversations':
@@ -1864,6 +1906,10 @@ function getSolomapMemoryRoot(workspaceRoot: string, globalDataPath = ''): strin
   return path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'memory');
 }
 
+function getSolomapSkillsRoot(workspaceRoot: string, globalDataPath = ''): string {
+  return path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'skills');
+}
+
 function getProjectMemoryFilePath(workspaceRoot: string, globalDataPath = ''): string {
   const projectName = path.basename(workspaceRoot || 'project');
   const projectSlug = sanitizeAttachmentScope(projectName.toLowerCase()) || 'project';
@@ -2090,6 +2136,268 @@ function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): {
   return { globalRoot, memoryRoot, projectMemoryFile };
 }
 
+function getSolomapSkillRegistryPath(workspaceRoot: string, globalDataPath = ''): string {
+  return path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), 'registry.json');
+}
+
+function ensureSolomapSkillStore(workspaceRoot: string, globalDataPath = ''): { skillsRoot: string; installedRoot: string; runsRoot: string; registryPath: string } {
+  const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
+  const installedRoot = path.join(skillsRoot, 'installed');
+  const runsRoot = path.join(skillsRoot, 'runs');
+  const registryPath = path.join(skillsRoot, 'registry.json');
+  fs.mkdirSync(installedRoot, { recursive: true });
+  fs.mkdirSync(runsRoot, { recursive: true });
+  if (!fs.existsSync(registryPath)) {
+    fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), skills: [] }, null, 2), 'utf8');
+  }
+  return { skillsRoot, installedRoot, runsRoot, registryPath };
+}
+
+function readSolomapSkillRegistry(workspaceRoot: string, globalDataPath = ''): SolomapSkillRegistry {
+  const registryPath = getSolomapSkillRegistryPath(workspaceRoot, globalDataPath);
+  if (!fs.existsSync(registryPath)) {
+    return { version: 1, updatedAt: '', skills: [] };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    return {
+      version: Number(parsed.version || 1),
+      updatedAt: String(parsed.updatedAt || ''),
+      skills: Array.isArray(parsed.skills) ? parsed.skills : []
+    };
+  } catch {
+    return { version: 1, updatedAt: new Date().toISOString(), skills: [] };
+  }
+}
+
+function writeSolomapSkillRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapSkillRegistry): void {
+  const { registryPath } = ensureSolomapSkillStore(workspaceRoot, globalDataPath);
+  const normalized: SolomapSkillRegistry = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    skills: Array.isArray(registry.skills) ? registry.skills : []
+  };
+  fs.writeFileSync(registryPath, JSON.stringify(normalized, null, 2) + '\n', 'utf8');
+}
+
+function normalizeSkillKeywords(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 30);
+}
+
+function scoreSolomapSkill(skill: SolomapSkillRegistryEntry, contextText: string): { score: number; reasons: string[] } {
+  if (!skill || skill.status === 'disabled' || skill.status === 'failed') {
+    return { score: 0, reasons: [] };
+  }
+  if (skill.activation?.manualOnly) {
+    return { score: 0, reasons: [] };
+  }
+  if (skill.risk?.hasScripts || skill.risk?.hasExecutables) {
+    return { score: 0, reasons: [] };
+  }
+  const text = contextText.toLowerCase();
+  const reasons: string[] = [];
+  let score = 0;
+  const keywords = normalizeSkillKeywords(skill.activation?.keywords);
+  keywords.forEach((keyword) => {
+    if (keyword && text.includes(keyword.toLowerCase())) {
+      score += 3;
+      if (reasons.length < 3) {
+        reasons.push(`keyword:${keyword}`);
+      }
+    }
+  });
+  normalizeSkillKeywords(skill.activation?.useWhen).forEach((hint) => {
+    const hintWords = hint.toLowerCase().split(/[^a-z0-9\u4e00-\u9fa5]+/).filter((word) => word.length >= 2);
+    if (hintWords.some((word) => text.includes(word))) {
+      score += 1;
+    }
+  });
+  return { score, reasons };
+}
+
+function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 3): Array<{ skill: SolomapSkillRegistryEntry; reasons: string[] }> {
+  const registry = readSolomapSkillRegistry(workspaceRoot, globalDataPath);
+  return registry.skills
+    .map((skill) => ({ skill, ...scoreSolomapSkill(skill, contextText) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(({ skill, reasons }) => ({ skill, reasons }));
+}
+
+function buildSolomapSkillCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): string {
+  const candidates = selectSolomapSkillCandidates(workspaceRoot, globalDataPath, contextText, 3);
+  if (candidates.length === 0) {
+    return '';
+  }
+  return [
+    '本次任务可能相关的 SoloMap 技能候选：',
+    ...candidates.map(({ skill, reasons }, index) => {
+      const entry = skill.entry || `installed/${skill.id}/package/SKILL.md`;
+      const useWhen = normalizeSkillKeywords(skill.activation?.useWhen).slice(0, 3).join('；');
+      const doNotUseWhen = normalizeSkillKeywords(skill.activation?.doNotUseWhen).slice(0, 3).join('；');
+      const risk = skill.risk?.hasScripts || skill.risk?.hasExecutables
+        ? '包含脚本或可执行文件；除非本轮任务明确需要并说明用途与风险，否则只读取说明，不自动执行。'
+        : '默认作为说明型能力读取。';
+      return [
+        `${index + 1}. ${skill.title || skill.id}`,
+        `   - 入口：${path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), entry)}`,
+        `   - 命中原因：${reasons.join(', ') || '任务上下文相关'}`,
+        useWhen ? `   - 适用：${useWhen}` : '',
+        doNotUseWhen ? `   - 不适用：${doNotUseWhen}` : '',
+        `   - 风险：${risk}`
+      ].filter(Boolean).join('\n');
+    }),
+    '技能使用协议：这些只是候选，不是强制项。开始执行前快速判断是否适用，只读取真正相关的 SKILL.md；如果跳过候选，用一句话说明原因。不要自行安装新 skill。最终输出中简短列出本轮实际使用的 skill。'
+  ].join('\n');
+}
+
+function buildSkillInstallPrompt(skillInput: string, workspaceRoot: string, globalDataPath: string, resultFilePath: string): string {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
+  return [
+    '你正在为 SoloMap 安装一个跨 Agent 通用 skill package。',
+    '这是受控安装任务；只能按 SoloMap 指定目录和 schema 落盘，不要安装到各 Agent 自己的全局技能目录作为正式结果。',
+    '',
+    `用户提供的 skill 来源：${skillInput}`,
+    `项目目录：${workspaceRoot}`,
+    `SoloMap 全局目录：${globalRoot}`,
+    `SoloMap 技能目录：${skillsRoot}`,
+    `安装结果 JSON：${resultFilePath}`,
+    '',
+    '目标目录结构：',
+    '- `.solomap-global/skills/installed/<skill-id>/package/`：完整 skill package，必须包含入口 `SKILL.md`，并保留 scripts、templates、assets、examples 等同级资源。',
+    '- `.solomap-global/skills/installed/<skill-id>/solomap.skill.json`：SoloMap 统一技能元数据。',
+    '- `.solomap-global/skills/installed/<skill-id>/source.lock.json`：来源、commit、原始 skillPath、安装时间、文件 hash 或目录 hash。',
+    '',
+    '安装步骤：',
+    '1. 解析用户提供的来源。支持 skills.sh URL、GitHub URL、owner/repo、owner/repo@skill、仓库子目录 URL。',
+    '2. 下载或克隆来源到临时预览区；如果使用 `npx skills`，必须设置 `DISABLE_TELEMETRY=1`，并把 HOME 指向临时目录，避免污染用户真实 Agent 技能目录。',
+    '3. 定位目标 skill package 的实际文件夹；不要只复制 `SKILL.md`。',
+    '4. 选择稳定 `skill-id`：优先用 SKILL.md frontmatter 的 `name`，否则用目录名；只允许小写字母、数字和连字符。',
+    '5. 将完整 package 写入 `.solomap-global/skills/installed/<skill-id>/package/`。',
+    '6. 从 `SKILL.md` 解析 title/name、description、version，并生成 `solomap.skill.json`。至少包含 id、title、description、entry、packagePath、status、source、activation、risk、installedAt、updatedAt。',
+    '7. 扫描 package，标记风险：是否包含 scripts、可执行文件、网络访问提示、文件写入提示。默认 `requiresUserApprovalToRunScripts=true`。',
+    '8. 写入 `source.lock.json`。',
+    '9. 写入安装结果 JSON。',
+    '',
+    '结果 JSON schema：',
+    '{',
+    '  "ok": true,',
+    '  "skillId": "skill-id",',
+    '  "installedPath": ".solomap-global/skills/installed/skill-id",',
+    '  "packagePath": ".solomap-global/skills/installed/skill-id/package",',
+    '  "entryFile": ".solomap-global/skills/installed/skill-id/package/SKILL.md",',
+    '  "solomapSkillJson": ".solomap-global/skills/installed/skill-id/solomap.skill.json",',
+    '  "sourceLockJson": ".solomap-global/skills/installed/skill-id/source.lock.json",',
+    '  "metadata": { "name": "skill-id", "description": "...", "version": "..." },',
+    '  "source": { "input": "...", "repo": "owner/repo", "commit": "...", "skillPath": "..." },',
+    '  "risk": { "hasScripts": false, "hasExecutables": false, "usesNetwork": "unknown", "writesFiles": "unknown", "requiresUserApprovalToRunScripts": true }',
+    '}',
+    '',
+    '如果安装失败，也必须写入结果 JSON：',
+    '{ "ok": false, "error": "一句话说明失败原因", "source": { "input": "..." } }',
+    '',
+    '安全边界：',
+    '- 不要删除旧文件或清空目录。',
+    '- 不要把 package 安装到 `~/.codex`、`~/.claude`、`~/.agents`、项目源码目录或其他 Agent 私有目录作为正式结果。',
+    '- 不要运行 skill package 中的脚本；安装阶段只允许读取、复制、分析。',
+    '- 如果来源不清楚或存在多个候选 skill，选择最匹配用户输入的一个；无法判断时写失败结果 JSON，不要猜测安装。',
+    '',
+    '完成后正常退出 CLI。'
+  ].join('\n');
+}
+
+function resolveSkillResultPath(globalRoot: string, value: string): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return path.isAbsolute(raw) ? raw : path.join(path.dirname(globalRoot), raw);
+}
+
+function pathInside(parent: string, candidate: string): boolean {
+  const relativePath = path.relative(path.resolve(parent), path.resolve(candidate));
+  return Boolean(relativePath) && !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
+}
+
+function validateAndRegisterSkillInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): { ok: boolean; message: string; skillId?: string } {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
+  const installedRoot = path.join(skillsRoot, 'installed');
+  if (!fs.existsSync(resultFilePath)) {
+    return { ok: false, message: 'Skill install result.json was not created.' };
+  }
+  let result: any;
+  try {
+    result = JSON.parse(fs.readFileSync(resultFilePath, 'utf8'));
+  } catch (error: any) {
+    return { ok: false, message: `Skill install result.json is invalid: ${error.message}` };
+  }
+  if (!result.ok) {
+    return { ok: false, message: String(result.error || 'Skill installation failed.') };
+  }
+  const skillId = sanitizeAttachmentScope(String(result.skillId || result.metadata?.name || '').toLowerCase());
+  if (!skillId) {
+    return { ok: false, message: 'Skill install result is missing skillId.' };
+  }
+  const installedPath = resolveSkillResultPath(globalRoot, result.installedPath || path.join(skillsRoot, 'installed', skillId));
+  const packagePath = resolveSkillResultPath(globalRoot, result.packagePath || path.join(installedPath, 'package'));
+  const entryFile = resolveSkillResultPath(globalRoot, result.entryFile || path.join(packagePath, 'SKILL.md'));
+  const solomapSkillJson = resolveSkillResultPath(globalRoot, result.solomapSkillJson || path.join(installedPath, 'solomap.skill.json'));
+  const sourceLockJson = resolveSkillResultPath(globalRoot, result.sourceLockJson || path.join(installedPath, 'source.lock.json'));
+  if (!pathInside(installedRoot, installedPath)) {
+    return { ok: false, message: 'Skill installedPath is outside SoloMap skills/installed.' };
+  }
+  if (!pathInside(installedPath, packagePath) || !pathInside(packagePath, entryFile)) {
+    return { ok: false, message: 'Skill package path is outside the installed skill directory.' };
+  }
+  if (![entryFile, solomapSkillJson, sourceLockJson].every((filePath) => fs.existsSync(filePath) && fs.statSync(filePath).isFile())) {
+    return { ok: false, message: 'Skill package is missing SKILL.md, solomap.skill.json, or source.lock.json.' };
+  }
+  let skillJson: any;
+  try {
+    skillJson = JSON.parse(fs.readFileSync(solomapSkillJson, 'utf8'));
+  } catch (error: any) {
+    return { ok: false, message: `solomap.skill.json is invalid: ${error.message}` };
+  }
+  const now = new Date().toISOString();
+  const entry: SolomapSkillRegistryEntry = {
+    id: skillId,
+    title: String(skillJson.title || skillJson.name || result.metadata?.name || skillId),
+    description: String(skillJson.description || result.metadata?.description || ''),
+    entry: path.relative(skillsRoot, entryFile).replace(/\\/g, '/'),
+    packagePath: path.relative(skillsRoot, packagePath).replace(/\\/g, '/'),
+    status: 'installed',
+    source: skillJson.source || result.source || {},
+    activation: {
+      keywords: normalizeSkillKeywords(skillJson.activation?.keywords),
+      useWhen: normalizeSkillKeywords(skillJson.activation?.useWhen),
+      doNotUseWhen: normalizeSkillKeywords(skillJson.activation?.doNotUseWhen),
+      projectTypes: normalizeSkillKeywords(skillJson.activation?.projectTypes),
+      roadmapStages: normalizeSkillKeywords(skillJson.activation?.roadmapStages),
+      taskKinds: normalizeSkillKeywords(skillJson.activation?.taskKinds),
+      fileGlobs: normalizeSkillKeywords(skillJson.activation?.fileGlobs),
+      manualOnly: Boolean(skillJson.activation?.manualOnly)
+    },
+    risk: {
+      hasScripts: Boolean(skillJson.risk?.hasScripts || result.risk?.hasScripts),
+      hasExecutables: Boolean(skillJson.risk?.hasExecutables || result.risk?.hasExecutables),
+      usesNetwork: skillJson.risk?.usesNetwork ?? result.risk?.usesNetwork ?? 'unknown',
+      writesFiles: skillJson.risk?.writesFiles ?? result.risk?.writesFiles ?? 'unknown',
+      requiresUserApprovalToRunScripts: skillJson.risk?.requiresUserApprovalToRunScripts !== false
+    },
+    installedAt: String(skillJson.installedAt || result.installedAt || now),
+    updatedAt: now
+  };
+  const registry = readSolomapSkillRegistry(workspaceRoot, globalDataPath);
+  const nextSkills = registry.skills.filter((skill) => skill.id !== skillId);
+  nextSkills.push(entry);
+  writeSolomapSkillRegistry(workspaceRoot, globalDataPath, { ...registry, skills: nextSkills.sort((a, b) => a.id.localeCompare(b.id)) });
+  return { ok: true, message: `Skill installed: ${skillId}`, skillId };
+}
+
 function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = ''): string {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const memoryRoot = path.join(globalRoot, 'memory');
@@ -2192,6 +2500,11 @@ function buildAgentConversationPrompt(
     ].join('\n')
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(
+    workspaceRoot,
+    globalDataPath,
+    [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
+  );
 
   return [
     '你正在 SoloMap 的一个路线图环节中工作。',
@@ -2214,6 +2527,7 @@ function buildAgentConversationPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
     memoryInstructions,
@@ -2253,6 +2567,7 @@ function buildRoadmapRevisionPrompt(
     ].join('\n')
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   return [
     '你正在 SoloMap 中调整当前项目路线图。',
     '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
@@ -2264,6 +2579,7 @@ function buildRoadmapRevisionPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行要求：',
@@ -2300,6 +2616,7 @@ function buildSoloConversationPrompt(
     ].join('\n')
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -2311,6 +2628,7 @@ function buildSoloConversationPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行边界：',
@@ -2541,6 +2859,76 @@ function showAgentTerminal(): void {
     return;
   }
   vscode.window.showInformationMessage('No active SoloMap Agent terminal is available.');
+}
+
+function getSkillInstallWorkspaceRoot(context: vscode.ExtensionContext): string {
+  return activeProjectRoot || getSelectedProjectPath(context) || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+}
+
+async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSkillInput: string): Promise<void> {
+  const skillInput = String(rawSkillInput || '').trim();
+  if (!skillInput) {
+    vscode.window.showWarningMessage('Paste a skill link or package name before installing.');
+    return;
+  }
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = (settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  if (!commandExists(agentCli)) {
+    const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
+    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}.`);
+    return;
+  }
+  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
+  const { skillsRoot, runsRoot } = ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
+  const runId = `skill-install-${Date.now()}`;
+  const runDir = path.join(runsRoot, runId);
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const outputFilePath = path.join(runDir, 'output.log');
+  const resultFilePath = path.join(runDir, 'result.json');
+  const commandFilePath = path.join(runDir, 'command.txt');
+  const runScriptPath = path.join(runDir, 'run-skill-install.sh');
+  fs.mkdirSync(runDir, { recursive: true });
+  const prompt = buildSkillInstallPrompt(skillInput, workspaceRoot, settings.globalDataPath, resultFilePath);
+  fs.writeFileSync(promptFilePath, prompt, 'utf8');
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
+  fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
+  const script = [
+    `cd ${shellQuote(workspaceRoot)}`,
+    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
+    'export DISABLE_TELEMETRY=1',
+    `mkdir -p ${shellQuote(runDir)} ${shellQuote(skillsRoot)}`,
+    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`,
+    `printf '\\nSoloMap skill install run finished. Result expected at: ${resultFilePath}\\n' >> ${shellQuote(outputFilePath)}`
+  ].join('; ');
+  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
+  const terminal = createAgentTerminal(workspaceRoot, `skill-${runId.slice(-6)}`);
+  terminal.show(true);
+  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  vscode.window.showInformationMessage('SoloMap skill install started. The Agent terminal will complete the package install.');
+
+  const startedAt = Date.now();
+  const poller = setInterval(() => {
+    if (!fs.existsSync(resultFilePath)) {
+      if (Date.now() - startedAt > 30 * 60 * 1000) {
+        clearInterval(poller);
+        vscode.window.showWarningMessage('SoloMap skill install is still waiting for result.json. Check the Agent terminal output.');
+      }
+      return;
+    }
+    clearInterval(poller);
+    const validation = validateAndRegisterSkillInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
+    if (validation.ok) {
+      vscode.window.showInformationMessage(validation.message);
+      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: true, message: validation.message });
+      sidebarProvider?.postSkillInstallResult(true, validation.message);
+    } else {
+      vscode.window.showErrorMessage(`SoloMap skill install failed validation: ${validation.message}`);
+      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: false, message: validation.message });
+      sidebarProvider?.postSkillInstallResult(false, validation.message);
+    }
+  }, 2000);
 }
 
 function extractNativeSessionIdFromExecutionOutput(output: string): string {
@@ -4787,6 +5175,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       </div>
     </div>
 
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-skill-install">Install Skill</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-skill-input"
+        placeholder="e.g. https://skills.sh/owner/repo or owner/repo@skill"
+      >
+      <div id="help-skill-install" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Paste a skills.sh or GitHub skill link. SoloMap will install it into the global skill library.
+      </div>
+      <button class="settings-action-btn test-btn" id="btn-install-skill" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-cloud-download"></span><span id="text-install-skill">Install Skill</span></button>
+      <div class="cli-badge" id="skill-install-badge" style="display:none;"></div>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -4818,6 +5221,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
+    const settingSkillInput = document.getElementById('setting-skill-input');
+    const btnInstallSkill = document.getElementById('btn-install-skill');
+    const skillInstallBadge = document.getElementById('skill-install-badge');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -4850,6 +5256,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalDataPath: '跨项目数据目录',
         globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
         globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
+        skillInstall: '安装技能',
+        skillInstallPlaceholder: '例如：https://skills.sh/owner/repo 或 owner/repo@skill',
+        skillInstallHelp: '粘贴 skills.sh 或 GitHub 技能链接，SoloMap 会安装到全局技能库。',
+        installSkill: '安装技能',
+        installingSkill: '正在启动安装...',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -4928,6 +5339,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalDataPath: 'Global Data Directory',
         globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
         globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
+        skillInstall: 'Install Skill',
+        skillInstallPlaceholder: 'e.g. https://skills.sh/owner/repo or owner/repo@skill',
+        skillInstallHelp: 'Paste a skills.sh or GitHub skill link. SoloMap installs it into the global skill library.',
+        installSkill: 'Install Skill',
+        installingSkill: 'Starting install...',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -5063,6 +5479,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-global-data-path', t('globalDataPath'));
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
       setText('help-global-data-path', t('globalDataPathHelp'));
+      setText('label-skill-install', t('skillInstall'));
+      if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
+      setText('help-skill-install', t('skillInstallHelp'));
+      setText('text-install-skill', t('installSkill'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
@@ -5299,6 +5719,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             cliTestBadge.textContent = t('connectionFailed') + message.message;
           }
           break;
+        case 'skillInstallResult':
+          if (skillInstallBadge) {
+            skillInstallBadge.style.display = 'block';
+            skillInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
+            skillInstallBadge.textContent = message.message || '';
+          }
+          break;
       }
     });
 
@@ -5329,6 +5756,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         cliPath: getEffectiveSettingCliPath()
       });
     });
+
+    if (btnInstallSkill) {
+      btnInstallSkill.addEventListener('click', () => {
+        const skillInput = (settingSkillInput ? settingSkillInput.value : '').trim();
+        if (!skillInput) {
+          if (skillInstallBadge) {
+            skillInstallBadge.style.display = 'block';
+            skillInstallBadge.className = 'cli-badge error';
+            skillInstallBadge.textContent = t('skillInstallPlaceholder');
+          }
+          return;
+        }
+        if (skillInstallBadge) {
+          skillInstallBadge.style.display = 'block';
+          skillInstallBadge.className = 'cli-badge';
+          skillInstallBadge.style.background = 'rgba(255,255,255,0.05)';
+          skillInstallBadge.style.color = 'var(--text-muted)';
+          skillInstallBadge.textContent = t('installingSkill');
+        }
+        vscode.postMessage({ command: 'installSkill', skillInput });
+      });
+    }
 
     bindSoloSelect(projectSelect, (value) => {
       vscode.postMessage({
