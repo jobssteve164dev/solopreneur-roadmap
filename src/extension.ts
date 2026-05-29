@@ -25,6 +25,7 @@ interface SolopreneurSettings {
 interface SolopreneurProject {
   name: string;
   path: string;
+  type?: string;
 }
 
 interface AgentStepSession {
@@ -622,9 +623,23 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
 
   const projects = getProjects(context);
   if (!projects.some((project) => project.path === folder)) {
+    const projectType = await vscode.window.showQuickPick([
+      { label: '核心产品', description: '面向外部用户，需要获客、采用、付费或持续使用', value: 'core_product' },
+      { label: '基础设施', description: '为多个项目提供能力，重视契约、治理和兼容性', value: 'infra' },
+      { label: '内容产品', description: '围绕内容生产、发布、分发和反馈持续运转', value: 'content' },
+      { label: '试验研究', description: '验证想法或学习技术，重点是获得结论', value: 'experiment' },
+      { label: '工具脚手架', description: '减少重复工作，供自己或多个项目复用', value: 'tool' },
+      { label: '归档维护', description: '已上线或稳定项目，重点是健康检查和维护', value: 'archive' }
+    ], {
+      placeHolder: '这个项目更像哪一类？'
+    });
+    if (!projectType) {
+      return;
+    }
     projects.push({
       name: projectName(folder),
-      path: folder
+      path: folder,
+      type: projectType.value
     });
     await saveProjects(context, projects);
   }

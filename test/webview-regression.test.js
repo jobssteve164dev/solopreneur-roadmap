@@ -684,11 +684,26 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /id="progress-text"/);
   assert.match(html, /function activateProjectInSidebar/);
   assert.match(html, /padding:\s*12px 12px 78px/);
+  assert.match(html, /bindSoloSelect\(projectSelect,\s*\(value\) => \{[\s\S]*?activateProjectInSidebar\(value\)/);
   assert.match(html, /selectProject/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
+});
+
+test('adding a project asks for a global methodology project type', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+
+  assert.match(source, /showQuickPick\(\[/);
+  assert.match(source, /这个项目更像哪一类/);
+  assert.match(source, /核心产品/);
+  assert.match(source, /基础设施/);
+  assert.match(source, /内容产品/);
+  assert.match(source, /试验研究/);
+  assert.match(source, /工具脚手架/);
+  assert.match(source, /归档维护/);
+  assert.match(source, /type:\s*projectType\.value/);
 });
 
 test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
@@ -721,7 +736,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   ].join('\n'));
 
   const summaries = sidebarModule.__buildProjectPortfolioSummaries([
-    { name: 'Novel', path: projectRootA },
+    { name: 'Novel', path: projectRootA, type: 'content' },
     { name: 'CRM', path: projectRootB }
   ]);
 
@@ -733,6 +748,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].progressPercent, 33);
   assert.equal(summaries[0].globalPriority, 'P0');
   assert.equal(summaries[0].globalNextAction, 'Build MVP');
+  assert.equal(summaries[0].projectType, 'content');
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
   assert.equal(sidebarModule.__getRecommendedNode([

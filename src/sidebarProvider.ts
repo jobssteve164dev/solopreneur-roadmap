@@ -16,6 +16,7 @@ interface SolopreneurSettings {
 interface SolopreneurProject {
   name: string;
   path: string;
+  type?: string;
 }
 
 interface ProjectPortfolioSummary {
@@ -853,7 +854,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
   return {
     ...baseSummary,
     globalPriority,
-    projectType: detectProjectType(nodes),
+    projectType: project.type || detectProjectType(nodes),
     blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : '',
     globalNextAction: recommendedNode?.title || (totalNodes ? 'Review completed roadmap' : 'Initialize roadmap'),
     reusableSignals: countReusableSignals(project.path),
@@ -3445,10 +3446,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
 
     bindSoloSelect(projectSelect, (value) => {
+      activateProjectInSidebar(value);
       vscode.postMessage({
         command: 'selectProject',
         projectPath: value
       });
+      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: value });
     });
 
     btnAddProject.addEventListener('click', () => {
