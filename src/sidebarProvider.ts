@@ -58,6 +58,7 @@ interface ProjectIssueComment {
 
 interface ProjectIssueSummary {
   available: boolean;
+  loading: boolean;
   repo: string;
   total: number;
   open: number;
@@ -177,6 +178,7 @@ function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
 function createEmptyIssueSummary(message = ''): ProjectIssueSummary {
   return {
     available: false,
+    loading: false,
     repo: '',
     total: 0,
     open: 0,
@@ -184,6 +186,13 @@ function createEmptyIssueSummary(message = ''): ProjectIssueSummary {
     byPriority: {},
     items: [],
     message
+  };
+}
+
+function createLoadingIssueSummary(): ProjectIssueSummary {
+  return {
+    ...createEmptyIssueSummary('Loading GitHub Issues'),
+    loading: true
   };
 }
 
@@ -319,6 +328,7 @@ function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
   }
   return {
     available: true,
+    loading: false,
     repo,
     total: items.length,
     open: items.filter((issue) => issue.state === 'OPEN').length,
@@ -525,7 +535,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     recommendedStatus: recommendedNode?.status || '',
     overallStatus,
     recentActivityAt: getProjectRecentActivityAt(project.path),
-    issues: readProjectIssueSummary(project.path)
+    issues: createLoadingIssueSummary()
   };
 }
 
@@ -536,6 +546,7 @@ function buildProjectPortfolioSummaries(projects: SolopreneurProject[]): Project
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'solopreneur.sidebar';
   private _view?: vscode.WebviewView;
+  private _issueLoadRequest = 0;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -746,15 +757,41 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public sendProjects() {
     if (this._view) {
       const projectState = this._getProjects();
+      const portfolio = buildProjectPortfolioSummaries(projectState.projects);
       this._view.webview.postMessage({
         command: 'projectsLoaded',
         projects: {
           ...projectState,
-          portfolio: buildProjectPortfolioSummaries(projectState.projects)
+          portfolio
         }
       });
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
+      this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
     }
+  }
+
+  private scheduleIssueSummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
+    const requestId = ++this._issueLoadRequest;
+    const ordered = [
+      ...projects.filter((project) => project.path === selectedProjectPath),
+      ...projects.filter((project) => project.path !== selectedProjectPath)
+    ];
+    ordered.forEach((project, index) => {
+      setTimeout(() => {
+        if (!this._view || requestId !== this._issueLoadRequest) {
+          return;
+        }
+        const issues = readProjectIssueSummary(project.path);
+        if (!this._view || requestId !== this._issueLoadRequest) {
+          return;
+        }
+        this._view.webview.postMessage({
+          command: 'projectIssuesLoaded',
+          projectPath: project.path,
+          issues
+        });
+      }, index === 0 ? 0 : 80 * index);
+    });
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
@@ -2656,6 +2693,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderPortfolio(message.projects.portfolio || [], message.projects.selectedProjectPath || '');
           break;
 
+        case 'projectIssuesLoaded':
+          currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
+            project.path === message.projectPath ? { ...project, issues: message.issues } : project
+          ));
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
         case 'cliTestResult':
           cliTestBadge.style.display = 'block';
           if (message.success) {
@@ -3405,6 +3449,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function renderIssueStatsLine(project) {
       const issues = project.issues || {};
+      if (issues.loading) {
+        return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueLoading')) + '</span>';
+      }
       if (!issues.available) {
         return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueUnavailable')) + '</span>';
       }
@@ -3413,6 +3460,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function renderProjectIssuePanel(project) {
       const issues = project.issues || {};
+      if (issues.loading) {
+        return \`
+          <div class="portfolio-issue-panel" data-issue-panel>
+            <div class="portfolio-issue-head">
+              <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
+              <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
+            </div>
+            <div class="portfolio-issue-empty">\${escapeHtml(t('issueLoading'))}</div>
+            \${issueFormOpen ? renderIssueCreateForm(project.path) : ''}
+          </div>
+        \`;
+      }
       if (!issues.available) {
         return \`
           <div class="portfolio-issue-panel" data-issue-panel>
