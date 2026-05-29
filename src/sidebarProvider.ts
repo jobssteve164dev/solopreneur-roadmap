@@ -59,6 +59,8 @@ interface ProjectIssueComment {
 interface ProjectIssueSummary {
   available: boolean;
   loading: boolean;
+  stale: boolean;
+  syncedAt: string;
   repo: string;
   total: number;
   open: number;
@@ -74,6 +76,18 @@ interface DependencyStatus {
   githubCliReady: boolean;
   githubAuthReady: boolean;
   githubMessage: string;
+}
+
+interface IssueCacheFile {
+  schemaVersion: number;
+  repo: string;
+  syncedAt: string;
+  issues: ProjectIssueItem[];
+  details: Record<string, {
+    syncedAt: string;
+    issue: ProjectIssueItem;
+    comments: ProjectIssueComment[];
+  }>;
 }
 
 interface RoadmapNodeLike {
@@ -179,6 +193,8 @@ function createEmptyIssueSummary(message = ''): ProjectIssueSummary {
   return {
     available: false,
     loading: false,
+    stale: false,
+    syncedAt: '',
     repo: '',
     total: 0,
     open: 0,
@@ -193,6 +209,153 @@ function createLoadingIssueSummary(): ProjectIssueSummary {
   return {
     ...createEmptyIssueSummary('Loading GitHub Issues'),
     loading: true
+  };
+}
+
+function getIssueCachePath(projectPath: string): string {
+  return path.join(projectPath, '.solopreneur', 'issues-cache.json');
+}
+
+function ensureIssueCacheGitignore(projectPath: string): void {
+  const solopreneurDir = path.join(projectPath, '.solopreneur');
+  const gitignorePath = path.join(solopreneurDir, '.gitignore');
+  try {
+    fs.mkdirSync(solopreneurDir, { recursive: true });
+    const existing = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf8') : '';
+    if (!/(^|\n)issues-cache\.json(\n|$)/.test(existing)) {
+      const next = `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}issues-cache.json\n`;
+      fs.writeFileSync(gitignorePath, next, 'utf8');
+    }
+  } catch {}
+}
+
+function validateIssueCache(raw: any, repo: string): IssueCacheFile | null {
+  if (!raw || raw.schemaVersion !== 1 || raw.repo !== repo || !Array.isArray(raw.issues) || typeof raw.details !== 'object' || raw.details === null) {
+    return null;
+  }
+  const issues = raw.issues.map(parseGithubIssue).filter((issue: ProjectIssueItem) => issue.number && issue.title && issue.state);
+  const details: IssueCacheFile['details'] = {};
+  for (const [key, value] of Object.entries(raw.details)) {
+    const detail = value as any;
+    if (!detail || !detail.issue) {
+      continue;
+    }
+    const issue = parseGithubIssue(detail.issue);
+    if (!issue.number || !issue.title || !issue.state) {
+      continue;
+    }
+    details[String(key)] = {
+      syncedAt: String(detail.syncedAt || ''),
+      issue,
+      comments: Array.isArray(detail.comments)
+        ? detail.comments.map((comment: any) => ({
+          author: String(comment?.author || ''),
+          body: String(comment?.body || ''),
+          createdAt: String(comment?.createdAt || '')
+        }))
+        : []
+    };
+  }
+  return {
+    schemaVersion: 1,
+    repo,
+    syncedAt: String(raw.syncedAt || ''),
+    issues,
+    details
+  };
+}
+
+function readIssueCache(projectPath: string, repo = getGithubRepoSlug(projectPath)): IssueCacheFile | null {
+  if (!repo) {
+    return null;
+  }
+  try {
+    const cachePath = getIssueCachePath(projectPath);
+    if (!fs.existsSync(cachePath)) {
+      return null;
+    }
+    return validateIssueCache(JSON.parse(fs.readFileSync(cachePath, 'utf8')), repo);
+  } catch {
+    return null;
+  }
+}
+
+function writeIssueCache(projectPath: string, cache: IssueCacheFile): void {
+  const cachePath = getIssueCachePath(projectPath);
+  const tempPath = `${cachePath}.tmp`;
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  const payload = JSON.stringify(cache, null, 2);
+  fs.writeFileSync(tempPath, payload, 'utf8');
+  JSON.parse(fs.readFileSync(tempPath, 'utf8'));
+  fs.renameSync(tempPath, cachePath);
+  ensureIssueCacheGitignore(projectPath);
+}
+
+function summarizeIssueItems(repo: string, items: ProjectIssueItem[], syncedAt = '', stale = false): ProjectIssueSummary {
+  const byCategory: Record<string, number> = {};
+  const byPriority: Record<string, number> = {};
+  for (const issue of items.filter((issue) => issue.state === 'OPEN')) {
+    byCategory[issue.category] = (byCategory[issue.category] || 0) + 1;
+    if (issue.priority) {
+      byPriority[issue.priority] = (byPriority[issue.priority] || 0) + 1;
+    }
+  }
+  return {
+    available: true,
+    loading: false,
+    stale,
+    syncedAt,
+    repo,
+    total: items.length,
+    open: items.filter((issue) => issue.state === 'OPEN').length,
+    byCategory,
+    byPriority,
+    items: items
+      .filter((issue) => issue.state === 'OPEN')
+      .sort((a, b) => {
+        const priorityRank: Record<string, number> = { P0: 0, P1: 1, P2: 2, '': 3 };
+        return (priorityRank[a.priority] ?? 3) - (priorityRank[b.priority] ?? 3) || b.thumbsUp - a.thumbsUp || b.comments - a.comments;
+      })
+      .slice(0, 5),
+    message: stale ? 'Showing last synced GitHub Issues' : ''
+  };
+}
+
+function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyIssueSummary('No GitHub remote');
+  }
+  const cache = readIssueCache(projectPath, repo);
+  if (!cache) {
+    return createLoadingIssueSummary();
+  }
+  return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+}
+
+function createIssueCache(repo: string, issues: ProjectIssueItem[], details: IssueCacheFile['details'] = {}): IssueCacheFile {
+  return {
+    schemaVersion: 1,
+    repo,
+    syncedAt: new Date().toISOString(),
+    issues,
+    details
+  };
+}
+
+function readCachedIssueDetails(projectPath: string, issueNumber: number): { ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale: boolean } | null {
+  const repo = getGithubRepoSlug(projectPath);
+  const cache = readIssueCache(projectPath, repo);
+  const detail = cache?.details[String(issueNumber)];
+  if (!detail) {
+    return null;
+  }
+  return {
+    ok: true,
+    issue: detail.issue,
+    comments: detail.comments,
+    message: 'Showing last synced issue discussion',
+    stale: true
   };
 }
 
@@ -306,6 +469,10 @@ function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
     'number,title,body,state,labels,comments,reactionGroups,updatedAt,url'
   ], 4500);
   if (!result.ok) {
+    const cache = readIssueCache(projectPath, repo);
+    if (cache) {
+      return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+    }
     return {
       ...createEmptyIssueSummary(String(result.stderr || result.stdout || 'GitHub issues unavailable').trim()),
       repo
@@ -315,37 +482,24 @@ function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
   try {
     rawIssues = JSON.parse(String(result.stdout || '[]'));
   } catch {
+    const cache = readIssueCache(projectPath, repo);
+    if (cache) {
+      return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+    }
     return { ...createEmptyIssueSummary('GitHub issue data could not be read'), repo };
   }
   const items = rawIssues.map(parseGithubIssue).filter((issue) => issue.number > 0);
-  const byCategory: Record<string, number> = {};
-  const byPriority: Record<string, number> = {};
-  for (const issue of items.filter((issue) => issue.state === 'OPEN')) {
-    byCategory[issue.category] = (byCategory[issue.category] || 0) + 1;
-    if (issue.priority) {
-      byPriority[issue.priority] = (byPriority[issue.priority] || 0) + 1;
-    }
+  const existing = readIssueCache(projectPath, repo);
+  const cache = createIssueCache(repo, items, existing?.details || {});
+  try {
+    writeIssueCache(projectPath, cache);
+  } catch {
+    return summarizeIssueItems(repo, items, cache.syncedAt, false);
   }
-  return {
-    available: true,
-    loading: false,
-    repo,
-    total: items.length,
-    open: items.filter((issue) => issue.state === 'OPEN').length,
-    byCategory,
-    byPriority,
-    items: items
-      .filter((issue) => issue.state === 'OPEN')
-      .sort((a, b) => {
-        const priorityRank: Record<string, number> = { P0: 0, P1: 1, P2: 2, '': 3 };
-        return (priorityRank[a.priority] ?? 3) - (priorityRank[b.priority] ?? 3) || b.thumbsUp - a.thumbsUp || b.comments - a.comments;
-      })
-      .slice(0, 5),
-    message: ''
-  };
+  return summarizeIssueItems(repo, items, cache.syncedAt, false);
 }
 
-function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string } {
+function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale?: boolean } {
   const result = runGhIssueCommand(projectPath, [
     'issue',
     'view',
@@ -355,11 +509,12 @@ function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok
     'number,title,body,state,labels,comments,reactionGroups,updatedAt,url'
   ], 7000);
   if (!result.ok) {
-    return { ok: false, comments: [], message: String(result.stderr || result.stdout || 'GitHub issue unavailable').trim() };
+    return readCachedIssueDetails(projectPath, issueNumber)
+      || { ok: false, comments: [], message: String(result.stderr || result.stdout || 'GitHub issue unavailable').trim() };
   }
   try {
-    const issue = parseGithubIssue(JSON.parse(result.stdout || '{}'));
     const parsed = JSON.parse(result.stdout || '{}');
+    const issue = parseGithubIssue(parsed);
     const comments = Array.isArray(parsed.comments)
       ? parsed.comments.map((comment: any) => ({
         author: String(comment?.author?.login || ''),
@@ -367,9 +522,27 @@ function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok
         createdAt: String(comment?.createdAt || '')
       }))
       : [];
-    return { ok: true, issue, comments, message: '' };
+    const existing = readIssueCache(projectPath, result.repo);
+    const issues = existing?.issues || [];
+    const issueIndex = issues.findIndex((item) => item.number === issue.number);
+    const nextIssues = issueIndex >= 0
+      ? issues.map((item) => item.number === issue.number ? issue : item)
+      : [issue, ...issues];
+    const cache = createIssueCache(result.repo, nextIssues, {
+      ...(existing?.details || {}),
+      [String(issueNumber)]: {
+        syncedAt: new Date().toISOString(),
+        issue,
+        comments
+      }
+    });
+    try {
+      writeIssueCache(projectPath, cache);
+    } catch {}
+    return { ok: true, issue, comments, message: '', stale: false };
   } catch {
-    return { ok: false, comments: [], message: 'GitHub issue data could not be read' };
+    return readCachedIssueDetails(projectPath, issueNumber)
+      || { ok: false, comments: [], message: 'GitHub issue data could not be read' };
   }
 }
 
@@ -380,6 +553,9 @@ function createProjectIssue(projectPath: string, title: string, body: string, ca
     args.push('--label', labels);
   }
   const result = runGhIssueCommand(projectPath, args, 10000);
+  if (result.ok) {
+    readProjectIssueSummary(projectPath);
+  }
   return {
     ok: result.ok,
     message: String(result.stdout || result.stderr || '').trim()
@@ -388,6 +564,9 @@ function createProjectIssue(projectPath: string, title: string, body: string, ca
 
 function closeProjectIssue(projectPath: string, issueNumber: number): { ok: boolean; message: string } {
   const result = runGhIssueCommand(projectPath, ['issue', 'close', String(issueNumber)], 8000);
+  if (result.ok) {
+    readProjectIssueSummary(projectPath);
+  }
   return {
     ok: result.ok,
     message: String(result.stdout || result.stderr || '').trim()
@@ -535,7 +714,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     recommendedStatus: recommendedNode?.status || '',
     overallStatus,
     recentActivityAt: getProjectRecentActivityAt(project.path),
-    issues: createLoadingIssueSummary()
+    issues: readCachedIssueSummary(project.path)
   };
 }
 
@@ -663,12 +842,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           }
           break;
         case 'getIssueDetails':
-          this._view?.webview.postMessage({
-            command: 'issueDetailsLoaded',
-            projectPath: data.projectPath || '',
-            issueNumber: Number(data.issueNumber || 0),
-            ...readProjectIssueDetails(data.projectPath || '', Number(data.issueNumber || 0))
-          });
+          this.sendIssueDetails(data.projectPath || '', Number(data.issueNumber || 0));
           break;
         case 'createIssue': {
           const result = createProjectIssue(
@@ -792,6 +966,32 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         });
       }, index === 0 ? 0 : 80 * index);
     });
+  }
+
+  private sendIssueDetails(projectPath: string, issueNumber: number) {
+    if (!projectPath || !issueNumber) {
+      return;
+    }
+    const cached = readCachedIssueDetails(projectPath, issueNumber);
+    if (cached) {
+      this._view?.webview.postMessage({
+        command: 'issueDetailsLoaded',
+        projectPath,
+        issueNumber,
+        ...cached
+      });
+    }
+    setTimeout(() => {
+      if (!this._view) {
+        return;
+      }
+      this._view.webview.postMessage({
+        command: 'issueDetailsLoaded',
+        projectPath,
+        issueNumber,
+        ...readProjectIssueDetails(projectPath, issueNumber)
+      });
+    }, 0);
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
@@ -2419,6 +2619,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueSubmit: '创建',
         issueNoComments: '还没有评论。',
         issueLoading: '正在读取评论...',
+        issueSynced: '已同步',
+        issueCached: '缓存',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -2513,6 +2715,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueSubmit: 'Create',
         issueNoComments: 'No comments yet.',
         issueLoading: 'Loading comments...',
+        issueSynced: 'Synced',
+        issueCached: 'Cached',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -2749,7 +2953,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'issueDetailsLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
-          issueDetails = message.ok ? { issue: message.issue, comments: message.comments || [] } : { error: message.message || '' };
+          issueDetails = message.ok ? { issue: message.issue, comments: message.comments || [], stale: !!message.stale } : { error: message.message || '' };
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -3455,7 +3659,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!issues.available) {
         return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueUnavailable')) + '</span>';
       }
-      return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueTotal')) + ' ' + escapeHtml(issues.total || 0) + ' · ' + escapeHtml(t('issueOpen')) + ' ' + escapeHtml(issues.open || 0) + '</span>';
+      const syncText = issues.syncedAt ? ' · ' + escapeHtml(issues.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(issues.syncedAt)) : '';
+      return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueTotal')) + ' ' + escapeHtml(issues.total || 0) + ' · ' + escapeHtml(t('issueOpen')) + ' ' + escapeHtml(issues.open || 0) + syncText + '</span>';
     }
 
     function renderProjectIssuePanel(project) {
@@ -3507,7 +3712,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
             <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
           </div>
-          <div class="portfolio-issue-repo">\${escapeHtml(issues.repo || '')}</div>
+          <div class="portfolio-issue-repo">\${escapeHtml(issues.repo || '')}\${issues.syncedAt ? ' · ' + escapeHtml(issues.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(issues.syncedAt)) : ''}</div>
           <div class="portfolio-issue-metrics">
             <span class="portfolio-issue-pill">\${escapeHtml(t('issueTotal'))} \${escapeHtml(issues.total || 0)}</span>
             <span class="portfolio-issue-pill">\${escapeHtml(t('issueOpen'))} \${escapeHtml(issues.open || 0)}</span>
@@ -3553,6 +3758,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return \`
         <div class="portfolio-issue-detail">
           <div class="portfolio-issue-name">#\${escapeHtml(issue.number)} \${escapeHtml(issue.title || '')}</div>
+          \${issueDetails.stale ? \`<div class="portfolio-issue-empty">\${escapeHtml(t('issueCached'))}</div>\` : ''}
           \${issue.body ? \`<div class="portfolio-issue-comment">\${escapeHtml(issue.body).slice(0, 900)}</div>\` : ''}
           <div class="portfolio-issue-detail-actions">
             \${issue.url ? \`<button class="portfolio-issue-action" data-open-issue-url="\${escapeHtml(issue.url)}">\${escapeHtml(t('projectOpen'))}</button>\` : ''}

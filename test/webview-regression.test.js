@@ -730,6 +730,66 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   ]).title, 'Running step');
 });
 
+test('sidebar GitHub issue cache is validated and ignored by git', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    [
+      'module.exports.__getIssueCachePath = getIssueCachePath;',
+      'module.exports.__readIssueCache = readIssueCache;',
+      'module.exports.__writeIssueCache = writeIssueCache;',
+      'module.exports.__summarizeIssueItems = summarizeIssueItems;'
+    ].join('\n')
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-issue-cache-'));
+  const issue = {
+    number: 12,
+    title: '页面加载慢',
+    body: '首屏等待过久',
+    state: 'OPEN',
+    category: 'bug',
+    priority: 'P0',
+    labels: ['bug', 'P0'],
+    comments: 2,
+    thumbsUp: 3,
+    url: 'https://github.com/owner/repo/issues/12',
+    updatedAt: '2026-05-29T00:00:00.000Z'
+  };
+  const cache = {
+    schemaVersion: 1,
+    repo: 'owner/repo',
+    syncedAt: '2026-05-29T00:00:00.000Z',
+    issues: [issue],
+    details: {
+      '12': {
+        syncedAt: '2026-05-29T00:00:00.000Z',
+        issue,
+        comments: [{ author: 'user', body: '仍然很慢', createdAt: '2026-05-29T00:01:00.000Z' }]
+      }
+    }
+  };
+
+  sidebarModule.__writeIssueCache(root, cache);
+
+  const cachePath = sidebarModule.__getIssueCachePath(root);
+  assert.equal(cachePath, path.join(root, '.solopreneur', 'issues-cache.json'));
+  assert.ok(fs.existsSync(cachePath));
+  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /issues-cache\.json/);
+  assert.equal(sidebarModule.__readIssueCache(root, 'other/repo'), null);
+
+  const read = sidebarModule.__readIssueCache(root, 'owner/repo');
+  assert.equal(read.repo, 'owner/repo');
+  assert.equal(read.issues.length, 1);
+  assert.equal(read.details['12'].comments[0].body, '仍然很慢');
+
+  const summary = sidebarModule.__summarizeIssueItems('owner/repo', read.issues, read.syncedAt, true);
+  assert.equal(summary.available, true);
+  assert.equal(summary.stale, true);
+  assert.equal(summary.total, 1);
+  assert.equal(summary.open, 1);
+  assert.equal(summary.byCategory.bug, 1);
+  assert.equal(summary.byPriority.P0, 1);
+});
+
 test('agent command builder uses non-interactive task runs and native continuation commands', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
