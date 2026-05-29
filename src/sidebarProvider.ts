@@ -33,6 +33,37 @@ interface ProjectPortfolioSummary {
   recommendedStatus: string;
   overallStatus: string;
   recentActivityAt: string;
+  issues: ProjectIssueSummary;
+}
+
+interface ProjectIssueItem {
+  number: number;
+  title: string;
+  state: string;
+  category: string;
+  priority: string;
+  comments: number;
+  thumbsUp: number;
+  url: string;
+}
+
+interface ProjectIssueSummary {
+  available: boolean;
+  repo: string;
+  total: number;
+  open: number;
+  byCategory: Record<string, number>;
+  byPriority: Record<string, number>;
+  items: ProjectIssueItem[];
+  message: string;
+}
+
+interface DependencyStatus {
+  agentReady: boolean;
+  agentMessage: string;
+  githubCliReady: boolean;
+  githubAuthReady: boolean;
+  githubMessage: string;
 }
 
 interface RoadmapNodeLike {
@@ -132,6 +163,166 @@ function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
   }
 
   return candidates[0] || 'agy';
+}
+
+function createEmptyIssueSummary(message = ''): ProjectIssueSummary {
+  return {
+    available: false,
+    repo: '',
+    total: 0,
+    open: 0,
+    byCategory: {},
+    byPriority: {},
+    items: [],
+    message
+  };
+}
+
+function getGithubRepoSlug(projectPath: string): string {
+  if (!projectPath || !fs.existsSync(projectPath)) {
+    return '';
+  }
+  const result = childProcess.spawnSync('git', ['-C', projectPath, 'remote', 'get-url', 'origin'], {
+    encoding: 'utf8',
+    timeout: 1800,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  const remote = String(result.stdout || '').trim();
+  if (!remote) {
+    return '';
+  }
+  const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/i);
+  return match ? match[1].replace(/\.git$/i, '') : '';
+}
+
+function normalizeIssueLabel(label: string): string {
+  return String(label || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function normalizeIssueCategory(labels: string[]): string {
+  const normalized = labels.map(normalizeIssueLabel);
+  const has = (candidates: string[]) => normalized.some((label) => candidates.includes(label));
+  if (has(['bug', 'type: bug', 'kind/bug', 'defect', 'regression', 'perf'])) return 'bug';
+  if (has(['tech debt', 'tech-debt', 'debt', 'refactor', 'cleanup', 'maintenance', 'architecture'])) return 'tech-debt';
+  if (has(['feature', 'enhancement', 'request', 'feature request', 'feature-request', 'type: feature', 'customer'])) return 'feature-request';
+  if (has(['docs', 'documentation', 'readme'])) return 'documentation';
+  if (has(['discussion', 'question', 'idea', 'proposal', 'rfc'])) return 'discussion';
+  return 'discussion';
+}
+
+function normalizeIssuePriority(labels: string[]): string {
+  const normalized = labels.map(normalizeIssueLabel);
+  const has = (candidates: string[]) => normalized.some((label) => candidates.includes(label));
+  if (has(['p0', 'priority: critical', 'critical', 'urgent', 'blocker', 'sev1'])) return 'P0';
+  if (has(['p1', 'priority: high', 'high', 'sev2'])) return 'P1';
+  if (has(['p2', 'priority: medium', 'medium', 'normal', 'sev3'])) return 'P2';
+  return '';
+}
+
+function getReactionCount(reactionGroups: any[], content: string): number {
+  const group = Array.isArray(reactionGroups)
+    ? reactionGroups.find((candidate) => String(candidate?.content || '').toUpperCase() === content)
+    : null;
+  return Number(group?.users?.totalCount || 0);
+}
+
+function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyIssueSummary('No GitHub remote');
+  }
+  if (!commandExists('gh')) {
+    return createEmptyIssueSummary('GitHub CLI not found');
+  }
+  const result = childProcess.spawnSync('gh', [
+    'issue',
+    'list',
+    '--repo',
+    repo,
+    '--state',
+    'all',
+    '--limit',
+    '100',
+    '--json',
+    'number,title,state,labels,comments,reactionGroups,updatedAt,url'
+  ], {
+    encoding: 'utf8',
+    timeout: 4500,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  if (result.status !== 0) {
+    return {
+      ...createEmptyIssueSummary(String(result.stderr || result.stdout || 'GitHub issues unavailable').trim()),
+      repo
+    };
+  }
+  let rawIssues: any[] = [];
+  try {
+    rawIssues = JSON.parse(String(result.stdout || '[]'));
+  } catch {
+    return { ...createEmptyIssueSummary('GitHub issue data could not be read'), repo };
+  }
+  const items = rawIssues.map((issue) => {
+    const labels = Array.isArray(issue.labels) ? issue.labels.map((label: any) => String(label?.name || label || '')) : [];
+    return {
+      number: Number(issue.number || 0),
+      title: String(issue.title || ''),
+      state: String(issue.state || ''),
+      category: normalizeIssueCategory(labels),
+      priority: normalizeIssuePriority(labels),
+      comments: Number(issue.comments || 0),
+      thumbsUp: getReactionCount(issue.reactionGroups || [], 'THUMBS_UP'),
+      url: String(issue.url || '')
+    };
+  }).filter((issue) => issue.number > 0);
+  const byCategory: Record<string, number> = {};
+  const byPriority: Record<string, number> = {};
+  for (const issue of items.filter((issue) => issue.state === 'OPEN')) {
+    byCategory[issue.category] = (byCategory[issue.category] || 0) + 1;
+    if (issue.priority) {
+      byPriority[issue.priority] = (byPriority[issue.priority] || 0) + 1;
+    }
+  }
+  return {
+    available: true,
+    repo,
+    total: items.length,
+    open: items.filter((issue) => issue.state === 'OPEN').length,
+    byCategory,
+    byPriority,
+    items: items
+      .filter((issue) => issue.state === 'OPEN')
+      .sort((a, b) => {
+        const priorityRank: Record<string, number> = { P0: 0, P1: 1, P2: 2, '': 3 };
+        return (priorityRank[a.priority] ?? 3) - (priorityRank[b.priority] ?? 3) || b.thumbsUp - a.thumbsUp || b.comments - a.comments;
+      })
+      .slice(0, 5),
+    message: ''
+  };
+}
+
+function getDependencyStatus(cliPath: string): DependencyStatus {
+  const agentCli = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
+  const agentReady = commandExists(agentCli);
+  const githubCliReady = commandExists('gh');
+  let githubAuthReady = false;
+  let githubMessage = githubCliReady ? 'GitHub CLI is installed.' : 'GitHub CLI is not installed.';
+  if (githubCliReady) {
+    const auth = childProcess.spawnSync('gh', ['auth', 'status'], {
+      encoding: 'utf8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    githubAuthReady = auth.status === 0;
+    githubMessage = githubAuthReady ? 'GitHub is authorized.' : 'GitHub authorization is needed.';
+  }
+  return {
+    agentReady,
+    agentMessage: agentReady ? `${agentCli} is ready.` : `Agent CLI not found. Tried: ${getAgentCliCandidates(cliPath || 'agy', cliPath || 'agy').join(', ')}`,
+    githubCliReady,
+    githubAuthReady,
+    githubMessage
+  };
 }
 
 function getCliVersionArgs(agentCli: string): string[] {
@@ -250,7 +441,8 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     recommendedNodeTitle: recommendedNode?.title || '',
     recommendedStatus: recommendedNode?.status || '',
     overallStatus,
-    recentActivityAt: getProjectRecentActivityAt(project.path)
+    recentActivityAt: getProjectRecentActivityAt(project.path),
+    issues: readProjectIssueSummary(project.path)
   };
 }
 
@@ -362,6 +554,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             });
           });
           break;
+        case 'checkDependencies':
+          this._view?.webview.postMessage({
+            command: 'dependenciesChecked',
+            status: getDependencyStatus(data.cliPath || this._getSettings().cliPath || 'agy')
+          });
+          break;
+        case 'openDependencyAction':
+          this.openDependencyAction(data.action || '', data.cliPath || this._getSettings().cliPath || 'agy');
+          break;
+        case 'openExternal':
+          if (data.url) {
+            vscode.env.openExternal(vscode.Uri.parse(String(data.url)));
+          }
+          break;
         case 'getProjects':
           this.sendProjects();
           break;
@@ -442,6 +648,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       projectPath,
       conversations
     });
+  }
+
+  private openDependencyAction(action: string, cliPath: string) {
+    const terminal = vscode.window.createTerminal({ name: 'SoloMap Setup' });
+    terminal.show(true);
+    if (action === 'github-auth') {
+      terminal.sendText('gh auth login');
+      return;
+    }
+    if (action === 'github-install') {
+      terminal.sendText('gh --version || echo "Install GitHub CLI from https://cli.github.com/"');
+      return;
+    }
+    if (action === 'agent-check') {
+      const command = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
+      terminal.sendText(`${shellQuote(command)} --version`);
+    }
   }
 
   private _getHtmlForWebview(webview: vscode.Webview): string {
@@ -614,6 +837,87 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       min-height: 66px;
       resize: vertical;
       line-height: 1.4;
+    }
+
+    .dependency-panel {
+      border: 1px solid var(--border-glass);
+      border-radius: 6px;
+      padding: 8px;
+      background: rgba(255, 255, 255, 0.035);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .dependency-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .dependency-row:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .dependency-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .dependency-name {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .dependency-message {
+      font-size: 9px;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+
+    .dependency-status {
+      flex-shrink: 0;
+      border-radius: 999px;
+      padding: 3px 7px;
+      font-size: 9px;
+      font-weight: 800;
+      border: 1px solid var(--border-glass);
+      color: var(--text-muted);
+    }
+
+    .dependency-status.ready {
+      border-color: rgba(0, 230, 118, 0.25);
+      color: #00e676;
+      background: rgba(0, 230, 118, 0.08);
+    }
+
+    .dependency-status.needs-action {
+      border-color: rgba(255, 183, 77, 0.28);
+      color: #ffcc80;
+      background: rgba(255, 183, 77, 0.08);
+    }
+
+    .dependency-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .dependency-action-btn {
+      border: 1px solid rgba(0, 229, 255, 0.24);
+      border-radius: 5px;
+      background: rgba(0, 229, 255, 0.08);
+      color: #d8fbff;
+      padding: 5px 7px;
+      font-size: 10px;
+      font-weight: 700;
+      cursor: pointer;
     }
 
     .project-switcher {
@@ -1183,6 +1487,114 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       opacity: 0.5;
     }
 
+    .portfolio-issue-panel {
+      margin-top: 9px;
+      padding: 9px;
+      border: 1px solid rgba(255, 183, 77, 0.2);
+      border-radius: 6px;
+      background: rgba(255, 183, 77, 0.055);
+      cursor: default;
+    }
+
+    .portfolio-issue-head,
+    .portfolio-issue-metrics,
+    .portfolio-issue-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .portfolio-issue-title {
+      font-size: 10.5px;
+      font-weight: 800;
+      color: #ffcc80;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .portfolio-issue-repo {
+      font-size: 9px;
+      color: var(--text-muted);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .portfolio-issue-metrics {
+      justify-content: flex-start;
+      flex-wrap: wrap;
+      margin-top: 7px;
+    }
+
+    .portfolio-issue-pill {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.045);
+      color: var(--text-main);
+      padding: 3px 7px;
+      font-size: 9.5px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .portfolio-issue-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-top: 8px;
+    }
+
+    .portfolio-issue-row {
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 5px;
+      background: rgba(0, 0, 0, 0.14);
+      color: var(--text-main);
+      padding: 6px;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .portfolio-issue-row:hover {
+      border-color: rgba(255, 183, 77, 0.32);
+    }
+
+    .portfolio-issue-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .portfolio-issue-name {
+      font-size: 10px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .portfolio-issue-sub {
+      font-size: 9px;
+      color: var(--text-muted);
+    }
+
+    .portfolio-issue-empty {
+      margin-top: 7px;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .portfolio-action-zone {
+      margin-top: 9px;
+      padding-top: 9px;
+      border-top: 1px solid rgba(124, 77, 255, 0.24);
+    }
+
     .settings-actions {
       display: flex;
       gap: 6px;
@@ -1558,6 +1970,31 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
 
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
+      <div class="dependency-panel" id="dependency-panel">
+        <div class="dependency-row">
+          <div class="dependency-main">
+            <span class="dependency-name" id="dependency-agent-name">Agent CLI</span>
+            <span class="dependency-message" id="dependency-agent-message">Not checked yet.</span>
+          </div>
+          <span class="dependency-status" id="dependency-agent-status">Check</span>
+        </div>
+        <div class="dependency-row">
+          <div class="dependency-main">
+            <span class="dependency-name" id="dependency-github-name">GitHub</span>
+            <span class="dependency-message" id="dependency-github-message">Not checked yet.</span>
+          </div>
+          <span class="dependency-status" id="dependency-github-status">Check</span>
+        </div>
+        <div class="dependency-actions">
+          <button class="dependency-action-btn" id="btn-check-dependencies"><span class="codicon codicon-search"></span><span id="text-check-dependencies">Check</span></button>
+          <button class="dependency-action-btn" id="btn-open-agent-check"><span class="codicon codicon-terminal"></span><span id="text-open-agent-check">Agent</span></button>
+          <button class="dependency-action-btn" id="btn-open-github-auth"><span class="codicon codicon-github"></span><span id="text-open-github-auth">GitHub</span></button>
+        </div>
+      </div>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -1610,6 +2047,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
+    const btnCheckDependencies = document.getElementById('btn-check-dependencies');
+    const btnOpenAgentCheck = document.getElementById('btn-open-agent-check');
+    const btnOpenGithubAuth = document.getElementById('btn-open-github-auth');
     let currentLanguage = 'zh';
     let currentNodes = [];
     let activeProjectPath = '';
@@ -1675,6 +2115,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
+        dependencies: '本地依赖状态',
+        checkDependencies: '检查',
+        dependencyReady: '就绪',
+        dependencyAction: '处理',
+        dependencyNotChecked: '尚未检查。',
+        dependencyAgent: 'Agent CLI',
+        dependencyGithub: 'GitHub 授权',
+        openAgentCheck: 'Agent',
+        openGithubAuth: 'GitHub',
+        issues: 'Issues',
+        issueOpen: '待关闭',
+        issueTotal: '总数',
+        issueUnavailable: '连接 GitHub 后显示 Issues。',
+        issueBug: 'Bug',
+        issueFeature: '需求',
+        issueDebt: '技术债',
+        issueDiscussion: '讨论',
+        issueDocs: '文档',
+        issueComments: '评论',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -1740,6 +2199,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
+        dependencies: 'Local readiness',
+        checkDependencies: 'Check',
+        dependencyReady: 'Ready',
+        dependencyAction: 'Action',
+        dependencyNotChecked: 'Not checked yet.',
+        dependencyAgent: 'Agent CLI',
+        dependencyGithub: 'GitHub authorization',
+        openAgentCheck: 'Agent',
+        openGithubAuth: 'GitHub',
+        issues: 'Issues',
+        issueOpen: 'Open',
+        issueTotal: 'Total',
+        issueUnavailable: 'Connect GitHub to show Issues.',
+        issueBug: 'Bug',
+        issueFeature: 'Feature',
+        issueDebt: 'Tech debt',
+        issueDiscussion: 'Discussion',
+        issueDocs: 'Docs',
+        issueComments: 'comments',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -1795,6 +2273,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
+      setText('label-dependencies', t('dependencies'));
+      setText('dependency-agent-name', t('dependencyAgent'));
+      setText('dependency-github-name', t('dependencyGithub'));
+      setText('text-check-dependencies', t('checkDependencies'));
+      setText('text-open-agent-check', t('openAgentCheck'));
+      setText('text-open-github-auth', t('openGithubAuth'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       setText('progress-label', t('progress'));
@@ -1921,6 +2405,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           }
           break;
 
+        case 'dependenciesChecked':
+          renderDependencyStatus(message.status || {});
+          break;
+
         case 'soloSupplementFilesSelected':
           if (message.targetId) {
             if (String(message.targetId).startsWith('solo:')) {
@@ -1982,6 +2470,30 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     });
 
+    btnCheckDependencies.addEventListener('click', () => {
+      setDependencyPending();
+      vscode.postMessage({
+        command: 'checkDependencies',
+        cliPath: getEffectiveSettingCliPath()
+      });
+    });
+
+    btnOpenAgentCheck.addEventListener('click', () => {
+      vscode.postMessage({
+        command: 'openDependencyAction',
+        action: 'agent-check',
+        cliPath: getEffectiveSettingCliPath()
+      });
+    });
+
+    btnOpenGithubAuth.addEventListener('click', () => {
+      vscode.postMessage({
+        command: 'openDependencyAction',
+        action: 'github-auth',
+        cliPath: getEffectiveSettingCliPath()
+      });
+    });
+
     btnOpenFull.addEventListener('click', () => {
       vscode.postMessage({ command: 'showFullRoadmap' });
     });
@@ -1996,6 +2508,33 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     btnAddProject.addEventListener('click', () => {
       vscode.postMessage({ command: 'addProject' });
     });
+
+    function setDependencyPending() {
+      setText('dependency-agent-message', t('testing'));
+      setText('dependency-github-message', t('testing'));
+      const agentStatus = document.getElementById('dependency-agent-status');
+      const githubStatus = document.getElementById('dependency-github-status');
+      [agentStatus, githubStatus].forEach(item => {
+        if (!item) return;
+        item.className = 'dependency-status';
+        item.textContent = t('checkDependencies');
+      });
+    }
+
+    function renderDependencyStatus(status) {
+      const agentStatus = document.getElementById('dependency-agent-status');
+      const githubStatus = document.getElementById('dependency-github-status');
+      setText('dependency-agent-message', status.agentMessage || t('dependencyNotChecked'));
+      setText('dependency-github-message', status.githubMessage || t('dependencyNotChecked'));
+      if (agentStatus) {
+        agentStatus.className = 'dependency-status ' + (status.agentReady ? 'ready' : 'needs-action');
+        agentStatus.textContent = status.agentReady ? t('dependencyReady') : t('dependencyAction');
+      }
+      if (githubStatus) {
+        githubStatus.className = 'dependency-status ' + (status.githubCliReady && status.githubAuthReady ? 'ready' : 'needs-action');
+        githubStatus.textContent = status.githubCliReady && status.githubAuthReady ? t('dependencyReady') : t('dependencyAction');
+      }
+    }
 
     function renderPortfolioFilters() {
       const filters = [
@@ -2257,7 +2796,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function escapeHtml(value) {
-      return String(value || '')
+      return String(value == null ? '' : value)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -2548,6 +3087,70 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       bindSidebarSoloHistory(container, currentProjects.selectedProjectPath);
     }
 
+    function issueCategoryLabel(category) {
+      if (category === 'bug') return t('issueBug');
+      if (category === 'feature-request') return t('issueFeature');
+      if (category === 'tech-debt') return t('issueDebt');
+      if (category === 'documentation') return t('issueDocs');
+      return t('issueDiscussion');
+    }
+
+    function renderIssueStatsLine(project) {
+      const issues = project.issues || {};
+      if (!issues.available) {
+        return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueUnavailable')) + '</span>';
+      }
+      return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueTotal')) + ' ' + escapeHtml(issues.total || 0) + ' · ' + escapeHtml(t('issueOpen')) + ' ' + escapeHtml(issues.open || 0) + '</span>';
+    }
+
+    function renderProjectIssuePanel(project) {
+      const issues = project.issues || {};
+      if (!issues.available) {
+        return \`
+          <div class="portfolio-issue-panel" data-issue-panel>
+            <div class="portfolio-issue-head">
+              <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
+            </div>
+            <div class="portfolio-issue-empty">\${escapeHtml(t('issueUnavailable'))}</div>
+          </div>
+        \`;
+      }
+      const categoryPills = ['bug', 'feature-request', 'tech-debt', 'discussion', 'documentation']
+        .map(category => ({ category, count: Number((issues.byCategory || {})[category] || 0) }))
+        .filter(item => item.count > 0)
+        .map(item => \`<span class="portfolio-issue-pill">\${escapeHtml(issueCategoryLabel(item.category))} \${escapeHtml(item.count)}</span>\`)
+        .join('');
+      const priorityPills = ['P0', 'P1', 'P2']
+        .map(priority => ({ priority, count: Number((issues.byPriority || {})[priority] || 0) }))
+        .filter(item => item.count > 0)
+        .map(item => \`<span class="portfolio-issue-pill">\${escapeHtml(item.priority)} \${escapeHtml(item.count)}</span>\`)
+        .join('');
+      const issueRows = (issues.items || []).map(issue => \`
+        <button class="portfolio-issue-row" data-open-issue-url="\${escapeHtml(issue.url || '')}">
+          <span class="portfolio-issue-main">
+            <span class="portfolio-issue-name">#\${escapeHtml(issue.number)} \${escapeHtml(issue.title || '')}</span>
+            <span class="portfolio-issue-sub">\${escapeHtml(issue.priority || issueCategoryLabel(issue.category))} · \${escapeHtml(issueCategoryLabel(issue.category))} · \${escapeHtml(issue.comments || 0)} \${escapeHtml(t('issueComments'))}\${Number(issue.thumbsUp || 0) ? ' · +' + escapeHtml(issue.thumbsUp) : ''}</span>
+          </span>
+          <span class="codicon codicon-link-external"></span>
+        </button>
+      \`).join('');
+      return \`
+        <div class="portfolio-issue-panel" data-issue-panel>
+          <div class="portfolio-issue-head">
+            <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
+            <span class="portfolio-issue-repo">\${escapeHtml(issues.repo || '')}</span>
+          </div>
+          <div class="portfolio-issue-metrics">
+            <span class="portfolio-issue-pill">\${escapeHtml(t('issueTotal'))} \${escapeHtml(issues.total || 0)}</span>
+            <span class="portfolio-issue-pill">\${escapeHtml(t('issueOpen'))} \${escapeHtml(issues.open || 0)}</span>
+            \${priorityPills}
+            \${categoryPills}
+          </div>
+          \${issueRows ? \`<div class="portfolio-issue-list">\${issueRows}</div>\` : \`<div class="portfolio-issue-empty">\${escapeHtml(t('noPortfolioMatch'))}</div>\`}
+        </div>
+      \`;
+    }
+
     function renderPortfolio(portfolio, selectedProjectPath) {
       if (!portfolio || portfolio.length === 0) {
         portfolioList.innerHTML = '<div class="empty-portfolio">' + t('emptyPortfolio') + '</div>';
@@ -2582,6 +3185,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}
             </div>
             <div class="portfolio-card-meta">
+              \${renderIssueStatsLine(project)}
+            </div>
+            <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(recommendation || '-')}</span>
             </div>
             <div class="portfolio-progress">
@@ -2593,14 +3199,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
               \${isSelected ? '' : \`<button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>\`}
             </div>
-            \${isSelected ? renderProjectConversationComposer(project, currentNodes) : ''}
+            \${isSelected ? renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
           </div>
         \`;
       }).join('');
 
       portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
         card.addEventListener('click', (event) => {
-          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]')) return;
+          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
           vscode.postMessage({
             command: 'selectProject',
@@ -2624,6 +3230,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             projectPath: button.getAttribute('data-continue-project-path'),
             nodeId: button.getAttribute('data-continue-node-id')
           });
+        });
+      });
+      portfolioList.querySelectorAll('[data-open-issue-url]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const url = button.getAttribute('data-open-issue-url') || '';
+          if (url) {
+            vscode.postMessage({ command: 'openExternal', url });
+          }
         });
       });
       bindProjectContinueComposer(portfolioList);

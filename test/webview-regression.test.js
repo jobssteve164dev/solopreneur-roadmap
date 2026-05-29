@@ -309,6 +309,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /bindSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
   assert.match(script, /savePastedAttachments/);
+  assert.match(script, /checkDependencies/);
+  assert.match(script, /renderProjectIssuePanel/);
+  assert.match(html, /id="dependency-panel"/);
+  assert.match(html, /data-issue-panel/);
 
   const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'tasks-list',
@@ -329,6 +333,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'setting-global-prompt',
     'btn-test-cli',
     'btn-save-settings',
+    'btn-check-dependencies',
+    'btn-open-agent-check',
+    'btn-open-github-auth',
+    'dependency-agent-status',
+    'dependency-agent-message',
+    'dependency-github-status',
+    'dependency-github-message',
     'cli-test-badge'
   ]);
 
@@ -343,6 +354,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
+  elements['btn-check-dependencies'].listeners.click();
+  elements['btn-open-github-auth'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'checkDependencies'));
+  assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'github-auth'));
 
   dispatchMessage({
     command: 'settingsLoaded',
@@ -369,11 +384,24 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
         recommendedNodeTitle: '验证首页',
         recommendedStatus: 'Pending',
         overallStatus: 'Pending',
-        recentActivityAt: '2026-05-26T10:00:00.000Z'
+        recentActivityAt: '2026-05-26T10:00:00.000Z',
+        issues: {
+          available: true,
+          repo: 'owner/repo',
+          total: 3,
+          open: 2,
+          byCategory: { bug: 1, 'feature-request': 1 },
+          byPriority: { P0: 1 },
+          items: [{ number: 12, title: '页面加载慢', state: 'OPEN', category: 'bug', priority: 'P0', comments: 4, thumbsUp: 2, url: 'https://github.com/owner/repo/issues/12' }],
+          message: ''
+        }
       }]
     }
   });
   assert.match(elements['portfolio-list'].innerHTML, /data-project-continue-composer/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-issue-panel/);
+  assert.match(elements['portfolio-list'].innerHTML, /页面加载慢/);
+  assert.match(elements['portfolio-list'].innerHTML, /待关闭|Open/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
