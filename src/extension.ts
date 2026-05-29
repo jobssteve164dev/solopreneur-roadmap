@@ -1870,10 +1870,183 @@ function getProjectMemoryFilePath(workspaceRoot: string, globalDataPath = ''): s
   return path.join(getSolomapMemoryRoot(workspaceRoot, globalDataPath), 'projects', `${projectSlug}.md`);
 }
 
+function writeFileIfMissing(filePath: string, content: string): void {
+  if (!fs.existsSync(filePath)) {
+    fs.writeFileSync(filePath, content, 'utf8');
+  }
+}
+
+function writeSolomapMemoryExamples(memoryRoot: string, learningCandidatesDir: string): void {
+  const examples: Array<{ filePath: string; content: string }> = [
+    {
+      filePath: path.join(memoryRoot, 'projects', '_example.md'),
+      content: [
+        '# Project Memory Example',
+        '',
+        'Create real project files as `projects/<project-slug>.md`. Keep only stable facts that help future work on that project.',
+        '',
+        '## Stable Facts',
+        '- YYYY-MM-DD: Fact confirmed by current files, tests, logs, or user decision.',
+        '',
+        '## Decisions',
+        '- YYYY-MM-DD: Decision, reason, and impact.',
+        '',
+        '## Current Handoff',
+        '- Goal:',
+        '- Confirmed state:',
+        '- Next useful action:',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'patterns', '_example.md'),
+      content: [
+        '# Pattern Example',
+        '',
+        'Use one file per reusable delivery, implementation, debugging, or verification pattern.',
+        '',
+        '## Applies When',
+        '- Situation where this pattern is useful.',
+        '',
+        '## Steps',
+        '1. Action that reliably helps.',
+        '2. Action that verifies the result.',
+        '',
+        '## Evidence',
+        '- Where this pattern was validated.',
+        '',
+        '## Risks',
+        '- When not to apply it.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'decisions', '_example.md'),
+      content: [
+        '# Decision Example',
+        '',
+        'Use one file per stable cross-project decision.',
+        '',
+        '## Status',
+        '- proposed | accepted | superseded',
+        '',
+        '## Context',
+        '- Why this decision exists.',
+        '',
+        '## Decision',
+        '- What should happen from now on.',
+        '',
+        '## Impact',
+        '- Projects, workflows, or user experience affected.',
+        '',
+        '## Review Trigger',
+        '- When this decision should be revisited.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'domains', '_example.md'),
+      content: [
+        '# Domain Memory Example',
+        '',
+        'Use one file per domain that can help multiple projects.',
+        '',
+        '## Scope',
+        '- What this domain memory covers.',
+        '',
+        '## Stable Knowledge',
+        '- Verified domain fact or constraint.',
+        '',
+        '## Reuse Notes',
+        '- How future projects should apply it.',
+        '',
+        '## Sources',
+        '- File, user decision, command output, or trusted source that supports it.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'inbox', '_example.md'),
+      content: [
+        '# Inbox Example',
+        '',
+        'Use inbox for observations that may become memory but are not verified enough yet.',
+        '',
+        '## Observation',
+        '- What was noticed.',
+        '',
+        '## Evidence',
+        '- Where it came from.',
+        '',
+        '## Confidence',
+        '- low | medium | high',
+        '',
+        '## Promotion Target',
+        '- projects | patterns | decisions | domains | operating-rules | profile',
+        '',
+        '## Next Check',
+        '- What must be verified before promotion.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'active', '_example.md'),
+      content: [
+        '# Active Session Example',
+        '',
+        'Use active memory for temporary handoff only. Promote stable information elsewhere before it becomes long-lived.',
+        '',
+        '## Current Goal',
+        '- What is being handled now.',
+        '',
+        '## Confirmed Facts',
+        '- Current facts verified in this session.',
+        '',
+        '## Next Action',
+        '- The next concrete action if work resumes.',
+        '',
+        '## Open Risks',
+        '- Known unresolved risks.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(learningCandidatesDir, '_example.md'),
+      content: [
+        '# Learning Candidate Example',
+        '',
+        'Use this area for reusable lessons before they are promoted into long-term memory.',
+        '',
+        '## Candidate Lesson',
+        '- What future agents may reuse.',
+        '',
+        '## Source Task',
+        '- Project, date, and task where it was observed.',
+        '',
+        '## Evidence',
+        '- File, test, log, command output, or user decision that supports it.',
+        '',
+        '## Applies When',
+        '- Conditions where this lesson is useful.',
+        '',
+        '## Promotion Target',
+        '- memory/projects | memory/patterns | memory/decisions | memory/domains | memory/inbox',
+        ''
+      ].join('\n')
+    }
+  ];
+  examples.forEach((example) => {
+    fs.mkdirSync(path.dirname(example.filePath), { recursive: true });
+    writeFileIfMissing(example.filePath, example.content);
+  });
+}
+
 function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): { globalRoot: string; memoryRoot: string; projectMemoryFile: string } {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const memoryRoot = path.join(globalRoot, 'memory');
   const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
+  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  fs.mkdirSync(learningCandidatesDir, { recursive: true });
   ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active'].forEach((dir) => {
     fs.mkdirSync(path.join(memoryRoot, dir), { recursive: true });
   });
@@ -1913,6 +2086,7 @@ function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): {
       ''
     ].join('\n'), 'utf8');
   }
+  writeSolomapMemoryExamples(memoryRoot, learningCandidatesDir);
   return { globalRoot, memoryRoot, projectMemoryFile };
 }
 
@@ -1929,6 +2103,8 @@ function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = 
     `- 当前项目记忆文件：${projectMemoryFile}`,
     `- 待沉淀候选目录：${learningCandidatesDir}`,
     '- 开始工作前，按需读取全局经验库中的 `profile.md`、`operating-rules.md`、当前项目记忆、相关 `patterns/`、`decisions/`、`domains/`、`active/` 与 `inbox/`；文件不存在时继续完成本轮任务。',
+    '- 写入协议：每个子目录都有 `_example.md` 示例；写入前先读取对应示例，按示例结构新建或追加真实主题文件，不要覆盖 `_example.md`，不要把原始日志、执行流水或用户不需要看的内部过程直接复制进去。',
+    '- 写入位置：项目事实写入当前项目记忆；可复用做法写入 `patterns/`；已确认的跨项目决策写入 `decisions/`；领域知识写入 `domains/`；未验证观察写入 `inbox/` 或 `learning/candidates/`；临时交接写入 `active/`。',
     '- 旧 `.codex-memory/` 只作为兼容来源；新的稳定经验优先进入 `.solomap-global/memory`，未验证观察先作为候选进入 `.solomap-global/learning/candidates` 或经验库 `inbox/`。',
     '- 当前用户请求、当前项目文件、测试、日志和命令输出的证据优先级高于经验库；经验库只能帮助理解和减少重复，不能覆盖用户本轮目标。',
     '- 不要把经验库目录结构、实现机制或内部治理负担暴露给普通用户；面向用户的输出只保留能帮助其完成动作的结论、改动、验证和风险。',

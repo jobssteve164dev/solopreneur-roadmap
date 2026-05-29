@@ -794,6 +794,14 @@ test('global engineering store writes git-friendly portfolio files', () => {
   assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'domains')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'inbox')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'active')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'projects', '_example.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'patterns', '_example.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'decisions', '_example.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'domains', '_example.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'inbox', '_example.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'active', '_example.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'candidates', '_example.md')));
+  assert.equal(snapshot.learningCandidateCount, 0);
   assert.match(fs.readFileSync(path.join(globalRoot, 'portfolio.csv'), 'utf8'), /SoloMap/);
   assert.match(fs.readFileSync(path.join(globalRoot, 'dependencies.csv'), 'utf8'), /Build MVP/);
   assert.equal(sidebarModule.__normalizeGlobalDataPath(root, []), globalRoot);
@@ -1108,11 +1116,22 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(ensuredMemory.memoryRoot, path.join(memoryRoot, '.solomap-global', 'memory'));
   assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'README.md')));
   assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'projects', 'app.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'projects', '_example.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'patterns', '_example.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'decisions', '_example.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'domains', '_example.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'inbox', '_example.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'active', '_example.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates', '_example.md')));
   const defaultMemoryPrompt = extensionModule.__buildSoloMapSystemMemoryPrompt('/workspace/app', memoryRoot);
   assert.match(defaultMemoryPrompt, /SoloMap 默认系统提示词/);
   assert.match(defaultMemoryPrompt, /\.solomap-global\/memory/);
   assert.match(defaultMemoryPrompt, /projects\/app\.md/);
   assert.match(defaultMemoryPrompt, /learning\/candidates/);
+  assert.match(defaultMemoryPrompt, /写入协议/);
+  assert.match(defaultMemoryPrompt, /_example\.md/);
+  assert.match(defaultMemoryPrompt, /不要覆盖/);
+  assert.match(defaultMemoryPrompt, /写入位置/);
   assert.match(defaultMemoryPrompt, /旧 `\.codex-memory\/`/);
   assert.match(defaultMemoryPrompt, /当前用户请求、当前项目文件、测试、日志和命令输出/);
 

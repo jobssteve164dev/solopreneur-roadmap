@@ -731,6 +731,177 @@ function normalizeGlobalDataPath(rawPath: string, projects: SolopreneurProject[]
   return path.join(path.dirname(firstProjectPath), '.solomap-global');
 }
 
+function writeFileIfMissing(filePath: string, content: string): void {
+  if (!fs.existsSync(filePath)) {
+    fs.writeFileSync(filePath, content, 'utf8');
+  }
+}
+
+function writeSolomapMemoryExamples(memoryRoot: string, learningCandidatesDir: string): void {
+  const examples: Array<{ filePath: string; content: string }> = [
+    {
+      filePath: path.join(memoryRoot, 'projects', '_example.md'),
+      content: [
+        '# Project Memory Example',
+        '',
+        'Create real project files as `projects/<project-slug>.md`. Keep only stable facts that help future work on that project.',
+        '',
+        '## Stable Facts',
+        '- YYYY-MM-DD: Fact confirmed by current files, tests, logs, or user decision.',
+        '',
+        '## Decisions',
+        '- YYYY-MM-DD: Decision, reason, and impact.',
+        '',
+        '## Current Handoff',
+        '- Goal:',
+        '- Confirmed state:',
+        '- Next useful action:',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'patterns', '_example.md'),
+      content: [
+        '# Pattern Example',
+        '',
+        'Use one file per reusable delivery, implementation, debugging, or verification pattern.',
+        '',
+        '## Applies When',
+        '- Situation where this pattern is useful.',
+        '',
+        '## Steps',
+        '1. Action that reliably helps.',
+        '2. Action that verifies the result.',
+        '',
+        '## Evidence',
+        '- Where this pattern was validated.',
+        '',
+        '## Risks',
+        '- When not to apply it.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'decisions', '_example.md'),
+      content: [
+        '# Decision Example',
+        '',
+        'Use one file per stable cross-project decision.',
+        '',
+        '## Status',
+        '- proposed | accepted | superseded',
+        '',
+        '## Context',
+        '- Why this decision exists.',
+        '',
+        '## Decision',
+        '- What should happen from now on.',
+        '',
+        '## Impact',
+        '- Projects, workflows, or user experience affected.',
+        '',
+        '## Review Trigger',
+        '- When this decision should be revisited.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'domains', '_example.md'),
+      content: [
+        '# Domain Memory Example',
+        '',
+        'Use one file per domain that can help multiple projects.',
+        '',
+        '## Scope',
+        '- What this domain memory covers.',
+        '',
+        '## Stable Knowledge',
+        '- Verified domain fact or constraint.',
+        '',
+        '## Reuse Notes',
+        '- How future projects should apply it.',
+        '',
+        '## Sources',
+        '- File, user decision, command output, or trusted source that supports it.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'inbox', '_example.md'),
+      content: [
+        '# Inbox Example',
+        '',
+        'Use inbox for observations that may become memory but are not verified enough yet.',
+        '',
+        '## Observation',
+        '- What was noticed.',
+        '',
+        '## Evidence',
+        '- Where it came from.',
+        '',
+        '## Confidence',
+        '- low | medium | high',
+        '',
+        '## Promotion Target',
+        '- projects | patterns | decisions | domains | operating-rules | profile',
+        '',
+        '## Next Check',
+        '- What must be verified before promotion.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(memoryRoot, 'active', '_example.md'),
+      content: [
+        '# Active Session Example',
+        '',
+        'Use active memory for temporary handoff only. Promote stable information elsewhere before it becomes long-lived.',
+        '',
+        '## Current Goal',
+        '- What is being handled now.',
+        '',
+        '## Confirmed Facts',
+        '- Current facts verified in this session.',
+        '',
+        '## Next Action',
+        '- The next concrete action if work resumes.',
+        '',
+        '## Open Risks',
+        '- Known unresolved risks.',
+        ''
+      ].join('\n')
+    },
+    {
+      filePath: path.join(learningCandidatesDir, '_example.md'),
+      content: [
+        '# Learning Candidate Example',
+        '',
+        'Use this area for reusable lessons before they are promoted into long-term memory.',
+        '',
+        '## Candidate Lesson',
+        '- What future agents may reuse.',
+        '',
+        '## Source Task',
+        '- Project, date, and task where it was observed.',
+        '',
+        '## Evidence',
+        '- File, test, log, command output, or user decision that supports it.',
+        '',
+        '## Applies When',
+        '- Conditions where this lesson is useful.',
+        '',
+        '## Promotion Target',
+        '- memory/projects | memory/patterns | memory/decisions | memory/domains | memory/inbox',
+        ''
+      ].join('\n')
+    }
+  ];
+  examples.forEach((example) => {
+    fs.mkdirSync(path.dirname(example.filePath), { recursive: true });
+    writeFileIfMissing(example.filePath, example.content);
+  });
+}
+
 function detectProjectType(nodes: RoadmapNodeLike[]): string {
   const text = nodes.map((node) => `${node.stage} ${node.title}`).join(' ').toLowerCase();
   if (/能力|契约|接入|治理|infra|infrastructure|adapter|provider/.test(text)) return 'infra';
@@ -984,9 +1155,10 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
   if (!fs.existsSync(operatingRulesPath)) {
     fs.writeFileSync(operatingRulesPath, '# Operating Rules\n\nReusable execution rules promoted by SoloMap.\n', 'utf8');
   }
+  writeSolomapMemoryExamples(memoryRoot, learningDir);
   const learningCandidateCount = (() => {
     try {
-      return fs.readdirSync(learningDir).filter((name) => name.endsWith('.md')).length;
+      return fs.readdirSync(learningDir).filter((name) => name.endsWith('.md') && name !== '_example.md').length;
     } catch {
       return 0;
     }
