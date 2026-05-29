@@ -790,6 +790,24 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   assert.equal(summary.byPriority.P0, 1);
 });
 
+test('sidebar issue creation keeps labels auxiliary to creation', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    [
+      'module.exports.__getProjectIssueLabels = getProjectIssueLabels;',
+      'module.exports.__parseIssueNumberFromOutput = parseIssueNumberFromOutput;'
+    ].join('\n')
+  );
+
+  assert.equal(JSON.stringify(sidebarModule.__getProjectIssueLabels('feature-request', 'P1')), JSON.stringify(['feature-request', 'P1']));
+  assert.equal(JSON.stringify(sidebarModule.__getProjectIssueLabels('discussion', '')), JSON.stringify(['discussion']));
+  assert.equal(
+    sidebarModule.__parseIssueNumberFromOutput('https://github.com/owner/repo/issues/123'),
+    123
+  );
+  assert.equal(sidebarModule.__parseIssueNumberFromOutput('created issue'), 0);
+});
+
 test('agent command builder uses non-interactive task runs and native continuation commands', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',

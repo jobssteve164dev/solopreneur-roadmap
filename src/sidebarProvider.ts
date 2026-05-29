@@ -415,6 +415,41 @@ function toGithubLabel(category: string): string {
   return 'discussion';
 }
 
+function getProjectIssueLabels(category: string, priority: string): string[] {
+  return [toGithubLabel(category), priority].filter(Boolean);
+}
+
+function getGithubIssueLabelMeta(label: string): { color: string; description: string } {
+  if (label === 'bug') return { color: 'd73a4a', description: 'Something is not working' };
+  if (label === 'feature-request') return { color: '7c4dff', description: 'New capability or product request' };
+  if (label === 'tech-debt') return { color: 'fbca04', description: 'Technical debt or maintenance work' };
+  if (label === 'documentation') return { color: '0075ca', description: 'Documentation improvement' };
+  if (label === 'discussion') return { color: 'd4c5f9', description: 'Open discussion or decision input' };
+  if (label === 'P0') return { color: 'b60205', description: 'Critical priority' };
+  if (label === 'P1') return { color: 'd93f0b', description: 'High priority' };
+  if (label === 'P2') return { color: 'fbca04', description: 'Medium priority' };
+  return { color: 'ededed', description: 'SoloMap issue label' };
+}
+
+function ensureGithubIssueLabel(projectPath: string, label: string): void {
+  const meta = getGithubIssueLabelMeta(label);
+  runGhIssueCommand(projectPath, [
+    'label',
+    'create',
+    label,
+    '--color',
+    meta.color,
+    '--description',
+    meta.description,
+    '--force'
+  ], 6000);
+}
+
+function parseIssueNumberFromOutput(output: string): number {
+  const match = String(output || '').match(/\/issues\/(\d+)(?:\b|$)/);
+  return match ? Number(match[1]) : 0;
+}
+
 function parseGithubIssue(rawIssue: any): ProjectIssueItem {
   const labels = Array.isArray(rawIssue.labels) ? rawIssue.labels.map((label: any) => String(label?.name || label || '')) : [];
   return {
@@ -547,13 +582,15 @@ function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok
 }
 
 function createProjectIssue(projectPath: string, title: string, body: string, category: string, priority: string): { ok: boolean; message: string } {
-  const labels = [toGithubLabel(category), priority].filter(Boolean).join(',');
+  const labels = getProjectIssueLabels(category, priority);
   const args = ['issue', 'create', '--title', title, '--body', body || title];
-  if (labels) {
-    args.push('--label', labels);
-  }
   const result = runGhIssueCommand(projectPath, args, 10000);
   if (result.ok) {
+    const issueNumber = parseIssueNumberFromOutput(result.stdout);
+    if (issueNumber && labels.length) {
+      labels.forEach((label) => ensureGithubIssueLabel(projectPath, label));
+      runGhIssueCommand(projectPath, ['issue', 'edit', String(issueNumber), '--add-label', labels.join(',')], 8000);
+    }
     readProjectIssueSummary(projectPath);
   }
   return {
