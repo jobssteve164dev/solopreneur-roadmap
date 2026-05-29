@@ -682,6 +682,8 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /id="tasks-list"/);
   assert.doesNotMatch(html, /id="progress-bar"/);
   assert.doesNotMatch(html, /id="progress-text"/);
+  assert.match(html, /function activateProjectInSidebar/);
+  assert.match(html, /padding:\s*12px 12px 78px/);
   assert.match(html, /selectProject/);
   assert.match(html, /continueProjectFromPortfolio/);
   assert.match(html, /openProjectFromPortfolio/);

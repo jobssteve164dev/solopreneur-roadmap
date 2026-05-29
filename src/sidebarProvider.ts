@@ -1300,7 +1300,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     body {
       margin: 0;
-      padding: 12px;
+      padding: 12px 12px 78px;
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC', Roboto, Helvetica, Arial, sans-serif;
       background: var(--vscode-sidebar-background, var(--bg-dark));
       color: var(--text-main);
@@ -2062,6 +2062,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: flex;
       flex-direction: column;
       gap: 8px;
+      padding-bottom: 8px;
     }
 
     .empty-portfolio {
@@ -4122,10 +4123,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       \`;
       globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {
         item.addEventListener('click', () => {
+          const projectPath = item.getAttribute('data-global-focus-project') || '';
+          activateProjectInSidebar(projectPath);
           vscode.postMessage({
             command: 'selectProject',
-            projectPath: item.getAttribute('data-global-focus-project') || ''
+            projectPath
           });
+          vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
         });
       });
     }
@@ -4290,6 +4294,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         card.addEventListener('click', (event) => {
           if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
+          activateProjectInSidebar(projectPath);
           vscode.postMessage({
             command: 'selectProject',
             projectPath
@@ -4420,6 +4425,26 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         });
       });
       bindProjectContinueComposer(portfolioList);
+    }
+
+    function activateProjectInSidebar(projectPath) {
+      if (!projectPath) return;
+      if (projectPath !== activeProjectPath) {
+        currentNodes = [];
+      }
+      activeProjectPath = projectPath;
+      currentProjects.selectedProjectPath = projectPath;
+      setSoloSelectValue(projectSelect, projectPath);
+      activePortfolioFilter = 'all';
+      renderPortfolioFilters();
+      renderGlobalFocus(currentProjects.portfolio, projectPath);
+      renderPortfolio(currentProjects.portfolio, projectPath);
+      setTimeout(() => {
+        const selectedCard = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('.portfolio-card.is-selected') : null;
+        if (selectedCard && typeof selectedCard.scrollIntoView === 'function') {
+          selectedCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+      }, 0);
     }
 
     function renderSidebar(nodes) {
