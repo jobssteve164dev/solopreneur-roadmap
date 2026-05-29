@@ -1851,6 +1851,92 @@ function toProjectRelativeRuntimePath(workspaceRoot: string, targetPath: string)
   return relativePath && !relativePath.startsWith('..') ? relativePath : targetPath;
 }
 
+function normalizeSolomapGlobalPath(workspaceRoot: string, globalDataPath = ''): string {
+  const trimmed = String(globalDataPath || '').trim();
+  if (trimmed) {
+    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
+  }
+  const baseRoot = workspaceRoot || process.cwd();
+  return path.join(path.dirname(baseRoot), '.solomap-global');
+}
+
+function getSolomapMemoryRoot(workspaceRoot: string, globalDataPath = ''): string {
+  return path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'memory');
+}
+
+function getProjectMemoryFilePath(workspaceRoot: string, globalDataPath = ''): string {
+  const projectName = path.basename(workspaceRoot || 'project');
+  const projectSlug = sanitizeAttachmentScope(projectName.toLowerCase()) || 'project';
+  return path.join(getSolomapMemoryRoot(workspaceRoot, globalDataPath), 'projects', `${projectSlug}.md`);
+}
+
+function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): { globalRoot: string; memoryRoot: string; projectMemoryFile: string } {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const memoryRoot = path.join(globalRoot, 'memory');
+  const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
+  ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active'].forEach((dir) => {
+    fs.mkdirSync(path.join(memoryRoot, dir), { recursive: true });
+  });
+  const memoryReadmePath = path.join(memoryRoot, 'README.md');
+  const profilePath = path.join(memoryRoot, 'profile.md');
+  const operatingRulesPath = path.join(memoryRoot, 'operating-rules.md');
+  if (!fs.existsSync(memoryReadmePath)) {
+    fs.writeFileSync(memoryReadmePath, [
+      '# SoloMap Memory',
+      '',
+      'This directory stores reusable SoloMap experience across projects.',
+      '',
+      '- `profile.md`: stable user preferences and collaboration style.',
+      '- `operating-rules.md`: reusable execution rules that apply across projects.',
+      '- `projects/`: one memory file per project.',
+      '- `patterns/`: reusable implementation, debugging, and delivery patterns.',
+      '- `decisions/`: confirmed cross-project decisions and their rationale.',
+      '- `domains/`: domain knowledge that can help future projects.',
+      '- `inbox/`: unverified observations and learning candidates before promotion.',
+      '- `active/`: current session handoff and temporary working context.',
+      '',
+      'Agents should treat memory as context, not as stronger evidence than current files, tests, logs, or the user request.',
+      ''
+    ].join('\n'), 'utf8');
+  }
+  if (!fs.existsSync(profilePath)) {
+    fs.writeFileSync(profilePath, '# Profile\n\nStable user preferences and collaboration style promoted by SoloMap.\n', 'utf8');
+  }
+  if (!fs.existsSync(operatingRulesPath)) {
+    fs.writeFileSync(operatingRulesPath, '# Operating Rules\n\nReusable execution rules promoted by SoloMap.\n', 'utf8');
+  }
+  if (!fs.existsSync(projectMemoryFile)) {
+    fs.writeFileSync(projectMemoryFile, [
+      `# ${path.basename(workspaceRoot || 'Project')}`,
+      '',
+      'Stable project facts, decisions, and handoff context promoted by SoloMap.',
+      ''
+    ].join('\n'), 'utf8');
+  }
+  return { globalRoot, memoryRoot, projectMemoryFile };
+}
+
+function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = ''): string {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const memoryRoot = path.join(globalRoot, 'memory');
+  const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
+  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  return [
+    'SoloMap 默认系统提示词：全局经验库机制',
+    `- 当前项目目录：${workspaceRoot}`,
+    `- 跨项目数据目录：${globalRoot}`,
+    `- 全局经验库目录：${memoryRoot}`,
+    `- 当前项目记忆文件：${projectMemoryFile}`,
+    `- 待沉淀候选目录：${learningCandidatesDir}`,
+    '- 开始工作前，按需读取全局经验库中的 `profile.md`、`operating-rules.md`、当前项目记忆、相关 `patterns/`、`decisions/`、`domains/`、`active/` 与 `inbox/`；文件不存在时继续完成本轮任务。',
+    '- 旧 `.codex-memory/` 只作为兼容来源；新的稳定经验优先进入 `.solomap-global/memory`，未验证观察先作为候选进入 `.solomap-global/learning/candidates` 或经验库 `inbox/`。',
+    '- 当前用户请求、当前项目文件、测试、日志和命令输出的证据优先级高于经验库；经验库只能帮助理解和减少重复，不能覆盖用户本轮目标。',
+    '- 不要把经验库目录结构、实现机制或内部治理负担暴露给普通用户；面向用户的输出只保留能帮助其完成动作的结论、改动、验证和风险。',
+    '- 不要自动把某个项目的私有事实泄漏到其他项目；跨项目复用前必须确认其是稳定、可泛化且不含敏感信息的经验。',
+    '- 任务结束时，如发现未来可复用的经验，先以候选或明确建议形式沉淀；只有已验证且稳定的信息才进入长期记忆。'
+  ].join('\n');
+}
+
 function buildAgentConversationPrompt(
   node: RoadmapNode,
   userMessage: string,
@@ -1861,7 +1947,8 @@ function buildAgentConversationPrompt(
   previousSessionId = '',
   supplementFiles: string[] = [],
   globalPrompt = '',
-  githubIssueContext = ''
+  githubIssueContext = '',
+  globalDataPath = ''
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const normalizedGlobalPrompt = globalPrompt.trim();
@@ -1928,6 +2015,7 @@ function buildAgentConversationPrompt(
       '- 即使你查看上一轮对话，本轮仍必须以当前环节任务和本次用户补充为准，不要被旧结论带偏。'
     ].join('\n')
     : '';
+  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
 
   return [
     '你正在 SoloMap 的一个路线图环节中工作。',
@@ -1948,6 +2036,8 @@ function buildAgentConversationPrompt(
     supplement,
     ...(normalizedGithubIssueContext ? ['', normalizedGithubIssueContext] : []),
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
+    '',
+    solomapMemoryInstructions,
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
     memoryInstructions,
@@ -1967,7 +2057,8 @@ function buildRoadmapRevisionPrompt(
   userMessage: string,
   workspaceRoot: string,
   globalPrompt = '',
-  supplementFiles: string[] = []
+  supplementFiles: string[] = [],
+  globalDataPath = ''
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -1985,6 +2076,7 @@ function buildRoadmapRevisionPrompt(
       '如与本次路线图调整要求冲突，始终以本次路线图调整要求为准。'
     ].join('\n')
     : '';
+  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   return [
     '你正在 SoloMap 中调整当前项目路线图。',
     '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
@@ -1994,6 +2086,8 @@ function buildRoadmapRevisionPrompt(
     '本次路线图调整要求（最高优先级）：',
     normalizedUserMessage,
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
+    '',
+    solomapMemoryInstructions,
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行要求：',
@@ -2010,7 +2104,8 @@ function buildSoloConversationPrompt(
   userMessage: string,
   workspaceRoot: string,
   globalPrompt = '',
-  supplementFiles: string[] = []
+  supplementFiles: string[] = [],
+  globalDataPath = ''
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -2028,6 +2123,7 @@ function buildSoloConversationPrompt(
       '如与本次用户要求冲突，始终以本次用户要求为准。'
     ].join('\n')
     : '';
+  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -2037,6 +2133,8 @@ function buildSoloConversationPrompt(
     '用户本次要求（最高优先级）：',
     normalizedUserMessage,
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
+    '',
+    solomapMemoryInstructions,
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行边界：',
@@ -2421,8 +2519,9 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   if (fs.existsSync(roadmapPath)) {
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
+  ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles);
+  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath);
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot);
   const executionLogId = syncEngine.logAgentExecution(
@@ -2499,10 +2598,11 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   if (fs.existsSync(roadmapPath)) {
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
+  ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
   const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles);
+  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath);
   const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot);
   const executionLogId = syncEngine.logAgentExecution(
     soloConversationId,
@@ -2643,6 +2743,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const nativeSessionId = storedSession?.sessionId || '';
   const stepMemoryFilePath = getStepMemoryFilePath(workspaceRoot, nodeId);
   const githubIssueContext = buildGithubIssueContext(workspaceRoot, node);
+  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   const conversationPrompt = buildAgentConversationPrompt(
     node,
     userMessage,
@@ -2653,7 +2754,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     nativeSessionId,
     attachedFiles,
     settings.globalPrompt,
-    githubIssueContext
+    githubIssueContext,
+    settings.globalDataPath
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);

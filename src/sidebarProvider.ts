@@ -870,8 +870,12 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
   const normalizedPath = normalizeGlobalDataPath(dataPath);
   const learningDir = path.join(normalizedPath, 'learning', 'candidates');
   const metricsDir = path.join(normalizedPath, 'metrics');
+  const memoryRoot = path.join(normalizedPath, 'memory');
   fs.mkdirSync(learningDir, { recursive: true });
   fs.mkdirSync(metricsDir, { recursive: true });
+  ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active'].forEach((dir) => {
+    fs.mkdirSync(path.join(memoryRoot, dir), { recursive: true });
+  });
 
   const now = new Date().toISOString();
   const records = portfolio.map((project) => ({
@@ -926,6 +930,9 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
   const capabilityCsvPath = path.join(normalizedPath, 'capability-registry.csv');
   const decisionsCsvPath = path.join(normalizedPath, 'decision-conflicts.csv');
   const readmePath = path.join(normalizedPath, 'README.md');
+  const memoryReadmePath = path.join(memoryRoot, 'README.md');
+  const profilePath = path.join(memoryRoot, 'profile.md');
+  const operatingRulesPath = path.join(memoryRoot, 'operating-rules.md');
   fs.writeFileSync(path.join(normalizedPath, 'portfolio.csv'), portfolioCsv, 'utf8');
   fs.writeFileSync(path.join(normalizedPath, 'dependencies.csv'), dependenciesCsv, 'utf8');
   if (!fs.existsSync(capabilityCsvPath)) {
@@ -946,10 +953,36 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
       '- `decision-conflicts.csv`: cross-project decision conflicts.',
       '- `learning/candidates/`: learning candidates before they are promoted to long-term memory.',
       '- `metrics/`: low-frequency portfolio review metrics.',
+      '- `memory/`: cross-project experience memory used by SoloMap agents.',
       '',
       'Do not delete this directory unless you intentionally want to remove SoloMap global coordination state.',
       ''
     ].join('\n'), 'utf8');
+  }
+  if (!fs.existsSync(memoryReadmePath)) {
+    fs.writeFileSync(memoryReadmePath, [
+      '# SoloMap Memory',
+      '',
+      'This directory stores reusable SoloMap experience across projects.',
+      '',
+      '- `profile.md`: stable user preferences and collaboration style.',
+      '- `operating-rules.md`: reusable execution rules that apply across projects.',
+      '- `projects/`: one memory file per project.',
+      '- `patterns/`: reusable implementation, debugging, and delivery patterns.',
+      '- `decisions/`: confirmed cross-project decisions and their rationale.',
+      '- `domains/`: domain knowledge that can help future projects.',
+      '- `inbox/`: unverified observations and learning candidates before promotion.',
+      '- `active/`: current session handoff and temporary working context.',
+      '',
+      'Agents should treat memory as context, not as stronger evidence than current files, tests, logs, or the user request.',
+      ''
+    ].join('\n'), 'utf8');
+  }
+  if (!fs.existsSync(profilePath)) {
+    fs.writeFileSync(profilePath, '# Profile\n\nStable user preferences and collaboration style promoted by SoloMap.\n', 'utf8');
+  }
+  if (!fs.existsSync(operatingRulesPath)) {
+    fs.writeFileSync(operatingRulesPath, '# Operating Rules\n\nReusable execution rules promoted by SoloMap.\n', 'utf8');
   }
   const learningCandidateCount = (() => {
     try {

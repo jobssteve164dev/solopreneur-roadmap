@@ -785,6 +785,15 @@ test('global engineering store writes git-friendly portfolio files', () => {
   assert.ok(fs.existsSync(path.join(globalRoot, 'capability-registry.csv')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'decision-conflicts.csv')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'candidates')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'README.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'profile.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'operating-rules.md')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'projects')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'patterns')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'decisions')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'domains')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'inbox')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'active')));
   assert.match(fs.readFileSync(path.join(globalRoot, 'portfolio.csv'), 'utf8'), /SoloMap/);
   assert.match(fs.readFileSync(path.join(globalRoot, 'dependencies.csv'), 'utf8'), /Build MVP/);
   assert.equal(sidebarModule.__normalizeGlobalDataPath(root, []), globalRoot);
@@ -881,6 +890,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
       'module.exports.__buildSoloConversationPrompt = buildSoloConversationPrompt;',
+      'module.exports.__buildSoloMapSystemMemoryPrompt = buildSoloMapSystemMemoryPrompt;',
+      'module.exports.__ensureSolomapMemoryStore = ensureSolomapMemoryStore;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
@@ -1091,6 +1102,20 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(extensionModule.__getOutputTail(coloredOutputPath), 'Done');
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
 
+  const memoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-'));
+  const ensuredMemory = extensionModule.__ensureSolomapMemoryStore('/workspace/app', memoryRoot);
+  assert.equal(ensuredMemory.globalRoot, path.join(memoryRoot, '.solomap-global'));
+  assert.equal(ensuredMemory.memoryRoot, path.join(memoryRoot, '.solomap-global', 'memory'));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'README.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'projects', 'app.md')));
+  const defaultMemoryPrompt = extensionModule.__buildSoloMapSystemMemoryPrompt('/workspace/app', memoryRoot);
+  assert.match(defaultMemoryPrompt, /SoloMap 默认系统提示词/);
+  assert.match(defaultMemoryPrompt, /\.solomap-global\/memory/);
+  assert.match(defaultMemoryPrompt, /projects\/app\.md/);
+  assert.match(defaultMemoryPrompt, /learning\/candidates/);
+  assert.match(defaultMemoryPrompt, /旧 `\.codex-memory\/`/);
+  assert.match(defaultMemoryPrompt, /当前用户请求、当前项目文件、测试、日志和命令输出/);
+
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',
     'Ship the MVP',
@@ -1132,6 +1157,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /唯一任务/);
   assert.match(prompt, /SoloMap/);
+  assert.match(prompt, /SoloMap 默认系统提示词/);
+  assert.match(prompt, /\.solomap-global\/memory/);
+  assert.match(prompt, /待沉淀候选目录/);
 
   const followupPrompt = extensionModule.__buildAgentConversationPrompt(
     {
@@ -1177,7 +1205,9 @@ test('agent command builder uses non-interactive task runs and native continuati
     path.join(attachedRoot, '.solopreneur', 'agent-runs', '2', 'completion.json'),
     '',
     ['docs/brief.md', '../outside.md'],
-    'Always preserve public API compatibility.'
+    'Always preserve public API compatibility.',
+    '',
+    path.join(attachedRoot, '.solomap-global')
   );
   assert.match(attachedPrompt, /用户为本次对话选择了补充文件/);
   assert.match(attachedPrompt, /docs\/brief\.md/);
@@ -1186,6 +1216,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(attachedPrompt, /Always preserve public API compatibility/);
   assert.match(attachedPrompt, /本次用户补充为准/);
   assert.match(attachedPrompt, /本环节完成标准/);
+  assert.match(attachedPrompt, new RegExp(`${attachedRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\/\\.solomap-global\\/memory`));
   const issueContextPrompt = extensionModule.__buildAgentConversationPrompt(
     {
       title: 'Fix onboarding bug',
@@ -1215,7 +1246,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   const revisionPrompt = extensionModule.__buildRoadmapRevisionPrompt(
     '将发布准备提前，并增加支付验证环节。',
     '/workspace/app',
-    'Always run focused checks.'
+    'Always run focused checks.',
+    [],
+    '/workspace/.solomap-global'
   );
   assert.match(revisionPrompt, /本次路线图调整要求（最高优先级）/);
   assert.match(revisionPrompt, /将发布准备提前，并增加支付验证环节/);
@@ -1224,17 +1257,23 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /面向外部用户并需要获客或转化/);
   assert.match(revisionPrompt, /不要虚构营销或销售任务/);
   assert.match(revisionPrompt, /Always run focused checks/);
+  assert.match(revisionPrompt, /SoloMap 默认系统提示词/);
+  assert.match(revisionPrompt, /\/workspace\/\.solomap-global\/memory/);
 
   const soloPrompt = extensionModule.__buildSoloConversationPrompt(
     '帮我判断这个文案方向。',
     '/workspace/app',
-    'Keep answers brief.'
+    'Keep answers brief.',
+    [],
+    '/workspace/.solomap-global'
   );
   assert.match(soloPrompt, /Solo 模式/);
   assert.match(soloPrompt, /尚未归属于任何路线图环节/);
   assert.match(soloPrompt, /不要求产生文件修改/);
   assert.match(soloPrompt, /关联某个已有环节/);
   assert.match(soloPrompt, /Keep answers brief/);
+  assert.match(soloPrompt, /SoloMap 默认系统提示词/);
+  assert.match(soloPrompt, /\/workspace\/\.solomap-global\/memory/);
   assert.doesNotMatch(soloPrompt, /本环节完成标准/);
 
   const soloAttachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-attached-files-'));
