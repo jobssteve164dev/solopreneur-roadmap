@@ -1166,7 +1166,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .portfolio-compose-tool {
-      min-height: 84px;
+      min-height: 44px;
       width: 36px;
       flex-shrink: 0;
       border: 1px solid var(--border-glass);
@@ -1221,8 +1221,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .portfolio-compose-input {
       flex: 1;
-      min-height: 84px;
-      max-height: 160px;
+      min-height: 44px;
+      max-height: 96px;
       resize: vertical;
       background: rgba(255, 255, 255, 0.06);
       border: 1px solid var(--border-glass);
@@ -1242,7 +1242,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-send {
       border: none;
       border-radius: 5px;
-      min-height: 84px;
+      min-height: 44px;
       padding: 0 10px;
       background: linear-gradient(135deg, #7c4dff 0%, #00b0ff 100%);
       color: #fff;
@@ -1548,8 +1548,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .portfolio-compose {
       border-top: 1px solid rgba(255, 255, 255, 0.08);
-      padding-top: 8px;
-      margin-top: 8px;
+      padding-top: 7px;
+      margin-top: 0;
       cursor: default;
     }
 
@@ -1562,8 +1562,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-input {
       flex: 1;
       min-width: 0;
-      min-height: 84px;
-      max-height: 160px;
+      min-height: 44px;
+      max-height: 96px;
       resize: vertical;
       background: rgba(255, 255, 255, 0.06);
       border: 1px solid var(--border-glass);
@@ -1588,7 +1588,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-compose-send {
       border: none;
       border-radius: 5px;
-      min-height: 84px;
+      min-height: 44px;
       background: linear-gradient(135deg, #7c4dff 0%, #00b0ff 100%);
       color: #fff;
       font-size: 11px;
@@ -1821,8 +1821,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .portfolio-action-zone {
-      margin-top: 9px;
-      padding-top: 9px;
+      margin-top: 4px;
+      padding-top: 0;
     }
 
     .settings-actions {
@@ -2289,6 +2289,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let expandedIssueNumber = 0;
     let issueDetails = null;
     let issueFormOpen = false;
+    let issueDraftTitle = '';
+    let issueDraftBody = '';
+    let issueDraftCategory = 'bug';
+    let issueDraftPriority = '';
     let issueActionMessage = '';
     const projectConversationModes = {};
     const projectContinueFiles = {};
@@ -2710,6 +2714,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           issueActionMessage = message.message || '';
           if (message.success) {
             issueFormOpen = false;
+            issueDraftTitle = '';
+            issueDraftBody = '';
+            issueDraftCategory = 'bug';
+            issueDraftPriority = '';
             expandedIssueNumber = 0;
             issueDetails = null;
           }
@@ -3389,6 +3397,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       ];
     }
 
+    function selectFirstOption(options, selectedValue) {
+      const selected = String(selectedValue || '');
+      const found = (options || []).find(option => option.value === selected);
+      return found ? [found, ...(options || []).filter(option => option !== found)] : options;
+    }
+
     function renderIssueStatsLine(project) {
       const issues = project.issues || {};
       if (!issues.available) {
@@ -3450,13 +3464,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function renderIssueCreateForm(projectPath) {
+      const categoryOptions = selectFirstOption(getIssueCategories(), issueDraftCategory);
+      const priorityOptions = selectFirstOption(getIssuePriorities(), issueDraftPriority);
       return \`
         <div class="portfolio-issue-form" data-issue-create-form>
-          <input class="portfolio-issue-input" data-issue-title placeholder="\${escapeHtml(t('issueTitlePlaceholder'))}">
-          <textarea class="portfolio-issue-textarea" data-issue-body placeholder="\${escapeHtml(t('issueBodyPlaceholder'))}"></textarea>
+          <input class="portfolio-issue-input" data-issue-title placeholder="\${escapeHtml(t('issueTitlePlaceholder'))}" value="\${escapeHtml(issueDraftTitle)}">
+          <textarea class="portfolio-issue-textarea" data-issue-body placeholder="\${escapeHtml(t('issueBodyPlaceholder'))}">\${escapeHtml(issueDraftBody)}</textarea>
           <div class="portfolio-issue-form-row">
-            \${renderSoloSelect('portfolio-issue-category', 'data-issue-category', getIssueCategories(), false)}
-            \${renderSoloSelect('portfolio-issue-priority', 'data-issue-priority', getIssuePriorities(), false)}
+            \${renderSoloSelect('portfolio-issue-category', 'data-issue-category', categoryOptions, false)}
+            \${renderSoloSelect('portfolio-issue-priority', 'data-issue-priority', priorityOptions, false)}
           </div>
           <div class="portfolio-issue-form-row">
             <button class="portfolio-issue-action primary" data-create-issue data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('issueSubmit'))}</button>
@@ -3592,7 +3608,33 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           issueFormOpen = false;
+          issueDraftTitle = '';
+          issueDraftBody = '';
+          issueDraftCategory = 'bug';
+          issueDraftPriority = '';
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      portfolioList.querySelectorAll('[data-issue-title]').forEach(input => {
+        input.addEventListener('input', () => {
+          issueDraftTitle = input.value;
+        });
+        input.addEventListener('click', (event) => event.stopPropagation());
+      });
+      portfolioList.querySelectorAll('[data-issue-body]').forEach(input => {
+        input.addEventListener('input', () => {
+          issueDraftBody = input.value;
+        });
+        input.addEventListener('click', (event) => event.stopPropagation());
+      });
+      portfolioList.querySelectorAll('[data-issue-category]').forEach(select => {
+        bindSoloSelect(select, (value) => {
+          issueDraftCategory = value || 'bug';
+        });
+      });
+      portfolioList.querySelectorAll('[data-issue-priority]').forEach(select => {
+        bindSoloSelect(select, (value) => {
+          issueDraftPriority = value || '';
         });
       });
       portfolioList.querySelectorAll('[data-create-issue]').forEach(button => {
@@ -3604,14 +3646,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const category = form ? form.querySelector('[data-issue-category]') : null;
           const priority = form ? form.querySelector('[data-issue-priority]') : null;
           if (!title || !title.value.trim()) return;
+          issueDraftTitle = title.value.trim();
+          issueDraftBody = body ? body.value.trim() : '';
+          issueDraftCategory = getSoloSelectValue(category) || issueDraftCategory || 'bug';
+          issueDraftPriority = getSoloSelectValue(priority) || issueDraftPriority || '';
           issueActionMessage = '';
           vscode.postMessage({
             command: 'createIssue',
             projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
-            title: title.value.trim(),
-            body: body ? body.value.trim() : '',
-            category: getSoloSelectValue(category),
-            priority: getSoloSelectValue(priority)
+            title: issueDraftTitle,
+            body: issueDraftBody,
+            category: issueDraftCategory,
+            priority: issueDraftPriority
           });
         });
       });

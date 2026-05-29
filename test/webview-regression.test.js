@@ -649,7 +649,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
   assert.match(html, /\.portfolio-compose-row\s*\{[\s\S]*?align-items:\s*stretch/);
-  assert.match(html, /\.portfolio-compose-input\s*\{[\s\S]*?min-height:\s*84px/);
+  assert.match(html, /\.portfolio-compose-input\s*\{[\s\S]*?min-height:\s*44px/);
+  assert.match(html, /\.portfolio-action-zone\s*\{[\s\S]*?margin-top:\s*4px[\s\S]*?padding-top:\s*0/);
+  assert.match(html, /issueDraftTitle/);
   assert.match(html, /\.portfolio-compose-agent-row\s*\{[\s\S]*?margin-bottom:\s*7px/);
   assert.match(html, /\.sidebar-solo-attachments\s*\{[\s\S]*?margin:\s*8px 0 2px/);
   assert.match(html, /\.portfolio-mode-btn\[data-project-conversation-mode="solo"\]\.active\s*\{[\s\S]*?rgba\(124, 77, 255, 0\.2\)/);
