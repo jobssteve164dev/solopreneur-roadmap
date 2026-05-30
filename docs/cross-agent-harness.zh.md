@@ -1,5 +1,11 @@
 # SoloMap 跨 Agent Harness 设计
 
+## 产品边界
+
+SoloMap 的初衷是补齐 Agent CLI 和用户项目生命周期之间的最后十公里。它不是新的 Agent CLI，也不应该重建模型调用、工具执行、代码生成或权限体系。大厂和成熟社区已经在 Agent CLI 上投入了大量能力，SoloMap 应充分利用这些 CLI 的潜力。
+
+SoloMap 要做好的事情是管理 Agent CLI 如何服务项目生命周期：把项目目标转成路线图，把路线图环节转成可执行对话，把 memory、skill 和 MCP connector 放到统一上下文里，把执行日志、文件变更、状态、交接和验收沉淀回项目。用户面对的是项目推进，不是 Agent 配置工程。
+
 ## 目标
 
 SoloMap 的跨 Agent harness 负责让不同 Agent CLI 在同一套项目上下文、能力说明和外部连接规则下工作。用户只需要理解“项目、经验、技能、连接器”，不需要理解每个 Agent 的私有目录、配置格式或调用差异。
