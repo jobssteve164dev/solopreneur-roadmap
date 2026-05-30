@@ -76,6 +76,7 @@ function loadCompiledModule(relativePath, exportPatch) {
       return require(id);
     },
     console,
+    process,
     URL,
     Buffer,
     __dirname: path.dirname(filename),
@@ -991,6 +992,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__readCompletionCriteria = readCompletionCriteria;',
       'module.exports.__getStepMemoryFilePath = getStepMemoryFilePath;',
       'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
+      'module.exports.__resolveExecutablePath = resolveExecutablePath;',
+      'module.exports.__commandExists = commandExists;',
       'module.exports.__getAgentProvider = getAgentProvider;',
       'module.exports.__getStepSessionFilePath = getStepSessionFilePath;',
       'module.exports.__readStepSessionState = readStepSessionState;',
@@ -1120,6 +1123,10 @@ test('agent command builder uses non-interactive task runs and native continuati
     JSON.stringify(extensionModule.__getAgentCliCandidates('copilot', '').slice(0, 5)),
     JSON.stringify(['copilot', 'copilot-cli', 'agy', 'antigravity', 'antigravity-cli'])
   );
+  assert.equal(
+    JSON.stringify(extensionModule.__getAgentCliCandidates('cursor', '').slice(0, 5)),
+    JSON.stringify(['cursor', 'cursor-cli', 'codex', 'codex-cli', 'agy'])
+  );
   assert.equal(extensionModule.__getAgentProvider('claude'), 'claude');
   assert.equal(extensionModule.__getAgentProvider('copilot'), 'copilot');
   assert.equal(extensionModule.__getAgentProvider('opencode'), 'opencode');
@@ -1128,6 +1135,8 @@ test('agent command builder uses non-interactive task runs and native continuati
     'out/sidebarProvider.js',
     [
       'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
+      'module.exports.__resolveExecutablePath = resolveExecutablePath;',
+      'module.exports.__commandExists = commandExists;',
       'module.exports.__getCliVersionArgs = getCliVersionArgs;',
       'module.exports.__formatCliTestMessage = formatCliTestMessage;'
     ].join('\n')
@@ -1148,8 +1157,34 @@ test('agent command builder uses non-interactive task runs and native continuati
     JSON.stringify(sidebarModule.__getAgentCliCandidates('opencode', '').slice(0, 5)),
     JSON.stringify(['opencode', 'open-code', 'open-code-cli', 'agy', 'antigravity'])
   );
+  assert.equal(
+    JSON.stringify(sidebarModule.__getAgentCliCandidates('cursor', '').slice(0, 5)),
+    JSON.stringify(['cursor', 'cursor-cli', 'codex', 'codex-cli', 'agy'])
+  );
   assert.equal(JSON.stringify(sidebarModule.__getCliVersionArgs('agy')), JSON.stringify(['--version']));
   assert.match(sidebarModule.__formatCliTestMessage('agy', '1.0.1\n', ''), /agy · 1\.0\.1/);
+
+  const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cli-home-'));
+  const fakeCliPath = path.join(cliHome, '.local', 'bin', 'solo-test-agent');
+  fs.mkdirSync(path.dirname(fakeCliPath), { recursive: true });
+  fs.writeFileSync(fakeCliPath, '#!/bin/sh\necho solo-test-agent\n', 'utf8');
+  fs.chmodSync(fakeCliPath, 0o755);
+  const previousHome = process.env.HOME;
+  const previousPath = process.env.PATH;
+  const previousShell = process.env.SHELL;
+  process.env.HOME = cliHome;
+  process.env.PATH = '';
+  process.env.SHELL = '';
+  try {
+    assert.equal(extensionModule.__resolveExecutablePath('solo-test-agent'), fakeCliPath);
+    assert.equal(extensionModule.__commandExists('solo-test-agent'), true);
+    assert.equal(sidebarModule.__resolveExecutablePath('solo-test-agent'), fakeCliPath);
+    assert.equal(sidebarModule.__commandExists('solo-test-agent'), true);
+  } finally {
+    process.env.HOME = previousHome;
+    process.env.PATH = previousPath;
+    process.env.SHELL = previousShell;
+  }
 
   const shellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-shell-'));
   const shellScript = extensionModule.__buildAgentShellScript(

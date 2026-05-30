@@ -1127,20 +1127,105 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function commandExists(command: string): boolean {
-  const trimmed = command.trim();
-  if (!trimmed) {
+function expandHomePath(value: string): string {
+  const trimmed = String(value || '').trim();
+  if (trimmed === '~') {
+    return process.env.HOME || trimmed;
+  }
+  if (trimmed.startsWith('~/')) {
+    return path.join(process.env.HOME || '~', trimmed.slice(2));
+  }
+  return trimmed;
+}
+
+function isExecutableFile(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) {
+      return false;
+    }
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
     return false;
   }
+}
 
-  if (path.isAbsolute(trimmed) || trimmed.includes(path.sep)) {
-    return fs.existsSync(trimmed);
+function readShellPath(shellPath: string): string[] {
+  const shell = expandHomePath(shellPath);
+  if (!shell || !fs.existsSync(shell)) {
+    return [];
   }
+  try {
+    const result = childProcess.spawnSync(shell, ['-lc', 'printf %s "$PATH"'], {
+      encoding: 'utf8',
+      timeout: 1800,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    if (result.status !== 0) {
+      return [];
+    }
+    return String(result.stdout || '').split(path.delimiter).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
 
-  const result = childProcess.spawnSync('bash', ['-lc', `command -v ${shellQuote(trimmed)}`], {
-    stdio: 'ignore'
-  });
-  return result.status === 0;
+function getExecutableSearchPaths(): string[] {
+  const configuredPath = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const shellPaths = [
+    ...readShellPath(process.env.SHELL || ''),
+    ...readShellPath('/bin/zsh'),
+    ...readShellPath('/bin/bash')
+  ];
+  const home = process.env.HOME || '';
+  const commonPaths = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/local/sbin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+    home ? path.join(home, '.local', 'bin') : '',
+    home ? path.join(home, 'bin') : '',
+    home ? path.join(home, '.npm-global', 'bin') : '',
+    home ? path.join(home, '.npm', 'bin') : '',
+    home ? path.join(home, '.yarn', 'bin') : '',
+    home ? path.join(home, '.bun', 'bin') : '',
+    home ? path.join(home, '.cargo', 'bin') : ''
+  ].filter(Boolean);
+  return [...configuredPath, ...shellPaths, ...commonPaths]
+    .map(expandHomePath)
+    .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+}
+
+function resolveCommandOnSearchPath(command: string): string {
+  const trimmed = String(command || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+  const expanded = expandHomePath(trimmed);
+  if (path.isAbsolute(expanded) || expanded.includes(path.sep)) {
+    return isExecutableFile(expanded) ? expanded : '';
+  }
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+    : [''];
+  for (const dir of getExecutableSearchPaths()) {
+    for (const ext of extensions) {
+      const candidate = path.join(dir, `${expanded}${ext}`);
+      if (isExecutableFile(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return '';
+}
+
+function commandExists(command: string): boolean {
+  return Boolean(resolveCommandOnSearchPath(command));
 }
 
 function getGithubRepoSlug(workspaceRoot: string): string {
@@ -1270,15 +1355,7 @@ function resolveExecutablePath(command: string): string {
   if (!trimmed) {
     return '';
   }
-  if (path.isAbsolute(trimmed) || trimmed.includes(path.sep)) {
-    return trimmed;
-  }
-  const result = childProcess.spawnSync('bash', ['-lc', `command -v ${shellQuote(trimmed)}`], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore']
-  });
-  const resolved = String(result.stdout || '').trim().split('\n')[0];
-  return resolved || trimmed;
+  return resolveCommandOnSearchPath(trimmed) || expandHomePath(trimmed);
 }
 
 function getAgentCliFamily(command: string): string {
