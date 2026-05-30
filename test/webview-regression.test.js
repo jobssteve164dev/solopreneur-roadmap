@@ -458,6 +458,54 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.doesNotMatch(actionsHtml, /data-continue-sidebar-solo-id/);
 });
 
+test('sidebar resolve survives persisted state and startup data failures', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const postedMessages = [];
+  let messageListener = null;
+  const webviewView = {
+    webview: {
+      options: {},
+      html: '',
+      asWebviewUri(uri) {
+        return String(uri && (uri.fsPath || uri.path || uri));
+      },
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      },
+      onDidReceiveMessage(listener) {
+        messageListener = listener;
+      }
+    }
+  };
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => { throw new Error('stale sync engine'); } },
+    async () => { throw new Error('agent failed'); },
+    () => { throw new Error('settings unavailable'); },
+    async () => {},
+    () => { throw new Error('persisted projects unavailable'); },
+    async () => {},
+    async () => {}
+  );
+
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    assert.doesNotThrow(() => provider.resolveWebviewView(webviewView, {}, {}));
+    assert.match(webviewView.webview.html, /SoloMap/);
+    assert.ok(postedMessages.some((message) => message.command === 'projectsLoaded'));
+
+    await messageListener({ command: 'runAgent', nodeId: '1' });
+    assert.ok(postedMessages.some((message) => message.command === 'sidebarActionFailed' && /agent failed/.test(message.message)));
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
 test('full roadmap webview runtime script parses and opens settings panel', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',

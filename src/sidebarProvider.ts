@@ -136,6 +136,15 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function escapeHtmlText(value: string): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function commandExists(command: string): boolean {
   const trimmed = command.trim();
   if (!trimmed) {
@@ -1196,180 +1205,196 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   ) {
     this._view = webviewView;
 
-    // Allow scripts and configure local resource roots
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [this._extensionUri]
-    };
+    try {
+      // Allow scripts and configure local resource roots
+      webviewView.webview.options = {
+        enableScripts: true,
+        localResourceRoots: [this._extensionUri]
+      };
 
-    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+      webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+    } catch (error) {
+      console.error('SoloMap sidebar failed to render initial HTML:', error);
+      webviewView.webview.html = this.getSidebarFallbackHtml('SoloMap sidebar could not render. Open the command palette and run "Developer: Reload Window".');
+    }
 
     // Listen to messages from the webview
     webviewView.webview.onDidReceiveMessage(async (data) => {
-      switch (data.command) {
-        case 'getNodes':
-          this.sendNodesToWebview();
-          break;
-        case 'runAgent':
-          await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
-          break;
-        case 'runSoloConversation':
-          if (this._onRunSolo) {
-            await this._onRunSolo(data.projectPath || '', data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
-            await this.sendSoloConversationHistory(data.projectPath || '');
-          }
-          break;
-        case 'chooseSoloSupplementFiles':
-          if (this._chooseSoloSupplementFiles) {
-            const files = await this._chooseSoloSupplementFiles(data.projectPath || '');
-            this._view?.webview.postMessage({ command: 'soloSupplementFilesSelected', targetId: data.targetId || '', files });
-          }
-          break;
-        case 'savePastedAttachments':
-          if (this._savePastedAttachments) {
-            const files = await this._savePastedAttachments(data.projectPath || '', data.scope || data.targetId || 'conversation', data.attachments || []);
-            this._view?.webview.postMessage({ command: 'pastedAttachmentsSaved', targetId: data.targetId || '', files });
-          }
-          break;
-        case 'getSoloConversationHistory':
-          await this.sendSoloConversationHistory(data.projectPath || '');
-          break;
-        case 'continueSoloConversation':
-          if (this._continueSoloConversation) {
-            await this._continueSoloConversation(data.projectPath || '', Number(data.conversationId || 0));
-          }
-          break;
-        case 'showFullRoadmap':
-          vscode.commands.executeCommand('solopreneur.showRoadmap');
-          break;
-        case 'getSettings':
-          this.sendSettings();
-          break;
-        case 'updateSettings':
-          await this._updateSettings({
-            cliPath: data.cliPath,
-            language: data.language,
-            globalPrompt: data.globalPrompt,
-            globalDataPath: data.globalDataPath
-          });
-          vscode.window.showInformationMessage('SoloMap settings saved successfully!');
-          // Broadcast to sync both Webviews
-          this.sendSettings();
-          // Trigger updates on the full screen view if active
-          vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
-          break;
-        case 'installSkill':
-          if (this._installSkill) {
-            await this._installSkill(data.skillInput || '');
-          }
-          break;
-        case 'installMcp':
-          if (this._installMcp) {
-            await this._installMcp(data.mcpInput || '');
-          }
-          break;
-        case 'testCli':
-          const cliToTest = resolveAgentCli('antigravity-cli', data.cliPath || '');
-          childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
-            const success = !error;
-            let msg = error ? error.message : formatCliTestMessage(cliToTest, stdout, stderr);
-            if (!success) {
-              const candidates = getAgentCliCandidates('antigravity-cli', data.cliPath || '').join(', ');
-              msg = `Command not found or failed. Tried: ${candidates}`;
+      try {
+        switch (data.command) {
+          case 'getNodes':
+            this.sendNodesToWebview();
+            break;
+          case 'runAgent':
+            await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
+            break;
+          case 'runSoloConversation':
+            if (this._onRunSolo) {
+              await this._onRunSolo(data.projectPath || '', data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
+              await this.sendSoloConversationHistory(data.projectPath || '');
             }
-            this._view?.webview.postMessage({
-              command: 'cliTestResult',
-              success,
-              message: msg
-            });
-          });
-          break;
-        case 'checkDependencies':
-          this._view?.webview.postMessage({
-            command: 'dependenciesChecked',
-            status: getDependencyStatus(data.cliPath || this._getSettings().cliPath || 'agy')
-          });
-          break;
-        case 'openDependencyAction':
-          this.openDependencyAction(data.action || '', data.cliPath || this._getSettings().cliPath || 'agy');
-          break;
-        case 'openExternal':
-          if (data.url) {
-            vscode.env.openExternal(vscode.Uri.parse(String(data.url)));
-          }
-          break;
-        case 'getIssueDetails':
-          this.sendIssueDetails(data.projectPath || '', Number(data.issueNumber || 0));
-          break;
-        case 'createIssue': {
-          const result = createProjectIssue(
-            data.projectPath || '',
-            String(data.title || '').trim(),
-            String(data.body || '').trim(),
-            String(data.category || 'discussion'),
-            String(data.priority || '')
-          );
-          this._view?.webview.postMessage({
-            command: 'issueActionCompleted',
-            projectPath: data.projectPath || '',
-            success: result.ok,
-            message: result.message
-          });
-          this.sendProjects();
-          break;
-        }
-        case 'closeIssue': {
-          const result = closeProjectIssue(data.projectPath || '', Number(data.issueNumber || 0));
-          this._view?.webview.postMessage({
-            command: 'issueActionCompleted',
-            projectPath: data.projectPath || '',
-            success: result.ok,
-            message: result.message
-          });
-          this.sendProjects();
-          break;
-        }
-        case 'getProjects':
-          this.sendProjects();
-          break;
-        case 'selectProject':
-          await this._selectProject(data.projectPath);
-          break;
-        case 'addProject':
-          await this._addProject();
-          break;
-        case 'openProjectFromPortfolio':
-          await this._selectProject(data.projectPath);
-          vscode.commands.executeCommand('solopreneur.showRoadmap');
-          break;
-        case 'continueProjectFromPortfolio':
-          await this._selectProject(data.projectPath);
-          if (data.nodeId) {
-            await this._onRunAgent(data.nodeId);
-          } else {
+            break;
+          case 'chooseSoloSupplementFiles':
+            if (this._chooseSoloSupplementFiles) {
+              const files = await this._chooseSoloSupplementFiles(data.projectPath || '');
+              this._view?.webview.postMessage({ command: 'soloSupplementFilesSelected', targetId: data.targetId || '', files });
+            }
+            break;
+          case 'savePastedAttachments':
+            if (this._savePastedAttachments) {
+              const files = await this._savePastedAttachments(data.projectPath || '', data.scope || data.targetId || 'conversation', data.attachments || []);
+              this._view?.webview.postMessage({ command: 'pastedAttachmentsSaved', targetId: data.targetId || '', files });
+            }
+            break;
+          case 'getSoloConversationHistory':
+            await this.sendSoloConversationHistory(data.projectPath || '');
+            break;
+          case 'continueSoloConversation':
+            if (this._continueSoloConversation) {
+              await this._continueSoloConversation(data.projectPath || '', Number(data.conversationId || 0));
+            }
+            break;
+          case 'showFullRoadmap':
             vscode.commands.executeCommand('solopreneur.showRoadmap');
+            break;
+          case 'getSettings':
+            this.sendSettings();
+            break;
+          case 'updateSettings':
+            await this._updateSettings({
+              cliPath: data.cliPath,
+              language: data.language,
+              globalPrompt: data.globalPrompt,
+              globalDataPath: data.globalDataPath
+            });
+            vscode.window.showInformationMessage('SoloMap settings saved successfully!');
+            // Broadcast to sync both Webviews
+            this.sendSettings();
+            // Trigger updates on the full screen view if active
+            vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+            break;
+          case 'installSkill':
+            if (this._installSkill) {
+              await this._installSkill(data.skillInput || '');
+            }
+            break;
+          case 'installMcp':
+            if (this._installMcp) {
+              await this._installMcp(data.mcpInput || '');
+            }
+            break;
+          case 'testCli':
+            const cliToTest = resolveAgentCli('antigravity-cli', data.cliPath || '');
+            childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
+              const success = !error;
+              let msg = error ? error.message : formatCliTestMessage(cliToTest, stdout, stderr);
+              if (!success) {
+                const candidates = getAgentCliCandidates('antigravity-cli', data.cliPath || '').join(', ');
+                msg = `Command not found or failed. Tried: ${candidates}`;
+              }
+              this._view?.webview.postMessage({
+                command: 'cliTestResult',
+                success,
+                message: msg
+              });
+            });
+            break;
+          case 'checkDependencies':
+            this._view?.webview.postMessage({
+              command: 'dependenciesChecked',
+              status: getDependencyStatus(data.cliPath || this._getSettings().cliPath || 'agy')
+            });
+            break;
+          case 'openDependencyAction':
+            this.openDependencyAction(data.action || '', data.cliPath || this._getSettings().cliPath || 'agy');
+            break;
+          case 'openExternal':
+            if (data.url) {
+              vscode.env.openExternal(vscode.Uri.parse(String(data.url)));
+            }
+            break;
+          case 'getIssueDetails':
+            this.sendIssueDetails(data.projectPath || '', Number(data.issueNumber || 0));
+            break;
+          case 'createIssue': {
+            const result = createProjectIssue(
+              data.projectPath || '',
+              String(data.title || '').trim(),
+              String(data.body || '').trim(),
+              String(data.category || 'discussion'),
+              String(data.priority || '')
+            );
+            this._view?.webview.postMessage({
+              command: 'issueActionCompleted',
+              projectPath: data.projectPath || '',
+              success: result.ok,
+              message: result.message
+            });
+            this.sendProjects();
+            break;
           }
-          break;
+          case 'closeIssue': {
+            const result = closeProjectIssue(data.projectPath || '', Number(data.issueNumber || 0));
+            this._view?.webview.postMessage({
+              command: 'issueActionCompleted',
+              projectPath: data.projectPath || '',
+              success: result.ok,
+              message: result.message
+            });
+            this.sendProjects();
+            break;
+          }
+          case 'getProjects':
+            this.sendProjects();
+            break;
+          case 'selectProject':
+            await this._selectProject(data.projectPath);
+            break;
+          case 'addProject':
+            await this._addProject();
+            break;
+          case 'openProjectFromPortfolio':
+            await this._selectProject(data.projectPath);
+            vscode.commands.executeCommand('solopreneur.showRoadmap');
+            break;
+          case 'continueProjectFromPortfolio':
+            await this._selectProject(data.projectPath);
+            if (data.nodeId) {
+              await this._onRunAgent(data.nodeId);
+            } else {
+              vscode.commands.executeCommand('solopreneur.showRoadmap');
+            }
+            break;
+        }
+      } catch (error) {
+        console.error('SoloMap sidebar message failed:', data?.command, error);
+        this._view?.webview.postMessage({
+          command: 'sidebarActionFailed',
+          message: error instanceof Error ? error.message : String(error)
+        });
       }
     });
 
     // Request initial data push
-    this.sendNodesToWebview();
-    this.sendSettings();
-    this.sendProjects();
+    this.sendInitialDataToWebview();
   }
 
   /**
    * Refreshes the sidebar view with updated node states.
    */
   public sendNodesToWebview() {
-    if (this._view && this._syncEngine) {
+    try {
+      if (!this._view || !this._syncEngine) {
+        return;
+      }
       const nodes = this._syncEngine.getNodes();
       this._view.webview.postMessage({
         command: 'nodesUpdated',
         nodes: nodes,
         projectPath: this._getProjects().selectedProjectPath
       });
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send nodes:', error);
     }
   }
 
@@ -1377,11 +1402,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
    * Reads and pushes active configuration settings to the sidebar.
    */
   public sendSettings() {
-    if (this._view) {
+    try {
+      if (!this._view) {
+        return;
+      }
       this._view.webview.postMessage({
         command: 'settingsLoaded',
         settings: this._getSettings()
       });
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send settings:', error);
     }
   }
 
@@ -1402,7 +1432,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public sendProjects() {
-    if (this._view) {
+    try {
+      if (!this._view) {
+        return;
+      }
       const projectState = this._getProjects();
       const portfolio = buildProjectPortfolioSummaries(projectState.projects);
       let globalStore: GlobalEngineeringSnapshot;
@@ -1422,6 +1455,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
       this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send projects:', error);
+      this._view?.webview.postMessage({
+        command: 'projectsLoaded',
+        projects: {
+          projects: [],
+          selectedProjectPath: '',
+          portfolio: [],
+          globalStore: {
+            dataPath: '',
+            portfolio: [],
+            dependencies: [],
+            learningCandidateCount: 0
+          }
+        }
+      });
     }
   }
 
@@ -1476,15 +1525,45 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
-    if (!this._view || !this._getSoloConversationHistory || !projectPath) {
-      return;
+    try {
+      if (!this._view || !this._getSoloConversationHistory || !projectPath) {
+        return;
+      }
+      const conversations = await this._getSoloConversationHistory(projectPath);
+      this._view.webview.postMessage({
+        command: 'sidebarSoloConversationLoaded',
+        projectPath,
+        conversations
+      });
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send solo conversation history:', error);
     }
-    const conversations = await this._getSoloConversationHistory(projectPath);
-    this._view.webview.postMessage({
-      command: 'sidebarSoloConversationLoaded',
-      projectPath,
-      conversations
-    });
+  }
+
+  private sendInitialDataToWebview() {
+    this.sendNodesToWebview();
+    this.sendSettings();
+    this.sendProjects();
+  }
+
+  private getSidebarFallbackHtml(message: string): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SoloMap</title>
+  <style>
+    body { margin: 0; padding: 14px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); }
+    .title { font-size: 13px; font-weight: 700; margin-bottom: 8px; }
+    .message { font-size: 12px; line-height: 1.45; color: var(--vscode-descriptionForeground); }
+  </style>
+</head>
+<body>
+  <div class="title">SoloMap</div>
+  <div class="message">${escapeHtmlText(message)}</div>
+</body>
+</html>`;
   }
 
   private openDependencyAction(action: string, cliPath: string) {
