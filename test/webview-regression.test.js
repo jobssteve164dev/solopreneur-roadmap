@@ -983,7 +983,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' @prompt-file:'/workspace/app/.solopreneur/agent-runs/2/prompt.txt'"
+    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
@@ -991,15 +991,15 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('claude', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\""
+    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('copilot', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'copilot' -p \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\" -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user --output-format text"
+    "'copilot' -p 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.' -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user --output-format text"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('opencode', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "(cd '/workspace/app' && 'opencode' run \"$(cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt')\")"
+    "(cd '/workspace/app' && 'opencode' run 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.')"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
@@ -1234,6 +1234,33 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-cli\/cache\/last_conversations\.json/);
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-log/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
+  assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
+  assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /@prompt-file/);
+
+  const claudeShellScript = extensionModule.__buildAgentShellScript(
+    'claude',
+    'Ship the MVP',
+    fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-claude-shell-')),
+    '2',
+    44,
+    ''
+  );
+  assert.match(fs.readFileSync(claudeShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
+  assert.doesNotMatch(fs.readFileSync(claudeShellScript.runScriptPath, 'utf8'), /\$\(cat .*prompt\.txt/);
+  assert.doesNotMatch(fs.readFileSync(claudeShellScript.runScriptPath, 'utf8'), /claude' .*"\$agent_prompt"/);
+
+  const copilotShellScript = extensionModule.__buildAgentShellScript(
+    'copilot',
+    'Ship the MVP',
+    fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-copilot-shell-')),
+    '2',
+    45,
+    ''
+  );
+  assert.match(fs.readFileSync(copilotShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
+  assert.doesNotMatch(fs.readFileSync(copilotShellScript.runScriptPath, 'utf8'), /\$\(cat .*prompt\.txt/);
+  assert.doesNotMatch(fs.readFileSync(copilotShellScript.runScriptPath, 'utf8'), /copilot' .*"\$agent_prompt"/);
 
   const prompt = extensionModule.__buildAgentConversationPrompt(
     {

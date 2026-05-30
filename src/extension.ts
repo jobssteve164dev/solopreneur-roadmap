@@ -1410,6 +1410,8 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
+  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
+  const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
@@ -1419,19 +1421,19 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} @prompt-file:${quotedPromptFile}`;
+    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} "$(cat ${quotedPromptFile})"`;
+    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p "$(cat ${quotedPromptFile})" -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
+    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run "$(cat ${quotedPromptFile})")`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPromptFileInstruction})`;
   }
 
-  return `${quotedCli} run --task @prompt-file:${quotedPromptFile}`;
+  return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
 function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, workspaceRoot: string): string {
@@ -2671,7 +2673,7 @@ function buildAgentShellScript(
   const startedAt = new Date().toISOString();
   const commandPreview = `${agentCli} [${sessionMode}]`;
   const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
-  const executionCommand = directExecutionCommand || buildAgentCommandFromShellVar(agentCli, 'agent_prompt', workspaceRoot);
+  const executionCommand = directExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
   const statusBase = { nodeId, runKind, roadmapBackupFilePath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
@@ -2680,8 +2682,10 @@ function buildAgentShellScript(
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  const promptExportScript = directExecutionCommand
+    ? [`agent_prompt=$(cat ${shellQuote(promptFilePath)})`, 'export agent_prompt']
+    : [];
   const terminalExecutionScript = [
-    'export agent_prompt;',
     `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
     'status=${PIPESTATUS[0]}'
   ].join(' ');
@@ -2696,7 +2700,7 @@ function buildAgentShellScript(
     workspaceSnapshotScript,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
-    `agent_prompt=$(cat ${shellQuote(promptFilePath)})`,
+    ...promptExportScript,
     terminalExecutionScript,
     sessionCaptureScript,
     `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
