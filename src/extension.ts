@@ -4555,6 +4555,86 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       gap: 8px;
     }
 
+    .onboarding-panel {
+      width: min(560px, calc(100vw - 48px));
+      margin: 48px auto 0;
+      border: 1px solid rgba(0, 229, 255, 0.18);
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(0, 229, 255, 0.08), rgba(124, 77, 255, 0.08));
+      padding: 18px;
+      box-sizing: border-box;
+    }
+
+    .onboarding-kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #7dd3fc;
+      font-size: 11px;
+      font-weight: 800;
+      margin-bottom: 9px;
+    }
+
+    .onboarding-title {
+      color: var(--text-main);
+      font-size: 20px;
+      font-weight: 800;
+      line-height: 1.22;
+      margin-bottom: 8px;
+    }
+
+    .onboarding-copy {
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 14px;
+    }
+
+    .onboarding-steps {
+      display: grid;
+      gap: 9px;
+      margin-bottom: 16px;
+    }
+
+    .onboarding-step {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr);
+      gap: 9px;
+      align-items: start;
+      color: var(--text-main);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .onboarding-step-index {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      background: rgba(0, 229, 255, 0.12);
+      border: 1px solid rgba(0, 229, 255, 0.24);
+      color: #a5f3fc;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .onboarding-action {
+      border: none;
+      border-radius: 6px;
+      padding: 9px 13px;
+      background: linear-gradient(135deg, #7c4dff 0%, #00b0ff 100%);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+    }
+
     .conversation-item {
       border: 1px solid var(--border-glass);
       border-radius: 6px;
@@ -5265,6 +5345,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         save: '保存',
         chooseProject: '选择项目文件夹',
         emptyRoadmap: '还没有路线图。请添加项目文件夹，或重新打开当前项目。',
+        onboardingKicker: '新手开始',
+        onboardingTitle: '先把一个项目交给 SoloMap',
+        onboardingCopy: '选择一个本地项目文件夹。SoloMap 会带你确认项目类型，然后生成第一张可推进路线图。',
+        onboardingStepProject: '添加本地项目文件夹',
+        onboardingStepType: '选择这个项目更像哪一类',
+        onboardingStepRoadmap: '在“生成初始路线图”里输入目标，让 Agent 产出第一版路线图',
+        onboardingAction: '添加第一个项目',
         startConversation: '发起 Agent 对话',
         conversationHistory: 'Agent 对话历史',
         noConversations: '这个环节还没有 Agent 对话。',
@@ -5348,6 +5435,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         save: 'Save',
         chooseProject: 'Choose project folder',
         emptyRoadmap: 'No roadmap yet. Add a project folder or reopen the current project.',
+        onboardingKicker: 'Get started',
+        onboardingTitle: 'Give SoloMap one local project first',
+        onboardingCopy: 'Choose a local project folder. SoloMap will ask for its type, then help create the first actionable roadmap.',
+        onboardingStepProject: 'Add a local project folder',
+        onboardingStepType: 'Choose what kind of project it is',
+        onboardingStepRoadmap: 'Use "Generate Initial Roadmap" to describe the goal and let the Agent create the first roadmap',
+        onboardingAction: 'Add first project',
         startConversation: 'Start Agent Conversation',
         conversationHistory: 'Agent Conversation History',
         noConversations: 'No Agent conversations for this step yet.',
@@ -5936,6 +6030,32 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       \`;
     }
 
+    function renderOnboardingPanel() {
+      return \`
+        <div class="onboarding-panel">
+          <div class="onboarding-kicker"><span class="codicon codicon-compass"></span>\${escapeHtml(t('onboardingKicker'))}</div>
+          <div class="onboarding-title">\${escapeHtml(t('onboardingTitle'))}</div>
+          <div class="onboarding-copy">\${escapeHtml(t('onboardingCopy'))}</div>
+          <div class="onboarding-steps">
+            <div class="onboarding-step"><span class="onboarding-step-index">1</span><span>\${escapeHtml(t('onboardingStepProject'))}</span></div>
+            <div class="onboarding-step"><span class="onboarding-step-index">2</span><span>\${escapeHtml(t('onboardingStepType'))}</span></div>
+            <div class="onboarding-step"><span class="onboarding-step-index">3</span><span>\${escapeHtml(t('onboardingStepRoadmap'))}</span></div>
+          </div>
+          <button class="onboarding-action" data-onboarding-add-project>
+            <span class="codicon codicon-add"></span>\${escapeHtml(t('onboardingAction'))}
+          </button>
+        </div>
+      \`;
+    }
+
+    function bindOnboardingActions(container) {
+      container.querySelectorAll('[data-onboarding-add-project]').forEach(button => {
+        button.addEventListener('click', () => {
+          vscode.postMessage({ command: 'addProject' });
+        });
+      });
+    }
+
     function renderRoadmap(nodes) {
       // Clear canvas keeping the flow line
       const flowLine = canvas.querySelector('.flow-line');
@@ -5944,10 +6064,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
       if (!nodes || nodes.length === 0) {
         const placeholder = document.createElement('div');
-        placeholder.style.color = 'var(--text-muted)';
-        placeholder.style.marginTop = '40px';
-        placeholder.textContent = t('emptyRoadmap');
+        placeholder.innerHTML = renderOnboardingPanel();
         canvas.appendChild(placeholder);
+        bindOnboardingActions(placeholder);
         return;
       }
 

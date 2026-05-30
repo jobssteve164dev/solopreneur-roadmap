@@ -2292,6 +2292,86 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       padding: 10px 4px;
     }
 
+    .onboarding-panel {
+      border: 1px solid rgba(0, 229, 255, 0.18);
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(0, 229, 255, 0.08), rgba(124, 77, 255, 0.08));
+      padding: 12px;
+      box-sizing: border-box;
+    }
+
+    .onboarding-kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: #7dd3fc;
+      font-size: 10px;
+      font-weight: 800;
+      margin-bottom: 7px;
+    }
+
+    .onboarding-title {
+      color: var(--text-main);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.25;
+      margin-bottom: 6px;
+    }
+
+    .onboarding-copy {
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.45;
+      margin-bottom: 10px;
+    }
+
+    .onboarding-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      margin-bottom: 11px;
+    }
+
+    .onboarding-step {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      gap: 7px;
+      align-items: start;
+      color: var(--text-main);
+      font-size: 10.5px;
+      line-height: 1.35;
+    }
+
+    .onboarding-step-index {
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: rgba(0, 229, 255, 0.12);
+      border: 1px solid rgba(0, 229, 255, 0.24);
+      color: #a5f3fc;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .onboarding-action {
+      width: 100%;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: linear-gradient(135deg, #7c4dff 0%, #00b0ff 100%);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
     .portfolio-card {
       border: 1px solid var(--border-glass);
       border-radius: 6px;
@@ -3169,6 +3249,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         portfolioTitle: '项目总览',
         globalFocusTitle: '本周推进',
         globalFocusEmpty: '还没有可推进项目。',
+        onboardingKicker: '新手开始',
+        onboardingTitle: '先把一个项目交给 SoloMap',
+        onboardingCopy: '选择一个本地项目文件夹。SoloMap 会带你确认项目类型，然后生成第一张可推进路线图。',
+        onboardingStepProject: '添加本地项目文件夹',
+        onboardingStepType: '选择这个项目更像哪一类',
+        onboardingStepRoadmap: '在“生成初始路线图”里输入目标，让 Agent 产出第一版路线图',
+        onboardingAction: '添加第一个项目',
         globalDataPath: '跨项目数据目录',
         globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
         globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
@@ -3279,6 +3366,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         portfolioTitle: 'Project Portfolio',
         globalFocusTitle: 'Weekly Focus',
         globalFocusEmpty: 'No projects ready yet.',
+        onboardingKicker: 'Get started',
+        onboardingTitle: 'Give SoloMap one local project first',
+        onboardingCopy: 'Choose a local project folder. SoloMap will ask for its type, then help create the first actionable roadmap.',
+        onboardingStepProject: 'Add a local project folder',
+        onboardingStepType: 'Choose what kind of project it is',
+        onboardingStepRoadmap: 'Use "Generate Initial Roadmap" to describe the goal and let the Agent create the first roadmap',
+        onboardingAction: 'Add first project',
         globalDataPath: 'Global Data Directory',
         globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
         globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
@@ -4418,6 +4512,24 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
+    function renderOnboardingPanel() {
+      return \`
+        <div class="onboarding-panel">
+          <div class="onboarding-kicker"><span class="codicon codicon-compass"></span>\${escapeHtml(t('onboardingKicker'))}</div>
+          <div class="onboarding-title">\${escapeHtml(t('onboardingTitle'))}</div>
+          <div class="onboarding-copy">\${escapeHtml(t('onboardingCopy'))}</div>
+          <div class="onboarding-steps">
+            <div class="onboarding-step"><span class="onboarding-step-index">1</span><span>\${escapeHtml(t('onboardingStepProject'))}</span></div>
+            <div class="onboarding-step"><span class="onboarding-step-index">2</span><span>\${escapeHtml(t('onboardingStepType'))}</span></div>
+            <div class="onboarding-step"><span class="onboarding-step-index">3</span><span>\${escapeHtml(t('onboardingStepRoadmap'))}</span></div>
+          </div>
+          <button class="onboarding-action" data-onboarding-add-project>
+            <span class="codicon codicon-add"></span>\${escapeHtml(t('onboardingAction'))}
+          </button>
+        </div>
+      \`;
+    }
+
     function renderProjectIssuePanel(project) {
       const issues = project.issues || {};
       if (issues.loading) {
@@ -4528,7 +4640,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function renderPortfolio(portfolio, selectedProjectPath) {
       if (!portfolio || portfolio.length === 0) {
-        portfolioList.innerHTML = '<div class="empty-portfolio">' + t('emptyPortfolio') + '</div>';
+        portfolioList.innerHTML = renderOnboardingPanel();
+        bindOnboardingActions(portfolioList);
         return;
       }
 
@@ -4795,6 +4908,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         tasksList.appendChild(card);
+      });
+    }
+
+    function bindOnboardingActions(container) {
+      container.querySelectorAll('[data-onboarding-add-project]').forEach(button => {
+        button.addEventListener('click', () => {
+          vscode.postMessage({ command: 'addProject' });
+        });
       });
     }
 

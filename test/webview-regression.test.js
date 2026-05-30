@@ -596,6 +596,10 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /data-link-solo-id/);
   assert.match(script, /completionCriteria/);
   assert.match(script, /renderCompletionCriteria/);
+  assert.match(script, /renderOnboardingPanel/);
+  assert.match(script, /data-onboarding-add-project/);
+  assert.match(script, /添加第一个项目|Add first project/);
+  assert.match(script, /vscode\.postMessage\(\{ command: 'addProject' \}\)/);
   assert.doesNotMatch(script, /confirmStepCompletion|completeConfirm/);
   assert.match(script, /Completion criteria|完成标准/);
   assert.match(html, /id="btn-toggle-roadmap-revision"/);
@@ -679,6 +683,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /data-select-project-path/);
   assert.match(html, /id="global-focus-panel"/);
   assert.match(html, /id="setting-global-data-path"/);
+  assert.match(html, /\.onboarding-panel\s*\{/);
+  assert.match(html, /renderOnboardingPanel/);
+  assert.match(html, /data-onboarding-add-project/);
+  assert.match(html, /添加第一个项目|Add first project/);
+  assert.match(html, /vscode\.postMessage\(\{ command: 'addProject' \}\)/);
   assert.doesNotMatch(html, /id="tasks-list"/);
   assert.doesNotMatch(html, /id="progress-bar"/);
   assert.doesNotMatch(html, /id="progress-text"/);
