@@ -1185,7 +1185,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
     private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
     private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>,
-    private readonly _installSkill?: (skillInput: string) => Promise<void>
+    private readonly _installSkill?: (skillInput: string) => Promise<void>,
+    private readonly _installMcp?: (mcpInput: string) => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -1260,6 +1261,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'installSkill':
           if (this._installSkill) {
             await this._installSkill(data.skillInput || '');
+          }
+          break;
+        case 'installMcp':
+          if (this._installMcp) {
+            await this._installMcp(data.mcpInput || '');
           }
           break;
         case 'testCli':
@@ -1382,6 +1388,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public postSkillInstallResult(success: boolean, message: string) {
     this._view?.webview.postMessage({
       command: 'skillInstallResult',
+      success,
+      message
+    });
+  }
+
+  public postMcpInstallResult(success: boolean, message: string) {
+    this._view?.webview.postMessage({
+      command: 'mcpInstallResult',
       success,
       message
     });
@@ -3155,6 +3169,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-mcp-install">Install Connector</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-mcp-input"
+        placeholder="e.g. GitHub MCP server URL, npm package, or config snippet"
+      >
+      <div id="help-mcp-install" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Paste an MCP connector source. SoloMap will register it as a global ability connector.
+      </div>
+      <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">Install Connector</span></button>
+      <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
       <div class="dependency-panel" id="dependency-panel">
         <div class="dependency-row">
@@ -3217,6 +3246,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingSkillInput = document.getElementById('setting-skill-input');
     const btnInstallSkill = document.getElementById('btn-install-skill');
     const skillInstallBadge = document.getElementById('skill-install-badge');
+    const settingMcpInput = document.getElementById('setting-mcp-input');
+    const btnInstallMcp = document.getElementById('btn-install-mcp');
+    const mcpInstallBadge = document.getElementById('mcp-install-badge');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -3264,6 +3296,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         skillInstallHelp: '粘贴 skills.sh 或 GitHub 技能链接，SoloMap 会安装到全局技能库。',
         installSkill: '安装技能',
         installingSkill: '正在启动安装...',
+        mcpInstall: '安装连接器',
+        mcpInstallPlaceholder: '例如：GitHub MCP server、npm 包名或配置片段',
+        mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
+        installMcp: '安装连接器',
+        installingMcp: '正在启动安装...',
         globalType: '类型',
         globalReusable: '可复用线索',
         globalLearning: '学习候选',
@@ -3381,6 +3418,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         skillInstallHelp: 'Paste a skills.sh or GitHub skill link. SoloMap installs it into the global skill library.',
         installSkill: 'Install Skill',
         installingSkill: 'Starting install...',
+        mcpInstall: 'Install Connector',
+        mcpInstallPlaceholder: 'e.g. GitHub MCP server, npm package, or config snippet',
+        mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
+        installMcp: 'Install Connector',
+        installingMcp: 'Starting install...',
         globalType: 'Type',
         globalReusable: 'Reusable signals',
         globalLearning: 'Learning candidates',
@@ -3531,6 +3573,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
       setText('help-skill-install', t('skillInstallHelp'));
       setText('text-install-skill', t('installSkill'));
+      setText('label-mcp-install', t('mcpInstall'));
+      if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
+      setText('help-mcp-install', t('mcpInstallHelp'));
+      setText('text-install-mcp', t('installMcp'));
       setText('label-dependencies', t('dependencies'));
       setText('dependency-agent-name', t('dependencyAgent'));
       setText('dependency-github-name', t('dependencyGithub'));
@@ -3686,6 +3732,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             skillInstallBadge.textContent = message.message || '';
           }
           break;
+        case 'mcpInstallResult':
+          if (mcpInstallBadge) {
+            mcpInstallBadge.style.display = 'block';
+            mcpInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
+            mcpInstallBadge.textContent = message.message || '';
+          }
+          break;
 
         case 'soloSupplementFilesSelected':
           if (message.targetId) {
@@ -3789,6 +3842,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           skillInstallBadge.textContent = t('installingSkill');
         }
         vscode.postMessage({ command: 'installSkill', skillInput });
+      });
+    }
+
+    if (btnInstallMcp) {
+      btnInstallMcp.addEventListener('click', () => {
+        const mcpInput = (settingMcpInput ? settingMcpInput.value : '').trim();
+        if (!mcpInput) {
+          if (mcpInstallBadge) {
+            mcpInstallBadge.style.display = 'block';
+            mcpInstallBadge.className = 'cli-badge error';
+            mcpInstallBadge.textContent = t('mcpInstallPlaceholder');
+          }
+          return;
+        }
+        if (mcpInstallBadge) {
+          mcpInstallBadge.style.display = 'block';
+          mcpInstallBadge.className = 'cli-badge';
+          mcpInstallBadge.style.background = 'rgba(255,255,255,0.05)';
+          mcpInstallBadge.style.color = 'var(--text-muted)';
+          mcpInstallBadge.textContent = t('installingMcp');
+        }
+        vscode.postMessage({ command: 'installMcp', mcpInput });
       });
     }
 

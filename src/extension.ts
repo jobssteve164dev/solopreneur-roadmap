@@ -76,6 +76,50 @@ interface SolomapSkillRegistry {
   skills: SolomapSkillRegistryEntry[];
 }
 
+interface SolomapMcpRegistryEntry {
+  id: string;
+  title?: string;
+  description?: string;
+  status?: string;
+  source?: any;
+  serverPath?: string;
+  configPath?: string;
+  profiles?: Record<string, any>;
+  activation?: {
+    keywords?: string[];
+    useWhen?: string[];
+    doNotUseWhen?: string[];
+    projectTypes?: string[];
+    taskKinds?: string[];
+    manualOnly?: boolean;
+  };
+  permissions?: {
+    tools?: string[];
+    resources?: string[];
+    prompts?: string[];
+    requiresCredentials?: boolean;
+    credentialRefs?: string[];
+    externalAccess?: boolean | string;
+    writeAccess?: boolean | string;
+  };
+  risk?: {
+    level?: string;
+    canWriteExternal?: boolean;
+    canSendMessages?: boolean;
+    canModifyCloudResources?: boolean;
+    canAccessSecrets?: boolean;
+    requiresExplicitEnable?: boolean;
+  };
+  installedAt?: string;
+  updatedAt?: string;
+}
+
+interface SolomapMcpRegistry {
+  version: number;
+  updatedAt: string;
+  connectors: SolomapMcpRegistryEntry[];
+}
+
 const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
@@ -193,6 +237,9 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async (skillInput) => {
       await handleInstallSolomapSkill(context, skillInput);
+    },
+    async (mcpInput) => {
+      await handleInstallSolomapMcp(context, mcpInput);
     }
   );
 
@@ -946,6 +993,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'installSkill':
           await handleInstallSolomapSkill(context, message.skillInput || '');
+          break;
+
+        case 'installMcp':
+          await handleInstallSolomapMcp(context, message.mcpInput || '');
           break;
 
         case 'getNodeConversations':
@@ -1912,6 +1963,10 @@ function getSolomapSkillsRoot(workspaceRoot: string, globalDataPath = ''): strin
   return path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'skills');
 }
 
+function getSolomapMcpRoot(workspaceRoot: string, globalDataPath = ''): string {
+  return path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'mcp');
+}
+
 function getProjectMemoryFilePath(workspaceRoot: string, globalDataPath = ''): string {
   const projectName = path.basename(workspaceRoot || 'project');
   const projectSlug = sanitizeAttachmentScope(projectName.toLowerCase()) || 'project';
@@ -2400,6 +2455,253 @@ function validateAndRegisterSkillInstall(workspaceRoot: string, globalDataPath: 
   return { ok: true, message: `Skill installed: ${skillId}`, skillId };
 }
 
+function getSolomapMcpRegistryPath(workspaceRoot: string, globalDataPath = ''): string {
+  return path.join(getSolomapMcpRoot(workspaceRoot, globalDataPath), 'registry.json');
+}
+
+function ensureSolomapMcpStore(workspaceRoot: string, globalDataPath = ''): { mcpRoot: string; serversRoot: string; runsRoot: string; profilesRoot: string; registryPath: string } {
+  const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
+  const serversRoot = path.join(mcpRoot, 'servers');
+  const runsRoot = path.join(mcpRoot, 'runs');
+  const profilesRoot = path.join(mcpRoot, 'profiles');
+  const registryPath = path.join(mcpRoot, 'registry.json');
+  [mcpRoot, serversRoot, runsRoot, profilesRoot].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
+  if (!fs.existsSync(registryPath)) {
+    fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), connectors: [] }, null, 2), 'utf8');
+  }
+  return { mcpRoot, serversRoot, runsRoot, profilesRoot, registryPath };
+}
+
+function readSolomapMcpRegistry(workspaceRoot: string, globalDataPath = ''): SolomapMcpRegistry {
+  const registryPath = getSolomapMcpRegistryPath(workspaceRoot, globalDataPath);
+  if (!fs.existsSync(registryPath)) {
+    return { version: 1, updatedAt: '', connectors: [] };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    return {
+      version: Number(parsed.version || 1),
+      updatedAt: String(parsed.updatedAt || ''),
+      connectors: Array.isArray(parsed.connectors) ? parsed.connectors : []
+    };
+  } catch {
+    return { version: 1, updatedAt: new Date().toISOString(), connectors: [] };
+  }
+}
+
+function writeSolomapMcpRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapMcpRegistry): void {
+  const { registryPath } = ensureSolomapMcpStore(workspaceRoot, globalDataPath);
+  const normalized: SolomapMcpRegistry = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    connectors: Array.isArray(registry.connectors) ? registry.connectors : []
+  };
+  fs.writeFileSync(registryPath, JSON.stringify(normalized, null, 2), 'utf8');
+}
+
+function scoreSolomapMcp(connector: SolomapMcpRegistryEntry, contextText: string): { score: number; reasons: string[] } {
+  if (!connector || connector.status === 'disabled' || connector.status === 'failed') {
+    return { score: 0, reasons: [] };
+  }
+  if (
+    connector.activation?.manualOnly ||
+    connector.permissions?.requiresCredentials ||
+    connector.permissions?.writeAccess === true ||
+    connector.risk?.requiresExplicitEnable ||
+    connector.risk?.canWriteExternal ||
+    connector.risk?.canSendMessages ||
+    connector.risk?.canModifyCloudResources ||
+    connector.risk?.canAccessSecrets
+  ) {
+    return { score: 0, reasons: [] };
+  }
+  const haystack = String(contextText || '').toLowerCase();
+  const reasons: string[] = [];
+  let score = 0;
+  normalizeSkillKeywords(connector.activation?.keywords).forEach((keyword) => {
+    if (keyword && haystack.includes(keyword.toLowerCase())) {
+      score += 4;
+      reasons.push(`keyword:${keyword}`);
+    }
+  });
+  normalizeSkillKeywords(connector.activation?.useWhen).forEach((hint) => {
+    if (hint && haystack.includes(hint.toLowerCase())) {
+      score += 2;
+      reasons.push(`useWhen:${hint.slice(0, 28)}`);
+    }
+  });
+  return { score, reasons };
+}
+
+function selectSolomapMcpCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 3): Array<{ connector: SolomapMcpRegistryEntry; reasons: string[] }> {
+  const registry = readSolomapMcpRegistry(workspaceRoot, globalDataPath);
+  return registry.connectors
+    .map((connector) => ({ connector, ...scoreSolomapMcp(connector, contextText) }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || a.connector.id.localeCompare(b.connector.id))
+    .slice(0, limit)
+    .map(({ connector, reasons }) => ({ connector, reasons }));
+}
+
+function buildSolomapMcpCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): string {
+  const candidates = selectSolomapMcpCandidates(workspaceRoot, globalDataPath, contextText, 3);
+  if (!candidates.length) {
+    return '';
+  }
+  const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
+  return [
+    'SoloMap 跨 Agent MCP 候选连接器：',
+    ...candidates.map(({ connector, reasons }, index) => {
+      const configPath = connector.configPath ? path.join(mcpRoot, connector.configPath) : '';
+      const tools = normalizeSkillKeywords(connector.permissions?.tools).slice(0, 5).join('、') || '-';
+      const useWhen = normalizeSkillKeywords(connector.activation?.useWhen).slice(0, 3).join('；');
+      const doNotUseWhen = normalizeSkillKeywords(connector.activation?.doNotUseWhen).slice(0, 3).join('；');
+      return [
+        `${index + 1}. ${connector.title || connector.id}`,
+        `   - 能力：${connector.description || '-'}`,
+        `   - 配置：${configPath || '-'}`,
+        `   - 工具：${tools}`,
+        `   - 适用：${useWhen || '-'}`,
+        `   - 不适用：${doNotUseWhen || '-'}`,
+        `   - 匹配原因：${reasons.join(', ') || '-'}`
+      ].join('\n');
+    }),
+    'MCP 使用协议：这些只是候选能力连接器，不是强制项。只有当任务明确需要外部工具能力时才使用；涉及外部写入、发消息、云资源、密钥或付费动作时必须先停止并要求用户明确授权。不要自行安装、启用或修改 MCP 配置。最终输出中简短说明本轮是否使用了 MCP。'
+  ].join('\n');
+}
+
+function buildMcpInstallPrompt(mcpInput: string, workspaceRoot: string, globalDataPath: string, resultFilePath: string): string {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
+  return [
+    '你正在为 SoloMap 安装一个跨 Agent 通用 MCP 能力连接器。',
+    '',
+    `项目目录：${workspaceRoot}`,
+    `用户提供的 MCP 来源：${mcpInput}`,
+    `SoloMap Global 目录：${globalRoot}`,
+    `SoloMap MCP 目录：${mcpRoot}`,
+    `安装结果 JSON 必须写入：${resultFilePath}`,
+    '',
+    '目标目录结构：',
+    '- `.solomap-global/mcp/servers/<mcp-id>/package/`：完整 MCP server package 或配置说明。',
+    '- `.solomap-global/mcp/servers/<mcp-id>/solomap.mcp.json`：SoloMap 统一 MCP 元数据。',
+    '- `.solomap-global/mcp/servers/<mcp-id>/source.lock.json`：来源、commit、安装时间、文件 hash 或目录 hash。',
+    '- `.solomap-global/mcp/servers/<mcp-id>/profiles/`：不同 Agent CLI 的配置建议片段，例如 codex.json、claude.json、cursor.json、agy.json。',
+    '',
+    '安装要求：',
+    '1. 解析来源。支持 GitHub URL、npm package、MCP server 仓库、文档页或用户粘贴的 server 配置片段。',
+    '2. 只做下载、复制、分析和生成配置建议；不要启动 MCP server，不要登录外部服务，不要写入任何 Agent 私有配置目录。',
+    '3. 选择稳定 `mcp-id`：只允许小写字母、数字和连字符。',
+    '4. 生成 `solomap.mcp.json`。至少包含 id、title、description、status、source、server、profiles、activation、permissions、risk、installedAt、updatedAt。',
+    '5. 识别风险：是否需要凭证、是否访问外网、是否可外部写入、是否可发消息、是否可修改云资源、是否可访问密钥；不确定时按高风险处理并设置 `requiresExplicitEnable: true`。',
+    '6. 生成各 Agent 的 profile/config 建议，但只写入 `.solomap-global/mcp/servers/<mcp-id>/profiles/`，不要应用到真实 Agent 配置。',
+    '',
+    '结果 JSON 格式：',
+    '{',
+    '  "ok": true,',
+    '  "mcpId": "mcp-id",',
+    '  "installedPath": ".solomap-global/mcp/servers/mcp-id",',
+    '  "packagePath": ".solomap-global/mcp/servers/mcp-id/package",',
+    '  "solomapMcpJson": ".solomap-global/mcp/servers/mcp-id/solomap.mcp.json",',
+    '  "sourceLockJson": ".solomap-global/mcp/servers/mcp-id/source.lock.json",',
+    '  "profilesPath": ".solomap-global/mcp/servers/mcp-id/profiles",',
+    '  "metadata": { "name": "mcp-id", "description": "...", "version": "..." },',
+    '  "source": { "input": "...", "repo": "owner/repo", "commit": "..." },',
+    '  "permissions": { "tools": [], "requiresCredentials": false, "externalAccess": "unknown", "writeAccess": "unknown" },',
+    '  "risk": { "level": "low|medium|high", "requiresExplicitEnable": true }',
+    '}',
+    '',
+    '失败时也必须写 result.json：',
+    '{ "ok": false, "error": "清晰说明失败原因", "source": { "input": "..." } }',
+    '',
+    '安全边界：不要运行 server，不要写入用户 home 下的 Agent 配置，不要保存明文密钥，不要删除任何已有文件。'
+  ].join('\n');
+}
+
+function validateAndRegisterMcpInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): { ok: boolean; message: string; mcpId?: string } {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
+  const serversRoot = path.join(mcpRoot, 'servers');
+  if (!fs.existsSync(resultFilePath)) {
+    return { ok: false, message: 'MCP install result.json was not created.' };
+  }
+  let result: any;
+  try {
+    result = JSON.parse(fs.readFileSync(resultFilePath, 'utf8'));
+  } catch (error: any) {
+    return { ok: false, message: `MCP install result.json is invalid: ${error.message}` };
+  }
+  if (!result.ok) {
+    return { ok: false, message: String(result.error || 'MCP installation failed.') };
+  }
+  const mcpId = sanitizeAttachmentScope(String(result.mcpId || result.metadata?.name || '').toLowerCase());
+  if (!mcpId) {
+    return { ok: false, message: 'MCP install result is missing mcpId.' };
+  }
+  const installedPath = resolveSkillResultPath(globalRoot, result.installedPath || path.join(mcpRoot, 'servers', mcpId));
+  const solomapMcpJson = resolveSkillResultPath(globalRoot, result.solomapMcpJson || path.join(installedPath, 'solomap.mcp.json'));
+  const sourceLockJson = resolveSkillResultPath(globalRoot, result.sourceLockJson || path.join(installedPath, 'source.lock.json'));
+  const profilesPath = resolveSkillResultPath(globalRoot, result.profilesPath || path.join(installedPath, 'profiles'));
+  if (!pathInside(serversRoot, installedPath)) {
+    return { ok: false, message: 'MCP installedPath is outside SoloMap mcp/servers.' };
+  }
+  if (![solomapMcpJson, sourceLockJson].every((filePath) => fs.existsSync(filePath) && fs.statSync(filePath).isFile())) {
+    return { ok: false, message: 'MCP package is missing solomap.mcp.json or source.lock.json.' };
+  }
+  let mcpJson: any;
+  try {
+    mcpJson = JSON.parse(fs.readFileSync(solomapMcpJson, 'utf8'));
+  } catch (error: any) {
+    return { ok: false, message: `solomap.mcp.json is invalid: ${error.message}` };
+  }
+  const now = new Date().toISOString();
+  const entry: SolomapMcpRegistryEntry = {
+    id: mcpId,
+    title: String(mcpJson.title || mcpJson.name || result.metadata?.name || mcpId),
+    description: String(mcpJson.description || result.metadata?.description || ''),
+    status: String(mcpJson.status || 'installed'),
+    source: mcpJson.source || result.source || {},
+    serverPath: path.relative(mcpRoot, installedPath).replace(/\\/g, '/'),
+    configPath: path.relative(mcpRoot, solomapMcpJson).replace(/\\/g, '/'),
+    profiles: mcpJson.profiles || result.profiles || {},
+    activation: {
+      keywords: normalizeSkillKeywords(mcpJson.activation?.keywords),
+      useWhen: normalizeSkillKeywords(mcpJson.activation?.useWhen),
+      doNotUseWhen: normalizeSkillKeywords(mcpJson.activation?.doNotUseWhen),
+      projectTypes: normalizeSkillKeywords(mcpJson.activation?.projectTypes),
+      taskKinds: normalizeSkillKeywords(mcpJson.activation?.taskKinds),
+      manualOnly: Boolean(mcpJson.activation?.manualOnly)
+    },
+    permissions: {
+      tools: normalizeSkillKeywords(mcpJson.permissions?.tools || result.permissions?.tools),
+      resources: normalizeSkillKeywords(mcpJson.permissions?.resources || result.permissions?.resources),
+      prompts: normalizeSkillKeywords(mcpJson.permissions?.prompts || result.permissions?.prompts),
+      requiresCredentials: Boolean(mcpJson.permissions?.requiresCredentials || result.permissions?.requiresCredentials),
+      credentialRefs: normalizeSkillKeywords(mcpJson.permissions?.credentialRefs || result.permissions?.credentialRefs),
+      externalAccess: mcpJson.permissions?.externalAccess ?? result.permissions?.externalAccess ?? 'unknown',
+      writeAccess: mcpJson.permissions?.writeAccess ?? result.permissions?.writeAccess ?? 'unknown'
+    },
+    risk: {
+      level: String(mcpJson.risk?.level || result.risk?.level || 'unknown'),
+      canWriteExternal: Boolean(mcpJson.risk?.canWriteExternal || result.risk?.canWriteExternal),
+      canSendMessages: Boolean(mcpJson.risk?.canSendMessages || result.risk?.canSendMessages),
+      canModifyCloudResources: Boolean(mcpJson.risk?.canModifyCloudResources || result.risk?.canModifyCloudResources),
+      canAccessSecrets: Boolean(mcpJson.risk?.canAccessSecrets || result.risk?.canAccessSecrets),
+      requiresExplicitEnable: Boolean(mcpJson.risk?.requiresExplicitEnable ?? result.risk?.requiresExplicitEnable ?? (mcpJson.permissions?.requiresCredentials || result.permissions?.requiresCredentials))
+    },
+    installedAt: String(mcpJson.installedAt || result.installedAt || now),
+    updatedAt: now
+  };
+  if (profilesPath && !pathInside(installedPath, profilesPath)) {
+    return { ok: false, message: 'MCP profiles path is outside installed MCP directory.' };
+  }
+  const registry = readSolomapMcpRegistry(workspaceRoot, globalDataPath);
+  const nextConnectors = registry.connectors.filter((connector) => connector.id !== mcpId);
+  nextConnectors.push(entry);
+  writeSolomapMcpRegistry(workspaceRoot, globalDataPath, { ...registry, connectors: nextConnectors.sort((a, b) => a.id.localeCompare(b.id)) });
+  return { ok: true, message: `MCP connector installed: ${mcpId}`, mcpId };
+}
+
 function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = ''): string {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const memoryRoot = path.join(globalRoot, 'memory');
@@ -2507,6 +2809,11 @@ function buildAgentConversationPrompt(
     globalDataPath,
     [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
   );
+  const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(
+    workspaceRoot,
+    globalDataPath,
+    [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
+  );
 
   return [
     '你正在 SoloMap 的一个路线图环节中工作。',
@@ -2530,6 +2837,7 @@ function buildAgentConversationPrompt(
     '',
     solomapMemoryInstructions,
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
+    ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
     memoryInstructions,
@@ -2570,6 +2878,7 @@ function buildRoadmapRevisionPrompt(
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
+  const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   return [
     '你正在 SoloMap 中调整当前项目路线图。',
     '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
@@ -2582,6 +2891,7 @@ function buildRoadmapRevisionPrompt(
     '',
     solomapMemoryInstructions,
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
+    ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行要求：',
@@ -2619,6 +2929,7 @@ function buildSoloConversationPrompt(
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
+  const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -2631,6 +2942,7 @@ function buildSoloConversationPrompt(
     '',
     solomapMemoryInstructions,
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
+    ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行边界：',
@@ -2869,6 +3181,11 @@ function getSkillInstallWorkspaceRoot(context: vscode.ExtensionContext): string 
   return activeProjectRoot || getSelectedProjectPath(context) || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 }
 
+function postMcpInstallResult(success: boolean, message: string): void {
+  activePanel?.webview.postMessage({ command: 'mcpInstallResult', success, message });
+  sidebarProvider?.postMcpInstallResult(success, message);
+}
+
 async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSkillInput: string): Promise<void> {
   const skillInput = String(rawSkillInput || '').trim();
   if (!skillInput) {
@@ -2931,6 +3248,70 @@ async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSk
       vscode.window.showErrorMessage(`SoloMap skill install failed validation: ${validation.message}`);
       activePanel?.webview.postMessage({ command: 'skillInstallResult', success: false, message: validation.message });
       sidebarProvider?.postSkillInstallResult(false, validation.message);
+    }
+  }, 2000);
+}
+
+async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpInput: string): Promise<void> {
+  const mcpInput = String(rawMcpInput || '').trim();
+  if (!mcpInput) {
+    vscode.window.showWarningMessage('Paste an MCP connector link, package, or config before installing.');
+    return;
+  }
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = (settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  if (!commandExists(agentCli)) {
+    const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
+    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}.`);
+    return;
+  }
+  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
+  const { mcpRoot, runsRoot } = ensureSolomapMcpStore(workspaceRoot, settings.globalDataPath);
+  const runId = `mcp-install-${Date.now()}`;
+  const runDir = path.join(runsRoot, runId);
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const outputFilePath = path.join(runDir, 'output.log');
+  const resultFilePath = path.join(runDir, 'result.json');
+  const commandFilePath = path.join(runDir, 'command.txt');
+  const runScriptPath = path.join(runDir, 'run-mcp-install.sh');
+  fs.mkdirSync(runDir, { recursive: true });
+  const prompt = buildMcpInstallPrompt(mcpInput, workspaceRoot, settings.globalDataPath, resultFilePath);
+  fs.writeFileSync(promptFilePath, prompt, 'utf8');
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
+  fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
+  const script = [
+    `cd ${shellQuote(workspaceRoot)}`,
+    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
+    'export DISABLE_TELEMETRY=1',
+    `mkdir -p ${shellQuote(runDir)} ${shellQuote(mcpRoot)}`,
+    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`,
+    `printf '\\nSoloMap MCP install run finished. Result expected at: ${resultFilePath}\\n' >> ${shellQuote(outputFilePath)}`
+  ].join('; ');
+  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
+  const terminal = createAgentTerminal(workspaceRoot, `mcp-${runId.slice(-6)}`);
+  terminal.show(true);
+  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  vscode.window.showInformationMessage('SoloMap MCP connector install started. The Agent terminal will complete the controlled install.');
+
+  const startedAt = Date.now();
+  const poller = setInterval(() => {
+    if (!fs.existsSync(resultFilePath)) {
+      if (Date.now() - startedAt > 30 * 60 * 1000) {
+        clearInterval(poller);
+        vscode.window.showWarningMessage('SoloMap MCP install is still waiting for result.json. Check the Agent terminal output.');
+      }
+      return;
+    }
+    clearInterval(poller);
+    const validation = validateAndRegisterMcpInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
+    if (validation.ok) {
+      vscode.window.showInformationMessage(validation.message);
+      postMcpInstallResult(true, validation.message);
+    } else {
+      vscode.window.showErrorMessage(`SoloMap MCP install failed validation: ${validation.message}`);
+      postMcpInstallResult(false, validation.message);
     }
   }, 2000);
 }
@@ -5274,6 +5655,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="cli-badge" id="skill-install-badge" style="display:none;"></div>
     </div>
 
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-mcp-install">Install Connector</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-mcp-input"
+        placeholder="e.g. GitHub MCP server URL, npm package, or config snippet"
+      >
+      <div id="help-mcp-install" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Paste an MCP connector source. SoloMap will register it as a global ability connector.
+      </div>
+      <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">Install Connector</span></button>
+      <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -5308,6 +5704,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingSkillInput = document.getElementById('setting-skill-input');
     const btnInstallSkill = document.getElementById('btn-install-skill');
     const skillInstallBadge = document.getElementById('skill-install-badge');
+    const settingMcpInput = document.getElementById('setting-mcp-input');
+    const btnInstallMcp = document.getElementById('btn-install-mcp');
+    const mcpInstallBadge = document.getElementById('mcp-install-badge');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -5345,6 +5744,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         skillInstallHelp: '粘贴 skills.sh 或 GitHub 技能链接，SoloMap 会安装到全局技能库。',
         installSkill: '安装技能',
         installingSkill: '正在启动安装...',
+        mcpInstall: '安装连接器',
+        mcpInstallPlaceholder: '例如：GitHub MCP server、npm 包名或配置片段',
+        mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
+        installMcp: '安装连接器',
+        installingMcp: '正在启动安装...',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -5435,6 +5839,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         skillInstallHelp: 'Paste a skills.sh or GitHub skill link. SoloMap installs it into the global skill library.',
         installSkill: 'Install Skill',
         installingSkill: 'Starting install...',
+        mcpInstall: 'Install Connector',
+        mcpInstallPlaceholder: 'e.g. GitHub MCP server, npm package, or config snippet',
+        mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
+        installMcp: 'Install Connector',
+        installingMcp: 'Starting install...',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -5581,6 +5990,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
       setText('help-skill-install', t('skillInstallHelp'));
       setText('text-install-skill', t('installSkill'));
+      setText('label-mcp-install', t('mcpInstall'));
+      if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
+      setText('help-mcp-install', t('mcpInstallHelp'));
+      setText('text-install-mcp', t('installMcp'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
@@ -5824,6 +6237,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             skillInstallBadge.textContent = message.message || '';
           }
           break;
+        case 'mcpInstallResult':
+          if (mcpInstallBadge) {
+            mcpInstallBadge.style.display = 'block';
+            mcpInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
+            mcpInstallBadge.textContent = message.message || '';
+          }
+          break;
       }
     });
 
@@ -5874,6 +6294,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           skillInstallBadge.textContent = t('installingSkill');
         }
         vscode.postMessage({ command: 'installSkill', skillInput });
+      });
+    }
+
+    if (btnInstallMcp) {
+      btnInstallMcp.addEventListener('click', () => {
+        const mcpInput = (settingMcpInput ? settingMcpInput.value : '').trim();
+        if (!mcpInput) {
+          if (mcpInstallBadge) {
+            mcpInstallBadge.style.display = 'block';
+            mcpInstallBadge.className = 'cli-badge error';
+            mcpInstallBadge.textContent = t('mcpInstallPlaceholder');
+          }
+          return;
+        }
+        if (mcpInstallBadge) {
+          mcpInstallBadge.style.display = 'block';
+          mcpInstallBadge.className = 'cli-badge';
+          mcpInstallBadge.style.background = 'rgba(255,255,255,0.05)';
+          mcpInstallBadge.style.color = 'var(--text-muted)';
+          mcpInstallBadge.textContent = t('installingMcp');
+        }
+        vscode.postMessage({ command: 'installMcp', mcpInput });
       });
     }
 

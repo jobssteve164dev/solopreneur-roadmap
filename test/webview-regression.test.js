@@ -549,6 +549,10 @@ test('full roadmap webview exposes node conversation history and language settin
 
   assert.match(html, /id="setting-language"/);
   assert.match(html, /id="setting-global-prompt"/);
+  assert.match(html, /id="setting-mcp-input"/);
+  assert.match(html, /id="btn-install-mcp"/);
+  assert.match(script, /installMcp/);
+  assert.match(script, /mcpInstallResult/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -683,6 +687,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /data-select-project-path/);
   assert.match(html, /id="global-focus-panel"/);
   assert.match(html, /id="setting-global-data-path"/);
+  assert.match(html, /id="setting-mcp-input"/);
+  assert.match(html, /id="btn-install-mcp"/);
+  assert.match(html, /installMcp/);
+  assert.match(html, /mcpInstallResult/);
   assert.match(html, /\.onboarding-panel\s*\{/);
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);
@@ -915,6 +923,12 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildSolomapSkillCandidateInstructions = buildSolomapSkillCandidateInstructions;',
       'module.exports.__buildSkillInstallPrompt = buildSkillInstallPrompt;',
       'module.exports.__validateAndRegisterSkillInstall = validateAndRegisterSkillInstall;',
+      'module.exports.__ensureSolomapMcpStore = ensureSolomapMcpStore;',
+      'module.exports.__readSolomapMcpRegistry = readSolomapMcpRegistry;',
+      'module.exports.__writeSolomapMcpRegistry = writeSolomapMcpRegistry;',
+      'module.exports.__buildSolomapMcpCandidateInstructions = buildSolomapMcpCandidateInstructions;',
+      'module.exports.__buildMcpInstallPrompt = buildMcpInstallPrompt;',
+      'module.exports.__validateAndRegisterMcpInstall = validateAndRegisterMcpInstall;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
@@ -1223,6 +1237,74 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(validation.ok, true);
   const registryAfterValidation = extensionModule.__readSolomapSkillRegistry('/workspace/app', skillStoreRoot);
   assert.equal(registryAfterValidation.skills.some((skill) => skill.id === 'frontend-ui'), true);
+
+  const mcpStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-store-'));
+  const mcpStore = extensionModule.__ensureSolomapMcpStore('/workspace/app', mcpStoreRoot);
+  assert.ok(fs.existsSync(path.join(mcpStore.mcpRoot, 'servers')));
+  assert.ok(fs.existsSync(path.join(mcpStore.mcpRoot, 'runs')));
+  assert.ok(fs.existsSync(path.join(mcpStore.mcpRoot, 'profiles')));
+  extensionModule.__writeSolomapMcpRegistry('/workspace/app', mcpStoreRoot, {
+    version: 1,
+    updatedAt: '',
+    connectors: [{
+      id: 'github-readonly',
+      title: 'GitHub Readonly',
+      description: 'Read GitHub issues and pull requests.',
+      status: 'installed',
+      configPath: 'servers/github-readonly/solomap.mcp.json',
+      activation: { keywords: ['GitHub', 'Issue'], useWhen: ['任务需要读取 GitHub Issue 背景'] },
+      permissions: { tools: ['issues.list'], requiresCredentials: false, externalAccess: true, writeAccess: false },
+      risk: { level: 'low', requiresExplicitEnable: false }
+    }, {
+      id: 'email-sender',
+      title: 'Email Sender',
+      status: 'installed',
+      activation: { keywords: ['email'] },
+      risk: { level: 'high', canSendMessages: true, requiresExplicitEnable: true }
+    }]
+  });
+  const mcpInstructions = extensionModule.__buildSolomapMcpCandidateInstructions('/workspace/app', mcpStoreRoot, '读取 GitHub Issue 来判断当前任务背景');
+  assert.match(mcpInstructions, /GitHub Readonly/);
+  assert.match(mcpInstructions, /issues\.list/);
+  assert.match(mcpInstructions, /这些只是候选能力连接器/);
+  assert.doesNotMatch(mcpInstructions, /Email Sender/);
+
+  const mcpInstallPrompt = extensionModule.__buildMcpInstallPrompt('https://github.com/owner/mcp-server', '/workspace/app', mcpStoreRoot, path.join(mcpStore.runsRoot, 'run', 'result.json'));
+  assert.match(mcpInstallPrompt, /跨 Agent 通用 MCP 能力连接器/);
+  assert.match(mcpInstallPrompt, /solomap\.mcp\.json/);
+  assert.match(mcpInstallPrompt, /不要启动 MCP server/);
+  assert.match(mcpInstallPrompt, /profiles/);
+
+  const fakeMcpDir = path.join(mcpStore.mcpRoot, 'servers', 'github-readonly');
+  fs.mkdirSync(path.join(fakeMcpDir, 'package'), { recursive: true });
+  fs.mkdirSync(path.join(fakeMcpDir, 'profiles'), { recursive: true });
+  fs.writeFileSync(path.join(fakeMcpDir, 'solomap.mcp.json'), JSON.stringify({
+    id: 'github-readonly',
+    title: 'GitHub Readonly',
+    description: 'Read GitHub issues.',
+    status: 'installed',
+    activation: { keywords: ['GitHub'], useWhen: ['GitHub Issue context'] },
+    permissions: { tools: ['issues.list'], requiresCredentials: false, externalAccess: true, writeAccess: false },
+    risk: { level: 'low', requiresExplicitEnable: false }
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(fakeMcpDir, 'source.lock.json'), JSON.stringify({ source: 'owner/mcp-server' }, null, 2), 'utf8');
+  const fakeMcpResultPath = path.join(mcpStore.runsRoot, 'fake-result.json');
+  fs.writeFileSync(fakeMcpResultPath, JSON.stringify({
+    ok: true,
+    mcpId: 'github-readonly',
+    installedPath: fakeMcpDir,
+    packagePath: path.join(fakeMcpDir, 'package'),
+    solomapMcpJson: path.join(fakeMcpDir, 'solomap.mcp.json'),
+    sourceLockJson: path.join(fakeMcpDir, 'source.lock.json'),
+    profilesPath: path.join(fakeMcpDir, 'profiles'),
+    metadata: { name: 'github-readonly', description: 'Read GitHub issues.' },
+    permissions: { tools: ['issues.list'], requiresCredentials: false },
+    risk: { level: 'low', requiresExplicitEnable: false }
+  }, null, 2), 'utf8');
+  const mcpValidation = extensionModule.__validateAndRegisterMcpInstall('/workspace/app', mcpStoreRoot, fakeMcpResultPath);
+  assert.equal(mcpValidation.ok, true);
+  const mcpRegistryAfterValidation = extensionModule.__readSolomapMcpRegistry('/workspace/app', mcpStoreRoot);
+  assert.equal(mcpRegistryAfterValidation.connectors.some((connector) => connector.id === 'github-readonly'), true);
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',
