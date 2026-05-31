@@ -773,6 +773,46 @@ function formatCliTestMessage(agentCli: string, stdout: string, stderr: string):
   return `${agentCli} · ${version}`;
 }
 
+function buildAgentInstallCommand(cliPath: string): string {
+  const family = getAgentCliFamily(cliPath || 'agy');
+  const verifyCandidates = getKnownAgentCliCandidates(family)
+    .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+  const verifyScript = [
+    'echo ""',
+    'echo "SoloMap: verifying Agent CLI..."',
+    `for c in ${verifyCandidates.map(shellQuote).join(' ')}; do if command -v "$c" >/dev/null 2>&1; then echo "SoloMap: found $(command -v "$c")"; "$c" --version || true; exit 0; fi; done`,
+    'echo "SoloMap: install command finished, but the CLI is not visible in this terminal PATH yet."',
+    'echo "SoloMap: restart VS Code/code-server or paste the executable absolute path into SoloMap settings."'
+  ].join('; ');
+
+  if (family === 'codex') {
+    return `npm install -g @openai/codex; ${verifyScript}`;
+  }
+  if (family === 'claude') {
+    return `npm install -g @anthropic-ai/claude-code; ${verifyScript}`;
+  }
+  if (family === 'copilot') {
+    return `npm install -g @github/copilot; ${verifyScript}`;
+  }
+  if (family === 'opencode') {
+    return `npm install -g opencode-ai; ${verifyScript}`;
+  }
+  if (family === 'antigravity') {
+    return `curl -fsSL https://antigravity.google/cli/install.sh | bash; ${verifyScript}`;
+  }
+  if (family === 'cursor') {
+    return [
+      'echo "SoloMap: Cursor CLI is installed from the Cursor app command palette."',
+      'echo "Open Cursor, run the command to install the cursor command, then return here and click Check."',
+      'echo "If the command already exists, paste its absolute path into SoloMap settings."'
+    ].join('; ');
+  }
+  return [
+    `echo "SoloMap: no built-in installer is available for ${String(cliPath || 'this custom CLI').replace(/"/g, '\\"')}."`,
+    'echo "Install that CLI with its official installer, then paste its executable absolute path into SoloMap settings."'
+  ].join('; ');
+}
+
 function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
   const roadmapPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
   if (!fs.existsSync(roadmapPath)) {
@@ -1656,6 +1696,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
     if (action === 'github-install') {
       terminal.sendText('gh --version || echo "Install GitHub CLI from https://cli.github.com/"');
+      return;
+    }
+    if (action === 'agent-install') {
+      terminal.sendText(buildAgentInstallCommand(cliPath || 'agy'));
       return;
     }
     if (action === 'agent-check') {
@@ -3362,6 +3406,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         </div>
         <div class="dependency-actions">
           <button class="dependency-action-btn" id="btn-check-dependencies"><span class="codicon codicon-search"></span><span id="text-check-dependencies">Check</span></button>
+          <button class="dependency-action-btn" id="btn-open-agent-install"><span class="codicon codicon-cloud-download"></span><span id="text-open-agent-install">Install</span></button>
           <button class="dependency-action-btn" id="btn-open-agent-check"><span class="codicon codicon-terminal"></span><span id="text-open-agent-check">Agent</span></button>
           <button class="dependency-action-btn" id="btn-open-github-auth"><span class="codicon codicon-github"></span><span id="text-open-github-auth">GitHub</span></button>
         </div>
@@ -3413,6 +3458,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
     const btnCheckDependencies = document.getElementById('btn-check-dependencies');
+    const btnOpenAgentInstall = document.getElementById('btn-open-agent-install');
     const btnOpenAgentCheck = document.getElementById('btn-open-agent-check');
     const btnOpenGithubAuth = document.getElementById('btn-open-github-auth');
     let currentLanguage = 'zh';
@@ -3521,6 +3567,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         dependencyNotChecked: '尚未检查。',
         dependencyAgent: 'Agent CLI',
         dependencyGithub: 'GitHub 授权',
+        openAgentInstall: '安装 Agent',
         openAgentCheck: 'Agent',
         openGithubAuth: 'GitHub',
         issues: 'Issues',
@@ -3643,6 +3690,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         dependencyNotChecked: 'Not checked yet.',
         dependencyAgent: 'Agent CLI',
         dependencyGithub: 'GitHub authorization',
+        openAgentInstall: 'Install Agent',
         openAgentCheck: 'Agent',
         openGithubAuth: 'GitHub',
         issues: 'Issues',
@@ -3741,6 +3789,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('dependency-agent-name', t('dependencyAgent'));
       setText('dependency-github-name', t('dependencyGithub'));
       setText('text-check-dependencies', t('checkDependencies'));
+      setText('text-open-agent-install', t('openAgentInstall'));
       setText('text-open-agent-check', t('openAgentCheck'));
       setText('text-open-github-auth', t('openGithubAuth'));
       setText('text-test-cli', t('testCli'));
@@ -4039,6 +4088,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({
         command: 'openDependencyAction',
         action: 'agent-check',
+        cliPath: getEffectiveSettingCliPath()
+      });
+    });
+
+    btnOpenAgentInstall.addEventListener('click', () => {
+      vscode.postMessage({
+        command: 'openDependencyAction',
+        action: 'agent-install',
         cliPath: getEffectiveSettingCliPath()
       });
     });

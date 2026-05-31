@@ -340,6 +340,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-test-cli',
     'btn-save-settings',
     'btn-check-dependencies',
+    'btn-open-agent-install',
     'btn-open-agent-check',
     'btn-open-github-auth',
     'dependency-agent-status',
@@ -362,8 +363,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global'));
   elements['btn-check-dependencies'].listeners.click();
+  elements['btn-open-agent-install'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'checkDependencies'));
+  assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'agent-install'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'github-auth'));
 
   dispatchMessage({
@@ -1138,7 +1141,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__resolveExecutablePath = resolveExecutablePath;',
       'module.exports.__commandExists = commandExists;',
       'module.exports.__getCliVersionArgs = getCliVersionArgs;',
-      'module.exports.__formatCliTestMessage = formatCliTestMessage;'
+      'module.exports.__formatCliTestMessage = formatCliTestMessage;',
+      'module.exports.__buildAgentInstallCommand = buildAgentInstallCommand;'
     ].join('\n')
   );
   assert.equal(
@@ -1163,6 +1167,12 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(JSON.stringify(sidebarModule.__getCliVersionArgs('agy')), JSON.stringify(['--version']));
   assert.match(sidebarModule.__formatCliTestMessage('agy', '1.0.1\n', ''), /agy · 1\.0\.1/);
+  assert.match(sidebarModule.__buildAgentInstallCommand('codex'), /npm install -g @openai\/codex/);
+  assert.match(sidebarModule.__buildAgentInstallCommand('claude'), /npm install -g @anthropic-ai\/claude-code/);
+  assert.match(sidebarModule.__buildAgentInstallCommand('copilot'), /npm install -g @github\/copilot/);
+  assert.match(sidebarModule.__buildAgentInstallCommand('opencode'), /npm install -g opencode-ai/);
+  assert.match(sidebarModule.__buildAgentInstallCommand('agy'), /https:\/\/antigravity\.google\/cli\/install\.sh/);
+  assert.match(sidebarModule.__buildAgentInstallCommand('cursor'), /Cursor CLI/);
 
   const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cli-home-'));
   const fakeCliPath = path.join(cliHome, '.local', 'bin', 'solo-test-agent');
