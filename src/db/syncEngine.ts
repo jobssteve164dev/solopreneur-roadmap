@@ -6,6 +6,7 @@ import { AgentConversation, RoadmapNode, RoadmapEdge } from './types';
 export class SyncEngine {
   private csvStore: CsvStore;
   private sqliteStore: SqliteStore;
+  private nodeCache: RoadmapNode[] = [];
 
   constructor(
     private csvPath: string,
@@ -14,6 +15,7 @@ export class SyncEngine {
   ) {
     this.csvStore = new CsvStore(csvPath);
     this.sqliteStore = new SqliteStore(dbPath, extensionPath);
+    this.nodeCache = this.csvStore.readNodes();
   }
 
   /**
@@ -25,21 +27,25 @@ export class SyncEngine {
 
     // 2. Read nodes from CSV (Git source of truth)
     const csvNodes = this.csvStore.readNodes();
+    this.nodeCache = csvNodes;
 
     if (csvNodes.length > 0) {
       // 3. Hydrate SQLite from the CSV
       this.sqliteStore.syncNodesFromList(csvNodes);
+      this.nodeCache = csvNodes;
     } else {
       // If CSV is empty, check if SQLite has any existing nodes (to prevent data loss)
       const sqliteNodes = this.sqliteStore.getAllNodes();
       if (sqliteNodes.length > 0) {
         // Sync back to CSV
         this.csvStore.writeNodes(sqliteNodes);
+        this.nodeCache = sqliteNodes;
       } else {
         // Both are empty! Seed a default roadmap for a new solopreneur project
         const defaultNodes = this.createDefaultRoadmap();
         this.csvStore.writeNodes(defaultNodes);
         this.sqliteStore.syncNodesFromList(defaultNodes);
+        this.nodeCache = defaultNodes;
       }
     }
   }
@@ -48,6 +54,9 @@ export class SyncEngine {
    * Retrieves nodes. Reads from SQLite (very fast).
    */
   public getNodes(): RoadmapNode[] {
+    if (!this.sqliteStore.isInitialized()) {
+      return this.nodeCache;
+    }
     return this.sqliteStore.getAllNodes();
   }
 
@@ -72,6 +81,7 @@ export class SyncEngine {
     // Save to SQLite & CSV
     this.sqliteStore.syncNodesFromList(nodes);
     this.csvStore.writeNodes(nodes);
+    this.nodeCache = nodes;
   }
 
   /**
@@ -80,6 +90,7 @@ export class SyncEngine {
   public setNodes(nodes: RoadmapNode[]): void {
     this.sqliteStore.syncNodesFromList(nodes);
     this.csvStore.writeNodes(nodes);
+    this.nodeCache = nodes;
   }
 
   /**

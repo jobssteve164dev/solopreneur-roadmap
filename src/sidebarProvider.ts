@@ -147,6 +147,8 @@ const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
 const DELIVERY_WORKFLOW_RUN_LIMIT = 3;
 const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
 const githubRepoSlugCache = new Map<string, string>();
+const commandResolutionCache = new Map<string, string>();
+let executableSearchPathsCache: string[] | null = null;
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -210,6 +212,9 @@ function readShellPath(shellPath: string): string[] {
 }
 
 function getExecutableSearchPaths(): string[] {
+  if (executableSearchPathsCache) {
+    return executableSearchPathsCache;
+  }
   const configuredPath = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
   const shellPaths = [
     ...readShellPath(process.env.SHELL || ''),
@@ -234,9 +239,10 @@ function getExecutableSearchPaths(): string[] {
     home ? path.join(home, '.bun', 'bin') : '',
     home ? path.join(home, '.cargo', 'bin') : ''
   ].filter(Boolean);
-  return [...configuredPath, ...shellPaths, ...commonPaths]
+  executableSearchPathsCache = [...configuredPath, ...shellPaths, ...commonPaths]
     .map(expandHomePath)
     .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+  return executableSearchPathsCache;
 }
 
 function resolveCommandOnSearchPath(command: string): string {
@@ -244,9 +250,15 @@ function resolveCommandOnSearchPath(command: string): string {
   if (!trimmed) {
     return '';
   }
+  const cached = commandResolutionCache.get(trimmed);
+  if (cached !== undefined) {
+    return cached;
+  }
   const expanded = expandHomePath(trimmed);
   if (path.isAbsolute(expanded) || expanded.includes(path.sep)) {
-    return isExecutableFile(expanded) ? expanded : '';
+    const resolved = isExecutableFile(expanded) ? expanded : '';
+    commandResolutionCache.set(trimmed, resolved);
+    return resolved;
   }
   const extensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
@@ -255,10 +267,12 @@ function resolveCommandOnSearchPath(command: string): string {
     for (const ext of extensions) {
       const candidate = path.join(dir, `${expanded}${ext}`);
       if (isExecutableFile(candidate)) {
+        commandResolutionCache.set(trimmed, candidate);
         return candidate;
       }
     }
   }
+  commandResolutionCache.set(trimmed, '');
   return '';
 }
 
@@ -681,13 +695,20 @@ function getGithubRepoSlug(projectPath: string): string {
   if (cached !== undefined) {
     return cached;
   }
-  const result = childProcess.spawnSync('git', ['-C', projectPath, 'remote', 'get-url', 'origin'], {
-    encoding: 'utf8',
-    timeout: 1800,
-    stdio: ['ignore', 'pipe', 'ignore']
-  });
+  let result: childProcess.SpawnSyncReturns<string>;
+  try {
+    result = childProcess.spawnSync('git', ['-C', projectPath, 'remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      timeout: 1800,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+  } catch {
+    githubRepoSlugCache.set(projectPath, '');
+    return '';
+  }
   const remote = String(result.stdout || '').trim();
   if (!remote) {
+    githubRepoSlugCache.set(projectPath, '');
     return '';
   }
   const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/i);
@@ -808,6 +829,62 @@ function runGhIssueCommand(projectPath: string, args: string[], timeout = 6000):
   };
 }
 
+function runProcessAsync(command: string, args: string[], timeout = 6000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = childProcess.spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.kill();
+      resolve({ ok: false, stdout, stderr: stderr || `Command timed out after ${timeout}ms` });
+    }, timeout);
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk || '');
+    });
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk || '');
+    });
+    child.on('error', (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: false, stdout, stderr: String(error.message || error) });
+    });
+    child.on('close', (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout, stderr });
+    });
+  });
+}
+
+async function runGhIssueCommandAsync(projectPath: string, args: string[], timeout = 6000): Promise<{ ok: boolean; stdout: string; stderr: string; repo: string }> {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return { ok: false, stdout: '', stderr: 'No GitHub remote', repo: '' };
+  }
+  const ghPath = resolveCommandOnSearchPath('gh');
+  if (!ghPath) {
+    return { ok: false, stdout: '', stderr: 'GitHub CLI not found', repo };
+  }
+  const result = await runProcessAsync(ghPath, args.includes('--repo') ? args : [...args, '--repo', repo], timeout);
+  return { ...result, repo };
+}
+
 function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
@@ -887,6 +964,127 @@ function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
     return createEmptyIssueSummary('No GitHub remote');
   }
   const result = runGhIssueCommand(projectPath, [
+    'issue',
+    'list',
+    '--state',
+    'all',
+    '--limit',
+    '100',
+    '--json',
+    'number,title,body,state,labels,comments,reactionGroups,updatedAt,url'
+  ], 4500);
+  if (!result.ok) {
+    const cache = readIssueCache(projectPath, repo);
+    if (cache) {
+      return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+    }
+    return {
+      ...createEmptyIssueSummary(String(result.stderr || result.stdout || 'GitHub issues unavailable').trim()),
+      repo
+    };
+  }
+  let rawIssues: any[] = [];
+  try {
+    rawIssues = JSON.parse(String(result.stdout || '[]'));
+  } catch {
+    const cache = readIssueCache(projectPath, repo);
+    if (cache) {
+      return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+    }
+    return { ...createEmptyIssueSummary('GitHub issue data could not be read'), repo };
+  }
+  const items = rawIssues.map(parseGithubIssue).filter((issue) => issue.number > 0);
+  const existing = readIssueCache(projectPath, repo);
+  const cache = createIssueCache(repo, items, existing?.details || {});
+  try {
+    writeIssueCache(projectPath, cache);
+  } catch {
+    return summarizeIssueItems(repo, items, cache.syncedAt, false);
+  }
+  return summarizeIssueItems(repo, items, cache.syncedAt, false);
+}
+
+async function readProjectDeliverySummaryAsync(projectPath: string): Promise<ProjectDeliverySummary> {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyDeliverySummary('No GitHub remote');
+  }
+  if (!resolveCommandOnSearchPath('gh')) {
+    const cache = readDeliveryCache(projectPath, repo);
+    return cache ? summarizeDeliveryCache(repo, cache, true) : { ...createEmptyDeliverySummary('GitHub CLI not found'), repo };
+  }
+  const [releaseResult, runResult] = await Promise.all([
+    runGhIssueCommandAsync(projectPath, [
+      'release',
+      'list',
+      '--limit',
+      '1',
+      '--json',
+      'tagName,name,publishedAt,url'
+    ], 4500),
+    runGhIssueCommandAsync(projectPath, [
+      'run',
+      'list',
+      '--limit',
+      String(DELIVERY_WORKFLOW_RUN_LIMIT),
+      '--json',
+      'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
+    ], 4500)
+  ]);
+  if (!releaseResult.ok && !runResult.ok) {
+    const cache = readDeliveryCache(projectPath, repo);
+    return cache ? summarizeDeliveryCache(repo, cache, true) : {
+      ...createEmptyDeliverySummary(String(releaseResult.stderr || runResult.stderr || 'GitHub delivery signals unavailable').trim()),
+      repo
+    };
+  }
+  let latestRelease: DeliveryCacheFile['latestRelease'] = null;
+  let workflowRuns: DeliveryCacheFile['workflowRuns'] = [];
+  try {
+    const releases = releaseResult.ok ? JSON.parse(String(releaseResult.stdout || '[]')) : [];
+    const release = Array.isArray(releases) ? releases[0] : null;
+    latestRelease = release
+      ? {
+        tagName: String(release.tagName || ''),
+        name: String(release.name || ''),
+        publishedAt: String(release.publishedAt || ''),
+        url: String(release.url || '')
+      }
+      : null;
+  } catch {}
+  try {
+    const runs = runResult.ok ? JSON.parse(String(runResult.stdout || '[]')) : [];
+    workflowRuns = Array.isArray(runs)
+      ? runs.map((run: any) => ({
+        name: String(run.name || ''),
+        displayTitle: String(run.displayTitle || ''),
+        status: String(run.status || ''),
+        conclusion: String(run.conclusion || ''),
+        createdAt: String(run.createdAt || ''),
+        updatedAt: String(run.updatedAt || ''),
+        url: String(run.url || '')
+      })).slice(0, DELIVERY_WORKFLOW_RUN_LIMIT)
+      : [];
+  } catch {}
+  const cache: DeliveryCacheFile = {
+    schemaVersion: 1,
+    repo,
+    syncedAt: new Date().toISOString(),
+    latestRelease,
+    workflowRuns
+  };
+  try {
+    writeDeliveryCache(projectPath, cache);
+  } catch {}
+  return summarizeDeliveryCache(repo, cache, false);
+}
+
+async function readProjectIssueSummaryAsync(projectPath: string): Promise<ProjectIssueSummary> {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyIssueSummary('No GitHub remote');
+  }
+  const result = await runGhIssueCommandAsync(projectPath, [
     'issue',
     'list',
     '--state',
@@ -2005,7 +2203,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       } catch (error) {
         console.error('SoloMap sidebar failed to enrich portfolio:', error);
       }
-    }, 0);
+    }, 1000);
   }
 
   private scheduleIssueSummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
@@ -2019,16 +2217,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!this._view || requestId !== this._issueLoadRequest) {
           return;
         }
-        const issues = readProjectIssueSummary(project.path);
-        if (!this._view || requestId !== this._issueLoadRequest) {
-          return;
-        }
-        this._view.webview.postMessage({
-          command: 'projectIssuesLoaded',
-          projectPath: project.path,
-          issues
+        void readProjectIssueSummaryAsync(project.path).then((issues) => {
+          if (!this._view || requestId !== this._issueLoadRequest) {
+            return;
+          }
+          this._view.webview.postMessage({
+            command: 'projectIssuesLoaded',
+            projectPath: project.path,
+            issues
+          });
+        }).catch((error) => {
+          console.error('SoloMap sidebar failed to refresh issue summary:', error);
         });
-      }, index === 0 ? 0 : 80 * index);
+      }, 1200 + 80 * index);
     });
   }
 
@@ -2043,16 +2244,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!this._view || requestId !== this._deliveryLoadRequest) {
           return;
         }
-        const delivery = readProjectDeliverySummary(project.path);
-        if (!this._view || requestId !== this._deliveryLoadRequest) {
-          return;
-        }
-        this._view.webview.postMessage({
-          command: 'projectDeliveryLoaded',
-          projectPath: project.path,
-          delivery
+        void readProjectDeliverySummaryAsync(project.path).then((delivery) => {
+          if (!this._view || requestId !== this._deliveryLoadRequest) {
+            return;
+          }
+          this._view.webview.postMessage({
+            command: 'projectDeliveryLoaded',
+            projectPath: project.path,
+            delivery
+          });
+        }).catch((error) => {
+          console.error('SoloMap sidebar failed to refresh delivery summary:', error);
         });
-      }, index === 0 ? 0 : 120 * index);
+      }, 1400 + 120 * index);
     });
   }
 

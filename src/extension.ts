@@ -14,6 +14,7 @@ let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let activeProjectRoot: string | null = null;
+let syncEngineReady = false;
 let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
 
@@ -353,6 +354,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   await context.globalState.update(selectedProjectKey, projectPath);
   syncEngine = null;
   activeProjectRoot = null;
+  syncEngineReady = false;
   syncEngineInitPromise = null;
   syncEngineInitProjectRoot = '';
   if (watcher) {
@@ -584,17 +586,18 @@ function readCompletionCriteria(workspaceRoot: string, node: RoadmapNode): strin
   return existing.length > 0 ? existing : buildCompletionCriteriaForNode(node);
 }
 
-function ensureCompletionCriteriaForNodes(workspaceRoot: string, nodes: RoadmapNode[]): RoadmapNode[] {
+function ensureCompletionCriteriaForNodes(workspaceRoot: string, nodes: RoadmapNode[], options: { writeMissing?: boolean } = {}): RoadmapNode[] {
   if (!workspaceRoot) {
     return nodes;
   }
+  const writeMissing = options.writeMissing !== false;
   return nodes.map((node) => {
     const filePath = getStepMemoryFilePath(workspaceRoot, node.id || '');
     const legacyFilePath = getLegacyStepMemoryFilePath(workspaceRoot, node.id || '');
     const memory = readStepMemoryObject(filePath);
     const existingCriteria = normalizeStringList(memory.completionCriteria);
     const completionCriteria = existingCriteria.length > 0 ? existingCriteria : buildCompletionCriteriaForNode(node);
-    if (existingCriteria.length === 0) {
+    if (writeMissing && existingCriteria.length === 0) {
       const legacyEntries = !fs.existsSync(filePath) && fs.existsSync(legacyFilePath)
         ? parseStepHandoffEntries(fs.readFileSync(legacyFilePath, 'utf8'))
         : [];
@@ -765,6 +768,7 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
   await context.globalState.update(selectedProjectKey, folder);
   syncEngine = null;
   activeProjectRoot = null;
+  syncEngineReady = false;
   await ensureSyncEngine(context);
   sendProjectsToWebviews(context);
   sendNodesToWebview();
@@ -801,6 +805,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
 
   syncEngine = null;
   activeProjectRoot = null;
+  syncEngineReady = false;
   if (watcher) {
     watcher.dispose();
     watcher = null;
@@ -857,7 +862,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
  */
 async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boolean> {
   const projectRoot = getSelectedProjectPath(context);
-  if (syncEngine && activeProjectRoot === projectRoot) {
+  if (syncEngine && activeProjectRoot === projectRoot && syncEngineReady) {
     return true;
   }
   if (syncEngineInitPromise && syncEngineInitProjectRoot === projectRoot) {
@@ -882,6 +887,10 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   syncEngineInitProjectRoot = projectRoot;
   syncEngineInitPromise = (async () => {
     const nextSyncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
+    syncEngine = nextSyncEngine;
+    activeProjectRoot = projectRoot;
+    syncEngineReady = false;
+    sendNodesToWebview();
     try {
       await nextSyncEngine.initAndSync();
       if (getSelectedProjectPath(context) !== projectRoot) {
@@ -889,6 +898,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
       }
       syncEngine = nextSyncEngine;
       activeProjectRoot = projectRoot;
+      syncEngineReady = true;
       ensureCompletionCriteriaForNodes(projectRoot, syncEngine.getNodes());
       setupFileSentinelWatcher(projectRoot);
       // Refresh sidebar when successfully initialized
@@ -898,6 +908,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
       }
       return true;
     } catch (error) {
+      syncEngineReady = false;
       vscode.window.showErrorMessage(`Failed to initialize Roadmap database: ${error}`);
       return false;
     } finally {
@@ -1155,7 +1166,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
  */
 function sendNodesToWebview() {
   const nodes = syncEngine
-    ? ensureCompletionCriteriaForNodes(activeProjectRoot || '', syncEngine.getNodes())
+    ? ensureCompletionCriteriaForNodes(activeProjectRoot || '', syncEngine.getNodes(), { writeMissing: false })
     : [];
   if (activePanel) {
     activePanel.webview.postMessage({

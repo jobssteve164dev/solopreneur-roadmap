@@ -12,6 +12,10 @@ export class SqliteStore {
     private extensionPath: string
   ) {}
 
+  public isInitialized(): boolean {
+    return Boolean(this.db);
+  }
+
   /**
    * Initializes the SQLite WASM runtime and opens the database.
    */
@@ -105,6 +109,10 @@ export class SqliteStore {
       throw new Error('Database not initialized');
     }
 
+    if (this.nodesMatch(this.getAllNodes(), nodes)) {
+      return;
+    }
+
     // Clear existing nodes
     this.db.run('DELETE FROM nodes');
 
@@ -130,6 +138,25 @@ export class SqliteStore {
     }
     stmt.free();
     this.save();
+  }
+
+  private nodesMatch(existing: RoadmapNode[], next: RoadmapNode[]): boolean {
+    if (existing.length !== next.length) {
+      return false;
+    }
+    const fields: Array<keyof RoadmapNode> = [
+      'id',
+      'title',
+      'description',
+      'stage',
+      'dependencies',
+      'agentCli',
+      'agentPrompt',
+      'status',
+      'createdAt',
+      'completedAt'
+    ];
+    return existing.every((node, index) => fields.every((field) => String(node[field] || '') === String(next[index]?.[field] || '')));
   }
 
   /**

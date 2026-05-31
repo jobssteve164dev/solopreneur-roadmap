@@ -2029,6 +2029,30 @@ test('new empty project seed does not assume a commercial product workflow', asy
   assert.equal(nodes.some((node) => node.stage === '反馈与规模化'), false);
 });
 
+test('sync engine does not rewrite the journal when roadmap csv is unchanged', async () => {
+  const { SyncEngine } = require(path.join(projectRoot, 'out/db/syncEngine.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-sync-no-rewrite-'));
+  const solopreneurDir = path.join(tempRoot, '.solopreneur');
+  const csvPath = path.join(solopreneurDir, 'roadmap.csv');
+  const dbPath = path.join(solopreneurDir, 'project_journal.db');
+  fs.mkdirSync(solopreneurDir, { recursive: true });
+  fs.writeFileSync(csvPath, [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,目标与路径确认,,agy,,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+
+  const firstEngine = new SyncEngine(csvPath, dbPath, projectRoot);
+  await firstEngine.initAndSync();
+  const oldTime = new Date('2026-01-01T00:00:00.000Z');
+  fs.utimesSync(dbPath, oldTime, oldTime);
+
+  const secondEngine = new SyncEngine(csvPath, dbPath, projectRoot);
+  await secondEngine.initAndSync();
+
+  assert.equal(fs.statSync(dbPath).mtimeMs, oldTime.getTime());
+  assert.equal(secondEngine.getNodes()[0].title, 'Plan');
+});
+
 test('step conversation can start while roadmap dependencies are still incomplete', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
