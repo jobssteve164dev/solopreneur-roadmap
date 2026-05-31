@@ -123,13 +123,13 @@ jobs:
 
       - name: Verify Open VSX Availability
         run: |
-          for i in {1..12}; do
+          for i in {1..30}; do
             echo "Checking Open VSX availability for SZLK.solopreneur-roadmap $VERSION..."
             if curl -fsS "https://open-vsx.org/api/SZLK/solopreneur-roadmap/$VERSION" >/tmp/openvsx-extension.json; then
               node -e "const fs=require('fs'); const data=JSON.parse(fs.readFileSync('/tmp/openvsx-extension.json','utf8')); if (data.namespace !== 'SZLK' || data.name !== 'solopreneur-roadmap' || data.version !== process.env.VERSION) process.exit(1); console.log('Open VSX verified:', data.namespace + '.' + data.name + '@' + data.version);"
               exit 0
             fi
-            sleep 10
+            sleep 20
           done
           echo "Open VSX did not expose SZLK.solopreneur-roadmap $VERSION in time."
           exit 1

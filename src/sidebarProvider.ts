@@ -17,6 +17,7 @@ interface SolopreneurProject {
   name: string;
   path: string;
   type?: string;
+  priority?: string;
 }
 
 interface ProjectPortfolioSummary {
@@ -42,7 +43,6 @@ interface ProjectPortfolioSummary {
   globalNextAction: string;
   reusableSignals: number;
   issuePressure: string;
-  stageSignalLine: string;
   stageGap: string;
   delivery: ProjectDeliverySummary;
   deliverySignal: string;
@@ -1348,14 +1348,13 @@ function inferMethodologyStage(node: RoadmapNodeLike): MethodologyStageKey {
   return 'build';
 }
 
-function summarizeMethodologyStages(nodes: RoadmapNodeLike[]): { counts: Record<MethodologyStageKey, number>; line: string; gap: string } {
+function summarizeMethodologyStages(nodes: RoadmapNodeLike[]): { counts: Record<MethodologyStageKey, number>; gap: string } {
   const counts: Record<MethodologyStageKey, number> = { build: 0, sell: 0, learn: 0, improve: 0 };
   nodes.forEach((node) => {
     counts[inferMethodologyStage(node)] += 1;
   });
   const gap = methodologyStages.find((stage) => counts[stage.key] === 0)?.label || '';
-  const line = gap ? `${gap} 缺口` : '';
-  return { counts, line, gap };
+  return { counts, gap };
 }
 
 function rankNodeForStageGap(node: RoadmapNodeLike, stageSummary: { gap: string }): number {
@@ -1456,7 +1455,8 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     issues: readCachedIssueSummary(project.path),
     delivery: readCachedDeliverySummary(project.path)
   };
-  const globalPriority = inferGlobalPriority(baseSummary);
+  const inferredPriority = inferGlobalPriority(baseSummary);
+  const globalPriority = project.priority || inferredPriority;
   const deliverySignal = inferDeliverySignal(baseSummary.delivery);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
   return {
@@ -1469,7 +1469,6 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
       : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap')),
     reusableSignals: countReusableSignals(project.path),
     issuePressure: inferIssuePressure(baseSummary.issues),
-    stageSignalLine: stageSummary.line,
     stageGap: stageSummary.gap,
     delivery: baseSummary.delivery,
     deliverySignal
@@ -2976,15 +2975,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       white-space: nowrap;
     }
 
-    .portfolio-stage-signal {
-      width: 100%;
-      min-width: 0;
-      color: #a5f3fc;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
     .portfolio-status {
       font-size: 10px;
       font-weight: 700;
@@ -3112,6 +3102,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       align-items: center;
       justify-content: space-between;
       gap: 8px;
+    }
+
+    .portfolio-issue-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     .portfolio-issue-create {
@@ -3817,6 +3815,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let sidebarSoloConversationExpanded = false;
     let expandedIssueNumber = 0;
     let issueDetails = null;
+    let issuePanelExpanded = false;
     let issueFormOpen = false;
     let issueDraftTitle = '';
     let issueDraftBody = '';
@@ -3929,6 +3928,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueDocs: '文档',
         issueComments: '评论',
         issueCreate: '新建 Issue',
+        issueExpand: '展开',
+        issueCollapse: '收起',
         issueTitlePlaceholder: '一句话描述问题或想法...',
         issueBodyPlaceholder: '补充背景、现象、期望结果...',
         issueCategory: '分类',
@@ -4052,6 +4053,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueDocs: 'Docs',
         issueComments: 'comments',
         issueCreate: 'New Issue',
+        issueExpand: 'Expand',
+        issueCollapse: 'Collapse',
         issueTitlePlaceholder: 'Summarize the issue or idea...',
         issueBodyPlaceholder: 'Add context, observed behavior, and expected outcome...',
         issueCategory: 'Category',
@@ -4103,6 +4106,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       Object.keys(projectSoloDrafts).forEach(key => delete projectSoloDrafts[key]);
       expandedIssueNumber = 0;
       issueDetails = null;
+      issuePanelExpanded = false;
       issueFormOpen = false;
       issueActionMessage = '';
       if (clearNodes) {
@@ -5188,13 +5192,27 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function renderProjectIssuePanel(project) {
       const issues = project.issues || {};
+      const expanded = issuePanelExpanded || issueFormOpen || expandedIssueNumber;
+      const issueHead = \`
+        <div class="portfolio-issue-head">
+          <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
+          <div class="portfolio-issue-actions">
+            <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
+            <button class="portfolio-issue-create" data-toggle-issue-panel data-project-path="\${escapeHtml(project.path)}">\${escapeHtml(expanded ? t('issueCollapse') : t('issueExpand'))}</button>
+          </div>
+        </div>
+      \`;
+      if (!expanded) {
+        return \`
+          <div class="portfolio-issue-panel" data-issue-panel>
+            \${issueHead}
+          </div>
+        \`;
+      }
       if (issues.loading) {
         return \`
           <div class="portfolio-issue-panel" data-issue-panel>
-            <div class="portfolio-issue-head">
-              <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
-              <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
-            </div>
+            \${issueHead}
             <div class="portfolio-issue-empty">\${escapeHtml(t('issueLoading'))}</div>
             \${issueFormOpen ? renderIssueCreateForm(project.path) : ''}
           </div>
@@ -5203,10 +5221,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!issues.available) {
         return \`
           <div class="portfolio-issue-panel" data-issue-panel>
-            <div class="portfolio-issue-head">
-              <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
-              <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
-            </div>
+            \${issueHead}
             <div class="portfolio-issue-empty">\${escapeHtml(t('issueUnavailable'))}</div>
             \${issueFormOpen ? renderIssueCreateForm(project.path) : ''}
           </div>
@@ -5231,10 +5246,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       \`).join('');
       return \`
         <div class="portfolio-issue-panel" data-issue-panel>
-          <div class="portfolio-issue-head">
-            <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
-            <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
-          </div>
+          \${issueHead}
           <div class="portfolio-issue-repo">\${escapeHtml(issues.repo || '')}\${issues.syncedAt ? ' · ' + escapeHtml(issues.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(issues.syncedAt)) : ''}</div>
           <div class="portfolio-issue-metrics">
             <span class="portfolio-issue-pill">\${escapeHtml(t('issueTotal'))} \${escapeHtml(issues.total || 0)}</span>
@@ -5386,7 +5398,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           issueFormOpen = !issueFormOpen;
+          issuePanelExpanded = true;
           issueActionMessage = '';
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      portfolioList.querySelectorAll('[data-toggle-issue-panel]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          issuePanelExpanded = !issuePanelExpanded;
+          if (!issuePanelExpanded) {
+            expandedIssueNumber = 0;
+            issueDetails = null;
+          }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });

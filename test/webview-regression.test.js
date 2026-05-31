@@ -410,12 +410,11 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   });
   assert.match(elements['portfolio-list'].innerHTML, /data-project-continue-composer/);
   assert.match(elements['portfolio-list'].innerHTML, /data-issue-panel/);
-  assert.match(elements['portfolio-list'].innerHTML, /页面加载慢/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-toggle-issue-panel/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /页面加载慢/);
   assert.match(elements['portfolio-list'].innerHTML, /待关闭|Open/);
   assert.match(elements['portfolio-list'].innerHTML, /data-toggle-issue-form/);
-  assert.match(elements['portfolio-list'].innerHTML, /data-expand-issue-number="12"/);
-  assert.match(elements['portfolio-list'].innerHTML, /Bug/);
-  assert.match(elements['portfolio-list'].innerHTML, /需求|Feature/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-expand-issue-number="12"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
@@ -818,7 +817,6 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].globalPriority, 'P0');
   assert.equal(summaries[0].globalNextAction, 'Build MVP');
   assert.equal(summaries[0].projectType, 'content');
-  assert.equal(summaries[0].stageSignalLine, 'Learn 缺口');
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
   assert.equal(sidebarModule.__getRecommendedNode([
@@ -1904,7 +1902,8 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /Run result|本轮结果/);
   assert.match(html, /Agent conclusion|Agent 结论/);
   assert.match(html, /methodology-overview/);
-  assert.match(html, /data-methodology-stage/);
+  assert.match(html, /methodology-stage-card/);
+  assert.match(html, /data-open-roadmap-revision/);
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   assert.match(source, /当前项目交付信号/);
   assert.match(source, /'3'/);

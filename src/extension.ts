@@ -26,6 +26,7 @@ interface SolopreneurProject {
   name: string;
   path: string;
   type?: string;
+  priority?: string;
 }
 
 interface AgentStepSession {
@@ -357,9 +358,25 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     clearInterval(statusPoller);
     statusPoller = null;
   }
-  await ensureSyncEngine(context);
   sendProjectsToWebviews(context);
+  await ensureSyncEngine(context);
   sendNodesToWebview();
+}
+
+async function updateProjectMetadata(context: vscode.ExtensionContext, projectPath: string, updates: Partial<Pick<SolopreneurProject, 'type' | 'priority'>>): Promise<void> {
+  const projects = getProjects(context);
+  const nextProjects = projects.map((project) => {
+    if (project.path !== projectPath) {
+      return project;
+    }
+    return {
+      ...project,
+      ...(updates.type !== undefined ? { type: String(updates.type || '') } : {}),
+      ...(updates.priority !== undefined ? { priority: String(updates.priority || '') } : {})
+    };
+  });
+  await saveProjects(context, nextProjects);
+  sendProjectsToWebviews(context);
 }
 
 function buildSolopreneurDirectoryReadme(): string {
@@ -1023,6 +1040,13 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'selectProject':
           await selectProject(context, message.projectPath);
+          break;
+
+        case 'updateProjectMetadata':
+          await updateProjectMetadata(context, message.projectPath, {
+            type: message.projectType,
+            priority: message.priority
+          });
           break;
 
         case 'addProject':
@@ -4400,6 +4424,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       min-width: 0;
     }
 
+    .project-property-select {
+      width: clamp(96px, 10vw, 150px);
+      min-width: 0;
+    }
+
     .solo-select {
       position: relative;
       min-width: 0;
@@ -4749,33 +4778,29 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       max-width: min(920px, 100%);
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 8px;
+      gap: 10px;
       position: relative;
       z-index: 3;
     }
 
-    .methodology-stage-btn {
+    .methodology-stage-card {
       min-width: 0;
-      min-height: 58px;
-      padding: 9px 10px;
+      min-height: 78px;
+      padding: 12px;
       border: 1px solid var(--border-glass);
       border-radius: 8px;
       background: rgba(255, 255, 255, 0.045);
       color: var(--text-main);
       display: flex;
       flex-direction: column;
-      align-items: flex-start;
-      justify-content: center;
-      gap: 4px;
-      box-shadow: none;
+      justify-content: space-between;
+      gap: 8px;
     }
 
-    .methodology-stage-btn:hover,
-    .methodology-stage-btn.active {
-      transform: none;
-      background: rgba(0, 229, 255, 0.10);
-      border-color: rgba(0, 229, 255, 0.28);
-      box-shadow: 0 0 12px rgba(0, 229, 255, 0.12);
+    .methodology-stage-card.missing {
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.42);
+      box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12);
     }
 
     .methodology-stage-name {
@@ -4787,14 +4812,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .methodology-stage-meta {
       color: var(--text-muted);
       font-size: 11px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 100%;
+      line-height: 1.35;
     }
 
-    .node-row.stage-filter-dim {
-      opacity: 0.34;
+    .methodology-adjust-btn {
+      align-self: flex-start;
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      background: rgba(245, 158, 11, 0.14);
+      color: #fde68a;
+      border-radius: 6px;
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
     }
 
     .node-row {
@@ -5723,8 +5753,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         padding: 16px;
       }
 
-      .methodology-stage-btn {
-        min-height: 52px;
+      .methodology-overview {
+        grid-template-columns: 1fr;
       }
 
       .node-title {
@@ -5744,6 +5774,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <h1 class="brand-title"><span class="codicon codicon-map"></span><span id="app-title">SoloMap</span></h1>
       <div class="controls">
         <div class="solo-select project-select" id="project-select" data-solo-select data-value="">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+            <span class="solo-select-trigger-label" data-solo-label></span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+        </div>
+        <div class="solo-select project-property-select" id="project-type-select" data-solo-select data-value="">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+            <span class="solo-select-trigger-label" data-solo-label></span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+        </div>
+        <div class="solo-select project-property-select" id="project-priority-select" data-solo-select data-value="">
           <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
             <span class="solo-select-trigger-label" data-solo-label></span>
             <span class="codicon codicon-chevron-down solo-select-caret"></span>
@@ -5925,6 +5969,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
+    const projectTypeSelect = document.getElementById('project-type-select');
+    const projectPrioritySelect = document.getElementById('project-priority-select');
     let currentLanguage = 'zh';
     let currentNodes = [];
     let expandedNodeId = '';
@@ -5932,7 +5978,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let activeProjectPath = '';
     let currentCliPath = 'agy';
     let activeMainView = 'roadmap';
-    let activeMethodologyStage = '';
     const roadmapRevisionId = '__roadmap_revision__';
     const soloConversationId = '__solo__';
     let roadmapRevisionExpanded = false;
@@ -6165,7 +6210,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       roadmapRevisionExpanded = false;
       soloExpanded = false;
       activeConversationId = '';
-      activeMethodologyStage = '';
       if (soloPanel) soloPanel.classList.remove('open');
       if (soloPanel) soloPanel.classList.remove('active');
       if (canvas) canvas.classList.add('active');
@@ -6543,6 +6587,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     });
 
+    bindSoloSelect(projectTypeSelect, (value) => {
+      const projectPath = getSoloSelectValue(projectSelect);
+      if (!projectPath) return;
+      vscode.postMessage({
+        command: 'updateProjectMetadata',
+        projectPath,
+        projectType: value,
+        priority: getSoloSelectValue(projectPrioritySelect)
+      });
+    });
+
+    bindSoloSelect(projectPrioritySelect, (value) => {
+      const projectPath = getSoloSelectValue(projectSelect);
+      if (!projectPath) return;
+      vscode.postMessage({
+        command: 'updateProjectMetadata',
+        projectPath,
+        projectType: getSoloSelectValue(projectTypeSelect),
+        priority: value
+      });
+    });
+
     btnAddProject.addEventListener('click', () => {
       vscode.postMessage({ command: 'addProject' });
     });
@@ -6556,14 +6622,39 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function renderProjects(projects, selectedProjectPath) {
       if (!projects || projects.length === 0) {
         setSoloSelectOptions(projectSelect, [{ value: '', label: t('chooseProject') }], '');
+        setSoloSelectOptions(projectTypeSelect, [{ value: '', label: 'Type' }], '');
+        setSoloSelectOptions(projectPrioritySelect, [{ value: '', label: 'Priority' }], '');
         return;
       }
 
+      const selectedProject = projects.find(project => project.path === selectedProjectPath) || projects[0];
       setSoloSelectOptions(projectSelect, projects.map(project => ({
         value: project.path,
         label: project.name,
         title: project.path
       })), selectedProjectPath);
+      setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), selectedProject && selectedProject.type ? selectedProject.type : 'core_product');
+      setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), selectedProject && selectedProject.priority ? selectedProject.priority : '');
+    }
+
+    function getProjectTypeOptions() {
+      return [
+        { value: 'core_product', label: '核心产品' },
+        { value: 'infra', label: '基础设施' },
+        { value: 'content', label: '内容产品' },
+        { value: 'experiment', label: '试验研究' },
+        { value: 'tool', label: '工具脚手架' },
+        { value: 'archive', label: '归档维护' }
+      ];
+    }
+
+    function getProjectPriorityOptions() {
+      return [
+        { value: '', label: '自动优先级' },
+        { value: 'P0', label: 'P0' },
+        { value: 'P1', label: 'P1' },
+        { value: 'P2', label: 'P2' }
+      ];
     }
 
     function escapeHtml(value) {
@@ -6744,34 +6835,51 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return 'build';
     }
 
-    function getMethodologyGap(nodes) {
-      const counts = { build: 0, sell: 0, learn: 0, improve: 0 };
+    function getMethodologyStageCounts(nodes) {
+      const counts = {
+        build: { total: 0, completed: 0 },
+        sell: { total: 0, completed: 0 },
+        learn: { total: 0, completed: 0 },
+        improve: { total: 0, completed: 0 }
+      };
       (nodes || []).forEach(node => {
-        counts[inferMethodologyStage(node)] += 1;
+        const key = inferMethodologyStage(node);
+        counts[key].total += 1;
+        if (node.status === 'Completed') counts[key].completed += 1;
       });
-      return methodologyStages.find(stage => counts[stage.key] === 0) || null;
+      return counts;
     }
 
     function renderMethodologyOverview(nodes) {
-      const gap = getMethodologyGap(nodes);
-      if (!gap) return '';
+      const counts = getMethodologyStageCounts(nodes);
       return \`
         <div class="methodology-overview" aria-label="Build Sell Learn Improve">
-          <button class="methodology-stage-btn active" type="button" data-methodology-stage="\${escapeHtml(gap.key)}">
-            <span class="methodology-stage-name">\${escapeHtml(gap.label)} gap</span>
-            <span class="methodology-stage-meta">Review related steps</span>
-          </button>
+          \${methodologyStages.map(stage => {
+            const item = counts[stage.key] || { total: 0, completed: 0 };
+            const missing = Number(item.total || 0) === 0;
+            return \`
+              <div class="methodology-stage-card\${missing ? ' missing' : ''}">
+                <div>
+                  <div class="methodology-stage-name">\${escapeHtml(stage.label)}</div>
+                  <div class="methodology-stage-meta">\${missing ? '缺少对应环节' : escapeHtml(item.completed + ' / ' + item.total + ' completed')}</div>
+                </div>
+                \${missing ? \`<button class="methodology-adjust-btn" type="button" data-open-roadmap-revision>\${escapeHtml(t('reviseRoadmap'))}</button>\` : ''}
+              </div>
+            \`;
+          }).join('')}
         </div>
       \`;
     }
 
     function bindMethodologyOverview(container) {
-      container.querySelectorAll('[data-methodology-stage]').forEach(button => {
+      container.querySelectorAll('[data-open-roadmap-revision]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
-          const stage = button.getAttribute('data-methodology-stage') || '';
-          activeMethodologyStage = activeMethodologyStage === stage ? '' : stage;
-          renderRoadmap(currentNodes);
+          roadmapRevisionExpanded = true;
+          if (settingsPanel) settingsPanel.style.display = 'none';
+          roadmapRevisionPanel.classList.add('open');
+          btnToggleRoadmapRevision.classList.add('active');
+          renderRoadmapRevisionPanel(currentNodes);
         });
       });
     }
@@ -6798,8 +6906,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       nodes.forEach(node => {
         const row = document.createElement('div');
         const methodologyStage = inferMethodologyStage(node);
-        const dimmed = activeMethodologyStage && activeMethodologyStage !== methodologyStage ? ' stage-filter-dim' : '';
-        row.className = 'node-row methodology-' + methodologyStage + dimmed;
+        row.className = 'node-row methodology-' + methodologyStage;
 
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
         const expanded = expandedNodeId === node.id;
