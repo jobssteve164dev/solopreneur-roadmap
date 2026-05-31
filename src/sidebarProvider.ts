@@ -144,6 +144,7 @@ const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
   { key: 'learn', label: 'Learn' },
   { key: 'improve', label: 'Improve' }
 ];
+const DELIVERY_WORKFLOW_RUN_LIMIT = 3;
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -596,8 +597,9 @@ function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
 }
 
 function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = false): ProjectDeliverySummary {
-  const latestRun = cache.workflowRuns[0] || null;
-  const failedWorkflowRuns = cache.workflowRuns
+  const recentRuns = cache.workflowRuns.slice(0, DELIVERY_WORKFLOW_RUN_LIMIT);
+  const latestRun = recentRuns[0] || null;
+  const failedWorkflowRuns = recentRuns
     .filter((run) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
     .length;
   return {
@@ -806,7 +808,7 @@ function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary
     'run',
     'list',
     '--limit',
-    '10',
+    String(DELIVERY_WORKFLOW_RUN_LIMIT),
     '--json',
     'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
   ], 4500);
@@ -842,7 +844,7 @@ function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary
         createdAt: String(run.createdAt || ''),
         updatedAt: String(run.updatedAt || ''),
         url: String(run.url || '')
-      }))
+      })).slice(0, DELIVERY_WORKFLOW_RUN_LIMIT)
       : [];
   } catch {}
   const cache: DeliveryCacheFile = {
@@ -1351,10 +1353,8 @@ function summarizeMethodologyStages(nodes: RoadmapNodeLike[]): { counts: Record<
   nodes.forEach((node) => {
     counts[inferMethodologyStage(node)] += 1;
   });
-  const line = methodologyStages
-    .map((stage) => `${stage.label} ${counts[stage.key]}`)
-    .join(' · ');
   const gap = methodologyStages.find((stage) => counts[stage.key] === 0)?.label || '';
+  const line = gap ? `${gap} 缺口` : '';
   return { counts, line, gap };
 }
 
@@ -5328,7 +5328,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
             </div>
-            \${project.stageSignalLine ? \`<div class="portfolio-card-meta"><span class="portfolio-stage-signal">\${escapeHtml(project.stageSignalLine)}</span></div>\` : ''}
             <div class="portfolio-card-meta">
               <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}

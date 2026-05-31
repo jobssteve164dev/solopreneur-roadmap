@@ -818,7 +818,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].globalPriority, 'P0');
   assert.equal(summaries[0].globalNextAction, 'Build MVP');
   assert.equal(summaries[0].projectType, 'content');
-  assert.match(summaries[0].stageSignalLine, /Build 2 · Sell 1 · Learn 0 · Improve 0/);
+  assert.equal(summaries[0].stageSignalLine, 'Learn 缺口');
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
   assert.equal(sidebarModule.__getRecommendedNode([
@@ -950,15 +950,44 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
       publishedAt: '2026-05-29T00:00:00.000Z',
       url: 'https://github.com/owner/repo/releases/tag/v1.2.3'
     },
-    workflowRuns: [{
-      name: 'CI',
-      displayTitle: 'CI',
-      status: 'completed',
-      conclusion: 'failure',
-      createdAt: '2026-05-29T00:00:00.000Z',
-      updatedAt: '2026-05-29T00:01:00.000Z',
-      url: 'https://github.com/owner/repo/actions/runs/1'
-    }]
+    workflowRuns: [
+      {
+        name: 'CI',
+        displayTitle: 'CI',
+        status: 'completed',
+        conclusion: 'success',
+        createdAt: '2026-05-29T00:03:00.000Z',
+        updatedAt: '2026-05-29T00:04:00.000Z',
+        url: 'https://github.com/owner/repo/actions/runs/4'
+      },
+      {
+        name: 'CI',
+        displayTitle: 'CI',
+        status: 'completed',
+        conclusion: 'success',
+        createdAt: '2026-05-29T00:02:00.000Z',
+        updatedAt: '2026-05-29T00:03:00.000Z',
+        url: 'https://github.com/owner/repo/actions/runs/3'
+      },
+      {
+        name: 'CI',
+        displayTitle: 'CI',
+        status: 'completed',
+        conclusion: 'failure',
+        createdAt: '2026-05-29T00:01:00.000Z',
+        updatedAt: '2026-05-29T00:02:00.000Z',
+        url: 'https://github.com/owner/repo/actions/runs/2'
+      },
+      {
+        name: 'CI',
+        displayTitle: 'CI',
+        status: 'completed',
+        conclusion: 'failure',
+        createdAt: '2026-05-29T00:00:00.000Z',
+        updatedAt: '2026-05-29T00:01:00.000Z',
+        url: 'https://github.com/owner/repo/actions/runs/1'
+      }
+    ]
   });
   const deliveryPath = sidebarModule.__getDeliveryCachePath(root);
   assert.equal(deliveryPath, path.join(root, '.solopreneur', 'delivery-cache.json'));
@@ -1878,6 +1907,7 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /data-methodology-stage/);
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   assert.match(source, /当前项目交付信号/);
+  assert.match(source, /'3'/);
   assert.match(source, /'run',\s*'list'/);
   assert.match(source, /'release',\s*'list'/);
 });

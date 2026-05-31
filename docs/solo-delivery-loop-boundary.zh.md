@@ -56,6 +56,8 @@ Actions 是验证层，回答：
 - 构建、测试、打包或发布检查有没有失败？
 - 下一步是否应该先修检查失败？
 
+SoloMap 只用最近 3 次 Actions 运行判断当前检查状态。更早的历史失败只属于审计背景，不应继续影响 Next Action，否则已经解决的问题会变成历史噪音。
+
 SoloMap 不做完整 GitHub Actions 控制台。侧边栏只显示轻量信号，例如：
 
 ```text
@@ -90,7 +92,7 @@ PR 是可选证据层，不是独立开发者默认门槛。
 
 第一版只补三件事：
 
-1. 读取 GitHub Actions 最近运行和最新 Release。
+1. 读取 GitHub Actions 最近 3 次运行和最新 Release。
 2. 在侧边栏项目卡片显示轻量交付信号。
 3. 将交付信号注入路线图环节和路线图调整 prompt。
 
@@ -119,7 +121,8 @@ Actions 和 Release 只能作为下一步判断的信号，不应成为新的重
 
 - 有 GitHub remote 且 `gh` 可用时，SoloMap 能读取最新 Actions 和 Release。
 - GitHub 数据读取失败时，侧边栏仍可用，并优先显示缓存。
-- 最近 Actions 失败时，项目下一步可以变成“修复发布检查”。
+- 最近 3 次 Actions 失败时，项目下一步可以变成“修复发布检查”。
+- 更早的历史失败不会污染当前 Next Action。
 - 最新 Release 能作为轻量信号展示。
 - Agent prompt 能获得当前项目交付信号，用于修 CI、发布或调整路线图。
 - 没有 PR 的独立开发者项目不会被阻断。

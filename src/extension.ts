@@ -1379,7 +1379,7 @@ function buildGithubDeliveryContext(workspaceRoot: string): string {
     '--repo',
     repo,
     '--limit',
-    '5',
+    '3',
     '--json',
     'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
   ], {
@@ -1406,7 +1406,7 @@ function buildGithubDeliveryContext(workspaceRoot: string): string {
   try {
     const runs = runResult.status === 0 ? JSON.parse(String(runResult.stdout || '[]')) : [];
     const lines = Array.isArray(runs)
-      ? runs.slice(0, 5).map((run: any, index: number) => {
+      ? runs.slice(0, 3).map((run: any, index: number) => {
         const name = String(run.displayTitle || run.name || `workflow-${index + 1}`).trim();
         const state = [String(run.status || '').trim(), String(run.conclusion || '').trim()].filter(Boolean).join('/');
         const when = String(run.updatedAt || run.createdAt || '').trim();
@@ -6744,35 +6744,23 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return 'build';
     }
 
-    function getMethodologyStageCounts(nodes) {
-      const counts = {
-        build: { total: 0, completed: 0 },
-        sell: { total: 0, completed: 0 },
-        learn: { total: 0, completed: 0 },
-        improve: { total: 0, completed: 0 }
-      };
+    function getMethodologyGap(nodes) {
+      const counts = { build: 0, sell: 0, learn: 0, improve: 0 };
       (nodes || []).forEach(node => {
-        const key = inferMethodologyStage(node);
-        counts[key].total += 1;
-        if (node.status === 'Completed') counts[key].completed += 1;
+        counts[inferMethodologyStage(node)] += 1;
       });
-      return counts;
+      return methodologyStages.find(stage => counts[stage.key] === 0) || null;
     }
 
     function renderMethodologyOverview(nodes) {
-      const counts = getMethodologyStageCounts(nodes);
+      const gap = getMethodologyGap(nodes);
+      if (!gap) return '';
       return \`
         <div class="methodology-overview" aria-label="Build Sell Learn Improve">
-          \${methodologyStages.map(stage => {
-            const item = counts[stage.key] || { total: 0, completed: 0 };
-            const active = activeMethodologyStage === stage.key ? ' active' : '';
-            return \`
-              <button class="methodology-stage-btn\${active}" type="button" data-methodology-stage="\${escapeHtml(stage.key)}">
-                <span class="methodology-stage-name">\${escapeHtml(stage.label)}</span>
-                <span class="methodology-stage-meta">\${escapeHtml(item.completed)} / \${escapeHtml(item.total)}</span>
-              </button>
-            \`;
-          }).join('')}
+          <button class="methodology-stage-btn active" type="button" data-methodology-stage="\${escapeHtml(gap.key)}">
+            <span class="methodology-stage-name">\${escapeHtml(gap.label)} gap</span>
+            <span class="methodology-stage-meta">Review related steps</span>
+          </button>
         </div>
       \`;
     }
