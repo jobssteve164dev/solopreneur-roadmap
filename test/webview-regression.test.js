@@ -818,6 +818,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].globalPriority, 'P0');
   assert.equal(summaries[0].globalNextAction, 'Build MVP');
   assert.equal(summaries[0].projectType, 'content');
+  assert.match(summaries[0].stageSignalLine, /Build 2 · Sell 1 · Learn 0 · Improve 0/);
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
   assert.equal(sidebarModule.__getRecommendedNode([
@@ -1814,8 +1815,10 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
   assert.match(bootstrapInstructions, /按项目真实目标选择适用的推进框架/);
   assert.match(bootstrapInstructions, /内部工具、迁移、研究、内容或基础设施项目不得被强行改写成营销销售路线/);
+  assert.match(bootstrapInstructions, /Build -> Sell -> Learn -> Improve 作为底层审查/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
   assert.match(methodologyInstructions, /商业化产品的默认四阶段/);
+  assert.match(methodologyInstructions, /底层判断模型/);
   assert.match(methodologyInstructions, /不要为了满足模板/);
   assert.match(methodologyInstructions, /完成标准判断/);
 });
@@ -1838,6 +1841,8 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /data-stop-agent-run/);
   assert.match(html, /Run result|本轮结果/);
   assert.match(html, /Agent conclusion|Agent 结论/);
+  assert.match(html, /methodology-overview/);
+  assert.match(html, /data-methodology-stage/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {

@@ -418,8 +418,10 @@ function buildBootstrapRoadmapInstructions(cliPath: string): string {
     '6. `dependencies` 必须反映真实前置关系；第一步留空，后续按需要依赖前面环节的 id。',
     '7. `status` 全部写 `Pending`，`completedAt` 留空，`createdAt` 写当前 ISO 时间。',
     '8. 面向外部用户并需要获客或转化的产品，默认覆盖四个方法论阶段；内部工具、迁移、研究、内容或基础设施项目不得被强行改写成营销销售路线。',
-    '9. 每个 `agentPrompt` 都必须要求后续 Agent 直接创建或修改项目本地文件，并在适用时执行最窄验证命令。',
-    '10. 不要生成空泛咨询任务；每个环节都必须有看得见的本地交付物。',
+    '9. 把 Build -> Sell -> Learn -> Improve 作为底层审查：商业化产品不能只有 Build，必须让用户后续能触达市场、吸收反馈并调整路线图。',
+    '10. 不要把四阶段方法论写成用户需要维护的解释任务；它只应用来生成更好的下一步和环节。',
+    '11. 每个 `agentPrompt` 都必须要求后续 Agent 直接创建或修改项目本地文件，并在适用时执行最窄验证命令。',
+    '12. 不要生成空泛咨询任务；每个环节都必须有看得见的本地交付物。',
     '',
     '## 结束前自检',
     '- 重新读取 `.solopreneur/roadmap.csv`。',
@@ -457,6 +459,8 @@ function buildRoadmapMethodologyInstructions(): string {
     '',
     '- 阶段名称和任务应服务项目实际结果，不服务固定模板。',
     '- 对确实需要用户采用、获客或转化的产品，不要把路线图退化成只写代码的工程任务。',
+    '- Build -> Sell -> Learn -> Improve 是底层判断模型，不是让用户手工维护的表单、说明页或侧边栏大组件。',
+    '- 用四阶段判断项目是否失衡，并把结果转成明确的下一步动作。',
     '- 不要只生成研究、分析、规划这类无本地交付物的任务。',
     '- 每个环节都必须能通过 Agent 对话推进，并产生本地文件、验证结果、市场材料或反馈记录。',
     '- 每个环节都必须能被完成标准判断：交付物是什么、证据在哪里、是否还需要下一轮推进。',
@@ -2977,7 +2981,9 @@ function buildRoadmapRevisionPrompt(
     '3. 除非用户明确要求推翻已完成工作，否则保留已完成环节的事实和状态，并围绕新方向调整待推进环节、依赖与 Agent 任务。',
     '4. CSV 必须保留字段 `id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt`；每个依赖必须指向存在的环节 ID，且不能自依赖。',
     '5. 先判断项目是否面向外部用户并需要获客或转化：如果是，默认保留问题发现、产品 MVP、营销销售、反馈规模化四阶段，不能退化成只剩工程任务；如果不是，按其真实交付目标调整阶段，不要虚构营销或销售任务。',
-    '6. 完成后重新读取 CSV，确认每个环节都有明确标题、描述、适合该项目目标的阶段和可执行的 Agent 任务，再正常退出 CLI。'
+    '6. 用 Build -> Sell -> Learn -> Improve 作为底层审查：如果本次调整让商业化项目长期只剩 Build，必须补回分发、反馈或改进闭环；如果项目没有商业化目标，不要为了四阶段制造虚假任务。',
+    '7. 不要把四阶段方法论写成用户需要维护的说明环节；它只应用来决定后续路线图和下一步动作。',
+    '8. 完成后重新读取 CSV，确认每个环节都有明确标题、描述、适合该项目目标的阶段和可执行的 Agent 任务，再正常退出 CLI。'
   ].join('\n');
 }
 
@@ -4667,6 +4673,59 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       z-index: 1;
     }
 
+    .methodology-overview {
+      width: 100%;
+      max-width: min(920px, 100%);
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      position: relative;
+      z-index: 3;
+    }
+
+    .methodology-stage-btn {
+      min-width: 0;
+      min-height: 58px;
+      padding: 9px 10px;
+      border: 1px solid var(--border-glass);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.045);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 4px;
+      box-shadow: none;
+    }
+
+    .methodology-stage-btn:hover,
+    .methodology-stage-btn.active {
+      transform: none;
+      background: rgba(0, 229, 255, 0.10);
+      border-color: rgba(0, 229, 255, 0.28);
+      box-shadow: 0 0 12px rgba(0, 229, 255, 0.12);
+    }
+
+    .methodology-stage-name {
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.1;
+    }
+
+    .methodology-stage-meta {
+      color: var(--text-muted);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+
+    .node-row.stage-filter-dim {
+      opacity: 0.34;
+    }
+
     .node-row {
       position: relative;
       display: flex;
@@ -5524,6 +5583,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         gap: 22px;
       }
 
+      .methodology-overview {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .node-summary,
       .conversation-row {
         flex-direction: column;
@@ -5587,6 +5650,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
       .node-card {
         padding: 16px;
+      }
+
+      .methodology-stage-btn {
+        min-height: 52px;
       }
 
       .node-title {
@@ -5794,6 +5861,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let activeProjectPath = '';
     let currentCliPath = 'agy';
     let activeMainView = 'roadmap';
+    let activeMethodologyStage = '';
     const roadmapRevisionId = '__roadmap_revision__';
     const soloConversationId = '__solo__';
     let roadmapRevisionExpanded = false;
@@ -6026,6 +6094,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       roadmapRevisionExpanded = false;
       soloExpanded = false;
       activeConversationId = '';
+      activeMethodologyStage = '';
       if (soloPanel) soloPanel.classList.remove('open');
       if (soloPanel) soloPanel.classList.remove('active');
       if (canvas) canvas.classList.add('active');
@@ -6579,11 +6648,80 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     }
 
+    const methodologyStages = [
+      { key: 'build', label: 'Build' },
+      { key: 'sell', label: 'Sell' },
+      { key: 'learn', label: 'Learn' },
+      { key: 'improve', label: 'Improve' }
+    ];
+
+    function inferMethodologyStage(node) {
+      const text = String((node && node.stage) || '') + ' ' + String((node && node.title) || '');
+      const normalized = text.toLowerCase();
+      if (/营销|销售|分发|品牌|官网|发布|外联|获客|转化|sell|sales|market|launch|growth|distribution|outreach/.test(normalized)) {
+        return 'sell';
+      }
+      if (/产品|mvp|构建|实现|开发|交付|源码|页面|功能|build|ship|implement|code|feature/.test(normalized)) {
+        return 'build';
+      }
+      if (/调整|改进|复盘|规模化|路线图|优先级|下一轮|improve|iterate|iteration|roadmap|scale|optimi[sz]e/.test(normalized)) {
+        return 'improve';
+      }
+      if (/问题|客户|发现|反馈|学习|访谈|指标|数据|issue|learn|feedback|customer|discovery|analytics|support/.test(normalized)) {
+        return 'learn';
+      }
+      return 'build';
+    }
+
+    function getMethodologyStageCounts(nodes) {
+      const counts = {
+        build: { total: 0, completed: 0 },
+        sell: { total: 0, completed: 0 },
+        learn: { total: 0, completed: 0 },
+        improve: { total: 0, completed: 0 }
+      };
+      (nodes || []).forEach(node => {
+        const key = inferMethodologyStage(node);
+        counts[key].total += 1;
+        if (node.status === 'Completed') counts[key].completed += 1;
+      });
+      return counts;
+    }
+
+    function renderMethodologyOverview(nodes) {
+      const counts = getMethodologyStageCounts(nodes);
+      return \`
+        <div class="methodology-overview" aria-label="Build Sell Learn Improve">
+          \${methodologyStages.map(stage => {
+            const item = counts[stage.key] || { total: 0, completed: 0 };
+            const active = activeMethodologyStage === stage.key ? ' active' : '';
+            return \`
+              <button class="methodology-stage-btn\${active}" type="button" data-methodology-stage="\${escapeHtml(stage.key)}">
+                <span class="methodology-stage-name">\${escapeHtml(stage.label)}</span>
+                <span class="methodology-stage-meta">\${escapeHtml(item.completed)} / \${escapeHtml(item.total)}</span>
+              </button>
+            \`;
+          }).join('')}
+        </div>
+      \`;
+    }
+
+    function bindMethodologyOverview(container) {
+      container.querySelectorAll('[data-methodology-stage]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const stage = button.getAttribute('data-methodology-stage') || '';
+          activeMethodologyStage = activeMethodologyStage === stage ? '' : stage;
+          renderRoadmap(currentNodes);
+        });
+      });
+    }
+
     function renderRoadmap(nodes) {
       // Clear canvas keeping the flow line
       const flowLine = canvas.querySelector('.flow-line');
       canvas.innerHTML = '';
-      canvas.appendChild(flowLine);
+      if (flowLine) canvas.appendChild(flowLine);
 
       if (!nodes || nodes.length === 0) {
         const placeholder = document.createElement('div');
@@ -6593,9 +6731,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         return;
       }
 
+      const overview = document.createElement('div');
+      overview.innerHTML = renderMethodologyOverview(nodes);
+      canvas.appendChild(overview);
+      bindMethodologyOverview(overview);
+
       nodes.forEach(node => {
         const row = document.createElement('div');
-        row.className = 'node-row';
+        const methodologyStage = inferMethodologyStage(node);
+        const dimmed = activeMethodologyStage && activeMethodologyStage !== methodologyStage ? ' stage-filter-dim' : '';
+        row.className = 'node-row methodology-' + methodologyStage + dimmed;
 
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
         const expanded = expandedNodeId === node.id;

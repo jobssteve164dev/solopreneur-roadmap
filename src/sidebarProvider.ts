@@ -42,6 +42,8 @@ interface ProjectPortfolioSummary {
   globalNextAction: string;
   reusableSignals: number;
   issuePressure: string;
+  stageSignalLine: string;
+  stageGap: string;
 }
 
 interface GlobalEngineeringSnapshot {
@@ -131,6 +133,15 @@ interface RoadmapNodeLike {
   agentCli?: string;
   dependencies?: string;
 }
+
+type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
+
+const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
+  { key: 'build', label: 'Build' },
+  { key: 'sell', label: 'Sell' },
+  { key: 'learn', label: 'Learn' },
+  { key: 'improve', label: 'Improve' }
+];
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -1073,10 +1084,52 @@ function countReusableSignals(projectPath: string): number {
   }, 0);
 }
 
+function inferMethodologyStage(node: RoadmapNodeLike): MethodologyStageKey {
+  const text = `${node.stage || ''} ${node.title || ''}`.toLowerCase();
+  if (/营销|销售|分发|品牌|官网|发布|外联|获客|转化|sell|sales|market|launch|growth|distribution|outreach/.test(text)) {
+    return 'sell';
+  }
+  if (/产品|mvp|构建|实现|开发|交付|源码|页面|功能|build|ship|implement|code|feature/.test(text)) {
+    return 'build';
+  }
+  if (/调整|改进|复盘|规模化|路线图|优先级|下一轮|improve|iterate|iteration|roadmap|scale|optimi[sz]e/.test(text)) {
+    return 'improve';
+  }
+  if (/问题|客户|发现|反馈|学习|访谈|指标|数据|issue|learn|feedback|customer|discovery|analytics|support/.test(text)) {
+    return 'learn';
+  }
+  return 'build';
+}
+
+function summarizeMethodologyStages(nodes: RoadmapNodeLike[]): { counts: Record<MethodologyStageKey, number>; line: string; gap: string } {
+  const counts: Record<MethodologyStageKey, number> = { build: 0, sell: 0, learn: 0, improve: 0 };
+  nodes.forEach((node) => {
+    counts[inferMethodologyStage(node)] += 1;
+  });
+  const line = methodologyStages
+    .map((stage) => `${stage.label} ${counts[stage.key]}`)
+    .join(' · ');
+  const gap = methodologyStages.find((stage) => counts[stage.key] === 0)?.label || '';
+  return { counts, line, gap };
+}
+
+function rankNodeForStageGap(node: RoadmapNodeLike, stageSummary: { gap: string }): number {
+  const stage = inferMethodologyStage(node);
+  if (!stageSummary.gap) {
+    return 0;
+  }
+  if (stageSummary.gap === 'Sell' && stage === 'sell') return -3;
+  if (stageSummary.gap === 'Learn' && stage === 'learn') return -3;
+  if (stageSummary.gap === 'Improve' && stage === 'improve') return -3;
+  if (stageSummary.gap === 'Build' && stage === 'build') return -3;
+  return 0;
+}
+
 function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
   if (!nodes.length) {
     return null;
   }
+  const stageSummary = summarizeMethodologyStages(nodes);
   const completedIds = new Set(nodes.filter((node) => node.status === 'Completed').map((node) => node.id));
   const dependenciesSatisfied = (node: RoadmapNodeLike) => {
     const dependencies = String(node.dependencies || '')
@@ -1086,11 +1139,16 @@ function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
     return dependencies.every((dependency) => completedIds.has(dependency));
   };
   const byStatus = (status: string) => nodes.find((node) => node.status === status);
+  const rankPending = (candidates: RoadmapNodeLike[]) => candidates
+    .map((node, index) => ({ node, index, rank: rankNodeForStageGap(node, stageSummary) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)[0]?.node || null;
+  const readyPending = rankPending(nodes.filter((node) => node.status === 'Pending' && dependenciesSatisfied(node)));
+  const anyPending = rankPending(nodes.filter((node) => node.status === 'Pending'));
   return byStatus('Running')
     || byStatus('Failed')
     || byStatus('In Progress')
-    || nodes.find((node) => node.status === 'Pending' && dependenciesSatisfied(node))
-    || byStatus('Pending')
+    || readyPending
+    || anyPending
     || nodes.find((node) => node.status !== 'Completed')
     || nodes[0];
 }
@@ -1116,6 +1174,7 @@ function getProjectRecentActivityAt(projectPath: string): string {
 
 function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortfolioSummary {
   const nodes = readProjectRoadmapNodes(project.path);
+  const stageSummary = summarizeMethodologyStages(nodes);
   const totalNodes = nodes.length;
   const completedNodes = nodes.filter((node) => node.status === 'Completed').length;
   const failedNodes = nodes.filter((node) => node.status === 'Failed').length;
@@ -1157,9 +1216,11 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     globalPriority,
     projectType: project.type || detectProjectType(nodes),
     blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : '',
-    globalNextAction: recommendedNode?.title || (totalNodes ? 'Review completed roadmap' : 'Initialize roadmap'),
+    globalNextAction: recommendedNode?.title || (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap'),
     reusableSignals: countReusableSignals(project.path),
-    issuePressure: inferIssuePressure(baseSummary.issues)
+    issuePressure: inferIssuePressure(baseSummary.issues),
+    stageSignalLine: stageSummary.line,
+    stageGap: stageSummary.gap
   };
 }
 
@@ -2632,6 +2693,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .portfolio-stage,
     .portfolio-updated,
     .portfolio-recommendation {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .portfolio-stage-signal {
+      width: 100%;
+      min-width: 0;
+      color: #a5f3fc;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -4963,6 +5033,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
             </div>
+            \${project.stageSignalLine ? \`<div class="portfolio-card-meta"><span class="portfolio-stage-signal">\${escapeHtml(project.stageSignalLine)}</span></div>\` : ''}
             <div class="portfolio-card-meta">
               <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}
