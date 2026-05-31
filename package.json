@@ -2,7 +2,7 @@
   "name": "solopreneur-roadmap",
   "displayName": "SoloMap: AI Roadmap & Agent Task Flow",
   "description": "Turn project ideas into AI roadmaps and local agent task flows in VS Code.",
-  "version": "0.0.110",
+  "version": "0.0.111",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
   "repository": {
