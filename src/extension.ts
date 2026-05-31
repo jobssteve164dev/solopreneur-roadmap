@@ -1354,6 +1354,73 @@ function buildGithubIssueContext(workspaceRoot: string, node: RoadmapNode): stri
   return ['当前环节关联的 GitHub Issues：', ...sections].join('\n\n');
 }
 
+function buildGithubDeliveryContext(workspaceRoot: string): string {
+  const repo = getGithubRepoSlug(workspaceRoot);
+  if (!repo || !commandExists('gh')) {
+    return '';
+  }
+  const releaseResult = childProcess.spawnSync('gh', [
+    'release',
+    'list',
+    '--repo',
+    repo,
+    '--limit',
+    '1',
+    '--json',
+    'tagName,name,publishedAt,url'
+  ], {
+    encoding: 'utf8',
+    timeout: 4500,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  const runResult = childProcess.spawnSync('gh', [
+    'run',
+    'list',
+    '--repo',
+    repo,
+    '--limit',
+    '5',
+    '--json',
+    'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
+  ], {
+    encoding: 'utf8',
+    timeout: 4500,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  if (releaseResult.status !== 0 && runResult.status !== 0) {
+    return '';
+  }
+  let latestRelease = '';
+  try {
+    const releases = releaseResult.status === 0 ? JSON.parse(String(releaseResult.stdout || '[]')) : [];
+    const release = Array.isArray(releases) ? releases[0] : null;
+    if (release) {
+      latestRelease = [
+        `最新 Release：${String(release.tagName || release.name || '').trim()}`,
+        String(release.publishedAt || '').trim() ? `发布时间：${String(release.publishedAt).trim()}` : '',
+        String(release.url || '').trim() ? `链接：${String(release.url).trim()}` : ''
+      ].filter(Boolean).join('\n');
+    }
+  } catch {}
+  let workflowSummary = '';
+  try {
+    const runs = runResult.status === 0 ? JSON.parse(String(runResult.stdout || '[]')) : [];
+    const lines = Array.isArray(runs)
+      ? runs.slice(0, 5).map((run: any, index: number) => {
+        const name = String(run.displayTitle || run.name || `workflow-${index + 1}`).trim();
+        const state = [String(run.status || '').trim(), String(run.conclusion || '').trim()].filter(Boolean).join('/');
+        const when = String(run.updatedAt || run.createdAt || '').trim();
+        return `${index + 1}. ${name}：${state || 'unknown'}${when ? ` · ${when}` : ''}${run.url ? ` · ${String(run.url).trim()}` : ''}`;
+      })
+      : [];
+    if (lines.length) {
+      workflowSummary = ['最近 GitHub Actions：', ...lines].join('\n');
+    }
+  } catch {}
+  const sections = [latestRelease, workflowSummary].filter(Boolean);
+  return sections.length ? ['当前项目交付信号：', ...sections].join('\n\n') : '';
+}
+
 function resolveExecutablePath(command: string): string {
   const trimmed = (command || '').trim();
   if (!trimmed) {
@@ -2895,6 +2962,7 @@ function buildAgentConversationPrompt(
     globalDataPath,
     [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
   );
+  const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
 
   return [
     '你正在 SoloMap 的一个路线图环节中工作。',
@@ -2914,6 +2982,7 @@ function buildAgentConversationPrompt(
     node.agentPrompt,
     supplement,
     ...(normalizedGithubIssueContext ? ['', normalizedGithubIssueContext] : []),
+    ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
@@ -2960,6 +3029,7 @@ function buildRoadmapRevisionPrompt(
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
+  const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   return [
     '你正在 SoloMap 中调整当前项目路线图。',
     '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
@@ -2971,6 +3041,7 @@ function buildRoadmapRevisionPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),

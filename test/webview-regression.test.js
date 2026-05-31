@@ -882,8 +882,12 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
     'out/sidebarProvider.js',
     [
       'module.exports.__getIssueCachePath = getIssueCachePath;',
+      'module.exports.__getDeliveryCachePath = getDeliveryCachePath;',
       'module.exports.__readIssueCache = readIssueCache;',
       'module.exports.__writeIssueCache = writeIssueCache;',
+      'module.exports.__readDeliveryCache = readDeliveryCache;',
+      'module.exports.__writeDeliveryCache = writeDeliveryCache;',
+      'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;',
       'module.exports.__summarizeIssueItems = summarizeIssueItems;'
     ].join('\n')
   );
@@ -935,6 +939,35 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   assert.equal(summary.open, 1);
   assert.equal(summary.byCategory.bug, 1);
   assert.equal(summary.byPriority.P0, 1);
+
+  sidebarModule.__writeDeliveryCache(root, {
+    schemaVersion: 1,
+    repo: 'owner/repo',
+    syncedAt: '2026-05-29T00:00:00.000Z',
+    latestRelease: {
+      tagName: 'v1.2.3',
+      name: 'v1.2.3',
+      publishedAt: '2026-05-29T00:00:00.000Z',
+      url: 'https://github.com/owner/repo/releases/tag/v1.2.3'
+    },
+    workflowRuns: [{
+      name: 'CI',
+      displayTitle: 'CI',
+      status: 'completed',
+      conclusion: 'failure',
+      createdAt: '2026-05-29T00:00:00.000Z',
+      updatedAt: '2026-05-29T00:01:00.000Z',
+      url: 'https://github.com/owner/repo/actions/runs/1'
+    }]
+  });
+  const deliveryPath = sidebarModule.__getDeliveryCachePath(root);
+  assert.equal(deliveryPath, path.join(root, '.solopreneur', 'delivery-cache.json'));
+  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /delivery-cache\.json/);
+  const deliveryCache = sidebarModule.__readDeliveryCache(root, 'owner/repo');
+  const deliverySummary = sidebarModule.__summarizeDeliveryCache('owner/repo', deliveryCache, true);
+  assert.equal(deliverySummary.latestRelease, 'v1.2.3');
+  assert.equal(deliverySummary.failedWorkflowRuns, 1);
+  assert.equal(deliverySummary.stale, true);
 });
 
 test('sidebar issue creation keeps labels auxiliary to creation', () => {
@@ -1843,6 +1876,10 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /Agent conclusion|Agent 结论/);
   assert.match(html, /methodology-overview/);
   assert.match(html, /data-methodology-stage/);
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  assert.match(source, /当前项目交付信号/);
+  assert.match(source, /'run',\s*'list'/);
+  assert.match(source, /'release',\s*'list'/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {

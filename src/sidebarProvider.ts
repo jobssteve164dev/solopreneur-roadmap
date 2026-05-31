@@ -44,6 +44,8 @@ interface ProjectPortfolioSummary {
   issuePressure: string;
   stageSignalLine: string;
   stageGap: string;
+  delivery: ProjectDeliverySummary;
+  deliverySignal: string;
 }
 
 interface GlobalEngineeringSnapshot {
@@ -339,9 +341,73 @@ function createEmptyIssueSummary(message = ''): ProjectIssueSummary {
   };
 }
 
+interface ProjectDeliverySummary {
+  available: boolean;
+  loading: boolean;
+  stale: boolean;
+  syncedAt: string;
+  repo: string;
+  latestRelease: string;
+  latestReleaseAt: string;
+  latestReleaseUrl: string;
+  failedWorkflowRuns: number;
+  latestWorkflowName: string;
+  latestWorkflowStatus: string;
+  latestWorkflowConclusion: string;
+  latestWorkflowUrl: string;
+  message: string;
+}
+
+interface DeliveryCacheFile {
+  schemaVersion: number;
+  repo: string;
+  syncedAt: string;
+  latestRelease: {
+    tagName: string;
+    name: string;
+    publishedAt: string;
+    url: string;
+  } | null;
+  workflowRuns: Array<{
+    name: string;
+    displayTitle: string;
+    status: string;
+    conclusion: string;
+    createdAt: string;
+    updatedAt: string;
+    url: string;
+  }>;
+}
+
 function createLoadingIssueSummary(): ProjectIssueSummary {
   return {
     ...createEmptyIssueSummary('Loading GitHub Issues'),
+    loading: true
+  };
+}
+
+function createEmptyDeliverySummary(message = ''): ProjectDeliverySummary {
+  return {
+    available: false,
+    loading: false,
+    stale: false,
+    syncedAt: '',
+    repo: '',
+    latestRelease: '',
+    latestReleaseAt: '',
+    latestReleaseUrl: '',
+    failedWorkflowRuns: 0,
+    latestWorkflowName: '',
+    latestWorkflowStatus: '',
+    latestWorkflowConclusion: '',
+    latestWorkflowUrl: '',
+    message
+  };
+}
+
+function createLoadingDeliverySummary(): ProjectDeliverySummary {
+  return {
+    ...createEmptyDeliverySummary('Loading delivery signals'),
     loading: true
   };
 }
@@ -350,14 +416,20 @@ function getIssueCachePath(projectPath: string): string {
   return path.join(projectPath, '.solopreneur', 'issues-cache.json');
 }
 
+function getDeliveryCachePath(projectPath: string): string {
+  return path.join(projectPath, '.solopreneur', 'delivery-cache.json');
+}
+
 function ensureIssueCacheGitignore(projectPath: string): void {
   const solopreneurDir = path.join(projectPath, '.solopreneur');
   const gitignorePath = path.join(solopreneurDir, '.gitignore');
   try {
     fs.mkdirSync(solopreneurDir, { recursive: true });
     const existing = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf8') : '';
-    if (!/(^|\n)issues-cache\.json(\n|$)/.test(existing)) {
-      const next = `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}issues-cache.json\n`;
+    const missing = ['issues-cache.json', 'delivery-cache.json']
+      .filter((entry) => !(new RegExp(`(^|\\n)${entry.replace('.', '\\.')}($|\\n)`).test(existing)));
+    if (missing.length) {
+      const next = `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`;
       fs.writeFileSync(gitignorePath, next, 'utf8');
     }
   } catch {}
@@ -425,6 +497,62 @@ function writeIssueCache(projectPath: string, cache: IssueCacheFile): void {
   ensureIssueCacheGitignore(projectPath);
 }
 
+function validateDeliveryCache(raw: any, repo: string): DeliveryCacheFile | null {
+  if (!raw || raw.schemaVersion !== 1 || raw.repo !== repo || !Array.isArray(raw.workflowRuns)) {
+    return null;
+  }
+  const latestRelease = raw.latestRelease && typeof raw.latestRelease === 'object'
+    ? {
+      tagName: String(raw.latestRelease.tagName || ''),
+      name: String(raw.latestRelease.name || ''),
+      publishedAt: String(raw.latestRelease.publishedAt || ''),
+      url: String(raw.latestRelease.url || '')
+    }
+    : null;
+  const workflowRuns = raw.workflowRuns.map((run: any) => ({
+    name: String(run.name || ''),
+    displayTitle: String(run.displayTitle || ''),
+    status: String(run.status || ''),
+    conclusion: String(run.conclusion || ''),
+    createdAt: String(run.createdAt || ''),
+    updatedAt: String(run.updatedAt || ''),
+    url: String(run.url || '')
+  }));
+  return {
+    schemaVersion: 1,
+    repo,
+    syncedAt: String(raw.syncedAt || ''),
+    latestRelease,
+    workflowRuns
+  };
+}
+
+function readDeliveryCache(projectPath: string, repo = getGithubRepoSlug(projectPath)): DeliveryCacheFile | null {
+  if (!repo) {
+    return null;
+  }
+  try {
+    const cachePath = getDeliveryCachePath(projectPath);
+    if (!fs.existsSync(cachePath)) {
+      return null;
+    }
+    return validateDeliveryCache(JSON.parse(fs.readFileSync(cachePath, 'utf8')), repo);
+  } catch {
+    return null;
+  }
+}
+
+function writeDeliveryCache(projectPath: string, cache: DeliveryCacheFile): void {
+  const cachePath = getDeliveryCachePath(projectPath);
+  const tempPath = `${cachePath}.tmp`;
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  const payload = JSON.stringify(cache, null, 2);
+  fs.writeFileSync(tempPath, payload, 'utf8');
+  JSON.parse(fs.readFileSync(tempPath, 'utf8'));
+  fs.renameSync(tempPath, cachePath);
+  ensureIssueCacheGitignore(projectPath);
+}
+
 function summarizeIssueItems(repo: string, items: ProjectIssueItem[], syncedAt = '', stale = false): ProjectIssueSummary {
   const byCategory: Record<string, number> = {};
   const byPriority: Record<string, number> = {};
@@ -465,6 +593,41 @@ function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
     return createLoadingIssueSummary();
   }
   return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+}
+
+function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = false): ProjectDeliverySummary {
+  const latestRun = cache.workflowRuns[0] || null;
+  const failedWorkflowRuns = cache.workflowRuns
+    .filter((run) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
+    .length;
+  return {
+    available: true,
+    loading: false,
+    stale,
+    syncedAt: cache.syncedAt,
+    repo,
+    latestRelease: cache.latestRelease?.tagName || cache.latestRelease?.name || '',
+    latestReleaseAt: cache.latestRelease?.publishedAt || '',
+    latestReleaseUrl: cache.latestRelease?.url || '',
+    failedWorkflowRuns,
+    latestWorkflowName: latestRun?.displayTitle || latestRun?.name || '',
+    latestWorkflowStatus: latestRun?.status || '',
+    latestWorkflowConclusion: latestRun?.conclusion || '',
+    latestWorkflowUrl: latestRun?.url || '',
+    message: stale ? 'Showing last synced delivery signals' : ''
+  };
+}
+
+function readCachedDeliverySummary(projectPath: string): ProjectDeliverySummary {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyDeliverySummary('No GitHub remote');
+  }
+  const cache = readDeliveryCache(projectPath, repo);
+  if (!cache) {
+    return createLoadingDeliverySummary();
+  }
+  return summarizeDeliveryCache(repo, cache, true);
 }
 
 function createIssueCache(repo: string, issues: ProjectIssueItem[], details: IssueCacheFile['details'] = {}): IssueCacheFile {
@@ -620,6 +783,79 @@ function runGhIssueCommand(projectPath: string, args: string[], timeout = 6000):
     stderr: String(result.stderr || ''),
     repo
   };
+}
+
+function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyDeliverySummary('No GitHub remote');
+  }
+  if (!commandExists('gh')) {
+    const cache = readDeliveryCache(projectPath, repo);
+    return cache ? summarizeDeliveryCache(repo, cache, true) : { ...createEmptyDeliverySummary('GitHub CLI not found'), repo };
+  }
+  const releaseResult = runGhIssueCommand(projectPath, [
+    'release',
+    'list',
+    '--limit',
+    '1',
+    '--json',
+    'tagName,name,publishedAt,url'
+  ], 4500);
+  const runResult = runGhIssueCommand(projectPath, [
+    'run',
+    'list',
+    '--limit',
+    '10',
+    '--json',
+    'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
+  ], 4500);
+  if (!releaseResult.ok && !runResult.ok) {
+    const cache = readDeliveryCache(projectPath, repo);
+    return cache ? summarizeDeliveryCache(repo, cache, true) : {
+      ...createEmptyDeliverySummary(String(releaseResult.stderr || runResult.stderr || 'GitHub delivery signals unavailable').trim()),
+      repo
+    };
+  }
+  let latestRelease: DeliveryCacheFile['latestRelease'] = null;
+  let workflowRuns: DeliveryCacheFile['workflowRuns'] = [];
+  try {
+    const releases = releaseResult.ok ? JSON.parse(String(releaseResult.stdout || '[]')) : [];
+    const release = Array.isArray(releases) ? releases[0] : null;
+    latestRelease = release
+      ? {
+        tagName: String(release.tagName || ''),
+        name: String(release.name || ''),
+        publishedAt: String(release.publishedAt || ''),
+        url: String(release.url || '')
+      }
+      : null;
+  } catch {}
+  try {
+    const runs = runResult.ok ? JSON.parse(String(runResult.stdout || '[]')) : [];
+    workflowRuns = Array.isArray(runs)
+      ? runs.map((run: any) => ({
+        name: String(run.name || ''),
+        displayTitle: String(run.displayTitle || ''),
+        status: String(run.status || ''),
+        conclusion: String(run.conclusion || ''),
+        createdAt: String(run.createdAt || ''),
+        updatedAt: String(run.updatedAt || ''),
+        url: String(run.url || '')
+      }))
+      : [];
+  } catch {}
+  const cache: DeliveryCacheFile = {
+    schemaVersion: 1,
+    repo,
+    syncedAt: new Date().toISOString(),
+    latestRelease,
+    workflowRuns
+  };
+  try {
+    writeDeliveryCache(projectPath, cache);
+  } catch {}
+  return summarizeDeliveryCache(repo, cache, false);
 }
 
 function readProjectIssueSummary(projectPath: string): ProjectIssueSummary {
@@ -1053,9 +1289,10 @@ function detectProjectType(nodes: RoadmapNodeLike[]): string {
   return 'core_product';
 }
 
-function inferGlobalPriority(summary: Pick<ProjectPortfolioSummary, 'failedNodes' | 'runningNodes' | 'inProgressNodes' | 'pendingNodes' | 'issues' | 'overallStatus'>): string {
+function inferGlobalPriority(summary: Pick<ProjectPortfolioSummary, 'failedNodes' | 'runningNodes' | 'inProgressNodes' | 'pendingNodes' | 'issues' | 'delivery' | 'overallStatus'>): string {
   const p0Issues = Number((summary.issues?.byPriority || {}).P0 || 0);
-  if (p0Issues > 0 || Number(summary.failedNodes || 0) > 0) return 'P0';
+  const failedWorkflowRuns = Number(summary.delivery?.failedWorkflowRuns || 0);
+  if (p0Issues > 0 || failedWorkflowRuns > 0 || Number(summary.failedNodes || 0) > 0) return 'P0';
   if (Number(summary.runningNodes || 0) > 0 || Number(summary.inProgressNodes || 0) > 0) return 'P1';
   if (summary.overallStatus === 'Completed') return 'P2';
   return Number(summary.pendingNodes || 0) > 0 ? 'P1' : 'P2';
@@ -1068,6 +1305,14 @@ function inferIssuePressure(issues: ProjectIssueSummary): string {
   if (p0 > 0) return `${p0} P0`;
   if (bugs > 0) return `${bugs} bug`;
   return issues.open ? `${issues.open} open` : '';
+}
+
+function inferDeliverySignal(delivery: ProjectDeliverySummary): string {
+  if (!delivery?.available) return '';
+  if (Number(delivery.failedWorkflowRuns || 0) > 0) return `Checks failed ${delivery.failedWorkflowRuns}`;
+  if (delivery.latestRelease) return `Latest ${delivery.latestRelease}`;
+  if (delivery.latestWorkflowStatus) return `Checks ${delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus}`;
+  return '';
 }
 
 function countReusableSignals(projectPath: string): number {
@@ -1208,19 +1453,26 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     recommendedStatus: recommendedNode?.status || '',
     overallStatus,
     recentActivityAt: getProjectRecentActivityAt(project.path),
-    issues: readCachedIssueSummary(project.path)
+    issues: readCachedIssueSummary(project.path),
+    delivery: readCachedDeliverySummary(project.path)
   };
   const globalPriority = inferGlobalPriority(baseSummary);
+  const deliverySignal = inferDeliverySignal(baseSummary.delivery);
+  const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
   return {
     ...baseSummary,
     globalPriority,
     projectType: project.type || detectProjectType(nodes),
     blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : '',
-    globalNextAction: recommendedNode?.title || (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap'),
+    globalNextAction: baseSummary.delivery.failedWorkflowRuns > 0
+      ? '修复发布检查'
+      : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap')),
     reusableSignals: countReusableSignals(project.path),
     issuePressure: inferIssuePressure(baseSummary.issues),
     stageSignalLine: stageSummary.line,
-    stageGap: stageSummary.gap
+    stageGap: stageSummary.gap,
+    delivery: baseSummary.delivery,
+    deliverySignal
   };
 }
 
@@ -1361,6 +1613,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'solopreneur.sidebar';
   private _view?: vscode.WebviewView;
   private _issueLoadRequest = 0;
+  private _deliveryLoadRequest = 0;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -1637,6 +1890,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
       this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
+      this.scheduleDeliverySummaryLoads(projectState.projects, projectState.selectedProjectPath);
     } catch (error) {
       console.error('SoloMap sidebar failed to send projects:', error);
       this._view?.webview.postMessage({
@@ -1677,6 +1931,30 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           issues
         });
       }, index === 0 ? 0 : 80 * index);
+    });
+  }
+
+  private scheduleDeliverySummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
+    const requestId = ++this._deliveryLoadRequest;
+    const ordered = [
+      ...projects.filter((project) => project.path === selectedProjectPath),
+      ...projects.filter((project) => project.path !== selectedProjectPath)
+    ];
+    ordered.forEach((project, index) => {
+      setTimeout(() => {
+        if (!this._view || requestId !== this._deliveryLoadRequest) {
+          return;
+        }
+        const delivery = readProjectDeliverySummary(project.path);
+        if (!this._view || requestId !== this._deliveryLoadRequest) {
+          return;
+        }
+        this._view.webview.postMessage({
+          command: 'projectDeliveryLoaded',
+          projectPath: project.path,
+          delivery
+        });
+      }, index === 0 ? 0 : 120 * index);
     });
   }
 
@@ -3989,6 +4267,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
+        case 'projectDeliveryLoaded':
+          currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
+            project.path === message.projectPath ? { ...project, delivery: message.delivery, deliverySignal: deliverySignalText(message.delivery) } : project
+          ));
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
         case 'cliTestResult':
           cliTestBadge.style.display = 'block';
           if (message.success) {
@@ -4818,6 +5104,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueTotal')) + ' ' + escapeHtml(issues.total || 0) + ' · ' + escapeHtml(t('issueOpen')) + ' ' + escapeHtml(issues.open || 0) + syncText + '</span>';
     }
 
+    function deliverySignalText(delivery) {
+      if (!delivery || !delivery.available) return '';
+      if (Number(delivery.failedWorkflowRuns || 0) > 0) return 'Checks failed ' + Number(delivery.failedWorkflowRuns || 0);
+      if (delivery.latestRelease) return 'Latest ' + delivery.latestRelease;
+      if (delivery.latestWorkflowStatus) return 'Checks ' + (delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus);
+      return '';
+    }
+
     function priorityRank(priority) {
       return ({ P0: 0, P1: 1, P2: 2, P3: 3 })[priority] ?? 4;
     }
@@ -5029,6 +5323,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <span class="global-chip">\${escapeHtml(statusText(project.overallStatus))}</span>
               \${project.reusableSignals ? \`<span class="global-chip">\${escapeHtml(t('globalReusable'))}: \${escapeHtml(project.reusableSignals)}</span>\` : ''}
               \${project.issuePressure ? \`<span class="global-chip">\${escapeHtml(t('issues'))}: \${escapeHtml(project.issuePressure)}</span>\` : ''}
+              \${project.deliverySignal ? \`<span class="global-chip">\${escapeHtml(project.deliverySignal)}</span>\` : ''}
             </div>
             <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>

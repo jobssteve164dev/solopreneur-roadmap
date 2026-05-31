@@ -45,6 +45,7 @@
 | P1 | 环节完成标准模板 | 让每个环节知道什么叫完成 |
 | P1 | Solo 直接对话 | 不要求用户先判断所属环节，结束后再按需要关联 |
 | P1 | Build -> Sell -> Learn -> Improve 方法论落地 | 用底层方法论驱动 Next Action、路线图调整和大图视角 |
+| P1 | Actions / Release 交付闭环 | 让验证和发布进入独立开发者主路径 |
 | P2 | 市场动作任务化 | 把品牌、官网、营销、销售、反馈变成 Agent 可执行任务 |
 
 ## 已落地：Solo 直接对话
@@ -342,6 +343,30 @@ Build 3 · Sell 0 · Learn 2 · Improve 1
 - **大图视角**：主页面能稳定展示 Build -> Sell -> Learn -> Improve 四个维度的真实运转槽位，并支持定位关联环节。
 - **空白状态友好**：即使是没有进行任何市场/反馈动作的新项目，该面板亦能展示明确的“推荐市场任务一键派发”提示，而不是尴尬的报错或空白。
 - **数据流正常**：`prompt.txt` 中能稳定生成包含真实反馈文件的 `## 来自 LEARN 循环的真实反馈` 章节，且前置环节的完成手稿（Memory）被下一个推荐节点完美继承。
+
+## P1：Actions / Release 交付闭环
+
+产品边界见 [SoloMap 独立开发者交付闭环产品边界](./solo-delivery-loop-boundary.zh.md)。
+
+SoloMap 的默认交付路径不是完整团队治理流程，而是：
+
+```text
+Issue / Solo -> Roadmap Step -> Agent 执行 -> Actions / 本地验证 -> Release / Deploy -> 反馈输入 -> Improve 调整
+```
+
+第一版只把 GitHub Actions 和 Release 当成交付信号：
+
+- Actions 失败时，侧边栏 Next Action 优先提示修复发布检查。
+- 最新 Release 作为项目卡片轻量信号显示。
+- 路线图环节和路线图调整 prompt 注入当前项目交付信号。
+- PR 暂时作为可选证据层，不作为独立开发者默认门槛。
+
+### 验收标准
+
+- 有 GitHub remote 且 `gh` 可用时，能读取最近 Actions 和最新 Release。
+- 读取失败时不阻断侧边栏和路线图主路径。
+- 最近 Actions 失败会影响项目下一步。
+- 没有 PR 的项目不会被提示补 PR。
 
 ## P2：市场动作任务化
 
