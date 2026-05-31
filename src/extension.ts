@@ -14,6 +14,8 @@ let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let activeProjectRoot: string | null = null;
+let syncEngineInitPromise: Promise<boolean> | null = null;
+let syncEngineInitProjectRoot = '';
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -350,6 +352,8 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   await context.globalState.update(selectedProjectKey, projectPath);
   syncEngine = null;
   activeProjectRoot = null;
+  syncEngineInitPromise = null;
+  syncEngineInitProjectRoot = '';
   if (watcher) {
     watcher.dispose();
     watcher = null;
@@ -359,8 +363,14 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     statusPoller = null;
   }
   sendProjectsToWebviews(context);
-  await ensureSyncEngine(context);
-  sendNodesToWebview();
+  if (activePanel) {
+    activePanel.webview.postMessage({ command: 'roadmapLoading', projectPath });
+  }
+  void ensureSyncEngine(context).then((ready) => {
+    if (ready) {
+      sendNodesToWebview();
+    }
+  });
 }
 
 async function updateProjectMetadata(context: vscode.ExtensionContext, projectPath: string, updates: Partial<Pick<SolopreneurProject, 'type' | 'priority'>>): Promise<void> {
@@ -849,6 +859,9 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   if (syncEngine && activeProjectRoot === projectRoot) {
     return true;
   }
+  if (syncEngineInitPromise && syncEngineInitProjectRoot === projectRoot) {
+    return syncEngineInitPromise;
+  }
 
   if (!projectRoot) {
     return false;
@@ -865,36 +878,45 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
 
-  syncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
-  try {
-    await syncEngine.initAndSync();
-    activeProjectRoot = projectRoot;
-    ensureCompletionCriteriaForNodes(projectRoot, syncEngine.getNodes());
-    setupFileSentinelWatcher(projectRoot);
-    // Refresh sidebar when successfully initialized
-    if (sidebarProvider) {
-      sidebarProvider.sendNodesToWebview();
-      sidebarProvider.sendProjects();
+  syncEngineInitProjectRoot = projectRoot;
+  syncEngineInitPromise = (async () => {
+    const nextSyncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
+    try {
+      await nextSyncEngine.initAndSync();
+      if (getSelectedProjectPath(context) !== projectRoot) {
+        return false;
+      }
+      syncEngine = nextSyncEngine;
+      activeProjectRoot = projectRoot;
+      ensureCompletionCriteriaForNodes(projectRoot, syncEngine.getNodes());
+      setupFileSentinelWatcher(projectRoot);
+      // Refresh sidebar when successfully initialized
+      if (sidebarProvider) {
+        sidebarProvider.sendNodesToWebview();
+        sidebarProvider.sendProjects();
+      }
+      return true;
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to initialize Roadmap database: ${error}`);
+      return false;
+    } finally {
+      syncEngineInitPromise = null;
+      syncEngineInitProjectRoot = '';
     }
-    return true;
-  } catch (error) {
-    vscode.window.showErrorMessage(`Failed to initialize Roadmap database: ${error}`);
-    return false;
-  }
+  })();
+  return syncEngineInitPromise;
 }
 
 async function openRoadmapPanel(context: vscode.ExtensionContext) {
-  const initialized = await ensureSyncEngine(context);
-  if (!initialized) {
-    vscode.window.showErrorMessage('Choose a project folder before launching the Roadmap.');
+  // If panel already exists, reveal it
+  if (activePanel) {
+    activePanel.reveal(vscode.ViewColumn.One);
     return;
   }
 
   const projectRoot = getSelectedProjectPath(context);
-
-  // If panel already exists, reveal it
-  if (activePanel) {
-    activePanel.reveal(vscode.ViewColumn.One);
+  if (!projectRoot) {
+    vscode.window.showErrorMessage('Choose a project folder before launching the Roadmap.');
     return;
   }
 
@@ -912,13 +934,31 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
   // Load basic HTML into Webview
   activePanel.webview.html = getWebviewHtml(activePanel.webview, context);
+  activePanel.webview.postMessage({ command: 'roadmapLoading', projectPath: projectRoot });
+  activePanel.webview.postMessage({
+    command: 'settingsLoaded',
+    settings: getPersistedSettings(context)
+  });
+  activePanel.webview.postMessage({
+    command: 'projectsLoaded',
+    projects: getProjectState(context)
+  });
 
   // Handle messages from Webview
   activePanel.webview.onDidReceiveMessage(
     async (message) => {
       switch (message.command) {
         case 'getNodes':
-          sendNodesToWebview();
+          if (syncEngine && activeProjectRoot === getSelectedProjectPath(context)) {
+            sendNodesToWebview();
+          } else {
+            activePanel?.webview.postMessage({ command: 'roadmapLoading', projectPath: getSelectedProjectPath(context) });
+            void ensureSyncEngine(context).then((ready) => {
+              if (ready) {
+                sendNodesToWebview();
+              }
+            });
+          }
           break;
 
         case 'updateNode':
@@ -1081,8 +1121,11 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
     context.subscriptions
   );
 
-  // Set up File Sentinel Watcher for agent completion (.agent_status.json)
-  setupFileSentinelWatcher(projectRoot);
+  void ensureSyncEngine(context).then((ready) => {
+    if (ready) {
+      sendNodesToWebview();
+    }
+  });
 
   // Clean up when panel is closed
   activePanel.onDidDispose(
@@ -2321,7 +2364,13 @@ function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): {
   const memoryRoot = path.join(globalRoot, 'memory');
   const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
   const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  const learningApprovedDir = path.join(globalRoot, 'learning', 'approved');
+  const learningRejectedDir = path.join(globalRoot, 'learning', 'rejected');
+  const metricsDir = path.join(globalRoot, 'metrics');
   fs.mkdirSync(learningCandidatesDir, { recursive: true });
+  fs.mkdirSync(learningApprovedDir, { recursive: true });
+  fs.mkdirSync(learningRejectedDir, { recursive: true });
+  fs.mkdirSync(metricsDir, { recursive: true });
   ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active'].forEach((dir) => {
     fs.mkdirSync(path.join(memoryRoot, dir), { recursive: true });
   });
@@ -2361,8 +2410,134 @@ function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): {
       ''
     ].join('\n'), 'utf8');
   }
+  writeFileIfMissing(path.join(metricsDir, 'execution-speed.csv'), 'project,node_id,stage,status,duration_ms,completed_at\n');
+  writeFileIfMissing(path.join(metricsDir, 'reuse-rate.csv'), 'project,node_id,reusable_signals,learning_candidates,recorded_at\n');
+  writeFileIfMissing(path.join(metricsDir, 'priority-accuracy.csv'), 'project,priority,next_action,outcome,recorded_at\n');
+  writeFileIfMissing(path.join(metricsDir, 'monthly-summary.md'), '# Monthly Learning Summary\n\nSoloMap uses this file to collect low-frequency cross-project learning signals.\n');
   writeSolomapMemoryExamples(memoryRoot, learningCandidatesDir);
   return { globalRoot, memoryRoot, projectMemoryFile };
+}
+
+function solomapCsvEscape(value: string | number): string {
+  const raw = String(value ?? '');
+  return /[",\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
+}
+
+function countMarkdownFiles(dirPath: string): number {
+  try {
+    return fs.readdirSync(dirPath).filter((name) => name.endsWith('.md') && name !== '_example.md').length;
+  } catch {
+    return 0;
+  }
+}
+
+function appendCsvRecord(filePath: string, header: string, values: Array<string | number>): void {
+  writeFileIfMissing(filePath, `${header}\n`);
+  fs.appendFileSync(filePath, `${values.map(solomapCsvEscape).join(',')}\n`, 'utf8');
+}
+
+function summarizeLearningEvidence(changedFilesSummary: string, touchedFilesSummary: string, outputTail: string): string {
+  return [
+    changedFilesSummary ? `- Workspace changes: ${changedFilesSummary.split('\n').filter(Boolean).slice(0, 6).join('; ')}` : '',
+    touchedFilesSummary ? `- Touched files: ${touchedFilesSummary.split('\n').filter(Boolean).slice(0, 6).join('; ')}` : '',
+    outputTail ? `- Agent output tail was captured in this run.` : ''
+  ].filter(Boolean).join('\n') || '- This run completed and updated the SoloMap execution history.';
+}
+
+function recordSolomapLearningCycle(
+  workspaceRoot: string,
+  globalDataPath: string,
+  node: RoadmapNode | null,
+  nextStatus: string,
+  changedFilesSummary: string,
+  touchedFilesSummary: string,
+  outputTail: string,
+  runDurationMs: number,
+  finishedAt: string
+): void {
+  if (!workspaceRoot || !node || !node.id) {
+    return;
+  }
+  const { globalRoot } = ensureSolomapMemoryStore(workspaceRoot, globalDataPath);
+  const projectName = path.basename(workspaceRoot);
+  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  const metricsDir = path.join(globalRoot, 'metrics');
+  const reusableSignals = (() => {
+    try {
+      return fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'step-memory'))
+        ? fs.readdirSync(path.join(workspaceRoot, '.solopreneur', 'step-memory')).length
+        : 0;
+    } catch {
+      return 0;
+    }
+  })();
+  appendCsvRecord(
+    path.join(metricsDir, 'execution-speed.csv'),
+    'project,node_id,stage,status,duration_ms,completed_at',
+    [projectName, node.id, node.stage || '', nextStatus, runDurationMs, finishedAt]
+  );
+  appendCsvRecord(
+    path.join(metricsDir, 'reuse-rate.csv'),
+    'project,node_id,reusable_signals,learning_candidates,recorded_at',
+    [projectName, node.id, reusableSignals, countMarkdownFiles(learningCandidatesDir), finishedAt]
+  );
+  appendCsvRecord(
+    path.join(metricsDir, 'priority-accuracy.csv'),
+    'project,priority,next_action,outcome,recorded_at',
+    [projectName, '', node.title || '', nextStatus, finishedAt]
+  );
+
+  if (nextStatus !== 'Completed' && nextStatus !== 'In Progress') {
+    return;
+  }
+  const slug = sanitizeAttachmentScope(`${projectName}-${node.id}-${Date.parse(finishedAt) || Date.now()}`);
+  const candidatePath = path.join(learningCandidatesDir, `${slug}.md`);
+  writeFileIfMissing(candidatePath, [
+    `# Learning Candidate: ${node.title || node.id}`,
+    '',
+    '## Candidate Lesson',
+    `- A ${node.stage || 'roadmap'} step produced reusable execution evidence. Review whether this should become a pattern, decision, domain note, or project memory.`,
+    '',
+    '## Source Task',
+    `- Project: ${projectName}`,
+    `- Step: ${node.title || node.id}`,
+    `- Status: ${nextStatus}`,
+    `- Completed at: ${finishedAt}`,
+    '',
+    '## Evidence',
+    summarizeLearningEvidence(changedFilesSummary, touchedFilesSummary, outputTail),
+    '',
+    '## Applies When',
+    `- Future projects have a similar ${node.stage || 'roadmap'} step or need the same delivery pattern.`,
+    '',
+    '## Promotion Target',
+    '- memory/patterns | memory/decisions | memory/domains | memory/projects',
+    ''
+  ].join('\n'));
+}
+
+function buildSolomapLearningContext(workspaceRoot: string, globalDataPath = ''): string {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  const metricsDir = path.join(globalRoot, 'metrics');
+  const candidateCount = countMarkdownFiles(learningCandidatesDir);
+  const readTail = (fileName: string) => {
+    const filePath = path.join(metricsDir, fileName);
+    try {
+      return fs.readFileSync(filePath, 'utf8').trim().split('\n').slice(-4).join('\n');
+    } catch {
+      return '';
+    }
+  };
+  const executionTail = readTail('execution-speed.csv');
+  const reuseTail = readTail('reuse-rate.csv');
+  return [
+    'SoloMap 跨项目学习信号：',
+    `- 待审核学习候选：${candidateCount}`,
+    executionTail ? `- 最近执行速度记录：\n${executionTail}` : '',
+    reuseTail ? `- 最近复用记录：\n${reuseTail}` : '',
+    '- 如果当前环节属于 Improve / 复盘 / 调整路线图，应优先参考这些信号来提出下一轮路线图调整。'
+  ].filter(Boolean).join('\n');
 }
 
 function getSolomapSkillRegistryPath(workspaceRoot: string, globalDataPath = ''): string {
@@ -2987,6 +3162,7 @@ function buildAgentConversationPrompt(
     [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
   );
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
+  const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
 
   return [
     '你正在 SoloMap 的一个路线图环节中工作。',
@@ -3010,6 +3186,7 @@ function buildAgentConversationPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
@@ -3054,6 +3231,7 @@ function buildRoadmapRevisionPrompt(
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
+  const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   return [
     '你正在 SoloMap 中调整当前项目路线图。',
     '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
@@ -3065,6 +3243,7 @@ function buildRoadmapRevisionPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
@@ -3108,6 +3287,7 @@ function buildSoloConversationPrompt(
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
+  const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -3119,6 +3299,7 @@ function buildSoloConversationPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
@@ -4235,6 +4416,19 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const stepHandoffSummary = workspaceRoot && handoffEntry
       ? updateStepHandoffSummary(getStepMemoryFilePath(workspaceRoot, nodeId), handoffEntry)
       : '';
+    if (workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation) {
+      recordSolomapLearningCycle(
+        workspaceRoot,
+        '',
+        currentNode,
+        nextStatus,
+        changedFilesSummary,
+        touchedFilesSummary,
+        outputTail,
+        runDurationMs,
+        finishedAt
+      );
+    }
     const executionSummary = [
       userMessage ? `User supplement:\n${userMessage}` : '',
       sessionMode ? `Native session mode: ${sessionMode}` : '',
@@ -4773,17 +4967,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       z-index: 1;
     }
 
-    .methodology-overview {
+    .methodology-shell {
       width: 100%;
       max-width: min(920px, 100%);
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
       position: relative;
       z-index: 3;
     }
 
+    .methodology-overview {
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
     .methodology-stage-card {
+      width: 100%;
       min-width: 0;
       min-height: 78px;
       padding: 12px;
@@ -4795,12 +4994,27 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       flex-direction: column;
       justify-content: space-between;
       gap: 8px;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .methodology-stage-card:hover,
+    .methodology-stage-card.active {
+      border-color: rgba(0, 229, 255, 0.52);
+      background: rgba(0, 229, 255, 0.10);
+      box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.10), 0 12px 30px rgba(0, 0, 0, 0.22);
+      transform: none;
     }
 
     .methodology-stage-card.missing {
       background: rgba(245, 158, 11, 0.12);
       border-color: rgba(245, 158, 11, 0.42);
       box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12);
+    }
+
+    .methodology-stage-card.missing.active {
+      background: rgba(245, 158, 11, 0.18);
+      border-color: rgba(245, 158, 11, 0.62);
     }
 
     .methodology-stage-name {
@@ -4836,6 +5050,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       max-width: min(920px, 100%);
       min-width: 0;
       z-index: 2;
+    }
+
+    .node-row.stage-highlight .node-card {
+      border-color: rgba(0, 229, 255, 0.65);
+      box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.16), 0 0 32px rgba(0, 229, 255, 0.14);
     }
 
     .node-card {
@@ -5974,10 +6193,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let currentLanguage = 'zh';
     let currentNodes = [];
     let expandedNodeId = '';
+    let activeMethodologyStage = '';
     let activeConversationId = '';
     let activeProjectPath = '';
     let currentCliPath = 'agy';
     let activeMainView = 'roadmap';
+    let currentRoadmapLoading = false;
     const roadmapRevisionId = '__roadmap_revision__';
     const soloConversationId = '__solo__';
     let roadmapRevisionExpanded = false;
@@ -6079,6 +6300,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         revisionHistory: '路线图调整历史',
         noRevisionConversations: '还没有路线图调整记录。',
         sendRevision: '发送调整',
+        roadmapLoading: '正在打开路线图...',
+        methodologyBuild: '打造',
+        methodologySell: '触达',
+        methodologyLearn: '学习',
+        methodologyImprove: '改进',
+        methodologyMissing: '缺少对应环节',
+        methodologyCompleted: '已完成',
         status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败', Linked: '已关联' }
       },
       en: {
@@ -6174,6 +6402,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         revisionHistory: 'Roadmap Revision History',
         noRevisionConversations: 'No roadmap revisions yet.',
         sendRevision: 'Send revision',
+        roadmapLoading: 'Opening roadmap...',
+        methodologyBuild: 'Build',
+        methodologySell: 'Sell',
+        methodologyLearn: 'Learn',
+        methodologyImprove: 'Improve',
+        methodologyMissing: 'Missing step',
+        methodologyCompleted: 'completed',
         status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed', Linked: 'Linked' }
       }
     };
@@ -6207,6 +6442,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function resetProjectScopedState(projectPath, clearNodes) {
       activeProjectPath = projectPath || '';
       expandedNodeId = '';
+      activeMethodologyStage = '';
       roadmapRevisionExpanded = false;
       soloExpanded = false;
       activeConversationId = '';
@@ -6409,7 +6645,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     window.addEventListener('message', event => {
       const message = event.data;
       switch (message.command) {
+        case 'roadmapLoading':
+          currentRoadmapLoading = true;
+          if (message.projectPath && message.projectPath !== activeProjectPath) {
+            resetProjectScopedState(message.projectPath, true);
+          }
+          renderRoadmap(currentNodes);
+          break;
         case 'nodesUpdated':
+          currentRoadmapLoading = false;
           if (message.projectPath && message.projectPath !== activeProjectPath) {
             resetProjectScopedState(message.projectPath, false);
           }
@@ -6811,10 +7055,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     const methodologyStages = [
-      { key: 'build', label: 'Build' },
-      { key: 'sell', label: 'Sell' },
-      { key: 'learn', label: 'Learn' },
-      { key: 'improve', label: 'Improve' }
+      { key: 'build', labelKey: 'methodologyBuild' },
+      { key: 'sell', labelKey: 'methodologySell' },
+      { key: 'learn', labelKey: 'methodologyLearn' },
+      { key: 'improve', labelKey: 'methodologyImprove' }
     ];
 
     function inferMethodologyStage(node) {
@@ -6857,11 +7101,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           \${methodologyStages.map(stage => {
             const item = counts[stage.key] || { total: 0, completed: 0 };
             const missing = Number(item.total || 0) === 0;
+            const active = activeMethodologyStage === stage.key;
             return \`
-              <div class="methodology-stage-card\${missing ? ' missing' : ''}">
+              <div class="methodology-stage-card\${missing ? ' missing' : ''}\${active ? ' active' : ''}" role="button" tabindex="0" data-methodology-stage="\${escapeHtml(stage.key)}">
                 <div>
-                  <div class="methodology-stage-name">\${escapeHtml(stage.label)}</div>
-                  <div class="methodology-stage-meta">\${missing ? '缺少对应环节' : escapeHtml(item.completed + ' / ' + item.total + ' completed')}</div>
+                  <div class="methodology-stage-name">\${escapeHtml(t(stage.labelKey))}</div>
+                  <div class="methodology-stage-meta">\${missing ? escapeHtml(t('methodologyMissing')) : escapeHtml(item.completed + ' / ' + item.total + ' ' + t('methodologyCompleted'))}</div>
                 </div>
                 \${missing ? \`<button class="methodology-adjust-btn" type="button" data-open-roadmap-revision>\${escapeHtml(t('reviseRoadmap'))}</button>\` : ''}
               </div>
@@ -6872,6 +7117,31 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     function bindMethodologyOverview(container) {
+      container.querySelectorAll('[data-methodology-stage]').forEach(card => {
+        const selectStage = () => {
+          const stage = card.getAttribute('data-methodology-stage') || '';
+          activeMethodologyStage = activeMethodologyStage === stage ? '' : stage;
+          renderRoadmap(currentNodes);
+          if (activeMethodologyStage) {
+            setTimeout(() => {
+              const target = canvas.querySelector('[data-methodology-row-stage="' + cssEscape(activeMethodologyStage) + '"]');
+              if (target && typeof target.scrollIntoView === 'function') {
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }, 0);
+          }
+        };
+        card.addEventListener('click', (event) => {
+          if (event.target.closest('[data-open-roadmap-revision]')) return;
+          selectStage();
+        });
+        card.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            selectStage();
+          }
+        });
+      });
       container.querySelectorAll('[data-open-roadmap-revision]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -6892,13 +7162,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
       if (!nodes || nodes.length === 0) {
         const placeholder = document.createElement('div');
-        placeholder.innerHTML = renderOnboardingPanel();
+        placeholder.innerHTML = currentRoadmapLoading
+          ? '<div class="onboarding-panel"><div class="onboarding-title">' + escapeHtml(t('roadmapLoading')) + '</div></div>'
+          : renderOnboardingPanel();
         canvas.appendChild(placeholder);
         bindOnboardingActions(placeholder);
         return;
       }
 
       const overview = document.createElement('div');
+      overview.className = 'methodology-shell';
       overview.innerHTML = renderMethodologyOverview(nodes);
       canvas.appendChild(overview);
       bindMethodologyOverview(overview);
@@ -6906,7 +7179,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       nodes.forEach(node => {
         const row = document.createElement('div');
         const methodologyStage = inferMethodologyStage(node);
-        row.className = 'node-row methodology-' + methodologyStage;
+        row.className = 'node-row methodology-' + methodologyStage + (activeMethodologyStage === methodologyStage ? ' stage-highlight' : '');
+        row.setAttribute('data-methodology-row-stage', methodologyStage);
 
         const cleanStage = node.stage.replace(/[^a-zA-Z0-9]/g, '-');
         const expanded = expandedNodeId === node.id;

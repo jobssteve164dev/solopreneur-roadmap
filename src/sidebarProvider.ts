@@ -1482,9 +1482,13 @@ function buildProjectPortfolioSummaries(projects: SolopreneurProject[]): Project
 function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
   const normalizedPath = normalizeGlobalDataPath(dataPath);
   const learningDir = path.join(normalizedPath, 'learning', 'candidates');
+  const learningApprovedDir = path.join(normalizedPath, 'learning', 'approved');
+  const learningRejectedDir = path.join(normalizedPath, 'learning', 'rejected');
   const metricsDir = path.join(normalizedPath, 'metrics');
   const memoryRoot = path.join(normalizedPath, 'memory');
   fs.mkdirSync(learningDir, { recursive: true });
+  fs.mkdirSync(learningApprovedDir, { recursive: true });
+  fs.mkdirSync(learningRejectedDir, { recursive: true });
   fs.mkdirSync(metricsDir, { recursive: true });
   ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active'].forEach((dir) => {
     fs.mkdirSync(path.join(memoryRoot, dir), { recursive: true });
@@ -1546,6 +1550,10 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
   const memoryReadmePath = path.join(memoryRoot, 'README.md');
   const profilePath = path.join(memoryRoot, 'profile.md');
   const operatingRulesPath = path.join(memoryRoot, 'operating-rules.md');
+  const executionSpeedPath = path.join(metricsDir, 'execution-speed.csv');
+  const reuseRatePath = path.join(metricsDir, 'reuse-rate.csv');
+  const priorityAccuracyPath = path.join(metricsDir, 'priority-accuracy.csv');
+  const monthlySummaryPath = path.join(metricsDir, 'monthly-summary.md');
   fs.writeFileSync(path.join(normalizedPath, 'portfolio.csv'), portfolioCsv, 'utf8');
   fs.writeFileSync(path.join(normalizedPath, 'dependencies.csv'), dependenciesCsv, 'utf8');
   if (!fs.existsSync(capabilityCsvPath)) {
@@ -1553,6 +1561,18 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
   }
   if (!fs.existsSync(decisionsCsvPath)) {
     fs.writeFileSync(decisionsCsvPath, 'topic,projects,conflict,resolution,status,owner,updated_at\n', 'utf8');
+  }
+  if (!fs.existsSync(executionSpeedPath)) {
+    fs.writeFileSync(executionSpeedPath, 'project,node_id,stage,status,duration_ms,completed_at\n', 'utf8');
+  }
+  if (!fs.existsSync(reuseRatePath)) {
+    fs.writeFileSync(reuseRatePath, 'project,node_id,reusable_signals,learning_candidates,recorded_at\n', 'utf8');
+  }
+  if (!fs.existsSync(priorityAccuracyPath)) {
+    fs.writeFileSync(priorityAccuracyPath, 'project,priority,next_action,outcome,recorded_at\n', 'utf8');
+  }
+  if (!fs.existsSync(monthlySummaryPath)) {
+    fs.writeFileSync(monthlySummaryPath, '# Monthly Learning Summary\n\nSoloMap uses this file to collect low-frequency cross-project learning signals.\n', 'utf8');
   }
   if (!fs.existsSync(readmePath)) {
     fs.writeFileSync(readmePath, [
@@ -1565,6 +1585,8 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
       '- `capability-registry.csv`: reusable capabilities confirmed or under review.',
       '- `decision-conflicts.csv`: cross-project decision conflicts.',
       '- `learning/candidates/`: learning candidates before they are promoted to long-term memory.',
+      '- `learning/approved/`: candidates approved for promotion.',
+      '- `learning/rejected/`: candidates that should stay out of long-term memory.',
       '- `metrics/`: low-frequency portfolio review metrics.',
       '- `memory/`: cross-project experience memory used by SoloMap agents.',
       '',

@@ -667,8 +667,18 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /class="view-tab solo-tab"/);
   assert.match(html, /class="solo-view view-panel"/);
   assert.match(html, /\.roadmap-canvas\.view-panel:not\(\.active\),\s*\.solo-view\.view-panel:not\(\.active\)\s*\{[\s\S]*?display:\s*none/);
+  assert.match(html, /\.methodology-shell\s*\{[\s\S]*?max-width:\s*min\(920px,\s*100%\)/);
+  assert.match(html, /\.methodology-stage-card\.active/);
   assert.doesNotMatch(html, /solo-conversation-popover/);
   assert.match(script, /renderRoadmapRevisionPanel/);
+  assert.match(script, /roadmapLoading/);
+  assert.match(script, /currentRoadmapLoading/);
+  assert.match(script, /data-methodology-stage/);
+  assert.match(script, /activeMethodologyStage/);
+  assert.match(script, /data-methodology-row-stage/);
+  assert.match(script, /scrollIntoView/);
+  assert.match(script, /methodologyBuild/);
+  assert.match(script, /methodologyCompleted/);
   assert.doesNotMatch(script, /canvas\.appendChild\(panel\)/);
   assert.doesNotMatch(script, /data-toggle-roadmap-revision/);
   assert.match(script, /completeNode/);
@@ -853,6 +863,12 @@ test('global engineering store writes git-friendly portfolio files', () => {
   assert.ok(fs.existsSync(path.join(globalRoot, 'capability-registry.csv')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'decision-conflicts.csv')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'candidates')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'approved')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'rejected')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'execution-speed.csv')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'reuse-rate.csv')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'priority-accuracy.csv')));
+  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'monthly-summary.md')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'README.md')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'profile.md')));
   assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'operating-rules.md')));
@@ -1070,6 +1086,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__validateBootstrapRoadmapRewrite = validateBootstrapRoadmapRewrite;',
       'module.exports.__validateRoadmapRevision = validateRoadmapRevision;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__recordSolomapLearningCycle = recordSolomapLearningCycle;',
+      'module.exports.__buildSolomapLearningContext = buildSolomapLearningContext;',
       'module.exports.__shellQuote = shellQuote;'
     ].join('\n')
   );
@@ -1306,6 +1324,34 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'inbox', '_example.md')));
   assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'active', '_example.md')));
   assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates', '_example.md')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'learning', 'approved')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'learning', 'rejected')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'execution-speed.csv')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'reuse-rate.csv')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'priority-accuracy.csv')));
+  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'monthly-summary.md')));
+  extensionModule.__recordSolomapLearningCycle(
+    '/workspace/app',
+    memoryRoot,
+    {
+      id: '2',
+      title: 'Improve roadmap',
+      stage: '反馈与规模化',
+      description: 'Use feedback to adjust the roadmap.',
+      agentPrompt: 'Review learning signals.',
+      status: 'In Progress'
+    },
+    'Completed',
+    'M docs/learning-loop.md',
+    'M docs/learning-loop.md',
+    'Updated the learning loop.',
+    1234,
+    '2026-05-31T00:00:00.000Z'
+  );
+  assert.match(fs.readFileSync(path.join(ensuredMemory.globalRoot, 'metrics', 'execution-speed.csv'), 'utf8'), /反馈与规模化.*1234/);
+  assert.ok(fs.readdirSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates')).some((name) => name.endsWith('.md') && name !== '_example.md'));
+  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /待审核学习候选：1/);
+  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /最近执行速度记录/);
   const defaultMemoryPrompt = extensionModule.__buildSoloMapSystemMemoryPrompt('/workspace/app', memoryRoot);
   assert.match(defaultMemoryPrompt, /SoloMap 默认系统提示词/);
   assert.match(defaultMemoryPrompt, /\.solomap-global\/memory/);
