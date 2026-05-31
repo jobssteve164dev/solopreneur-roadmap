@@ -2611,6 +2611,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       white-space: nowrap;
     }
 
+    .global-focus-slot {
+      flex-shrink: 0;
+      min-width: 46px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.045);
+      color: #d8fbff;
+      padding: 3px 7px;
+      font-size: 9px;
+      font-weight: 800;
+      text-align: center;
+    }
+
     .global-priority {
       flex-shrink: 0;
       border-radius: 999px;
@@ -3946,8 +3959,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       zh: {
         title: 'SoloMap',
         portfolioTitle: '项目总览',
-        globalFocusTitle: '本周推进',
-        globalFocusEmpty: '还没有可推进项目。',
+        globalFocusTitle: '今日安排',
+        globalFocusEmpty: '今天还没有明确安排，先添加或选择一个项目。',
+        todaySlotUrgent: '先处理',
+        todaySlotMain: '主推进',
+        todaySlotClose: '收尾',
+        todayReasonDelivery: '发布检查需要处理',
+        todayReasonFailed: '失败环节需要收口',
+        todayReasonIssue: '高优先级反馈需要处理',
+        todayReasonRunning: 'Agent 正在执行，先看状态',
+        todayReasonInProgress: '已经开始，今天最容易形成进展',
+        todayReasonPending: '可以开始推进',
+        todayReasonReview: '成果已完成，适合复盘或调整下一轮',
         onboardingKicker: '新手开始',
         onboardingTitle: '先把一个项目交给 SoloMap',
         onboardingCopy: '选择一个本地项目文件夹。SoloMap 会带你确认项目类型，然后生成第一张可推进路线图。',
@@ -4075,8 +4098,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       en: {
         title: 'SoloMap',
         portfolioTitle: 'Project Portfolio',
-        globalFocusTitle: 'Weekly Focus',
-        globalFocusEmpty: 'No projects ready yet.',
+        globalFocusTitle: 'Today',
+        globalFocusEmpty: 'No clear plan yet. Add or choose a project first.',
+        todaySlotUrgent: 'Handle',
+        todaySlotMain: 'Push',
+        todaySlotClose: 'Close',
+        todayReasonDelivery: 'Release checks need attention',
+        todayReasonFailed: 'A failed step needs closure',
+        todayReasonIssue: 'High-priority feedback needs attention',
+        todayReasonRunning: 'The Agent is running; check status first',
+        todayReasonInProgress: 'Already in motion and easiest to move forward',
+        todayReasonPending: 'Ready to start',
+        todayReasonReview: 'Completed work is ready for review or the next loop',
         onboardingKicker: 'Get started',
         onboardingTitle: 'Give SoloMap one local project first',
         onboardingCopy: 'Choose a local project folder. SoloMap will ask for its type, then help create the first actionable roadmap.',
@@ -5256,14 +5289,59 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return ({ P0: 0, P1: 1, P2: 2, P3: 3 })[priority] ?? 4;
     }
 
+    function todayPlanScore(project) {
+      let score = 0;
+      if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) score += 120;
+      if (Number(project.failedNodes || 0) > 0) score += 100;
+      if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) score += 90;
+      if (project.globalPriority === 'P0') score += 80;
+      if (project.globalPriority === 'P1') score += 60;
+      if (Number(project.runningNodes || 0) > 0) score += 50;
+      if (Number(project.inProgressNodes || 0) > 0) score += 40;
+      if (Number(project.pendingNodes || 0) > 0) score += 20;
+      if (Number(project.reusableSignals || 0) > 0) score += 10;
+      return score;
+    }
+
+    function todayPlanReason(project) {
+      if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) return t('todayReasonDelivery');
+      if (Number(project.failedNodes || 0) > 0) return t('todayReasonFailed');
+      if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) return t('todayReasonIssue');
+      if (Number(project.runningNodes || 0) > 0) return t('todayReasonRunning');
+      if (Number(project.inProgressNodes || 0) > 0) return t('todayReasonInProgress');
+      if (Number(project.pendingNodes || 0) > 0) return t('todayReasonPending');
+      return t('todayReasonReview');
+    }
+
+    function buildTodayPlanItems(portfolio) {
+      const projects = (portfolio || [])
+        .filter(project => project && project.path)
+        .slice()
+        .sort((a, b) => todayPlanScore(b) - todayPlanScore(a) || priorityRank(a.globalPriority) - priorityRank(b.globalPriority));
+      const used = new Set();
+      const take = (slot, predicate) => {
+        const project = projects.find(candidate => !used.has(candidate.path) && predicate(candidate));
+        if (!project) return null;
+        used.add(project.path);
+        return { slot, project };
+      };
+      return [
+        take(t('todaySlotUrgent'), project => Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 || Number(project.failedNodes || 0) > 0 || Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0 || project.globalPriority === 'P0'),
+        take(t('todaySlotMain'), project => project.globalPriority === 'P1' || Number(project.runningNodes || 0) > 0 || Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0),
+        take(t('todaySlotClose'), project => Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || project.stageGap)
+      ].filter(Boolean).concat(
+        projects
+          .filter(project => !used.has(project.path))
+          .slice(0, 3)
+          .map((project, index) => ({ slot: index === 0 ? t('todaySlotMain') : t('todaySlotClose'), project }))
+      ).slice(0, 3);
+    }
+
     function renderGlobalFocus(portfolio, selectedProjectPath) {
       if (!globalFocusPanel) return;
-      const projects = (portfolio || [])
-        .slice()
-        .sort((a, b) => priorityRank(a.globalPriority) - priorityRank(b.globalPriority) || Number(b.failedNodes || 0) - Number(a.failedNodes || 0))
-        .slice(0, 3);
+      const items = buildTodayPlanItems(portfolio);
       const store = currentProjects.globalStore || {};
-      if (!projects.length) {
+      if (!items.length) {
         globalFocusPanel.innerHTML = \`
           <div class="global-focus-head">
             <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
@@ -5278,14 +5356,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           <span class="global-focus-path" title="\${escapeHtml(store.dataPath || '')}">\${escapeHtml(store.dataPath || '')}</span>
         </div>
         <div class="global-focus-list">
-          \${projects.map(project => \`
-            <div class="global-focus-item \${project.path === selectedProjectPath ? 'is-selected' : ''}" data-global-focus-project="\${escapeHtml(project.path)}">
+          \${items.map(item => \`
+            <div class="global-focus-item \${item.project.path === selectedProjectPath ? 'is-selected' : ''}" data-global-focus-project="\${escapeHtml(item.project.path)}">
               <div class="global-focus-row">
                 <span class="global-focus-main">
-                  <span class="global-focus-name">\${escapeHtml(project.name || '')}</span>
-                  <span class="global-focus-action">\${escapeHtml(project.blocker || project.globalNextAction || project.recommendedNodeTitle || '-')}</span>
+                  <span class="global-focus-name">\${escapeHtml(item.project.name || '')}</span>
+                  <span class="global-focus-action">\${escapeHtml(todayPlanReason(item.project))} · \${escapeHtml(item.project.blocker || item.project.globalNextAction || item.project.recommendedNodeTitle || '-')}</span>
                 </span>
-                <span class="global-priority \${escapeHtml(project.globalPriority || 'P2')}">\${escapeHtml(project.globalPriority || 'P2')}</span>
+                <span class="global-focus-slot">\${escapeHtml(item.slot)}</span>
+                <span class="global-priority \${escapeHtml(item.project.globalPriority || 'P2')}">\${escapeHtml(item.project.globalPriority || 'P2')}</span>
               </div>
             </div>
           \`).join('')}

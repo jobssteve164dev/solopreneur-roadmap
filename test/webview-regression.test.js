@@ -757,6 +757,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /data-project-continue-send/);
   assert.match(html, /data-select-project-path/);
   assert.match(html, /id="global-focus-panel"/);
+  assert.match(html, /今日安排|Today/);
+  assert.match(html, /todayPlanScore/);
+  assert.match(html, /todaySlotUrgent/);
+  assert.doesNotMatch(html, /本周推进|Weekly Focus/);
   assert.match(html, /id="setting-global-data-path"/);
   assert.match(html, /id="setting-mcp-input"/);
   assert.match(html, /id="btn-install-mcp"/);
