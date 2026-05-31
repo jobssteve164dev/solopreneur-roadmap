@@ -145,9 +145,24 @@ const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
   { key: 'improve', label: 'Improve' }
 ];
 const DELIVERY_WORKFLOW_RUN_LIMIT = 3;
+const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
+const githubRepoSlugCache = new Map<string, string>();
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildFeedbackIssueUrl(title: string, body: string): string {
+  const params = new URLSearchParams();
+  const issueTitle = String(title || '').trim();
+  const issueBody = String(body || '').trim();
+  if (issueTitle) {
+    params.set('title', issueTitle);
+  }
+  if (issueBody) {
+    params.set('body', issueBody);
+  }
+  return `${FEEDBACK_ISSUE_URL}${params.toString() ? `?${params.toString()}` : ''}`;
 }
 
 function expandHomePath(value: string): string {
@@ -662,6 +677,10 @@ function getGithubRepoSlug(projectPath: string): string {
   if (!projectPath || !fs.existsSync(projectPath)) {
     return '';
   }
+  const cached = githubRepoSlugCache.get(projectPath);
+  if (cached !== undefined) {
+    return cached;
+  }
   const result = childProcess.spawnSync('git', ['-C', projectPath, 'remote', 'get-url', 'origin'], {
     encoding: 'utf8',
     timeout: 1800,
@@ -672,7 +691,9 @@ function getGithubRepoSlug(projectPath: string): string {
     return '';
   }
   const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/i);
-  return match ? match[1].replace(/\.git$/i, '') : '';
+  const repo = match ? match[1].replace(/\.git$/i, '') : '';
+  githubRepoSlugCache.set(projectPath, repo);
+  return repo;
 }
 
 function normalizeIssueLabel(label: string): string {
@@ -1331,6 +1352,36 @@ function countReusableSignals(projectPath: string): number {
   }, 0);
 }
 
+function createGlobalEngineeringSnapshotPlaceholder(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
+  const normalizedPath = normalizeGlobalDataPath(dataPath);
+  return {
+    dataPath: normalizedPath,
+    portfolio: portfolio.map((project) => ({
+      id: slugifyProjectId(project.name || path.basename(project.path)),
+      name: project.name,
+      path: project.path,
+      type: project.projectType || 'core_product',
+      status: project.overallStatus || 'Pending',
+      priority: project.globalPriority || 'P2',
+      blocker: project.blocker || '',
+      nextAction: project.globalNextAction || project.recommendedNodeTitle || '',
+      updatedAt: project.recentActivityAt || ''
+    })),
+    dependencies: portfolio
+      .filter((project) => project.blocker)
+      .map((project) => ({
+        fromProject: slugifyProjectId(project.name || path.basename(project.path)),
+        toProject: '',
+        capability: project.blocker,
+        status: 'blocked',
+        priorityImpact: 'raise_to_P0',
+        reason: project.blocker,
+        updatedAt: project.recentActivityAt || ''
+      })),
+    learningCandidateCount: 0
+  };
+}
+
 function inferMethodologyStage(node: RoadmapNodeLike): MethodologyStageKey {
   const text = `${node.stage || ''} ${node.title || ''}`.toLowerCase();
   if (/营销|销售|分发|品牌|官网|发布|外联|获客|转化|sell|sales|market|launch|growth|distribution|outreach/.test(text)) {
@@ -1416,7 +1467,7 @@ function getProjectRecentActivityAt(projectPath: string): string {
   return latestMtime ? new Date(latestMtime).toISOString() : '';
 }
 
-function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortfolioSummary {
+function buildProjectPortfolioSummary(project: SolopreneurProject, options: { includeReusableSignals?: boolean } = {}): ProjectPortfolioSummary {
   const nodes = readProjectRoadmapNodes(project.path);
   const stageSummary = summarizeMethodologyStages(nodes);
   const totalNodes = nodes.length;
@@ -1467,7 +1518,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
     globalNextAction: baseSummary.delivery.failedWorkflowRuns > 0
       ? '修复发布检查'
       : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap')),
-    reusableSignals: countReusableSignals(project.path),
+    reusableSignals: options.includeReusableSignals ? countReusableSignals(project.path) : 0,
     issuePressure: inferIssuePressure(baseSummary.issues),
     stageGap: stageSummary.gap,
     delivery: baseSummary.delivery,
@@ -1475,8 +1526,8 @@ function buildProjectPortfolioSummary(project: SolopreneurProject): ProjectPortf
   };
 }
 
-function buildProjectPortfolioSummaries(projects: SolopreneurProject[]): ProjectPortfolioSummary[] {
-  return projects.map((project) => buildProjectPortfolioSummary(project));
+function buildProjectPortfolioSummaries(projects: SolopreneurProject[], options: { includeReusableSignals?: boolean } = {}): ProjectPortfolioSummary[] {
+  return projects.map((project) => buildProjectPortfolioSummary(project, options));
 }
 
 function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
@@ -1769,6 +1820,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               vscode.env.openExternal(vscode.Uri.parse(String(data.url)));
             }
             break;
+          case 'openFeedbackIssue':
+            vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(data.title || '', data.body || '')));
+            break;
           case 'getIssueDetails':
             this.sendIssueDetails(data.projectPath || '', Number(data.issueNumber || 0));
             break;
@@ -1894,13 +1948,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       const projectState = this._getProjects();
       const portfolio = buildProjectPortfolioSummaries(projectState.projects);
-      let globalStore: GlobalEngineeringSnapshot;
-      try {
-        globalStore = ensureGlobalEngineeringStore(this._getSettings().globalDataPath, portfolio);
-      } catch {
-        const fallbackPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
-        globalStore = { dataPath: fallbackPath, portfolio: [], dependencies: [], learningCandidateCount: 0 };
-      }
+      const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
       this._view.webview.postMessage({
         command: 'projectsLoaded',
         projects: {
@@ -1910,6 +1958,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         }
       });
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
+      this.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
       this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
       this.scheduleDeliverySummaryLoads(projectState.projects, projectState.selectedProjectPath);
     } catch (error) {
@@ -1929,6 +1978,34 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         }
       });
     }
+  }
+
+  private schedulePortfolioEnrichment(projects: SolopreneurProject[], selectedProjectPath: string) {
+    setTimeout(() => {
+      try {
+        if (!this._view) {
+          return;
+        }
+        const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true });
+        let globalStore: GlobalEngineeringSnapshot;
+        try {
+          globalStore = ensureGlobalEngineeringStore(this._getSettings().globalDataPath, portfolio);
+        } catch {
+          globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
+        }
+        this._view.webview.postMessage({
+          command: 'projectsLoaded',
+          projects: {
+            projects,
+            selectedProjectPath,
+            portfolio,
+            globalStore
+          }
+        });
+      } catch (error) {
+        console.error('SoloMap sidebar failed to enrich portfolio:', error);
+      }
+    }, 0);
   }
 
   private scheduleIssueSummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
@@ -3756,6 +3833,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-feedback">Feedback</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-feedback-title"
+        placeholder="What should be improved?"
+      >
+      <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 54px; margin-top: 5px;"></textarea>
+      <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
       <div class="dependency-panel" id="dependency-panel">
         <div class="dependency-row">
@@ -3822,6 +3911,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingMcpInput = document.getElementById('setting-mcp-input');
     const btnInstallMcp = document.getElementById('btn-install-mcp');
     const mcpInstallBadge = document.getElementById('mcp-install-badge');
+    const settingFeedbackTitle = document.getElementById('setting-feedback-title');
+    const settingFeedbackBody = document.getElementById('setting-feedback-body');
+    const btnOpenFeedback = document.getElementById('btn-open-feedback');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -3876,6 +3968,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
+        feedback: '建议反馈',
+        feedbackTitlePlaceholder: '一句话说明想反馈的问题...',
+        feedbackBodyPlaceholder: '补充现象、期望结果或改进建议...',
+        openFeedback: '提交到 GitHub Issue',
         globalType: '类型',
         globalReusable: '可复用线索',
         globalLearning: '学习候选',
@@ -4001,6 +4097,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
+        feedback: 'Feedback',
+        feedbackTitlePlaceholder: 'Summarize the issue or idea...',
+        feedbackBodyPlaceholder: 'Add what happened, what you expected, or the suggestion...',
+        openFeedback: 'Open GitHub Issue',
         globalType: 'Type',
         globalReusable: 'Reusable signals',
         globalLearning: 'Learning candidates',
@@ -4159,6 +4259,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
       setText('help-mcp-install', t('mcpInstallHelp'));
       setText('text-install-mcp', t('installMcp'));
+      setText('label-feedback', t('feedback'));
+      if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
+      if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
+      setText('text-open-feedback', t('openFeedback'));
       setText('label-dependencies', t('dependencies'));
       setText('dependency-agent-name', t('dependencyAgent'));
       setText('dependency-github-name', t('dependencyGithub'));
@@ -4455,6 +4559,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           mcpInstallBadge.textContent = t('installingMcp');
         }
         vscode.postMessage({ command: 'installMcp', mcpInput });
+      });
+    }
+
+    if (btnOpenFeedback) {
+      btnOpenFeedback.addEventListener('click', () => {
+        vscode.postMessage({
+          command: 'openFeedbackIssue',
+          title: settingFeedbackTitle ? settingFeedbackTitle.value.trim() : '',
+          body: settingFeedbackBody ? settingFeedbackBody.value.trim() : ''
+        });
       });
     }
 

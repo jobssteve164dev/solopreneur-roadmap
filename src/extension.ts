@@ -132,6 +132,7 @@ const soloConversationId = '__solo__';
 const agentTerminalBaseName = 'SoloMap Agent Console';
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
+const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
@@ -1060,6 +1061,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await handleInstallSolomapMcp(context, message.mcpInput || '');
           break;
 
+        case 'openFeedbackIssue':
+          vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(message.title || '', message.body || '')));
+          break;
+
         case 'getNodeConversations':
           if (syncEngine && activePanel) {
             activePanel.webview.postMessage({
@@ -1196,6 +1201,19 @@ function completeNodeManually(nodeId: string): void {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildFeedbackIssueUrl(title: string, body: string): string {
+  const params = new URLSearchParams();
+  const issueTitle = String(title || '').trim();
+  const issueBody = String(body || '').trim();
+  if (issueTitle) {
+    params.set('title', issueTitle);
+  }
+  if (issueBody) {
+    params.set('body', issueBody);
+  }
+  return `${FEEDBACK_ISSUE_URL}${params.toString() ? `?${params.toString()}` : ''}`;
 }
 
 function expandHomePath(value: string): string {
@@ -3068,6 +3086,10 @@ function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = 
     '- 当前用户请求、当前项目文件、测试、日志和命令输出的证据优先级高于经验库；经验库只能帮助理解和减少重复，不能覆盖用户本轮目标。',
     '- 不要把经验库目录结构、实现机制或内部治理负担暴露给普通用户；面向用户的输出只保留能帮助其完成动作的结论、改动、验证和风险。',
     '- 不要自动把某个项目的私有事实泄漏到其他项目；跨项目复用前必须确认其是稳定、可泛化且不含敏感信息的经验。',
+    '- 新项目或新环节开始时，必须先做启动注入自检：确认项目类型、当前用户动作、成功标准、可复用经验、相似项目记忆和本轮最窄验证，再开始改动。',
+    '- 项目类型用于选择路线图形态：核心产品默认覆盖 Build/Sell/Learn/Improve；基础设施强调契约、接入、版本和兼容；内容产品强调生产、分发和反馈；试验研究允许验证失败但必须沉淀结论；工具脚手架强调可复用入口；归档维护强调稳定性和监控。',
+    '- 如果当前是生成初始路线图或调整路线图，必须先把全局方法论转成用户能执行的环节，不要把方法论说明、内部目录结构或维护者自述做成路线图环节。',
+    '- 如果当前是普通执行环节，先查询可能相关的项目记忆、patterns、decisions、domains 和学习候选；只有确认可复用且不含项目私有细节时才复用。',
     '- 任务结束时，如发现未来可复用的经验，先以候选或明确建议形式沉淀；只有已验证且稳定的信息才进入长期记忆。'
   ].join('\n');
 }
@@ -3324,7 +3346,8 @@ function buildAgentShellScript(
   nativeSessionId = '',
   directExecutionCommand = '',
   runKind = 'step',
-  roadmapBackupFilePath = ''
+  roadmapBackupFilePath = '',
+  globalDataPath = ''
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
@@ -3345,7 +3368,7 @@ function buildAgentShellScript(
   const commandPreview = `${agentCli} [${sessionMode}]`;
   const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
   const executionCommand = directExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
-  const statusBase = { nodeId, runKind, roadmapBackupFilePath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
+  const statusBase = { nodeId, runKind, roadmapBackupFilePath, globalDataPath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
@@ -3857,7 +3880,8 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     '',
     '',
     'roadmap_revision',
-    roadmapBackupFilePath
+    roadmapBackupFilePath,
+    settings.globalDataPath
   );
   const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`);
   terminal.show(true);
@@ -3940,7 +3964,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     nativeSessionId,
     '',
     'solo',
-    roadmapBackupFilePath
+    roadmapBackupFilePath,
+    settings.globalDataPath
   );
   const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`);
   terminal.show(true);
@@ -4086,7 +4111,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   );
   postNodeConversations(nodeId);
 
-  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId);
+  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath);
 
   const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`);
   terminal.show(true);
@@ -4277,7 +4302,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, runKind, roadmapBackupFilePath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
@@ -4419,7 +4444,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     if (workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation) {
       recordSolomapLearningCycle(
         workspaceRoot,
-        '',
+        String(globalDataPath || ''),
         currentNode,
         nextStatus,
         changedFilesSummary,
@@ -6148,6 +6173,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
     </div>
 
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-feedback">Feedback</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-feedback-title"
+        placeholder="What should be improved?"
+      >
+      <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 54px; margin-top: 5px;"></textarea>
+      <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -6185,6 +6222,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingMcpInput = document.getElementById('setting-mcp-input');
     const btnInstallMcp = document.getElementById('btn-install-mcp');
     const mcpInstallBadge = document.getElementById('mcp-install-badge');
+    const settingFeedbackTitle = document.getElementById('setting-feedback-title');
+    const settingFeedbackBody = document.getElementById('setting-feedback-body');
+    const btnOpenFeedback = document.getElementById('btn-open-feedback');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
@@ -6231,6 +6271,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
+        feedback: '建议反馈',
+        feedbackTitlePlaceholder: '一句话说明想反馈的问题...',
+        feedbackBodyPlaceholder: '补充现象、期望结果或改进建议...',
+        openFeedback: '提交到 GitHub Issue',
         testCli: '测试 CLI',
         save: '保存',
         chooseProject: '选择项目文件夹',
@@ -6333,6 +6377,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
+        feedback: 'Feedback',
+        feedbackTitlePlaceholder: 'Summarize the issue or idea...',
+        feedbackBodyPlaceholder: 'Add what happened, what you expected, or the suggestion...',
+        openFeedback: 'Open GitHub Issue',
         testCli: 'Test CLI',
         save: 'Save',
         chooseProject: 'Choose project folder',
@@ -6491,6 +6539,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
       setText('help-mcp-install', t('mcpInstallHelp'));
       setText('text-install-mcp', t('installMcp'));
+      setText('label-feedback', t('feedback'));
+      if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
+      if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
+      setText('text-open-feedback', t('openFeedback'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
@@ -6821,6 +6873,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           mcpInstallBadge.textContent = t('installingMcp');
         }
         vscode.postMessage({ command: 'installMcp', mcpInput });
+      });
+    }
+
+    if (btnOpenFeedback) {
+      btnOpenFeedback.addEventListener('click', () => {
+        vscode.postMessage({
+          command: 'openFeedbackIssue',
+          title: settingFeedbackTitle ? settingFeedbackTitle.value.trim() : '',
+          body: settingFeedbackBody ? settingFeedbackBody.value.trim() : ''
+        });
       });
     }
 

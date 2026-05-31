@@ -311,6 +311,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /bindPastedImageAttachments/);
   assert.match(script, /savePastedAttachments/);
   assert.match(script, /checkDependencies/);
+  assert.match(script, /openFeedbackIssue/);
   assert.match(script, /renderProjectIssuePanel/);
   assert.match(script, /createIssue/);
   assert.match(script, /closeIssue/);
@@ -337,6 +338,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'setting-clipath-custom',
     'setting-global-prompt',
     'setting-global-data-path',
+    'setting-feedback-title',
+    'setting-feedback-body',
+    'btn-open-feedback',
     'btn-test-cli',
     'btn-save-settings',
     'btn-check-dependencies',
@@ -365,9 +369,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   elements['btn-check-dependencies'].listeners.click();
   elements['btn-open-agent-install'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
+  elements['setting-feedback-title'].value = '希望加载更快';
+  elements['setting-feedback-body'].value = '打开侧边栏时先显示项目。';
+  elements['btn-open-feedback'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'checkDependencies'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'agent-install'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'github-auth'));
+  assert.ok(postedMessages.some((message) => message.command === 'openFeedbackIssue' && message.title === '希望加载更快'));
 
   dispatchMessage({
     command: 'settingsLoaded',
@@ -600,6 +608,8 @@ test('full roadmap webview exposes node conversation history and language settin
 
   assert.match(html, /id="setting-language"/);
   assert.match(html, /id="setting-global-prompt"/);
+  assert.match(html, /id="btn-open-feedback"/);
+  assert.match(script, /openFeedbackIssue/);
   assert.match(html, /id="setting-mcp-input"/);
   assert.match(html, /id="btn-install-mcp"/);
   assert.match(script, /installMcp/);
@@ -1304,6 +1314,21 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /sessionMode/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /commandFilePath/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.codex\/sessions/);
+  const globalShellScript = extensionModule.__buildAgentShellScript(
+    'codex',
+    'Use the configured global memory path.',
+    shellRoot,
+    'global-path',
+    43,
+    '',
+    undefined,
+    '',
+    '',
+    'step',
+    '',
+    '/workspace/.solomap-global'
+  );
+  assert.match(fs.readFileSync(globalShellScript.runScriptPath, 'utf8'), /"globalDataPath":"\/workspace\/\.solomap-global"/);
   assert.doesNotMatch(shellScript.finalCommand, /Use a small smoke test\./);
   assert.doesNotMatch(shellScript.finalCommand, /Ship the MVP/);
   const coloredOutputPath = path.join(os.tmpdir(), 'solopreneur-colored-output.log');
@@ -1363,6 +1388,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(defaultMemoryPrompt, /写入位置/);
   assert.match(defaultMemoryPrompt, /旧 `\.codex-memory\/`/);
   assert.match(defaultMemoryPrompt, /当前用户请求、当前项目文件、测试、日志和命令输出/);
+  assert.match(defaultMemoryPrompt, /新项目或新环节开始时/);
+  assert.match(defaultMemoryPrompt, /项目类型用于选择路线图形态/);
 
   const skillStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-skill-store-'));
   const skillStore = extensionModule.__ensureSolomapSkillStore('/workspace/app', skillStoreRoot);
