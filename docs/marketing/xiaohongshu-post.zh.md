@@ -10,21 +10,21 @@
 
 ### 📌 图 1：黄金封面图 (Visual Project Roadmap Cover)
 展示 SoloMap 核心可视化看板，清晰的任务依赖节点，展现科技美感。
-*   文件路径：[docs/solomap_red_cover.png](./solomap_red_cover.png)
+*   文件路径：[docs/assets/solomap_red_cover.png](../assets/solomap_red_cover.png)
 *   预览：
-    ![SoloMap 可视化路线图看板](./solomap_red_cover.png)
+    ![SoloMap 可视化路线图看板](../assets/solomap_red_cover.png)
 
 ### 📌 图 2：核心功能图 (Local Agent CLI Terminal Integration)
 展示 VS Code 分屏下本地 Agent CLI (`agy`) 执行环节任务时的实时日志。
-*   文件路径：[docs/solomap_red_terminal.png](./solomap_red_terminal.png)
+*   文件路径：[docs/assets/solomap_red_terminal.png](../assets/solomap_red_terminal.png)
 *   预览：
-    ![SoloMap 集成本地 Agent 执行任务](./solomap_red_terminal.png)
+    ![SoloMap 集成本地 Agent 执行任务](../assets/solomap_red_terminal.png)
 
 ### 📌 图 3：架构特色图 (Local-First Git-Friendly Storage)
 展示位于项目根目录的 `.solopreneur/` 数据目录，包含 `roadmap.csv`、`project_journal.db` 等文件，彰显本地优先与 Git 友好特色。
-*   文件路径：[docs/solomap_red_local_first.png](./solomap_red_local_first.png)
+*   文件路径：[docs/assets/solomap_red_local_first.png](../assets/solomap_red_local_first.png)
 *   预览：
-    ![SoloMap 本地优先 Git 友好架构](./solomap_red_local_first.png)
+    ![SoloMap 本地优先 Git 友好架构](../assets/solomap_red_local_first.png)
 
 ---
 

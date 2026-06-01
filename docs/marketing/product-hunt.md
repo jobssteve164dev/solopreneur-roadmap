@@ -7,9 +7,9 @@ This document contains the complete promotional package for launching SoloMap on
 ## 🎨 Graphic Assets
 
 You can use the three high-fidelity screenshots already stored in the `docs/` directory for your Product Hunt gallery:
-1.  **Dashboard Cover**: [docs/solomap_red_cover.png](./solomap_red_cover.png) - Best as the main gallery image showing the full roadmap canvas.
-2.  **Terminal Integration**: [docs/solomap_red_terminal.png](./solomap_red_terminal.png) - Shows the local AI CLI executing steps.
-3.  **Local Storage Directory**: [docs/solomap_red_local_first.png](./solomap_red_local_first.png) - Visualizes the `.solopreneur/` folder inside VS Code.
+1.  **Dashboard Cover**: [docs/assets/solomap_red_cover.png](../assets/solomap_red_cover.png) - Best as the main gallery image showing the full roadmap canvas.
+2.  **Terminal Integration**: [docs/assets/solomap_red_terminal.png](../assets/solomap_red_terminal.png) - Shows the local AI CLI executing steps.
+3.  **Local Storage Directory**: [docs/assets/solomap_red_local_first.png](../assets/solomap_red_local_first.png) - Visualizes the `.solopreneur/` folder inside VS Code.
 
 ---
 

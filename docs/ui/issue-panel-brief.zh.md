@@ -141,4 +141,4 @@ Improve 环节启动时，自动生成：
 
 ---
 
-详细的设计哲学和实现细节见：`docs/issue_panel_design_philosophy.zh.md`
+详细的设计哲学和实现细节见：`docs/ui/issue-panel-design-philosophy.zh.md`

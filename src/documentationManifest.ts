@@ -70,11 +70,12 @@ const lowSignalDocumentNames = new Set([
 
 const preferredDocumentOrder = [
   'README.md',
-  'docs/product-positioning.zh.md',
-  'docs/project-lifecycle-model.zh.md',
-  'docs/data-ownership.zh.md',
-  'docs/release-and-distribution.zh.md',
-  'docs/project-lifecycle-engineering-docs.zh.md',
+  'docs/README.zh.md',
+  'docs/product/business-plan.zh.md',
+  'docs/methodology/methodology.zh.md',
+  'docs/architecture/solo-delivery-loop-boundary.zh.md',
+  'docs/roadmap/next-feature-plan.zh.md',
+  'docs/methodology/project-lifecycle-engineering-docs.zh.md',
   '.solopreneur/README.md'
 ];
 

@@ -35,13 +35,17 @@ SoloMap follows a simple builder loop: find the real problem, build the product 
 
 SoloMap 遵循一套面向独立开发者的行动循环：发现真实问题，打造产品系统，卖给客户，再通过 Build -> Sell -> Learn -> Improve 持续放大。
 
-See [docs/methodology.md](docs/methodology.md) for the full methodology. 中文版本见 [docs/methodology.zh.md](docs/methodology.zh.md)。
+See [docs/methodology/methodology.md](docs/methodology/methodology.md) for the full methodology. 中文版本见 [docs/methodology/methodology.zh.md](docs/methodology/methodology.zh.md)。
 
-完整方法论见 [docs/methodology.zh.md](docs/methodology.zh.md)，英文版本见 [docs/methodology.md](docs/methodology.md)。
+完整方法论见 [docs/methodology/methodology.zh.md](docs/methodology/methodology.zh.md)，英文版本见 [docs/methodology/methodology.md](docs/methodology/methodology.md)。
 
-Next-stage product planning is tracked in [docs/next_feature_plan.zh.md](docs/next_feature_plan.zh.md).
+Next-stage product planning is tracked in [docs/roadmap/next-feature-plan.zh.md](docs/roadmap/next-feature-plan.zh.md).
 
-下一阶段功能规划见 [docs/next_feature_plan.zh.md](docs/next_feature_plan.zh.md)。
+下一阶段功能规划见 [docs/roadmap/next-feature-plan.zh.md](docs/roadmap/next-feature-plan.zh.md)。
+
+Full documentation map: [docs/README.zh.md](docs/README.zh.md).
+
+完整文档入口见 [docs/README.zh.md](docs/README.zh.md)。
 
 ---
 

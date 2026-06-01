@@ -479,5 +479,5 @@ ls .codex-memory/domains/
 ## 相关文档
 
 - [全局工程方法论](./global-methodology.zh.md) - 理论基础
-- [.codex-memory 结构](../.codex-memory/README.md) - 知识库管理
+- `.codex-memory` 结构 - 知识库管理
 - [SoloMap 方法论](./methodology.zh.md) - 单项目循环

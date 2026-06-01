@@ -2130,9 +2130,10 @@ test('documentation manifest indexes project docs and flags noisy docs after run
   const documentation = require(path.join(projectRoot, 'out/documentationManifest.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-doc-manifest-'));
   fs.mkdirSync(path.join(tempRoot, 'docs'), { recursive: true });
+  fs.mkdirSync(path.join(tempRoot, 'docs', 'methodology'), { recursive: true });
   fs.mkdirSync(path.join(tempRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(tempRoot, 'README.md'), '# Product\n\nA useful project.', 'utf8');
-  fs.writeFileSync(path.join(tempRoot, 'docs', 'project-lifecycle-model.zh.md'), [
+  fs.writeFileSync(path.join(tempRoot, 'docs', 'methodology', 'methodology.zh.md'), [
     '# 生命周期模型',
     '',
     '## 这份文档解决什么判断',
@@ -2145,7 +2146,7 @@ test('documentation manifest indexes project docs and flags noisy docs after run
   const manifest = documentation.ensureDocumentationManifest(tempRoot, '2026-06-01T00:00:00.000Z');
   assert.ok(fs.existsSync(path.join(tempRoot, '.solopreneur', 'documentation.json')));
   assert.ok(manifest.documents.some((document) => document.path === 'README.md' && document.role === 'direction'));
-  assert.ok(manifest.documents.some((document) => document.path === 'docs/project-lifecycle-model.zh.md' && document.role === 'methodology'));
+  assert.ok(manifest.documents.some((document) => document.path === 'docs/methodology/methodology.zh.md' && document.role === 'methodology'));
 
   fs.writeFileSync(path.join(tempRoot, 'docs', 'summary.md'), [
     '# Summary',

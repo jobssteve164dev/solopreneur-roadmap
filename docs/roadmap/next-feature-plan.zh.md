@@ -253,7 +253,7 @@ Next Action 卡片应展示：
 
 Build -> Sell -> Learn -> Improve 是 SoloMap 的项目判断模型，不是侧边栏里的常驻大组件。
 
-落地边界见 [四阶段视图组件设计指导](./four-stage-view-guidelines.zh.md)。核心原则是：
+落地边界见 [四阶段视图组件设计指导](../ui/four-stage-view-guidelines.zh.md)。核心原则是：
 
 - 侧边栏只显示四阶段推导出的下一步，不显示四阶段统计。
 - 大图显示完整四象限组件，宽度与路线图环节卡片一致；缺少某阶段时高亮该象限并提供调整路线图按钮。
@@ -318,7 +318,7 @@ Build -> Sell -> Learn -> Improve 是 SoloMap 的项目判断模型，不是侧�
 
 ## P1：Actions / Release 交付闭环
 
-产品边界见 [SoloMap 独立开发者交付闭环产品边界](./solo-delivery-loop-boundary.zh.md)。
+产品边界见 [SoloMap 独立开发者交付闭环产品边界](../architecture/solo-delivery-loop-boundary.zh.md)。
 
 SoloMap 的默认交付路径不是完整团队治理流程，而是：
 
@@ -501,7 +501,7 @@ Issue / Solo -> Roadmap Step -> Agent 执行 -> Actions / 本地验证 -> Releas
 1. **私密 Token 本地存储**：用户的 `TELEGRAM_BOT_TOKEN` 仅保存在本地的加密 `ExtensionContext.globalState` 中，绝不上云。
 2. **Chat ID 单向白名单绑定**：
    - 首次启用时，用户在手机端向 Bot 发送 `/bind` 指令。
-   - 本地插件检测到该未绑定 Chat ID 请求，在 VS Code 弹窗警示：*“检测到 Telegram 账号 [Username](Chat ID: XXXXX) 申请绑定控制权限，是否授权此设备控制您的本地电脑？”*
+   - 本地插件检测到该未绑定 Chat ID 请求，在 VS Code 弹窗警示：*“检测到 Telegram 账号 [Username]（Chat ID: XXXXX） 申请绑定控制权限，是否授权此设备控制您的本地电脑？”*
    - 用户点击确认后，该 Chat ID 被永久写入本地信任白名单。
    - **此后，插件将无情过滤并丢弃任何非白名单 Chat ID 发来的任何指令与消息，做无响应静默处理。**
 

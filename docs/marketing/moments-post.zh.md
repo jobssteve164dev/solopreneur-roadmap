@@ -86,6 +86,6 @@ SoloMap 给你答案：
 ## 💡 如何使用这些材料推进“客户发现”？
 
 1. **搭配访谈表使用**:
-   在朋友圈吸引到感兴趣的开发者后，可以使用 [docs/customer_discovery.zh.md](file:///home/ubuntu/project/solopreneur-roadmap/docs/customer_discovery.zh.md) 中的 **10 个访谈问题** 进行一对一私聊或语音走查。
+   在朋友圈吸引到感兴趣的开发者后，可以使用 [docs/product/customer-discovery.zh.md](../product/customer-discovery.zh.md) 中的 **10 个访谈问题** 进行一对一私聊或语音走查。
 2. **记录用户反馈**:
    将访谈得到的真实卡点和对 SoloMap 的反应，记录到 `customer_discovery.zh.md` 底部的**反馈记录表**中，以便后续通过 SoloMap 的 `調整路线图 / Revise Roadmap` 功能对产品方向进行迭代。

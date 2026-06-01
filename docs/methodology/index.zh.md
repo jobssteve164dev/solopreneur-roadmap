@@ -26,7 +26,7 @@
   - 常见情况与处理方式
   - 关键指标与目标
 
-- **[SoloMap 全局工程体系插件化蓝图](./global-system-plugin-blueprint.zh.md)** ⭐ 插件落地参考
+- **[SoloMap 全局工程体系插件化蓝图](../architecture/global-system-plugin-blueprint.zh.md)** ⭐ 插件落地参考
   - 全局方法论如何进入 SoloMap UI
   - `.solomap-global` 后台事实层设计
   - Roadmap / Solo / Issue / 学习审核的融合方式
@@ -261,9 +261,9 @@ A：取决于你有多少重复工作。根据分析，独立开发者的重复�
 ## 相关链接
 
 - [SoloMap 方法论（既有）](./methodology.zh.md) - 单项目循环的定义
-- [SoloMap 业务规划](./business_plan.zh.md) - 产品方向
-- [.codex-memory 系统](../.codex-memory/README.md) - 知识管理基础设施
-- [SoloMap 客户发现](./customer_discovery.zh.md) - 用户需求
+- [SoloMap 业务规划](../product/business-plan.zh.md) - 产品方向
+- `.codex-memory` 系统 - 知识管理基础设施
+- [SoloMap 客户发现](../product/customer-discovery.zh.md) - 用户需求
 
 ---
 

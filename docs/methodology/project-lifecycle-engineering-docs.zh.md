@@ -53,8 +53,8 @@
 适合文档：
 
 - `docs/project-lifecycle-model.zh.md`
-- `docs/project-type-templates.zh.md`
-- `docs/global-methodology.zh.md`
+- `docs/methodology/project-type-templates.zh.md`
+- `docs/methodology/global-methodology.zh.md`
 
 不适合写入：
 
@@ -68,7 +68,7 @@
 
 适合文档：
 
-- `docs/cross-agent-harness.zh.md`
+- `docs/architecture/cross-agent-harness.zh.md`
 - `docs/data-ownership.zh.md`
 - `docs/ui/<surface>-guidelines.zh.md`
 
@@ -150,7 +150,7 @@ docs/decisions/YYYY-MM-DD-short-title.zh.md
 应产出或更新：
 
 - `docs/project-lifecycle-model.zh.md`
-- `docs/project-type-templates.zh.md`
+- `docs/methodology/project-type-templates.zh.md`
 
 ### 关键 UI 或治理面形成
 
@@ -402,13 +402,18 @@ Harness 在任务结束后可以扫描新增或修改的文档，并标记风险
 SoloMap 插件自身应逐步收敛到以下解释性文档体系：
 
 ```text
-docs/product-positioning.zh.md
-docs/project-lifecycle-model.zh.md
-docs/cross-agent-harness.zh.md
-docs/project-lifecycle-engineering-docs.zh.md
-docs/data-ownership.zh.md
-docs/release-and-distribution.zh.md
+docs/README.zh.md
+docs/product/business-plan.zh.md
+docs/product/customer-discovery.zh.md
+docs/methodology/methodology.zh.md
+docs/methodology/project-type-templates.zh.md
+docs/architecture/cross-agent-harness.zh.md
+docs/methodology/project-lifecycle-engineering-docs.zh.md
+docs/architecture/solo-delivery-loop-boundary.zh.md
+docs/roadmap/next-feature-plan.zh.md
 docs/ui/*.zh.md
+docs/marketing/*.zh.md
+docs/assets/*
 docs/decisions/*.zh.md
 ```
 
@@ -416,9 +421,9 @@ docs/decisions/*.zh.md
 
 ## 相关入口
 
-- `docs/cross-agent-harness.zh.md`
-- `docs/today-plan-sidebar-guidelines.zh.md`
-- `docs/global-execution-guide.zh.md`
-- `docs/global-methodology.zh.md`
+- `docs/architecture/cross-agent-harness.zh.md`
+- `docs/ui/today-plan-sidebar-guidelines.zh.md`
+- `docs/methodology/global-execution-guide.zh.md`
+- `docs/methodology/global-methodology.zh.md`
 - `src/extension.ts`
 - `src/sidebarProvider.ts`

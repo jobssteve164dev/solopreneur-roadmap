@@ -573,5 +573,5 @@ SoloMap 的四阶段循环（问题发现 → 产品打造 → 市场触达 → 
 ## 相关文档
 
 - [SoloMap 方法论](./methodology.zh.md) - 单项目的四阶段循环
-- [业务规划](./business_plan.zh.md) - 市场和商业目标
-- [.codex-memory 系统](../.codex-memory/README.md) - 跨项目知识管理
+- [业务规划](../product/business-plan.zh.md) - 市场和商业目标
+- `.codex-memory` 系统 - 跨项目知识管理
