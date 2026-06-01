@@ -71,6 +71,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         };
       }
       if (id.startsWith('./')) {
+        if (id === './documentationManifest') {
+          return require(path.join(projectRoot, 'out/documentationManifest.js'));
+        }
         return {};
       }
       return require(id);
@@ -1877,6 +1880,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /Keep answers brief/);
   assert.match(soloPrompt, /SoloMap 默认系统提示词/);
   assert.match(soloPrompt, /\/workspace\/\.solomap-global\/memory/);
+  assert.match(soloPrompt, /SoloMap 项目文档 Harness/);
+  assert.match(soloPrompt, /documentation\.json/);
+  assert.match(soloPrompt, /不要新建 `docs\/summary\.md`/);
   assert.doesNotMatch(soloPrompt, /本环节完成标准/);
 
   const soloAttachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-attached-files-'));
@@ -1891,6 +1897,11 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(attachedSoloPrompt, /用户为本次 Solo 对话选择了补充文件/);
   assert.match(attachedSoloPrompt, /docs\/brief\.md/);
   assert.doesNotMatch(attachedSoloPrompt, /\.\.\/outside\.md/);
+
+  const manifestPath = path.join(soloAttachmentRoot, '.solopreneur', 'documentation.json');
+  assert.ok(fs.existsSync(manifestPath));
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  assert.ok(Array.isArray(manifest.documents));
 
   const criteriaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-criteria-'));
   const criteriaNodes = extensionModule.__ensureCompletionCriteriaForNodes(criteriaRoot, [{
@@ -2113,6 +2124,56 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(methodologyInstructions, /底层判断模型/);
   assert.match(methodologyInstructions, /不要为了满足模板/);
   assert.match(methodologyInstructions, /完成标准判断/);
+});
+
+test('documentation manifest indexes project docs and flags noisy docs after runs', () => {
+  const documentation = require(path.join(projectRoot, 'out/documentationManifest.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-doc-manifest-'));
+  fs.mkdirSync(path.join(tempRoot, 'docs'), { recursive: true });
+  fs.mkdirSync(path.join(tempRoot, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(tempRoot, 'README.md'), '# Product\n\nA useful project.', 'utf8');
+  fs.writeFileSync(path.join(tempRoot, 'docs', 'project-lifecycle-model.zh.md'), [
+    '# 生命周期模型',
+    '',
+    '## 这份文档解决什么判断',
+    '说明项目如何推进。',
+    '',
+    '## 适用范围',
+    '项目路线图。'
+  ].join('\n'), 'utf8');
+
+  const manifest = documentation.ensureDocumentationManifest(tempRoot, '2026-06-01T00:00:00.000Z');
+  assert.ok(fs.existsSync(path.join(tempRoot, '.solopreneur', 'documentation.json')));
+  assert.ok(manifest.documents.some((document) => document.path === 'README.md' && document.role === 'direction'));
+  assert.ok(manifest.documents.some((document) => document.path === 'docs/project-lifecycle-model.zh.md' && document.role === 'methodology'));
+
+  fs.writeFileSync(path.join(tempRoot, 'docs', 'summary.md'), [
+    '# Summary',
+    '',
+    '$ npm test',
+    'Workspace changes:',
+    'M src/app.ts',
+    'Touched project files:',
+    'M docs/summary.md',
+    'Agent output tail:',
+    'Run duration ms: 1200'
+  ].join('\n'), 'utf8');
+
+  const audit = documentation.auditDocumentationAfterRun(tempRoot, {
+    nodeId: '2',
+    runKind: 'step',
+    status: 'Completed',
+    changedFilesSummary: 'A docs/summary.md\nM src/app.ts\n',
+    touchedFilesSummary: 'A docs/summary.md\n',
+    finishedAt: '2026-06-01T01:00:00.000Z'
+  });
+
+  assert.match(audit.summary, /建议确认/);
+  assert.ok(audit.pendingReview.some((item) => /低语义/.test(item.reason)));
+  assert.ok(audit.pendingReview.some((item) => /prompt|终端输出|执行流水/.test(item.reason)));
+  const written = JSON.parse(fs.readFileSync(path.join(tempRoot, '.solopreneur', 'documentation.json'), 'utf8'));
+  assert.equal(written.lastAudit.action, 'needs_review');
+  assert.ok(written.pendingReview.length >= 2);
 });
 
 test('failed conversations render retry action in roadmap webview', () => {

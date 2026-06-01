@@ -8,6 +8,7 @@ import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { getAgentImpactStatus } from './agentImpact';
+import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
@@ -410,6 +411,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '- `roadmap.csv`：路线图主数据，包括环节、依赖、状态和 Agent prompt。',
     '- `step-memory/`：每个路线图环节的 JSON 完成标准和交接总结。下一轮 Agent 对话会读取这里的结构化上下文。',
     '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会把这些会话 ID 作为可选参考交给 Agent，而不是强制续接。',
+    '- `documentation.json`：项目解释性文档的索引与审计状态。它由 SoloMap 维护，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
     '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
@@ -881,6 +883,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   ensureSolopreneurReadme(solopreneurDir);
   ensureRoadmapMethodologyInstructions(solopreneurDir);
   ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
+  ensureDocumentationManifest(projectRoot);
 
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
@@ -3194,6 +3197,7 @@ function buildAgentConversationPrompt(
     ].join('\n')
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(
     workspaceRoot,
     globalDataPath,
@@ -3229,6 +3233,8 @@ function buildAgentConversationPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    '',
+    solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
@@ -3271,6 +3277,7 @@ function buildRoadmapRevisionPrompt(
     ].join('\n')
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
@@ -3286,6 +3293,8 @@ function buildRoadmapRevisionPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    '',
+    solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
@@ -3328,6 +3337,7 @@ function buildSoloConversationPrompt(
     ].join('\n')
     : '';
   const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
@@ -3342,6 +3352,8 @@ function buildSoloConversationPrompt(
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
+    '',
+    solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
@@ -4475,6 +4487,17 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         finishedAt
       );
     }
+    const documentationAudit = workspaceRoot
+      ? auditDocumentationAfterRun(workspaceRoot, {
+        nodeId,
+        runKind,
+        status: nextStatus,
+        changedFilesSummary,
+        touchedFilesSummary,
+        outputTail,
+        finishedAt
+      })
+      : null;
     const executionSummary = [
       userMessage ? `User supplement:\n${userMessage}` : '',
       sessionMode ? `Native session mode: ${sessionMode}` : '',
@@ -4488,6 +4511,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       failureReason ? `Failure reason:\n${failureReason}` : '',
       completionReason ? `Completion decision: ${completionReason}` : '',
       stepHandoffSummary ? `Step handoff summary updated: ${getStepMemoryFilePath(workspaceRoot, nodeId)}` : '',
+      documentationAudit ? `Documentation harness: ${documentationAudit.summary}` : '',
+      documentationAudit && documentationAudit.pendingReview.length > 0
+        ? `Documentation review needed:\n${documentationAudit.pendingReview.map((item) => `- ${item.path}: ${item.reason}`).join('\n')}`
+        : '',
       `Workspace changes:`,
       changedFilesSummary,
       `Touched project files:`,

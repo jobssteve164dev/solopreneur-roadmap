@@ -6,6 +6,7 @@ import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { getAgentImpactStatus } from './agentImpact';
+import { summarizeDocumentationForReview } from './documentationManifest';
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -47,6 +48,8 @@ interface ProjectPortfolioSummary {
   stageGap: string;
   delivery: ProjectDeliverySummary;
   deliverySignal: string;
+  documentationDocumentCount: number;
+  documentationPendingReview: number;
 }
 
 interface GlobalEngineeringSnapshot {
@@ -1445,6 +1448,9 @@ function getDailyReviewMode(
   if (Number(globalStore.learningCandidateCount || 0) > 0 || portfolio.some((project) => Number(project.reusableSignals || 0) > 0)) {
     return 'daily_learning';
   }
+  if (portfolio.some((project) => Number(project.documentationPendingReview || 0) > 0)) {
+    return 'daily_learning';
+  }
   return 'daily_check';
 }
 
@@ -1990,6 +1996,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject, options: { in
   const globalPriority = project.priority || inferredPriority;
   const deliverySignal = inferDeliverySignal(baseSummary.delivery);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
+  const documentationSummary = summarizeDocumentationForReview(project.path);
   return {
     ...baseSummary,
     globalPriority,
@@ -2002,7 +2009,9 @@ function buildProjectPortfolioSummary(project: SolopreneurProject, options: { in
     issuePressure: inferIssuePressure(baseSummary.issues),
     stageGap: stageSummary.gap,
     delivery: baseSummary.delivery,
-    deliverySignal
+    deliverySignal,
+    documentationDocumentCount: documentationSummary.documentCount,
+    documentationPendingReview: documentationSummary.pendingReviewCount
   };
 }
 
@@ -2195,7 +2204,9 @@ function buildDailyReviewPrompt(options: {
       reusableSignals: project.reusableSignals,
       stageGap: project.stageGap,
       issuePressure: project.issuePressure,
-      deliverySignal: project.deliverySignal
+      deliverySignal: project.deliverySignal,
+      documentationDocumentCount: project.documentationDocumentCount || 0,
+      documentationPendingReview: project.documentationPendingReview || 0
     }))
   };
   return [
@@ -2212,6 +2223,7 @@ function buildDailyReviewPrompt(options: {
     '- 最多输出 5 条 todos，最多 3 条 needsConfirmation。',
     '- 文案用用户行动语言，避免工程自描述。',
     '- needsConfirmation 只放确实需要用户确认的学习、优先级或阻断判断；不要把后台归档动作包装成用户任务。',
+    '- 如果项目有文档待确认，只在周五、月末、日常学习或异常相关时放入 needsConfirmation；普通推进日不要让文档整理压过主行动。',
     '- action 只能使用 open_project、continue_step、adjust_roadmap、confirm_learning、ignore_suggestion、open_issue。',
     '',
     '## 本次情景化审视逻辑',
@@ -2229,6 +2241,7 @@ function buildDailyReviewPrompt(options: {
     '1. 异常处理：发布检查、失败环节、P0 Issue、跨项目阻断。',
     '2. 当前推进：本周 P1、Running/In Progress、可开始 Pending。',
     '3. 收尾复利：完成验证、学习候选、可复用经验、路线图调整。',
+    '4. 文档卫生：只处理 documentationPendingReview 指出的正式文档风险，不新增文档后台或独立任务系统。',
     '',
     '## 当前本地事实快照',
     '```json',

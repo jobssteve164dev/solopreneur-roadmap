@@ -281,6 +281,60 @@ Agent 如需新增或修改解释性文档，必须在最终输出中说明：
 - 解决了什么长期判断。
 - 为什么不是 step-memory、learning candidate 或临时输出。
 
+## `documentation.json` Manifest
+
+SoloMap harness 使用项目内 `.solopreneur/documentation.json` 作为文档体系 manifest。它不是文档正文，也不是给用户手写维护的配置，而是插件维护的文档路由账本和审计状态。
+
+它承担三件事：
+
+- 记录当前项目有哪些正式解释性文档、各自承担什么职责。
+- 让 Agent 启动前知道应该优先更新哪份既有文档，而不是靠猜测新建文件。
+- 让运行结束后的文档审计有结构化落点，例如低语义文件名、日志污染或缺少长期判断结构。
+
+建议结构：
+
+```json
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-06-01T00:00:00.000Z",
+  "documents": [
+    {
+      "path": "README.md",
+      "role": "direction",
+      "status": "active",
+      "solves": "说明项目是什么、服务谁、成功标准和对外表达。",
+      "lastReviewedAt": "",
+      "lastTouchedAt": "2026-06-01T00:00:00.000Z"
+    }
+  ],
+  "pendingReview": [
+    {
+      "path": "docs/summary.md",
+      "reason": "低语义文件名，疑似把本轮总结或过程记录放进长期项目文档。",
+      "severity": "warning",
+      "detectedAt": "2026-06-01T00:00:00.000Z",
+      "source": "documentation_audit"
+    }
+  ],
+  "lastAudit": {
+    "auditedAt": "2026-06-01T00:00:00.000Z",
+    "runKind": "step",
+    "nodeId": "2",
+    "status": "Completed",
+    "action": "needs_review",
+    "touchedDocuments": ["docs/summary.md"],
+    "pendingReviewCount": 1
+  }
+}
+```
+
+边界：
+
+- `documentation.json` 只保存索引、职责和审计状态，不保存文档正文。
+- Agent 不应手动编辑它；插件在项目刷新、Agent prompt 构建和运行结束时维护。
+- 它不能阻断主任务完成；风险只进入运行结果提示或 Agent 审视的 `needsConfirmation`。
+- 它不替代 `.solopreneur/step-memory/`、`.solomap-global/learning/candidates/` 或 `.solomap-global/memory/`。
+
 ## 文档路由表
 
 | 情况 | 正确去处 | 不应去处 |
