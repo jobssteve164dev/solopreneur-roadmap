@@ -74,6 +74,36 @@ interface GlobalEngineeringSnapshot {
   learningCandidateCount: number;
 }
 
+interface DailyReviewTodo {
+  title: string;
+  reason: string;
+  projectPath?: string;
+  nodeId?: string;
+  action?: string;
+}
+
+interface DailyReviewArtifact {
+  schemaVersion: number;
+  date: string;
+  generatedAt: string;
+  finishedAt?: string;
+  rhythm: string;
+  source: string;
+  status: 'idle' | 'running' | 'completed' | 'failed';
+  summary: string;
+  todos: DailyReviewTodo[];
+  needsConfirmation: DailyReviewTodo[];
+  inputSnapshot: {
+    projectCount: number;
+    learningCandidateCount: number;
+    blockedDependencyCount: number;
+  };
+  resultPath?: string;
+  promptPath?: string;
+  outputLog?: string;
+  error?: string;
+}
+
 interface ProjectIssueItem {
   number: number;
   title: string;
@@ -354,6 +384,31 @@ function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
   }
 
   return candidates[0] || 'agy';
+}
+
+function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedPromptFile = shellQuote(promptFilePath);
+  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
+  const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
+
+  if (executableName === 'codex' || executableName === 'codex-cli' || executableName === 'cursor' || executableName === 'cursor-cli') {
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPromptFileInstruction})`;
+  }
+  return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
 function createEmptyIssueSummary(message = ''): ProjectIssueSummary {
@@ -1330,6 +1385,119 @@ function normalizeGlobalDataPath(rawPath: string, projects: SolopreneurProject[]
   return path.join(path.dirname(firstProjectPath), '.solomap-global');
 }
 
+function getLocalDateKey(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function daysUntilMonthEnd(date: Date): number {
+  const end = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+  return end.getDate() - date.getDate();
+}
+
+function getDailyWorkRhythm(date = new Date()): string {
+  const day = date.getDay();
+  if (daysUntilMonthEnd(date) <= 2) return 'monthEnd';
+  if (day === 1) return 'monday';
+  if (day === 5) return 'friday';
+  return 'daily';
+}
+
+function getDailyReviewDir(globalRoot: string): string {
+  return path.join(globalRoot, 'daily');
+}
+
+function getDailyReviewPath(globalRoot: string, dateKey = getLocalDateKey()): string {
+  return path.join(getDailyReviewDir(globalRoot), `${dateKey}.json`);
+}
+
+function normalizeDailyReviewTodo(value: any): DailyReviewTodo {
+  return {
+    title: String(value?.title || '').trim(),
+    reason: String(value?.reason || '').trim(),
+    projectPath: String(value?.projectPath || '').trim(),
+    nodeId: String(value?.nodeId || '').trim(),
+    action: String(value?.action || '').trim()
+  };
+}
+
+function normalizeDailyReviewArtifact(value: any, resultPath = ''): DailyReviewArtifact | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const todos = Array.isArray(value.todos) ? value.todos.map(normalizeDailyReviewTodo).filter((item: DailyReviewTodo) => item.title) : [];
+  const needsConfirmation = Array.isArray(value.needsConfirmation)
+    ? value.needsConfirmation.map(normalizeDailyReviewTodo).filter((item: DailyReviewTodo) => item.title)
+    : [];
+  const status = ['running', 'completed', 'failed'].includes(String(value.status || '')) ? String(value.status) as DailyReviewArtifact['status'] : 'completed';
+  return {
+    schemaVersion: Number(value.schemaVersion || 1),
+    date: String(value.date || getLocalDateKey()),
+    generatedAt: String(value.generatedAt || ''),
+    finishedAt: String(value.finishedAt || ''),
+    rhythm: String(value.rhythm || 'daily'),
+    source: String(value.source || 'agent_review'),
+    status,
+    summary: String(value.summary || ''),
+    todos,
+    needsConfirmation,
+    inputSnapshot: {
+      projectCount: Number(value.inputSnapshot?.projectCount || 0),
+      learningCandidateCount: Number(value.inputSnapshot?.learningCandidateCount || 0),
+      blockedDependencyCount: Number(value.inputSnapshot?.blockedDependencyCount || 0)
+    },
+    resultPath: String(value.resultPath || resultPath),
+    promptPath: String(value.promptPath || ''),
+    outputLog: String(value.outputLog || ''),
+    error: String(value.error || '')
+  };
+}
+
+function readTodayReview(globalDataPath: string, projects: SolopreneurProject[]): DailyReviewArtifact | null {
+  const globalRoot = normalizeGlobalDataPath(globalDataPath, projects);
+  const resultPath = getDailyReviewPath(globalRoot);
+  if (!fs.existsSync(resultPath)) {
+    return null;
+  }
+  try {
+    return normalizeDailyReviewArtifact(JSON.parse(fs.readFileSync(resultPath, 'utf8')), resultPath);
+  } catch {
+    return {
+      schemaVersion: 1,
+      date: getLocalDateKey(),
+      generatedAt: '',
+      rhythm: getDailyWorkRhythm(),
+      source: 'agent_review',
+      status: 'failed',
+      summary: '',
+      todos: [],
+      needsConfirmation: [],
+      inputSnapshot: { projectCount: projects.length, learningCandidateCount: 0, blockedDependencyCount: 0 },
+      resultPath,
+      error: 'Today review cache is not valid JSON.'
+    };
+  }
+}
+
+function commonParent(paths: string[]): string {
+  const normalized = paths.filter(Boolean).map((item) => path.resolve(item));
+  if (!normalized.length) return process.cwd();
+  const splitPaths = normalized.map((item) => item.split(path.sep).filter(Boolean));
+  const first = splitPaths[0];
+  const common: string[] = [];
+  for (let index = 0; index < first.length; index += 1) {
+    if (splitPaths.every((parts) => parts[index] === first[index])) {
+      common.push(first[index]);
+    } else {
+      break;
+    }
+  }
+  const prefix = path.isAbsolute(normalized[0]) ? path.sep : '';
+  return common.length ? path.join(prefix, ...common) : path.parse(normalized[0]).root || process.cwd();
+}
+
 function writeFileIfMissing(filePath: string, content: string): void {
   if (!fs.existsSync(filePath)) {
     fs.writeFileSync(filePath, content, 'utf8');
@@ -1880,6 +2048,203 @@ function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfo
   return { dataPath: normalizedPath, portfolio: records, dependencies, learningCandidateCount };
 }
 
+function buildDailyReviewPrompt(options: {
+  resultPath: string;
+  dateKey: string;
+  rhythm: string;
+  portfolio: ProjectPortfolioSummary[];
+  globalStore: GlobalEngineeringSnapshot;
+}): string {
+  const snapshot = {
+    date: options.dateKey,
+    rhythm: options.rhythm,
+    learningCandidateCount: options.globalStore.learningCandidateCount || 0,
+    blockedDependencyCount: (options.globalStore.dependencies || []).length,
+    projects: options.portfolio.map((project) => ({
+      name: project.name,
+      path: project.path,
+      type: project.projectType,
+      priority: project.globalPriority,
+      status: project.overallStatus,
+      progressPercent: project.progressPercent,
+      blocker: project.blocker,
+      nextAction: project.globalNextAction || project.recommendedNodeTitle,
+      recommendedNodeId: project.recommendedNodeId,
+      recommendedNodeTitle: project.recommendedNodeTitle,
+      recommendedStatus: project.recommendedStatus,
+      failedNodes: project.failedNodes,
+      runningNodes: project.runningNodes,
+      inProgressNodes: project.inProgressNodes,
+      pendingNodes: project.pendingNodes,
+      reusableSignals: project.reusableSignals,
+      stageGap: project.stageGap,
+      issuePressure: project.issuePressure,
+      deliverySignal: project.deliverySignal
+    }))
+  };
+  return [
+    '# SoloMap 今日审视',
+    '',
+    '你要按 SoloMap 全局工程执行指南做一次轻量审视，只输出一个简单、可执行的今日 Todo 清单。',
+    '',
+    '## 必须遵守',
+    '- 用户目标：少判断，直接知道今天该先做什么。',
+    '- 不要改路线图、不要改优先级、不要创建新任务系统、不要写除结果 JSON 以外的文件。',
+    '- 不要把 `.solomap-global`、CSV 字段、评分公式、内部目录结构暴露给用户。',
+    '- Todo 必须回到已有项目、路线图环节、Issue 或路线图调整入口；如果拿不准，用项目级 action。',
+    '- 最多输出 5 条 todos，最多 3 条 needsConfirmation。',
+    '- 文案用用户行动语言，避免工程自描述。',
+    '',
+    '## 执行指南步骤摘要',
+    '- 每日自查：今天要做什么；是否切换项目；切换是否有更高优先级；当前 blocker 是否能用已有经验解决。',
+    '- 周一规划：先检查 P0；确认本周 P1；列出 P2；扫描外部变化和跨项目模式。',
+    '- 周五审核：检查学习候选；判断哪些经验值得复用；预览下周 P1 项目；提前识别 blocker。',
+    '- 月末审视：回顾执行效率、优先级准确度、知识沉淀质量和跨项目协调。',
+    '- 新项目阶段：确认项目类型，找相似项目，提取起点模板，再启动路线图。',
+    '- 环节执行阶段：检查完成标准、相似经验、Issue/交付信号、阻断和最窄验证。',
+    '- 环节完成后：交接总结、学习候选、复用机会和是否需要调整路线图。',
+    '',
+    '## 当前本地事实快照',
+    '```json',
+    JSON.stringify(snapshot, null, 2),
+    '```',
+    '',
+    '## 写入结果',
+    `请把结果写入这个 JSON 文件：${options.resultPath}`,
+    '',
+    '结果必须是合法 JSON，结构如下：',
+    '```json',
+    JSON.stringify({
+      schemaVersion: 1,
+      date: options.dateKey,
+      generatedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      rhythm: options.rhythm,
+      source: 'agent_review',
+      status: 'completed',
+      summary: '一句话说明今天的安排判断。',
+      todos: [
+        {
+          title: '行动标题',
+          reason: '为什么今天做它',
+          projectPath: '/absolute/project/path',
+          nodeId: 'optional-roadmap-node-id',
+          action: 'open_project'
+        }
+      ],
+      needsConfirmation: [
+        {
+          title: '需要用户确认的选择',
+          reason: '为什么需要确认',
+          projectPath: '/absolute/project/path',
+          action: 'confirm_priority'
+        }
+      ],
+      inputSnapshot: {
+        projectCount: snapshot.projects.length,
+        learningCandidateCount: snapshot.learningCandidateCount,
+        blockedDependencyCount: snapshot.blockedDependencyCount
+      }
+    }, null, 2),
+    '```',
+    '',
+    '完成后不要再解释，只确保文件已经写好。'
+  ].join('\n');
+}
+
+function startDailyReviewAgent(settings: SolopreneurSettings, projects: SolopreneurProject[]): DailyReviewArtifact {
+  const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true });
+  const globalStore = ensureGlobalEngineeringStore(settings.globalDataPath, portfolio);
+  const dateKey = getLocalDateKey();
+  const rhythm = getDailyWorkRhythm();
+  const dailyDir = getDailyReviewDir(globalStore.dataPath);
+  const runDir = path.join(dailyDir, 'runs', `${dateKey}-${Date.now()}`);
+  const resultPath = getDailyReviewPath(globalStore.dataPath, dateKey);
+  const promptPath = path.join(runDir, 'prompt.txt');
+  const outputLog = path.join(runDir, 'output.log');
+  const runScriptPath = path.join(runDir, 'run.sh');
+  fs.mkdirSync(runDir, { recursive: true });
+
+  const artifact: DailyReviewArtifact = {
+    schemaVersion: 1,
+    date: dateKey,
+    generatedAt: new Date().toISOString(),
+    rhythm,
+    source: 'agent_review',
+    status: 'running',
+    summary: '',
+    todos: [],
+    needsConfirmation: [],
+    inputSnapshot: {
+      projectCount: projects.length,
+      learningCandidateCount: globalStore.learningCandidateCount || 0,
+      blockedDependencyCount: (globalStore.dependencies || []).length
+    },
+    resultPath,
+    promptPath,
+    outputLog
+  };
+  fs.writeFileSync(resultPath, JSON.stringify(artifact, null, 2), 'utf8');
+
+  const prompt = buildDailyReviewPrompt({ resultPath, dateKey, rhythm, portfolio, globalStore });
+  fs.writeFileSync(promptPath, prompt, 'utf8');
+
+  const requestedAgentCli = (settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  if (!commandExists(agentCli)) {
+    artifact.status = 'failed';
+    artifact.error = `Agent CLI not found. Tried: ${getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ')}.`;
+    artifact.finishedAt = new Date().toISOString();
+    fs.writeFileSync(resultPath, JSON.stringify(artifact, null, 2), 'utf8');
+    return artifact;
+  }
+
+  const workspaceRoot = commonParent([
+    path.dirname(globalStore.dataPath),
+    ...projects.map((project) => project.path)
+  ]);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptPath, workspaceRoot);
+  const finalizer = [
+    'const fs = require("fs");',
+    `const resultPath = ${JSON.stringify(resultPath)};`,
+    `const outputLog = ${JSON.stringify(outputLog)};`,
+    'const code = Number(process.env.SOLOMAP_AGENT_STATUS || 0);',
+    'let data = {};',
+    'try { data = JSON.parse(fs.readFileSync(resultPath, "utf8")); } catch {}',
+    'if (data.status !== "completed" && data.status !== "failed") {',
+    '  data = Object.assign({}, data, {',
+    '    schemaVersion: 1,',
+    `    date: ${JSON.stringify(dateKey)},`,
+    `    rhythm: ${JSON.stringify(rhythm)},`,
+    '    source: "agent_review",',
+    '    status: "failed",',
+    '    summary: "",',
+    '    todos: Array.isArray(data.todos) ? data.todos : [],',
+    '    needsConfirmation: Array.isArray(data.needsConfirmation) ? data.needsConfirmation : [],',
+    '    finishedAt: new Date().toISOString(),',
+    '    outputLog,',
+    '    error: code === 0 ? "Agent finished but did not write the review JSON." : "Agent review command failed. Open the run log for details."',
+    '  });',
+    '  fs.writeFileSync(resultPath, JSON.stringify(data, null, 2), "utf8");',
+    '}'
+  ].join('\n');
+  const script = [
+    '#!/usr/bin/env bash',
+    'set +e',
+    `cd ${shellQuote(workspaceRoot)}`,
+    `${agentCommand} 2>&1 | tee ${shellQuote(outputLog)}`,
+    'status=${PIPESTATUS[0]}',
+    `SOLOMAP_AGENT_STATUS=$status node -e ${shellQuote(finalizer)}`,
+    'exit $status'
+  ].join('\n');
+  fs.writeFileSync(runScriptPath, script, 'utf8');
+
+  const terminal = vscode.window.createTerminal({ name: `SoloMap Agent Review · ${dateKey}`, cwd: workspaceRoot });
+  terminal.show(true);
+  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  return artifact;
+}
+
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'solopreneur.sidebar';
   private _view?: vscode.WebviewView;
@@ -2017,6 +2382,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               status: getAgentImpactStatus(this._getProjects().projects)
             });
             break;
+          case 'getDailyReview':
+            this.sendDailyReview();
+            break;
+          case 'runDailyReview': {
+            const review = startDailyReviewAgent(this._getSettings(), this._getProjects().projects);
+            this._view?.webview.postMessage({ command: 'dailyReviewLoaded', review });
+            break;
+          }
           case 'openDependencyAction':
             this.openDependencyAction(data.action || '', data.cliPath || this._getSettings().cliPath || 'agy');
             break;
@@ -2163,6 +2536,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         }
       });
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
+      this.sendDailyReview();
       this.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
       this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
       this.scheduleDeliverySummaryLoads(projectState.projects, projectState.selectedProjectPath);
@@ -2306,6 +2680,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send solo conversation history:', error);
+    }
+  }
+
+  public sendDailyReview() {
+    try {
+      if (!this._view) {
+        return;
+      }
+      const projectState = this._getProjects();
+      this._view.webview.postMessage({
+        command: 'dailyReviewLoaded',
+        review: readTodayReview(this._getSettings().globalDataPath, projectState.projects)
+      });
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send daily review:', error);
     }
   }
 
@@ -2876,6 +3265,31 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       white-space: nowrap;
     }
 
+    .global-review-btn {
+      flex-shrink: 0;
+      border: 1px solid rgba(0, 229, 255, 0.22);
+      border-radius: 6px;
+      background: rgba(0, 229, 255, 0.08);
+      color: #d8fbff;
+      padding: 4px 7px;
+      font-size: 9px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .global-review-btn:hover {
+      border-color: rgba(0, 229, 255, 0.42);
+      background: rgba(0, 229, 255, 0.14);
+    }
+
+    .global-review-btn[disabled] {
+      cursor: wait;
+      opacity: 0.72;
+    }
+
     .global-focus-list {
       display: flex;
       flex-direction: column;
@@ -2972,6 +3386,54 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: flex;
       flex-wrap: wrap;
       gap: 5px;
+    }
+
+    .daily-review-panel {
+      margin-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .daily-review-summary {
+      font-size: 9.5px;
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+
+    .daily-review-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .daily-review-item {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.035);
+      padding: 6px;
+      cursor: pointer;
+    }
+
+    .daily-review-item:hover {
+      border-color: rgba(0, 229, 255, 0.25);
+    }
+
+    .daily-review-title {
+      font-size: 10px;
+      font-weight: 800;
+      color: var(--text-main);
+      overflow-wrap: anywhere;
+    }
+
+    .daily-review-reason {
+      margin-top: 2px;
+      font-size: 9px;
+      line-height: 1.35;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
     }
 
     .global-chip {
@@ -4288,6 +4750,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let issueDraftCategory = 'bug';
     let issueDraftPriority = '';
     let issueActionMessage = '';
+    let currentDailyReview = null;
+    let dailyReviewPollTimer = null;
     const projectConversationModes = {};
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
@@ -4319,6 +4783,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         todayRhythmMonday: '周一确认主线',
         todayRhythmFriday: '周五收尾复盘',
         todayRhythmMonthEnd: '月末回顾',
+        dailyReviewButton: 'Agent 审视',
+        dailyReviewRunning: 'Agent 正在捋今天的安排...',
+        dailyReviewFailed: '审视失败，请打开运行日志查看原因。',
+        dailyReviewEmpty: '还没有 Agent 审视结果。',
+        dailyReviewConfirm: '需要确认',
         onboardingKicker: '新手开始',
         onboardingTitle: '先把一个项目交给 SoloMap',
         onboardingCopy: '选择一个本地项目文件夹。SoloMap 会带你确认项目类型，然后生成第一张可推进路线图。',
@@ -4477,6 +4946,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         todayRhythmMonday: 'Monday focus',
         todayRhythmFriday: 'Friday closure',
         todayRhythmMonthEnd: 'Month-end review',
+        dailyReviewButton: 'Agent Review',
+        dailyReviewRunning: 'Agent is reviewing today’s plan...',
+        dailyReviewFailed: 'Review failed. Open the run log for details.',
+        dailyReviewEmpty: 'No Agent review yet.',
+        dailyReviewConfirm: 'Needs confirmation',
         onboardingKicker: 'Get started',
         onboardingTitle: 'Give SoloMap one local project first',
         onboardingCopy: 'Choose a local project folder. SoloMap will ask for its type, then help create the first actionable roadmap.',
@@ -4762,6 +5236,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
     vscode.postMessage({ command: 'getProjects' });
+    vscode.postMessage({ command: 'getDailyReview' });
 
     // Handle messages
     window.addEventListener('message', event => {
@@ -4838,6 +5313,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'agentImpactLoaded':
           renderAgentImpact(message.status || {});
+          break;
+
+        case 'dailyReviewLoaded':
+          currentDailyReview = message.review || null;
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'skillInstallResult':
@@ -5819,6 +6299,67 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       ).slice(0, 3);
     }
 
+    function startDailyReviewPolling() {
+      if (dailyReviewPollTimer) {
+        clearTimeout(dailyReviewPollTimer);
+        dailyReviewPollTimer = null;
+      }
+      if (!currentDailyReview || currentDailyReview.status !== 'running') return;
+      dailyReviewPollTimer = setTimeout(() => {
+        vscode.postMessage({ command: 'getDailyReview' });
+      }, 2500);
+    }
+
+    function renderDailyReview(review) {
+      if (!review) return '';
+      if (review.status === 'running') {
+        return '<div class="daily-review-panel"><div class="daily-review-summary">' + escapeHtml(t('dailyReviewRunning')) + '</div></div>';
+      }
+      if (review.status === 'failed') {
+        return '<div class="daily-review-panel"><div class="daily-review-summary">' + escapeHtml(review.error || t('dailyReviewFailed')) + '</div></div>';
+      }
+      const todos = Array.isArray(review.todos) ? review.todos.slice(0, 5) : [];
+      const confirmations = Array.isArray(review.needsConfirmation) ? review.needsConfirmation.slice(0, 3) : [];
+      if (!todos.length && !confirmations.length && !review.summary) return '';
+      return \`
+        <div class="daily-review-panel">
+          \${review.summary ? \`<div class="daily-review-summary">\${escapeHtml(review.summary)}</div>\` : ''}
+          \${todos.length ? \`
+            <div class="daily-review-list">
+              \${todos.map((todo, index) => \`
+                <div class="daily-review-item" data-daily-review-index="\${index}">
+                  <div class="daily-review-title">\${escapeHtml(todo.title || '')}</div>
+                  <div class="daily-review-reason">\${escapeHtml(todo.reason || '')}</div>
+                </div>
+              \`).join('')}
+            </div>
+          \` : ''}
+          \${confirmations.length ? \`
+            <div class="daily-review-summary">\${escapeHtml(t('dailyReviewConfirm'))}</div>
+            <div class="daily-review-list">
+              \${confirmations.map((todo, index) => \`
+                <div class="daily-review-item" data-daily-confirm-index="\${index}">
+                  <div class="daily-review-title">\${escapeHtml(todo.title || '')}</div>
+                  <div class="daily-review-reason">\${escapeHtml(todo.reason || '')}</div>
+                </div>
+              \`).join('')}
+            </div>
+          \` : ''}
+        </div>
+      \`;
+    }
+
+    function openDailyReviewTarget(item) {
+      const projectPath = item && item.projectPath ? String(item.projectPath) : '';
+      if (!projectPath) return;
+      activateProjectInSidebar(projectPath);
+      vscode.postMessage({ command: 'selectProject', projectPath });
+      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
+      if (item.nodeId) {
+        vscode.postMessage({ command: 'showFullRoadmap' });
+      }
+    }
+
     function renderGlobalFocus(portfolio, selectedProjectPath) {
       if (!globalFocusPanel) return;
       const items = buildTodayPlanItems(portfolio);
@@ -5836,7 +6377,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       globalFocusPanel.innerHTML = \`
         <div class="global-focus-head">
           <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
-          <span class="global-focus-path" title="\${escapeHtml(store.dataPath || '')}">\${escapeHtml(store.dataPath || '')}</span>
+          <button class="global-review-btn" type="button" data-run-daily-review \${currentDailyReview && currentDailyReview.status === 'running' ? 'disabled' : ''}><span class="codicon codicon-sparkle"></span>\${escapeHtml(t('dailyReviewButton'))}</button>
         </div>
         <div class="global-focus-list">
           \${items.map(item => \`
@@ -5857,7 +6398,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           <span class="global-chip">\${escapeHtml(t('globalLearning'))}: \${escapeHtml(store.learningCandidateCount || 0)}</span>
           <span class="global-chip">\${escapeHtml(t('globalDependencies'))}: \${escapeHtml((store.dependencies || []).length || 0)}</span>
         </div>
+        \${renderDailyReview(currentDailyReview)}
       \`;
+      const reviewButton = globalFocusPanel.querySelector('[data-run-daily-review]');
+      if (reviewButton) {
+        reviewButton.addEventListener('click', () => {
+          currentDailyReview = {
+            status: 'running',
+            summary: '',
+            todos: [],
+            needsConfirmation: []
+          };
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({ command: 'runDailyReview' });
+          startDailyReviewPolling();
+        });
+      }
       globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {
         item.addEventListener('click', () => {
           const projectPath = item.getAttribute('data-global-focus-project') || '';
@@ -5869,6 +6425,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
         });
       });
+      globalFocusPanel.querySelectorAll('[data-daily-review-index]').forEach(item => {
+        item.addEventListener('click', () => {
+          const index = Number(item.getAttribute('data-daily-review-index') || 0);
+          openDailyReviewTarget((currentDailyReview && currentDailyReview.todos || [])[index]);
+        });
+      });
+      globalFocusPanel.querySelectorAll('[data-daily-confirm-index]').forEach(item => {
+        item.addEventListener('click', () => {
+          const index = Number(item.getAttribute('data-daily-confirm-index') || 0);
+          openDailyReviewTarget((currentDailyReview && currentDailyReview.needsConfirmation || [])[index]);
+        });
+      });
+      startDailyReviewPolling();
     }
 
     function renderOnboardingPanel() {
