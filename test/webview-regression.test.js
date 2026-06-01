@@ -805,6 +805,65 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /btn-generate-sidebar/);
 });
 
+test('daily review prompt switches modes by engineering rhythm and signals', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    [
+      'module.exports.__getDailyReviewMode = getDailyReviewMode;',
+      'module.exports.__buildDailyReviewPrompt = buildDailyReviewPrompt;'
+    ].join('\n')
+  );
+  const baseProject = {
+    name: 'ME',
+    path: '/workspace/ME',
+    projectType: 'content',
+    globalPriority: 'P1',
+    overallStatus: 'In Progress',
+    progressPercent: 40,
+    blocker: '',
+    globalNextAction: '继续国际化渲染',
+    recommendedNodeId: '2',
+    recommendedNodeTitle: '继续国际化渲染',
+    recommendedStatus: 'In Progress',
+    failedNodes: 0,
+    runningNodes: 0,
+    inProgressNodes: 1,
+    pendingNodes: 2,
+    reusableSignals: 0,
+    stageGap: '',
+    issuePressure: '',
+    issues: { byPriority: {} },
+    delivery: { failedWorkflowRuns: 0 },
+    deliverySignal: ''
+  };
+  const globalStore = {
+    dataPath: '/workspace/.solomap-global',
+    dependencies: [],
+    learningCandidateCount: 0,
+    portfolio: []
+  };
+
+  assert.equal(sidebarModule.__getDailyReviewMode('monday', [baseProject], globalStore), 'weekly_planning');
+  assert.equal(sidebarModule.__getDailyReviewMode('friday', [{ ...baseProject, reusableSignals: 2 }], globalStore), 'learning_closeout');
+  assert.equal(sidebarModule.__getDailyReviewMode('monthEnd', [baseProject], globalStore), 'monthly_review');
+  assert.equal(sidebarModule.__getDailyReviewMode('daily', [{ ...baseProject, delivery: { failedWorkflowRuns: 1 } }], globalStore), 'exception_review');
+  assert.equal(sidebarModule.__getDailyReviewMode('daily', [{ ...baseProject, reusableSignals: 1 }], globalStore), 'daily_learning');
+
+  const prompt = sidebarModule.__buildDailyReviewPrompt({
+    resultPath: '/workspace/.solomap-global/daily/2026-06-01.json',
+    dateKey: '2026-06-01',
+    rhythm: 'monday',
+    reviewMode: 'weekly_planning',
+    portfolio: [baseProject],
+    globalStore
+  });
+  assert.match(prompt, /审视模式是：周一重点校准/);
+  assert.match(prompt, /先检查 P0；确认本周 P1；保留 P2 备选；扫描外部变化和跨项目模式/);
+  assert.match(prompt, /reviewMode/);
+  assert.match(prompt, /confirm_learning/);
+  assert.doesNotMatch(prompt, /portfolio\.csv|dependencies\.csv/);
+});
+
 test('adding a project asks for a global methodology project type', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
 
