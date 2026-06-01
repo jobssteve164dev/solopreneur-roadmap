@@ -763,6 +763,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="global-focus-panel"/);
   assert.match(html, /今日安排|Today/);
   assert.match(html, /todayPlanScore/);
+  assert.match(html, /getTodayWorkRhythm/);
+  assert.match(html, /todayRhythmMonday/);
+  assert.match(html, /todayReasonFridayLearning/);
+  assert.match(html, /todayReasonMonthReview/);
   assert.match(html, /todaySlotUrgent/);
   assert.doesNotMatch(html, /本周推进|Weekly Focus/);
   assert.match(html, /id="setting-global-data-path"/);

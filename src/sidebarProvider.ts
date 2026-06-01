@@ -4310,6 +4310,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         todayReasonInProgress: '已经开始，今天最容易形成进展',
         todayReasonPending: '可以开始推进',
         todayReasonReview: '成果已完成，适合复盘或调整下一轮',
+        todayReasonWeeklyFocus: '周一先确认本周主线',
+        todayReasonFridayLearning: '周五适合收尾沉淀',
+        todayReasonMonthReview: '月末适合回顾优先级和复用效果',
+        todayReasonNewProject: '新项目先确认起点',
+        todayReasonReusable: '已有可复用经验，推进成本更低',
+        todayRhythmDaily: '每日自查',
+        todayRhythmMonday: '周一确认主线',
+        todayRhythmFriday: '周五收尾复盘',
+        todayRhythmMonthEnd: '月末回顾',
         onboardingKicker: '新手开始',
         onboardingTitle: '先把一个项目交给 SoloMap',
         onboardingCopy: '选择一个本地项目文件夹。SoloMap 会带你确认项目类型，然后生成第一张可推进路线图。',
@@ -4459,6 +4468,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         todayReasonInProgress: 'Already in motion and easiest to move forward',
         todayReasonPending: 'Ready to start',
         todayReasonReview: 'Completed work is ready for review or the next loop',
+        todayReasonWeeklyFocus: 'Confirm this week’s main line first',
+        todayReasonFridayLearning: 'Friday is best for closure and learning',
+        todayReasonMonthReview: 'Month end is best for priority and reuse review',
+        todayReasonNewProject: 'Confirm the starting point for this new project',
+        todayReasonReusable: 'Reusable experience lowers today’s effort',
+        todayRhythmDaily: 'Daily check',
+        todayRhythmMonday: 'Monday focus',
+        todayRhythmFriday: 'Friday closure',
+        todayRhythmMonthEnd: 'Month-end review',
         onboardingKicker: 'Get started',
         onboardingTitle: 'Give SoloMap one local project first',
         onboardingCopy: 'Choose a local project folder. SoloMap will ask for its type, then help create the first actionable roadmap.',
@@ -5710,8 +5728,38 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return ({ P0: 0, P1: 1, P2: 2, P3: 3 })[priority] ?? 4;
     }
 
+    function daysUntilMonthEnd(date) {
+      const end = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+      return end.getDate() - date.getDate();
+    }
+
+    function getTodayWorkRhythm(date) {
+      const current = date || new Date();
+      const day = current.getDay();
+      if (daysUntilMonthEnd(current) <= 2) return 'monthEnd';
+      if (day === 1) return 'monday';
+      if (day === 5) return 'friday';
+      return 'daily';
+    }
+
+    function todayWorkRhythmLabel(rhythm) {
+      if (rhythm === 'monthEnd') return t('todayRhythmMonthEnd');
+      if (rhythm === 'monday') return t('todayRhythmMonday');
+      if (rhythm === 'friday') return t('todayRhythmFriday');
+      return t('todayRhythmDaily');
+    }
+
+    function isNewProjectStart(project) {
+      return Number(project.progressPercent || 0) <= 0 && Number(project.completedNodes || 0) <= 0 && Number(project.pendingNodes || 0) > 0;
+    }
+
+    function hasCloseoutValue(project) {
+      return Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || !!project.stageGap;
+    }
+
     function todayPlanScore(project) {
       let score = 0;
+      const rhythm = getTodayWorkRhythm();
       if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) score += 120;
       if (Number(project.failedNodes || 0) > 0) score += 100;
       if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) score += 90;
@@ -5721,15 +5769,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (Number(project.inProgressNodes || 0) > 0) score += 40;
       if (Number(project.pendingNodes || 0) > 0) score += 20;
       if (Number(project.reusableSignals || 0) > 0) score += 10;
+      if (isNewProjectStart(project)) score += rhythm === 'monday' ? 35 : 12;
+      if (rhythm === 'monday' && project.globalPriority === 'P1') score += 35;
+      if (rhythm === 'monday' && Number(project.pendingNodes || 0) > 0) score += 10;
+      if (rhythm === 'friday' && hasCloseoutValue(project)) score += 45;
+      if (rhythm === 'friday' && Number(project.inProgressNodes || 0) > 0) score += 15;
+      if (rhythm === 'monthEnd' && hasCloseoutValue(project)) score += 55;
+      if (rhythm === 'monthEnd' && (project.globalPriority === 'P0' || project.blocker)) score += 20;
       return score;
     }
 
     function todayPlanReason(project) {
+      const rhythm = getTodayWorkRhythm();
       if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) return t('todayReasonDelivery');
       if (Number(project.failedNodes || 0) > 0) return t('todayReasonFailed');
       if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) return t('todayReasonIssue');
+      if (rhythm === 'monthEnd' && hasCloseoutValue(project)) return t('todayReasonMonthReview');
+      if (rhythm === 'friday' && hasCloseoutValue(project)) return t('todayReasonFridayLearning');
+      if (rhythm === 'monday' && (project.globalPriority === 'P1' || isNewProjectStart(project))) return t('todayReasonWeeklyFocus');
+      if (isNewProjectStart(project)) return t('todayReasonNewProject');
       if (Number(project.runningNodes || 0) > 0) return t('todayReasonRunning');
       if (Number(project.inProgressNodes || 0) > 0) return t('todayReasonInProgress');
+      if (Number(project.reusableSignals || 0) > 0) return t('todayReasonReusable');
       if (Number(project.pendingNodes || 0) > 0) return t('todayReasonPending');
       return t('todayReasonReview');
     }
@@ -5762,6 +5823,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!globalFocusPanel) return;
       const items = buildTodayPlanItems(portfolio);
       const store = currentProjects.globalStore || {};
+      const rhythm = getTodayWorkRhythm();
       if (!items.length) {
         globalFocusPanel.innerHTML = \`
           <div class="global-focus-head">
@@ -5791,6 +5853,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           \`).join('')}
         </div>
         <div class="global-focus-foot">
+          <span class="global-chip">\${escapeHtml(todayWorkRhythmLabel(rhythm))}</span>
           <span class="global-chip">\${escapeHtml(t('globalLearning'))}: \${escapeHtml(store.learningCandidateCount || 0)}</span>
           <span class="global-chip">\${escapeHtml(t('globalDependencies'))}: \${escapeHtml((store.dependencies || []).length || 0)}</span>
         </div>
