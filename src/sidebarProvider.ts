@@ -175,7 +175,8 @@ const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
   { key: 'learn', label: 'Learn' },
   { key: 'improve', label: 'Improve' }
 ];
-const DELIVERY_WORKFLOW_RUN_LIMIT = 3;
+const DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT = 3;
+const DELIVERY_WORKFLOW_RUN_FETCH_LIMIT = 20;
 const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
 const githubRepoSlugCache = new Map<string, string>();
 const commandResolutionCache = new Map<string, string>();
@@ -682,12 +683,20 @@ function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
 }
 
 function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = false): ProjectDeliverySummary {
-  const recentRuns = cache.workflowRuns.slice(0, DELIVERY_WORKFLOW_RUN_LIMIT);
+  const recentRuns = cache.workflowRuns.slice(0, DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT);
   const latestRun = recentRuns[0] || null;
+  const latestByWorkflow = new Map<string, DeliveryCacheFile['workflowRuns'][number]>();
+  for (const run of cache.workflowRuns) {
+    const key = String(run.name || run.displayTitle || run.url || '').trim();
+    if (!key || latestByWorkflow.has(key)) {
+      continue;
+    }
+    latestByWorkflow.set(key, run);
+  }
   const failedWorkflowRuns = stale
     ? 0
-    : recentRuns
-      .filter((run) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
+    : [...latestByWorkflow.values()]
+      .filter((run) => ['failure', 'timed_out', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
       .length;
   return {
     available: true,
@@ -964,7 +973,7 @@ function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary
     'run',
     'list',
     '--limit',
-    String(DELIVERY_WORKFLOW_RUN_LIMIT),
+    String(DELIVERY_WORKFLOW_RUN_FETCH_LIMIT),
     '--json',
     'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
   ], 4500);
@@ -1000,7 +1009,7 @@ function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary
         createdAt: String(run.createdAt || ''),
         updatedAt: String(run.updatedAt || ''),
         url: String(run.url || '')
-      })).slice(0, DELIVERY_WORKFLOW_RUN_LIMIT)
+      })).slice(0, DELIVERY_WORKFLOW_RUN_FETCH_LIMIT)
       : [];
   } catch {}
   const cache: DeliveryCacheFile = {
@@ -1084,7 +1093,7 @@ async function readProjectDeliverySummaryAsync(projectPath: string): Promise<Pro
       'run',
       'list',
       '--limit',
-      String(DELIVERY_WORKFLOW_RUN_LIMIT),
+      String(DELIVERY_WORKFLOW_RUN_FETCH_LIMIT),
       '--json',
       'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
     ], 4500)
@@ -1121,7 +1130,7 @@ async function readProjectDeliverySummaryAsync(projectPath: string): Promise<Pro
         createdAt: String(run.createdAt || ''),
         updatedAt: String(run.updatedAt || ''),
         url: String(run.url || '')
-      })).slice(0, DELIVERY_WORKFLOW_RUN_LIMIT)
+      })).slice(0, DELIVERY_WORKFLOW_RUN_FETCH_LIMIT)
       : [];
   } catch {}
   const cache: DeliveryCacheFile = {

@@ -1035,6 +1035,24 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
         createdAt: '2026-05-29T00:00:00.000Z',
         updatedAt: '2026-05-29T00:01:00.000Z',
         url: 'https://github.com/owner/repo/actions/runs/1'
+      },
+      {
+        name: 'Dependabot Updates',
+        displayTitle: 'npm_and_yarn Update',
+        status: 'completed',
+        conclusion: 'cancelled',
+        createdAt: '2026-05-28T00:00:00.000Z',
+        updatedAt: '2026-05-28T00:01:00.000Z',
+        url: 'https://github.com/owner/repo/actions/runs/dependabot'
+      },
+      {
+        name: 'Publish',
+        displayTitle: 'Publish',
+        status: 'completed',
+        conclusion: 'failure',
+        createdAt: '2026-05-27T00:00:00.000Z',
+        updatedAt: '2026-05-27T00:01:00.000Z',
+        url: 'https://github.com/owner/repo/actions/runs/publish'
       }
     ]
   });
@@ -1048,6 +1066,61 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   assert.equal(deliverySummary.stale, true);
   const liveDeliverySummary = sidebarModule.__summarizeDeliveryCache('owner/repo', deliveryCache, false);
   assert.equal(liveDeliverySummary.failedWorkflowRuns, 1);
+});
+
+test('sidebar delivery summary ignores cancelled and superseded workflow runs', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;'
+  );
+  const cache = {
+    schemaVersion: 1,
+    repo: 'owner/repo',
+    syncedAt: '2026-06-01T00:00:00.000Z',
+    latestRelease: null,
+    workflowRuns: [
+      {
+        name: 'Daily Security Scan',
+        displayTitle: 'Daily Security Scan',
+        status: 'completed',
+        conclusion: 'success',
+        createdAt: '2026-05-31T06:19:54Z',
+        updatedAt: '2026-05-31T06:20:32Z',
+        url: 'https://github.com/owner/repo/actions/runs/3'
+      },
+      {
+        name: 'Daily Security Scan',
+        displayTitle: 'Daily Security Scan',
+        status: 'completed',
+        conclusion: 'success',
+        createdAt: '2026-05-30T05:48:55Z',
+        updatedAt: '2026-05-30T05:49:36Z',
+        url: 'https://github.com/owner/repo/actions/runs/2'
+      },
+      {
+        name: 'Dependabot Updates',
+        displayTitle: 'npm_and_yarn Update',
+        status: 'completed',
+        conclusion: 'cancelled',
+        createdAt: '2026-05-29T14:12:43Z',
+        updatedAt: '2026-05-30T14:12:48Z',
+        url: 'https://github.com/owner/repo/actions/runs/dependabot'
+      },
+      {
+        name: 'Daily Security Scan',
+        displayTitle: 'Daily Security Scan',
+        status: 'completed',
+        conclusion: 'failure',
+        createdAt: '2026-05-26T06:07:41Z',
+        updatedAt: '2026-05-26T06:07:45Z',
+        url: 'https://github.com/owner/repo/actions/runs/old-failure'
+      }
+    ]
+  };
+
+  const summary = sidebarModule.__summarizeDeliveryCache('owner/repo', cache, false);
+  assert.equal(summary.failedWorkflowRuns, 0);
+  assert.equal(summary.latestWorkflowConclusion, 'success');
 });
 
 test('sidebar issue creation keeps labels auxiliary to creation', () => {
