@@ -421,7 +421,7 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
     return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;

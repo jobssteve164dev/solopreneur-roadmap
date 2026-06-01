@@ -1333,7 +1333,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app'"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
@@ -1736,8 +1736,10 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-cli\/cache\/last_conversations\.json/);
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-log/);
-  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /cat .*prompt\.txt' \| 'agy' --print/);
+  assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
+  assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$\(cat/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /@prompt-file/);
 
   const claudeShellScript = extensionModule.__buildAgentShellScript(

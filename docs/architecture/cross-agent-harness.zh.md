@@ -105,7 +105,8 @@ MCP Connector 是“外部能力连接器”，解决“Agent 可以连接哪些
 
 - 完整 prompt 写入 `.solopreneur/agent-runs/<scope>/prompt.txt`。
 - Codex/Cursor 使用 stdin 读取该文件。
-- agy、Claude、Copilot、OpenCode 和未知 CLI 只接收一条短 wrapper，要求读取 `prompt.txt` 并严格执行。
+- Antigravity/agy 使用 stdin 读取 `prompt.txt`，不能只发“请读取 prompt.txt”的短 wrapper；实际运行中短 wrapper 可能被模型当成普通任务处理，导致忽略用户本次要求。也不能把完整 prompt 放进启动命令参数，避免命令过长、转义和旧会话串线问题。
+- Claude、Copilot、OpenCode 和未知 CLI 仍接收短 wrapper，要求读取 `prompt.txt` 并严格执行，除非后续真实日志证明该 CLI 也不可靠。
 
 禁止把完整多行任务通过 shell 参数、`"$agent_prompt"` 或 `$(cat prompt.txt)` 直接传给 CLI。
 
