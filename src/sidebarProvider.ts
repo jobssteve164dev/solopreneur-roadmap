@@ -13,6 +13,7 @@ interface SolopreneurSettings {
   language: string;
   globalPrompt: string;
   globalDataPath: string;
+  taskPermissionMode: string;
 }
 
 interface SolopreneurProject {
@@ -191,6 +192,80 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function normalizeTaskPermissionMode(value: unknown): string {
+  return ['auto', 'always', 'never'].includes(String(value || '')) ? String(value) : 'auto';
+}
+
+function getTaskPermissionDetectionTokens(agentCli: string): string[] {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const commonTokens = [
+    '--dangerously-skip-permissions',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--ask-for-approval never',
+    '--ask-for-approval=never',
+    '-a never',
+    '--permission-mode bypasspermissions',
+    '--permission-mode=bypasspermissions',
+    '--permission-mode dontask',
+    '--permission-mode=dontask',
+    '--allow-all',
+    '--allow-all-tools',
+    '--yolo'
+  ];
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return ['--force'];
+  }
+  return commonTokens;
+}
+
+function commandAlreadyGrantsTaskPermissions(agentCli: string): boolean {
+  const raw = String(agentCli || '').toLowerCase();
+  const knownTokens = getTaskPermissionDetectionTokens(agentCli);
+  if (knownTokens.some((token) => raw.includes(token))) {
+    return true;
+  }
+  if (!path.isAbsolute(agentCli)) {
+    return false;
+  }
+  try {
+    const stat = fs.statSync(agentCli);
+    if (!stat.isFile() || stat.size > 1024 * 1024) {
+      return false;
+    }
+    const content = fs.readFileSync(agentCli, 'utf8').toLowerCase();
+    return knownTokens.some((token) => content.includes(token));
+  } catch {
+    return false;
+  }
+}
+
+function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
+  const normalizedMode = normalizeTaskPermissionMode(mode);
+  if (normalizedMode === 'never') {
+    return '';
+  }
+  if (normalizedMode === 'auto' && commandAlreadyGrantsTaskPermissions(agentCli)) {
+    return '';
+  }
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return '--dangerously-bypass-approvals-and-sandbox';
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return '--force';
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return '--dangerously-skip-permissions';
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return '--dangerously-skip-permissions';
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return '--allow-all --no-ask-user';
+  }
+  return '';
+}
+
 function buildFeedbackIssueUrl(title: string, body: string, category = ''): string {
   const params = new URLSearchParams();
   const issueTitle = String(title || '').trim();
@@ -356,7 +431,7 @@ function getAgentCliFamily(command: string): string {
   const name = path.basename((command || '').trim()).toLowerCase();
   if (['codex', 'codex-cli'].includes(name)) return 'codex';
   if (['claude', 'claude-code', 'claude-code-cli'].includes(name)) return 'claude';
-  if (['cursor', 'cursor-cli'].includes(name)) return 'cursor';
+  if (['cursor', 'cursor-cli', 'cursor-agent'].includes(name)) return 'cursor';
   if (['copilot', 'copilot-cli'].includes(name)) return 'copilot';
   if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
   if (['', 'agy', 'antigravity', 'antigravity-cli'].includes(name)) return 'antigravity';
@@ -366,7 +441,7 @@ function getAgentCliFamily(command: string): string {
 function getKnownAgentCliCandidates(family: string): string[] {
   if (family === 'codex') return ['codex', 'codex-cli'];
   if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
-  if (family === 'cursor') return ['cursor', 'cursor-cli', 'codex', 'codex-cli'];
+  if (family === 'cursor') return ['cursor-agent', 'cursor', 'cursor-cli'];
   if (family === 'copilot') return ['copilot', 'copilot-cli'];
   if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
   if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
@@ -379,6 +454,8 @@ function getAgentCliCandidates(agentCli: string, configuredCliPath: string): str
   const requestedFamily = getAgentCliFamily(requestedCli);
   const configuredFamily = getAgentCliFamily(configuredCli);
   const preferredFamily = requestedCli ? requestedFamily : configuredFamily;
+  const requestedCandidate = path.basename(requestedCli).toLowerCase() === 'cursor' ? '' : requestedCli;
+  const configuredCandidate = path.basename(configuredCli).toLowerCase() === 'cursor' ? '' : configuredCli;
   const familyOrder = [
     preferredFamily,
     configuredFamily,
@@ -390,8 +467,8 @@ function getAgentCliCandidates(agentCli: string, configuredCliPath: string): str
     'opencode'
   ].filter(Boolean);
   const candidates = [
-    configuredCli,
-    requestedCli,
+    configuredCandidate,
+    requestedCandidate,
     ...familyOrder.flatMap(getKnownAgentCliCandidates)
   ];
 
@@ -410,24 +487,29 @@ function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
   return candidates[0] || 'agy';
 }
 
-function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string): string {
+function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
   const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
-  if (executableName === 'codex' || executableName === 'codex-cli' || executableName === 'cursor' || executableName === 'cursor-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment} -`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `${quotedCli} -p${permissionSegment} --output-format text ${quotedPromptFileInstruction}`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+    return `${quotedCli} -p${permissionSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
+    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPromptFileInstruction})`;
@@ -2365,7 +2447,7 @@ function startDailyReviewAgent(settings: SolopreneurSettings, projects: Solopren
     path.dirname(globalStore.dataPath),
     ...projects.map((project) => project.path)
   ]);
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptPath, workspaceRoot);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptPath, workspaceRoot, settings.taskPermissionMode);
   const finalizer = [
     'const fs = require("fs");',
     `const resultPath = ${JSON.stringify(resultPath)};`,
@@ -2499,7 +2581,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               cliPath: data.cliPath,
               language: data.language,
               globalPrompt: data.globalPrompt,
-              globalDataPath: data.globalDataPath
+              globalDataPath: data.globalDataPath,
+              taskPermissionMode: data.taskPermissionMode
             });
             vscode.window.showInformationMessage('SoloMap settings saved successfully!');
             // Broadcast to sync both Webviews
@@ -4859,6 +4942,24 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-task-permission-mode">Task Permissions</label>
+      <div class="solo-select settings-select" id="setting-task-permission-mode" data-solo-select data-value="auto">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>Auto</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="auto" aria-selected="true">Auto</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="always" aria-selected="false">Auto-run</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="never" aria-selected="false">Ask each time</button>
+        </div>
+      </div>
+      <div id="help-task-permission-mode" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Controls whether SoloMap adds official no-approval flags to bounded task runs. Native continue never adds them.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
       <input
         type="text"
@@ -4992,6 +5093,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliSelect = document.getElementById('setting-cli-select');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
+    const settingTaskPermissionMode = document.getElementById('setting-task-permission-mode');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
@@ -5149,6 +5251,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode）或可执行文件绝对路径。',
+        taskPermissionMode: '任务执行权限',
+        taskPermissionAuto: '自动',
+        taskPermissionAlways: '自动执行',
+        taskPermissionNever: '每次确认',
+        taskPermissionHelp: '控制主任务是否追加官方无审批参数；原生继续不会追加。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -5319,6 +5426,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         language: 'Language',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, or opencode, or an absolute executable path.',
+        taskPermissionMode: 'Task Permissions',
+        taskPermissionAuto: 'Auto',
+        taskPermissionAlways: 'Auto-run',
+        taskPermissionNever: 'Ask each time',
+        taskPermissionHelp: 'Controls official no-approval flags for task runs. Native continue never adds them.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
@@ -5428,6 +5540,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
+      setText('label-task-permission-mode', t('taskPermissionMode'));
+      setText('help-task-permission-mode', t('taskPermissionHelp'));
+      if (settingTaskPermissionMode) {
+        const permissionLabels = {
+          auto: t('taskPermissionAuto'),
+          always: t('taskPermissionAlways'),
+          never: t('taskPermissionNever')
+        };
+        settingTaskPermissionMode.querySelectorAll('[data-solo-option-value]').forEach(option => {
+          const value = option.getAttribute('data-solo-option-value');
+          option.textContent = permissionLabels[value] || value;
+        });
+        const currentValue = getSoloSelectValue(settingTaskPermissionMode);
+        const label = settingTaskPermissionMode.querySelector('[data-solo-label]');
+        if (label) label.textContent = permissionLabels[currentValue] || currentValue;
+      }
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -5520,7 +5648,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const base = raw.split(/[\\\\/]/).pop().toLowerCase();
       if (['agy', 'antigravity', 'antigravity-cli'].includes(base)) return 'agy';
       if (['codex', 'codex-cli'].includes(base)) return 'codex';
-      if (['cursor', 'cursor-cli'].includes(base)) return 'cursor';
+      if (['cursor', 'cursor-cli', 'cursor-agent'].includes(base)) return 'cursor';
       if (['copilot', 'copilot-cli'].includes(base)) return 'copilot';
       if (['claude', 'claude-code', 'claude-code-cli'].includes(base)) return 'claude';
       if (['opencode', 'open-code', 'open-code-cli'].includes(base)) return 'opencode';
@@ -5571,6 +5699,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
+          if (settingTaskPermissionMode) setSoloSelectValue(settingTaskPermissionMode, message.settings.taskPermissionMode || 'auto');
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -5719,7 +5848,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
+        taskPermissionMode: settingTaskPermissionMode ? getSoloSelectValue(settingTaskPermissionMode) : 'auto'
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -6318,7 +6448,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const normalized = String(value || '').trim();
       const name = normalized.split(/[\\\\/]/).pop().toLowerCase();
       if (name === 'codex-cli') return 'codex';
-      if (name === 'cursor-cli') return 'cursor';
+      if (name === 'cursor-cli' || name === 'cursor-agent') return 'cursor';
       if (name === 'copilot-cli') return 'copilot';
       if (name === 'agy' || name === 'antigravity-cli') return 'antigravity';
       return normalized;

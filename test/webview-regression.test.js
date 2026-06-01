@@ -208,6 +208,11 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'opencode', label: 'opencode' },
     { value: 'custom', label: 'Custom...' }
   ]);
+  wireSoloSelect(elements['setting-task-permission-mode'], [
+    { value: 'auto', label: 'Auto' },
+    { value: 'always', label: 'Auto-run' },
+    { value: 'never', label: 'Ask each time' }
+  ]);
   wireSoloSelect(elements['project-select'], []);
   const context = {
     document: {
@@ -257,6 +262,7 @@ test('extension manifest uses SoloMap visible branding', () => {
   assert.equal(manifest.contributes.views['solopreneur-sidebar-container'][0].name, 'SoloMap');
   assert.equal(manifest.contributes.configuration.title, 'SoloMap Settings');
   assert.equal(manifest.contributes.configuration.properties['solopreneur.globalPrompt'].default, '');
+  assert.equal(manifest.contributes.configuration.properties['solopreneur.taskPermissionMode'].default, 'auto');
 });
 
 test('readme uses bilingual marketplace copy and stable remote logo', () => {
@@ -351,6 +357,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'settings-panel',
     'setting-language',
     'setting-cli-select',
+    'setting-task-permission-mode',
     'setting-clipath-custom',
     'setting-global-prompt',
     'setting-global-data-path',
@@ -381,7 +388,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global'));
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && message.taskPermissionMode === 'auto'));
   elements['btn-check-dependencies'].listeners.click();
   elements['btn-open-agent-install'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
@@ -397,7 +404,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }
+    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global', taskPermissionMode: 'auto' }
   });
 
   dispatchMessage({
@@ -583,6 +590,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'settings-panel',
     'setting-language',
     'setting-cli-select',
+    'setting-task-permission-mode',
     'setting-clipath-custom',
     'setting-global-prompt',
     'setting-feedback-title',
@@ -604,7 +612,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.taskPermissionMode === 'auto'));
   elements['btn-toggle-feedback'].listeners.click();
   assert.equal(elements['feedback-panel'].style.display, 'flex');
   elements['setting-feedback-title'].value = '看不懂下一步';
@@ -619,7 +627,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '' }
+    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', taskPermissionMode: 'auto' }
   });
 
   elements['btn-toggle-solo'].listeners.click();
@@ -1242,6 +1250,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentCommandForPromptFile = buildAgentCommandForPromptFile;',
       'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
       'module.exports.__buildNativeContinueCommand = buildNativeContinueCommand;',
+      'module.exports.__getTaskPermissionArgs = getTaskPermissionArgs;',
       'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
@@ -1308,6 +1317,10 @@ test('agent command builder uses non-interactive task runs and native continuati
     "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Continue the MVP'"
   );
   assert.equal(
+    extensionModule.__buildAgentCommand('cursor-agent', 'Build landing page', '/workspace/app'),
+    "'cursor-agent' -p --force --output-format text 'Build landing page'"
+  );
+  assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
     "'antigravity-cli' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Build landing page'"
   );
@@ -1340,6 +1353,10 @@ test('agent command builder uses non-interactive task runs and native continuati
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
   );
   assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('cursor-agent', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
+    "'cursor-agent' -p --force --output-format text 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
+  );
+  assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('claude', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
     "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
   );
@@ -1368,12 +1385,42 @@ test('agent command builder uses non-interactive task runs and native continuati
     "'codex' resume -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
   );
   assert.equal(
+    extensionModule.__buildNativeContinueCommand('cursor-agent', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
+    "(cd '/workspace/app' && 'cursor-agent' resume '3350a3b7-7761-4ed5-9661-2e9c9de8f924')"
+  );
+  assert.equal(
     extensionModule.__buildNativeContinueCommand('agy', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
-    "'agy' --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --prompt-interactive --dangerously-skip-permissions --add-dir='/workspace/app'"
+    "'agy' --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --add-dir='/workspace/app'"
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('copilot', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
-    "'copilot' --connect '3350a3b7-7761-4ed5-9661-2e9c9de8f924' -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user"
+    "'copilot' --connect '3350a3b7-7761-4ed5-9661-2e9c9de8f924' -C '/workspace/app' --add-dir '/workspace/app'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'never'),
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --add-dir='/workspace/app'"
+  );
+  assert.equal(
+    extensionModule.__getTaskPermissionArgs('opencode', 'always'),
+    ''
+  );
+  const configuredAgyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agy-wrapper-'));
+  const configuredAgyPath = path.join(configuredAgyDir, 'agy');
+  fs.writeFileSync(configuredAgyPath, '#!/bin/sh\nexec /usr/bin/agy --dangerously-skip-permissions "$@"\n', 'utf8');
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile(configuredAgyPath, '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto'),
+    `cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | '${configuredAgyPath}' --print --add-dir='/workspace/app'`
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile(configuredAgyPath, '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'always'),
+    `cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | '${configuredAgyPath}' --print --dangerously-skip-permissions --add-dir='/workspace/app'`
+  );
+  const configuredCursorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-wrapper-'));
+  const configuredCursorPath = path.join(configuredCursorDir, 'cursor-agent');
+  fs.writeFileSync(configuredCursorPath, '#!/bin/sh\nexec /usr/bin/cursor-agent --force "$@"\n', 'utf8');
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile(configuredCursorPath, '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto'),
+    `'${configuredCursorPath}' -p --output-format text 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'`
   );
   const firstTerminalName = extensionModule.__makeAgentTerminalName('step-2-42');
   const secondTerminalName = extensionModule.__makeAgentTerminalName('step-2-43');
@@ -1410,7 +1457,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('cursor', '').slice(0, 5)),
-    JSON.stringify(['cursor', 'cursor-cli', 'codex', 'codex-cli', 'agy'])
+    JSON.stringify(['cursor-agent', 'cursor', 'cursor-cli', 'agy', 'antigravity'])
   );
   assert.equal(extensionModule.__getAgentProvider('claude'), 'claude');
   assert.equal(extensionModule.__getAgentProvider('copilot'), 'copilot');
@@ -1445,7 +1492,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     JSON.stringify(sidebarModule.__getAgentCliCandidates('cursor', '').slice(0, 5)),
-    JSON.stringify(['cursor', 'cursor-cli', 'codex', 'codex-cli', 'agy'])
+    JSON.stringify(['cursor-agent', 'cursor', 'cursor-cli', 'agy', 'antigravity'])
   );
   assert.equal(JSON.stringify(sidebarModule.__getCliVersionArgs('agy')), JSON.stringify(['--version']));
   assert.match(sidebarModule.__formatCliTestMessage('agy', '1.0.1\n', ''), /agy · 1\.0\.1/);
@@ -1736,7 +1783,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-cli\/cache\/last_conversations\.json/);
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-log/);
-  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /cat .*prompt\.txt' \| 'agy' --print/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /cat .*prompt\.txt' \| 'agy' --print --dangerously-skip-permissions --add-dir/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$\(cat/);

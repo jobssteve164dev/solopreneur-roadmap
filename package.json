@@ -86,6 +86,16 @@
           ],
           "description": "The display language used by SoloMap webviews."
         },
+        "solopreneur.taskPermissionMode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "description": "Controls whether SoloMap adds officially documented no-approval flags to bounded Agent task runs. Auto skips injection when the configured executable already includes such a flag."
+        },
         "solopreneur.globalPrompt": {
           "type": "string",
           "default": "",

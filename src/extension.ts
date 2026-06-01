@@ -25,6 +25,7 @@ interface SolopreneurSettings {
   language: string;
   globalPrompt: string;
   globalDataPath: string;
+  taskPermissionMode: string;
 }
 
 interface SolopreneurProject {
@@ -268,7 +269,8 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
     language: saved.language || config.get('language') || 'zh',
     globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
-    globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? ''
+    globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
+    taskPermissionMode: normalizeTaskPermissionMode(saved.taskPermissionMode ?? config.get('taskPermissionMode') ?? 'auto')
   };
 }
 
@@ -278,7 +280,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     cliPath: settings.cliPath || 'agy',
     language: settings.language === 'en' ? 'en' : 'zh',
     globalPrompt: String(settings.globalPrompt || '').trim(),
-    globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim()
+    globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim(),
+    taskPermissionMode: normalizeTaskPermissionMode(settings.taskPermissionMode ?? currentSettings.taskPermissionMode)
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -287,6 +290,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
   await config.update('globalPrompt', nextSettings.globalPrompt, vscode.ConfigurationTarget.Global);
   await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
+  await config.update('taskPermissionMode', nextSettings.taskPermissionMode, vscode.ConfigurationTarget.Global);
 }
 
 function projectName(projectPath: string): string {
@@ -1061,7 +1065,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
             cliPath: message.cliPath,
             language: message.language,
             globalPrompt: message.globalPrompt,
-            globalDataPath: message.globalDataPath
+            globalDataPath: message.globalDataPath,
+            taskPermissionMode: message.taskPermissionMode
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -1225,6 +1230,80 @@ function completeNodeManually(nodeId: string): void {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function normalizeTaskPermissionMode(value: unknown): string {
+  return ['auto', 'always', 'never'].includes(String(value || '')) ? String(value) : 'auto';
+}
+
+function getTaskPermissionDetectionTokens(agentCli: string): string[] {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const commonTokens = [
+    '--dangerously-skip-permissions',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--ask-for-approval never',
+    '--ask-for-approval=never',
+    '-a never',
+    '--permission-mode bypasspermissions',
+    '--permission-mode=bypasspermissions',
+    '--permission-mode dontask',
+    '--permission-mode=dontask',
+    '--allow-all',
+    '--allow-all-tools',
+    '--yolo'
+  ];
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return ['--force'];
+  }
+  return commonTokens;
+}
+
+function commandAlreadyGrantsTaskPermissions(agentCli: string): boolean {
+  const raw = String(agentCli || '').toLowerCase();
+  const knownTokens = getTaskPermissionDetectionTokens(agentCli);
+  if (knownTokens.some((token) => raw.includes(token))) {
+    return true;
+  }
+  if (!path.isAbsolute(agentCli)) {
+    return false;
+  }
+  try {
+    const stat = fs.statSync(agentCli);
+    if (!stat.isFile() || stat.size > 1024 * 1024) {
+      return false;
+    }
+    const content = fs.readFileSync(agentCli, 'utf8').toLowerCase();
+    return knownTokens.some((token) => content.includes(token));
+  } catch {
+    return false;
+  }
+}
+
+function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
+  const normalizedMode = normalizeTaskPermissionMode(mode);
+  if (normalizedMode === 'never') {
+    return '';
+  }
+  if (normalizedMode === 'auto' && commandAlreadyGrantsTaskPermissions(agentCli)) {
+    return '';
+  }
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return '--dangerously-bypass-approvals-and-sandbox';
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return '--force';
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return '--dangerously-skip-permissions';
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return '--dangerously-skip-permissions';
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return '--allow-all --no-ask-user';
+  }
+  return '';
 }
 
 function buildFeedbackIssueUrl(title: string, body: string, category = ''): string {
@@ -1560,7 +1639,7 @@ function getAgentCliFamily(command: string): string {
   const name = path.basename((command || '').trim()).toLowerCase();
   if (['codex', 'codex-cli'].includes(name)) return 'codex';
   if (['claude', 'claude-code', 'claude-code-cli'].includes(name)) return 'claude';
-  if (['cursor', 'cursor-cli'].includes(name)) return 'cursor';
+  if (['cursor', 'cursor-cli', 'cursor-agent'].includes(name)) return 'cursor';
   if (['copilot', 'copilot-cli'].includes(name)) return 'copilot';
   if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
   if (['', 'agy', 'antigravity', 'antigravity-cli'].includes(name)) return 'antigravity';
@@ -1570,8 +1649,7 @@ function getAgentCliFamily(command: string): string {
 function getKnownAgentCliCandidates(family: string): string[] {
   if (family === 'codex') return ['codex', 'codex-cli'];
   if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
-  // Cursor CLI should behave like Codex for SoloMap: non-interactive exec + native resume.
-  if (family === 'cursor') return ['cursor', 'cursor-cli', 'codex', 'codex-cli'];
+  if (family === 'cursor') return ['cursor-agent', 'cursor', 'cursor-cli'];
   if (family === 'copilot') return ['copilot', 'copilot-cli'];
   if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
   if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
@@ -1584,6 +1662,8 @@ function getAgentCliCandidates(agentCli: string, configuredCliPath: string): str
   const requestedFamily = getAgentCliFamily(requestedCli);
   const configuredFamily = getAgentCliFamily(configuredCli);
   const preferredFamily = requestedCli ? requestedFamily : configuredFamily;
+  const requestedCandidate = path.basename(requestedCli).toLowerCase() === 'cursor' ? '' : requestedCli;
+  const configuredCandidate = path.basename(configuredCli).toLowerCase() === 'cursor' ? '' : configuredCli;
   const familyOrder = [
     preferredFamily,
     configuredFamily,
@@ -1595,8 +1675,8 @@ function getAgentCliCandidates(agentCli: string, configuredCliPath: string): str
     'opencode'
   ].filter(Boolean);
   const candidates = [
-    configuredCli,
-    requestedCli,
+    configuredCandidate,
+    requestedCandidate,
     ...familyOrder.flatMap(getKnownAgentCliCandidates)
   ];
 
@@ -1620,8 +1700,8 @@ function getAgentProvider(agentCli: string): string {
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return 'codex';
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli') {
-    return 'codex';
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return 'cursor';
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return 'claude';
@@ -1706,24 +1786,29 @@ function clearStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli
   return true;
 }
 
-function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string, nativeSessionId = ''): string {
+function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string, nativeSessionId = '', taskPermissionMode = 'auto'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPrompt = shellQuote(agentPrompt);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${quotedPrompt}`;
+    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment} ${quotedPrompt}`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `${quotedCli} -p${permissionSegment} --output-format text ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --print${permissionSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} -p${permissionSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
+    return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPrompt})`;
@@ -1732,28 +1817,30 @@ function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot:
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
-function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string): string {
+function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
   const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment} -`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `${quotedCli} -p${permissionSegment} --output-format text ${quotedPromptFileInstruction}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+    return `${quotedCli} -p${permissionSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
+    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPromptFileInstruction})`;
@@ -1762,26 +1849,28 @@ function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string
   return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
-function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, workspaceRoot: string): string {
+function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, workspaceRoot: string, taskPermissionMode = 'auto'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const promptExpression = `"$${promptVarName}"`;
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment} -`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -`;
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `${quotedCli} -p${permissionSegment} --output-format text ${promptExpression}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} --print${permissionSegment} --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --dangerously-skip-permissions --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} -p${permissionSegment} --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user --output-format text`;
+    return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `${quotedCli} run ${promptExpression}`;
@@ -1798,15 +1887,15 @@ function buildNativeContinueCommand(agentCli: string, sessionId: string, workspa
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `${quotedCli} resume -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli') {
-    return `${quotedCli} resume -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} resume ${quotedSessionId})`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --conversation ${quotedSessionId} --prompt-interactive --dangerously-skip-permissions --add-dir=${shellQuote(workspaceRoot)}`;
+    return `${quotedCli} --conversation ${quotedSessionId} --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} --connect ${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)} --allow-all --no-ask-user`;
+    return `${quotedCli} --connect ${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}`;
   }
 
   return `${quotedCli} ${quotedSessionId}`;
@@ -3398,7 +3487,8 @@ function buildAgentShellScript(
   directExecutionCommand = '',
   runKind = 'step',
   roadmapBackupFilePath = '',
-  globalDataPath = ''
+  globalDataPath = '',
+  taskPermissionMode = 'auto'
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
@@ -3417,8 +3507,8 @@ function buildAgentShellScript(
   const sessionMode = nativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
   const startedAt = new Date().toISOString();
   const commandPreview = `${agentCli} [${sessionMode}]`;
-  const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
-  const executionCommand = directExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
+  const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode);
+  const executionCommand = directExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode);
   const statusBase = { nodeId, runKind, roadmapBackupFilePath, globalDataPath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
@@ -3646,7 +3736,7 @@ async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSk
   fs.mkdirSync(runDir, { recursive: true });
   const prompt = buildSkillInstallPrompt(skillInput, workspaceRoot, settings.globalDataPath, resultFilePath);
   fs.writeFileSync(promptFilePath, prompt, 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
   fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
@@ -3712,7 +3802,7 @@ async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpI
   fs.mkdirSync(runDir, { recursive: true });
   const prompt = buildMcpInstallPrompt(mcpInput, workspaceRoot, settings.globalDataPath, resultFilePath);
   fs.writeFileSync(promptFilePath, prompt, 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
   fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
@@ -3905,7 +3995,7 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
   const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath);
   const promptFilePath = path.join(runDir, 'prompt.txt');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot, settings.taskPermissionMode);
   const executionLogId = syncEngine.logAgentExecution(
     roadmapRevisionId,
     agentCli,
@@ -3932,7 +4022,8 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     '',
     'roadmap_revision',
     roadmapBackupFilePath,
-    settings.globalDataPath
+    settings.globalDataPath,
+    settings.taskPermissionMode
   );
   const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`);
   terminal.show(true);
@@ -3986,7 +4077,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const nativeSessionId = storedSession?.sessionId || '';
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
   const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath);
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode);
   const executionLogId = syncEngine.logAgentExecution(
     soloConversationId,
     agentCli,
@@ -4016,7 +4107,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     '',
     'solo',
     roadmapBackupFilePath,
-    settings.globalDataPath
+    settings.globalDataPath,
+    settings.taskPermissionMode
   );
   const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`);
   terminal.show(true);
@@ -4142,7 +4234,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     settings.globalDataPath
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
 
   const launchSummary = [
     'Agent conversation started.',
@@ -4162,7 +4254,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   );
   postNodeConversations(nodeId);
 
-  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath);
+  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode);
 
   const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`);
   terminal.show(true);
@@ -6340,6 +6432,24 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-task-permission-mode">Task Permissions</label>
+      <div class="solo-select settings-select" id="setting-task-permission-mode" data-solo-select data-value="auto">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>Auto</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="auto" aria-selected="true">Auto</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="always" aria-selected="false">Auto-run</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="never" aria-selected="false">Ask each time</button>
+        </div>
+      </div>
+      <div id="help-task-permission-mode" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Controls whether SoloMap adds official no-approval flags to bounded task runs. Native continue never adds them.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
       <input
         type="text"
@@ -6443,6 +6553,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliSelect = document.getElementById('setting-cli-select');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
+    const settingTaskPermissionMode = document.getElementById('setting-task-permission-mode');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
@@ -6488,6 +6599,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeProject: '删除项目',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode）或可执行文件绝对路径。',
+        taskPermissionMode: '任务执行权限',
+        taskPermissionAuto: '自动',
+        taskPermissionAlways: '自动执行',
+        taskPermissionNever: '每次确认',
+        taskPermissionHelp: '控制主任务是否追加官方无审批参数；原生继续不会追加。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -6608,6 +6724,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeProject: 'Remove project',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, or opencode, or an absolute executable path.',
+        taskPermissionMode: 'Task Permissions',
+        taskPermissionAuto: 'Auto',
+        taskPermissionAlways: 'Auto-run',
+        taskPermissionNever: 'Ask each time',
+        taskPermissionHelp: 'Controls official no-approval flags for task runs. Native continue never adds them.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; guidance in the current conversation takes priority.',
@@ -6791,6 +6912,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
+      setText('label-task-permission-mode', t('taskPermissionMode'));
+      setText('help-task-permission-mode', t('taskPermissionHelp'));
+      if (settingTaskPermissionMode) {
+        const permissionLabels = {
+          auto: t('taskPermissionAuto'),
+          always: t('taskPermissionAlways'),
+          never: t('taskPermissionNever')
+        };
+        settingTaskPermissionMode.querySelectorAll('[data-solo-option-value]').forEach(option => {
+          const value = option.getAttribute('data-solo-option-value');
+          option.textContent = permissionLabels[value] || value;
+        });
+        const currentValue = getSoloSelectValue(settingTaskPermissionMode);
+        const label = settingTaskPermissionMode.querySelector('[data-solo-label]');
+        if (label) label.textContent = permissionLabels[currentValue] || currentValue;
+      }
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -6935,7 +7072,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const base = raw.split(/[\\\\/]/).pop().toLowerCase();
       if (['agy', 'antigravity', 'antigravity-cli'].includes(base)) return 'agy';
       if (['codex', 'codex-cli'].includes(base)) return 'codex';
-      if (['cursor', 'cursor-cli'].includes(base)) return 'cursor';
+      if (['cursor', 'cursor-cli', 'cursor-agent'].includes(base)) return 'cursor';
       if (['copilot', 'copilot-cli'].includes(base)) return 'copilot';
       if (['claude', 'claude-code', 'claude-code-cli'].includes(base)) return 'claude';
       if (['opencode', 'open-code', 'open-code-cli'].includes(base)) return 'opencode';
@@ -7011,6 +7148,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
+          if (settingTaskPermissionMode) setSoloSelectValue(settingTaskPermissionMode, message.settings.taskPermissionMode || 'auto');
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -7108,7 +7246,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
+        taskPermissionMode: settingTaskPermissionMode ? getSoloSelectValue(settingTaskPermissionMode) : 'auto'
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -8149,7 +8288,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const normalized = String(value || '').trim();
       const name = normalized.split(/[\\\\/]/).pop().toLowerCase();
       if (name === 'codex-cli') return 'codex';
-      if (name === 'cursor-cli') return 'cursor';
+      if (name === 'cursor-cli' || name === 'cursor-agent') return 'cursor';
       if (name === 'copilot-cli') return 'copilot';
       if (name === 'agy' || name === 'antigravity-cli') return 'antigravity';
       return normalized;
