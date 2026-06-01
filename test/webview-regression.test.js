@@ -244,7 +244,7 @@ test('extension manifest uses SoloMap visible branding', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
 
   assert.equal(manifest.displayName, 'SoloMap: AI Roadmap & Agent Task Flow');
-  assert.equal(manifest.description, 'Turn project ideas into AI roadmaps and local agent task flows in VS Code.');
+  assert.equal(manifest.description, 'Stop losing momentum in scattered AI chats. SoloMap turns your projects into a local execution cockpit for roadmaps, agents, feedback, and learning. / 别让项目迷失在零散 AI 对话里。SoloMap 把路线图、Agent 执行、反馈与学习收进 VS Code 本地推进驾驶舱。');
   assert.deepEqual(manifest.categories, ['AI', 'Chat', 'Machine Learning', 'Visualization', 'Other']);
   assert.ok(manifest.keywords.includes('ai'));
   assert.ok(manifest.keywords.includes('chat'));
@@ -469,6 +469,23 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       dependencies: ''
     }]
   });
+  assert.match(elements['portfolio-list'].innerHTML, /最近一次推进|Latest run/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-sidebar-step-history/);
+  dispatchMessage({
+    command: 'sidebarStepConversationLoaded',
+    projectPath: '/workspace/second',
+    nodeId: 'step-1',
+    conversations: [{
+      id: 8,
+      agentCli: 'codex',
+      status: 'Completed',
+      timestamp: '2026-05-26T10:05:00.000Z',
+      command: 'codex exec',
+      output: 'User supplement:\n继续验证首页\n\nTouched project files:\nsrc/home.ts\n\nRun duration ms: 3000\n\nAgent output tail:\n首页验证已完成。'
+    }]
+  });
+  assert.match(elements['portfolio-list'].innerHTML, /继续验证首页/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-sidebar-step-conversation/);
   dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: 'step-1', files: ['docs/brief.md'] });
   assert.match(elements['portfolio-list'].innerHTML, /docs\/brief\.md/);
 
@@ -781,8 +798,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /chooseSoloSupplementFiles/);
   assert.match(html, /soloSupplementFilesSelected/);
   assert.match(html, /getSoloConversationHistory/);
+  assert.match(html, /getStepConversationHistory/);
   assert.match(html, /sidebarSoloConversationLoaded/);
+  assert.match(html, /sidebarStepConversationLoaded/);
   assert.match(html, /renderSidebarSoloHistoryContent/);
+  assert.match(html, /renderSidebarStepHistoryContent/);
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
   assert.match(html, /\.portfolio-compose-row\s*\{[\s\S]*?align-items:\s*stretch/);

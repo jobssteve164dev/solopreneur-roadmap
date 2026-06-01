@@ -5,8 +5,8 @@
 <h1 align="center">SoloMap: AI Roadmap & Agent Task Flow</h1>
 
 <p align="center">
-  <strong>Turn your project idea into a roadmap your local AI agents can execute.</strong><br />
-  <strong>把项目想法变成可由本地 AI Agent 执行的路线图。</strong>
+  <strong>Stop losing momentum in scattered AI chats. Turn every project into a local execution cockpit.</strong><br />
+  <strong>别让项目迷失在零散 AI 对话里。把每个项目变成 VS Code 里的本地推进驾驶舱。</strong>
 </p>
 
 <p align="center">
@@ -19,13 +19,13 @@
 
 ## Why SoloMap? / 为什么选择 SoloMap？
 
-SoloMap is a local-first VS Code extension for turning project ideas into executable AI roadmaps. It keeps your roadmap, agent conversations, file changes, task status, and step memory inside the project folder, so your work can move with Git instead of depending on a hosted backend.
+SoloMap is for solo builders who already use AI agents, but still lose track of what to do next, what the Agent changed, which projects are stuck, and what users just told them. It gives each project a clear next action, runs your local Agent CLI from the right context, and keeps the evidence of progress where you work: inside VS Code and your local repo.
 
-SoloMap 是一个本地优先的 VS Code 插件，用路线图管理项目推进，用本地 Agent CLI 执行每个环节的具体任务。路线图、Agent 对话、文件修改、任务状态和环节记忆都保存在项目文件夹里，可以随 Git 一起流转，不依赖插件后端服务。
+SoloMap 面向已经在用 AI Agent 的独立开发者，但真正的问题往往不是“再生成一点代码”，而是下一步做什么、Agent 改了什么、哪个项目卡住了、用户反馈该怎么吸收。SoloMap 给每个项目一个清晰的下一步，用正确上下文启动你的本地 Agent CLI，并把推进证据留在你工作的地方：VS Code 和本地仓库。
 
-You choose a project folder, SoloMap creates a `.solopreneur/` data directory, and the starter roadmap begins with a "Generate Initial Roadmap" step. From there, your local Agent CLI can rewrite the roadmap CSV and continue executing each step through structured task conversations.
+Use it as the operating panel above your AI coding tools: register projects, see what needs attention, run the next roadmap step, capture open-ended Solo work, collect feedback, and learn across projects without sending your roadmap state to a hosted backend.
 
-你选择项目文件夹后，SoloMap 会创建 `.solopreneur/` 项目数据目录；初始化路线图会包含“生成初始路线图”环节。随后你可以把项目要求交给本地 Agent，让它直接修改路线图 CSV，再按环节持续推进项目。
+你可以把它当成 AI 编码工具之上的项目操作面板：登记项目、看到哪里最需要推进、运行下一步路线图任务、承接开放式 Solo 工作、收集反馈，并在多个项目之间复用经验，而不需要把路线图状态交给插件后端服务。
 
 ---
 
@@ -51,6 +51,15 @@ Full documentation map: [docs/README.zh.md](docs/README.zh.md).
 
 ## Core Capabilities / 核心能力
 
+### Project Command Center / 项目推进侧边栏
+
+- Track multiple local projects from the SoloMap activity bar.
+- 在 SoloMap 侧边栏集中查看多个本地项目。
+- See the current stage, next action, recent delivery signals, feedback issues, and latest Agent activity without opening every roadmap.
+- 不必逐个打开大图，也能看到当前阶段、下一步、近期交付信号、反馈 Issue 和最近 Agent 动作。
+- Refresh a project card on demand when you need the latest local and GitHub-backed signals.
+- 需要最新状态时，可以直接刷新项目卡片里的本地与 GitHub 信号。
+
 ### AI Roadmap / AI 路线图
 
 - Break a project idea into executable steps from planning to delivery.
@@ -72,6 +81,20 @@ Full documentation map: [docs/README.zh.md](docs/README.zh.md).
 - SoloMap 会记录 Agent 输入、输出、状态、修改文件列表和重试入口。
 - Keep structured step memory in `.solopreneur/step-memory/` so each Agent run can read the current step context before working.
 - 环节记忆保存在 `.solopreneur/step-memory/`，Agent 每次工作前都会被要求读取当前环节上下文。
+
+### Solo Conversations / Solo 对话
+
+- Use Solo mode for open-ended project work that is not tied to the current roadmap step.
+- 使用 Solo 模式处理不适合直接归入当前路线图环节的开放式项目请求。
+- Keep the latest Solo conversation visible on the project card and continue native Agent sessions when supported.
+- 在项目卡片上查看最近一次 Solo 对话，并在支持时继续原生 Agent 会话。
+
+### Feedback and Learning / 反馈与学习
+
+- Capture seed-user feedback from inside the extension and route it to GitHub Issues when configured.
+- 在插件内收集种子用户反馈，并在配置可用时同步到 GitHub Issues。
+- Review daily cross-project signals so repeated lessons, blockers, and reusable context can shape the next action.
+- 通过今日聚焦查看跨项目信号，让重复经验、阻断和可复用上下文影响下一步动作。
 
 ### Local-First Project Data / 本地优先项目数据
 

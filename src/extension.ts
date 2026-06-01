@@ -236,6 +236,9 @@ export async function activate(context: vscode.ExtensionContext) {
         await handleContinueNativeConversation(context, soloConversationId, Number(conversationId || 0));
       }
     },
+    async (projectPath, nodeId) => {
+      return getStepConversationHistoryForProject(context, projectPath, nodeId);
+    },
     async (projectPath, scope, attachments) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
         vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
@@ -858,6 +861,26 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
   await store.init();
   try {
     return store.getExecutionLogs(soloConversationId).slice(0, 1);
+  } finally {
+    store.close();
+  }
+}
+
+async function getStepConversationHistoryForProject(context: vscode.ExtensionContext, projectPath: string, nodeId: string): Promise<AgentConversation[]> {
+  if (!nodeId || !getProjects(context).some((project) => project.path === projectPath)) {
+    return [];
+  }
+  if (syncEngine && activeProjectRoot === projectPath) {
+    return syncEngine.getAgentExecutions(nodeId).slice(0, 1);
+  }
+  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  if (!fs.existsSync(journalPath)) {
+    return [];
+  }
+  const store = new SqliteStore(journalPath, context.extensionPath);
+  await store.init();
+  try {
+    return store.getExecutionLogs(nodeId).slice(0, 1);
   } finally {
     store.close();
   }
@@ -3696,6 +3719,8 @@ function postNodeConversations(nodeId: string): void {
   }
   if (nodeId === soloConversationId && sidebarProvider && activeProjectRoot) {
     void sidebarProvider.sendSoloConversationHistory(activeProjectRoot);
+  } else if (sidebarProvider && activeProjectRoot) {
+    void sidebarProvider.sendStepConversationHistory(activeProjectRoot, nodeId);
   }
 }
 

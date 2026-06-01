@@ -2580,6 +2580,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
     private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
+    private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>,
     private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>,
     private readonly _installSkill?: (skillInput: string) => Promise<void>,
     private readonly _installMcp?: (mcpInput: string) => Promise<void>
@@ -2635,6 +2636,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'getSoloConversationHistory':
             await this.sendSoloConversationHistory(data.projectPath || '');
+            break;
+          case 'getStepConversationHistory':
+            await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
             break;
           case 'continueSoloConversation':
             if (this._continueSoloConversation) {
@@ -3055,6 +3059,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send solo conversation history:', error);
+    }
+  }
+
+  public async sendStepConversationHistory(projectPath: string, nodeId: string) {
+    try {
+      if (!this._view || !this._getStepConversationHistory || !projectPath || !nodeId) {
+        return;
+      }
+      const conversations = await this._getStepConversationHistory(projectPath, nodeId);
+      this._view.webview.postMessage({
+        command: 'sidebarStepConversationLoaded',
+        projectPath,
+        nodeId,
+        conversations
+      });
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send step conversation history:', error);
     }
   }
 
@@ -5206,6 +5227,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let activePortfolioFilter = 'all';
     let sidebarSoloConversations = [];
     let sidebarSoloConversationExpanded = false;
+    const sidebarStepConversations = {};
+    const sidebarStepConversationExpanded = {};
+    const sidebarStepConversationRequested = {};
     let expandedIssueNumber = 0;
     let issueDetails = null;
     let issuePanelExpanded = false;
@@ -5293,6 +5317,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         soloAttach: '添加补充文件',
         soloHistory: '最近一次 Solo 对话',
         noSoloConversations: '还没有 Solo 对话。',
+        continueHistory: '最近一次推进',
+        noContinueConversations: '还没有推进记录。',
+        continueCompleted: '本次推进已结束。',
+        continueWorking: 'Agent 正在执行这次推进。',
         soloCompleted: '本次 Solo 对话已结束。',
         stillWorking: 'Agent 正在执行这次对话。',
         runResult: '本轮结果',
@@ -5465,6 +5493,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         soloAttach: 'Attach files',
         soloHistory: 'Latest Solo conversation',
         noSoloConversations: 'No Solo conversations yet.',
+        continueHistory: 'Latest run',
+        noContinueConversations: 'No runs yet.',
+        continueCompleted: 'This run has finished.',
+        continueWorking: 'The Agent is running this step.',
         soloCompleted: 'This Solo conversation has finished.',
         stillWorking: 'The Agent is running this conversation.',
         runResult: 'Run result',
@@ -5812,6 +5844,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'projectRefreshCompleted':
           projectRefreshPaths.delete(message.projectPath || '');
+          Object.keys(sidebarStepConversationRequested).forEach(key => {
+            if (key.startsWith(String(message.projectPath || '') + '::')) {
+              delete sidebarStepConversationRequested[key];
+            }
+          });
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -5885,6 +5922,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           sidebarSoloConversationExpanded = false;
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
+
+        case 'sidebarStepConversationLoaded': {
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          const key = stepConversationKey(message.projectPath, message.nodeId);
+          sidebarStepConversations[key] = message.conversations || [];
+          sidebarStepConversationRequested[key] = true;
+          sidebarStepConversationExpanded[key] = false;
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+        }
 
         case 'issueDetailsLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
@@ -6282,6 +6329,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return match[1].split('\\n').map(line => line.trim()).filter(line => line && !/^No (workspace|git|project) /i.test(line)).length;
     }
 
+    function stepConversationKey(projectPath, nodeId) {
+      return String(projectPath || '') + '::' + String(nodeId || '');
+    }
+
     function renderSidebarSoloHistoryContent() {
       const conversation = sidebarSoloConversations[0];
       if (!conversation) {
@@ -6328,6 +6379,49 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       \`;
     }
 
+    function renderSidebarStepHistoryContent(projectPath, node) {
+      const key = stepConversationKey(projectPath, node && node.id);
+      const conversation = (sidebarStepConversations[key] || [])[0];
+      if (!conversation) {
+        return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
+      }
+      const failedReason = (String(conversation.output || '').match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
+      const outcome = conversation.status === 'Running' ? t('continueWorking')
+        : conversation.status === 'Failed' ? (failedReason.trim() || statusText(conversation.status))
+        : t('continueCompleted');
+      const conclusion = conversation.status === 'Running' ? '' : soloConclusion(conversation.output);
+      const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
+      const duration = formatSoloDuration(conversation);
+      const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
+      const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
+      return \`
+        <div class="sidebar-solo-history-title">\${escapeHtml(t('continueHistory'))}</div>
+        <div class="sidebar-conversation" data-sidebar-step-conversation="\${escapeHtml(key)}">
+          <div class="sidebar-conversation-row">
+            <div class="sidebar-conversation-meta">
+              <span class="sidebar-conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
+              <span class="sidebar-conversation-summary">\${escapeHtml(summarizeSoloConversation(conversation))}</span>
+              <span class="sidebar-conversation-time">\${escapeHtml(when)}</span>
+              \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
+            </div>
+            <div class="sidebar-conversation-actions">
+              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(statusText(conversation.status))}</span>
+            </div>
+          </div>
+          \${sidebarStepConversationExpanded[key] ? \`
+            <div class="sidebar-conversation-detail">
+              <strong>\${escapeHtml(conversation.status === 'Failed' ? t('failureLabel') : t('runResult'))}:</strong> \${escapeHtml(result)}
+              \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
+              <strong>\${escapeHtml(t('command'))}</strong>
+              <pre>\${escapeHtml(conversation.command || '')}</pre>
+              <strong>\${escapeHtml(t('output'))}</strong>
+              <pre>\${escapeHtml(conversation.output || '')}</pre>
+            </div>
+          \` : ''}
+        </div>
+      \`;
+    }
+
     function bindSidebarSoloHistory(container, projectPath) {
       const card = container.querySelector('[data-sidebar-solo-conversation]');
       if (card) {
@@ -6346,6 +6440,24 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           });
         });
       });
+    }
+
+    function bindSidebarStepHistory(container, projectPath) {
+      const holder = container.querySelector('[data-sidebar-step-history]');
+      if (!holder) return;
+      const nodeId = holder.getAttribute('data-step-node-id') || '';
+      const key = stepConversationKey(projectPath, nodeId);
+      if (projectPath && nodeId && !sidebarStepConversationRequested[key]) {
+        sidebarStepConversationRequested[key] = true;
+        vscode.postMessage({ command: 'getStepConversationHistory', projectPath, nodeId });
+      }
+      const card = container.querySelector('[data-sidebar-step-conversation]');
+      if (card) {
+        card.addEventListener('click', () => {
+          sidebarStepConversationExpanded[key] = !sidebarStepConversationExpanded[key];
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      }
     }
 
     function formatRelativeTime(value) {
@@ -6589,6 +6701,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           </div>
           \${renderProjectConversationFiles(targetId, files)}
           \${activeMode === 'solo' ? \`<div class="sidebar-solo-history" data-sidebar-solo-history>\${renderSidebarSoloHistoryContent()}</div>\` : ''}
+          \${activeMode === 'continue' && node ? \`<div class="sidebar-solo-history" data-sidebar-step-history data-step-node-id="\${escapeHtml(node.id)}">\${renderSidebarStepHistoryContent(projectPath, node)}</div>\` : ''}
         </div>
       \`;
     }
@@ -6609,6 +6722,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function bindProjectContinueComposer(container) {
       bindSoloSelects(container);
+      bindSidebarStepHistory(container, currentProjects.selectedProjectPath);
       container.querySelectorAll('[data-project-conversation-mode]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -6667,6 +6781,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (input) input.value = '';
           projectContinueDrafts[nodeId] = '';
           projectContinueFiles[nodeId] = [];
+          if (projectPath && nodeId) {
+            const key = stepConversationKey(projectPath, nodeId);
+            delete sidebarStepConversationRequested[key];
+            vscode.postMessage({ command: 'getStepConversationHistory', projectPath, nodeId });
+          }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
