@@ -608,10 +608,10 @@ test('full roadmap webview exposes node conversation history and language settin
 
   assert.match(html, /id="setting-language"/);
   assert.match(html, /id="setting-global-prompt"/);
-  assert.match(html, /id="agent-usage-panel"/);
-  assert.match(html, /id="btn-refresh-agent-usage"/);
-  assert.match(script, /getAgentUsage/);
-  assert.match(script, /agentUsageLoaded/);
+  assert.match(html, /id="agent-impact-panel"/);
+  assert.match(html, /id="btn-refresh-agent-impact"/);
+  assert.match(script, /getAgentImpact/);
+  assert.match(script, /agentImpactLoaded/);
   assert.match(html, /id="btn-open-feedback"/);
   assert.match(script, /openFeedbackIssue/);
   assert.match(html, /id="setting-mcp-input"/);
@@ -766,10 +766,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /todaySlotUrgent/);
   assert.doesNotMatch(html, /本周推进|Weekly Focus/);
   assert.match(html, /id="setting-global-data-path"/);
-  assert.match(html, /id="agent-usage-panel"/);
-  assert.match(html, /id="btn-refresh-agent-usage"/);
-  assert.match(html, /getAgentUsage/);
-  assert.match(html, /agentUsageLoaded/);
+  assert.match(html, /id="agent-impact-panel"/);
+  assert.match(html, /id="btn-refresh-agent-impact"/);
+  assert.match(html, /getAgentImpact/);
+  assert.match(html, /agentImpactLoaded/);
   assert.match(html, /id="setting-mcp-input"/);
   assert.match(html, /id="btn-install-mcp"/);
   assert.match(html, /installMcp/);
@@ -2061,32 +2061,44 @@ test('sync engine does not rewrite the journal when roadmap csv is unchanged', a
   assert.equal(secondEngine.getNodes()[0].title, 'Plan');
 });
 
-test('agent usage summary counts local SoloMap runs by day and agent', () => {
-  const { buildAgentUsageSummary } = require(path.join(projectRoot, 'out/agentUsage.js'));
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-usage-'));
+test('agent impact summary counts local SoloMap contribution by agent', () => {
+  const { buildAgentImpactSummary } = require(path.join(projectRoot, 'out/agentImpact.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-'));
+  const solopreneurDir = path.join(tempRoot, '.solopreneur');
   const runsRoot = path.join(tempRoot, '.solopreneur', 'agent-runs');
   const runToday = path.join(runsRoot, '1');
   const runWeek = path.join(runsRoot, '2');
   fs.mkdirSync(runToday, { recursive: true });
   fs.mkdirSync(runWeek, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,目标与路径确认,,codex,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z',
+    '2,Ship,,交付与验证,1,codex,,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
   fs.writeFileSync(path.join(runToday, 'started_at'), '2026-06-01T10:00:00.000Z', 'utf8');
   fs.writeFileSync(path.join(runToday, 'command.txt'), "cat prompt.txt | codex exec -", 'utf8');
+  fs.writeFileSync(path.join(runToday, 'output.log'), 'Run duration ms: 120000', 'utf8');
+  fs.writeFileSync(path.join(runToday, 'touched-files.txt'), 'M src/view.ts\nA docs/result.md\n', 'utf8');
   fs.writeFileSync(path.join(runToday, 'completion.json'), JSON.stringify({ markCompleted: true }), 'utf8');
   fs.writeFileSync(path.join(runWeek, 'started_at'), '2026-05-30T10:00:00.000Z', 'utf8');
   fs.writeFileSync(path.join(runWeek, 'command.txt'), "claude -p 'ship'", 'utf8');
+  fs.writeFileSync(path.join(runWeek, 'output.log'), 'Run duration ms: 60000', 'utf8');
+  fs.writeFileSync(path.join(runWeek, 'touched-files.txt'), 'M src/view.ts\nM src/api.ts\n', 'utf8');
   fs.writeFileSync(path.join(runWeek, 'completion.json'), JSON.stringify({ markCompleted: false, failureReason: 'stopped' }), 'utf8');
 
-  const summary = buildAgentUsageSummary(
-    [{ name: 'Usage Project', path: tempRoot }],
+  const summary = buildAgentImpactSummary(
+    [{ name: 'Impact Project', path: tempRoot }],
     new Date('2026-06-01T12:00:00.000Z')
   );
 
-  assert.equal(summary.todayRuns, 1);
   assert.equal(summary.weekRuns, 2);
   assert.equal(summary.totalRuns, 2);
   assert.equal(summary.completedRuns, 1);
   assert.equal(summary.failedRuns, 1);
-  assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.totalRuns]), [['claude', 1], ['codex', 1]]);
+  assert.equal(summary.totalMinutes, 3);
+  assert.equal(summary.changedFiles, 3);
+  assert.equal(summary.projectProgressPercent, 50);
+  assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 2, 2], ['claude', 1, 1, 2]]);
 });
 
 test('step conversation can start while roadmap dependencies are still incomplete', async () => {
