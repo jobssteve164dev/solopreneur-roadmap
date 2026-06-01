@@ -608,6 +608,10 @@ test('full roadmap webview exposes node conversation history and language settin
 
   assert.match(html, /id="setting-language"/);
   assert.match(html, /id="setting-global-prompt"/);
+  assert.match(html, /id="agent-usage-panel"/);
+  assert.match(html, /id="btn-refresh-agent-usage"/);
+  assert.match(script, /getAgentUsage/);
+  assert.match(script, /agentUsageLoaded/);
   assert.match(html, /id="btn-open-feedback"/);
   assert.match(script, /openFeedbackIssue/);
   assert.match(html, /id="setting-mcp-input"/);
@@ -762,6 +766,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /todaySlotUrgent/);
   assert.doesNotMatch(html, /本周推进|Weekly Focus/);
   assert.match(html, /id="setting-global-data-path"/);
+  assert.match(html, /id="agent-usage-panel"/);
+  assert.match(html, /id="btn-refresh-agent-usage"/);
+  assert.match(html, /getAgentUsage/);
+  assert.match(html, /agentUsageLoaded/);
   assert.match(html, /id="setting-mcp-input"/);
   assert.match(html, /id="btn-install-mcp"/);
   assert.match(html, /installMcp/);
@@ -2051,6 +2059,34 @@ test('sync engine does not rewrite the journal when roadmap csv is unchanged', a
 
   assert.equal(fs.statSync(dbPath).mtimeMs, oldTime.getTime());
   assert.equal(secondEngine.getNodes()[0].title, 'Plan');
+});
+
+test('agent usage summary counts local SoloMap runs by day and agent', () => {
+  const { buildAgentUsageSummary } = require(path.join(projectRoot, 'out/agentUsage.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-usage-'));
+  const runsRoot = path.join(tempRoot, '.solopreneur', 'agent-runs');
+  const runToday = path.join(runsRoot, '1');
+  const runWeek = path.join(runsRoot, '2');
+  fs.mkdirSync(runToday, { recursive: true });
+  fs.mkdirSync(runWeek, { recursive: true });
+  fs.writeFileSync(path.join(runToday, 'started_at'), '2026-06-01T10:00:00.000Z', 'utf8');
+  fs.writeFileSync(path.join(runToday, 'command.txt'), "cat prompt.txt | codex exec -", 'utf8');
+  fs.writeFileSync(path.join(runToday, 'completion.json'), JSON.stringify({ markCompleted: true }), 'utf8');
+  fs.writeFileSync(path.join(runWeek, 'started_at'), '2026-05-30T10:00:00.000Z', 'utf8');
+  fs.writeFileSync(path.join(runWeek, 'command.txt'), "claude -p 'ship'", 'utf8');
+  fs.writeFileSync(path.join(runWeek, 'completion.json'), JSON.stringify({ markCompleted: false, failureReason: 'stopped' }), 'utf8');
+
+  const summary = buildAgentUsageSummary(
+    [{ name: 'Usage Project', path: tempRoot }],
+    new Date('2026-06-01T12:00:00.000Z')
+  );
+
+  assert.equal(summary.todayRuns, 1);
+  assert.equal(summary.weekRuns, 2);
+  assert.equal(summary.totalRuns, 2);
+  assert.equal(summary.completedRuns, 1);
+  assert.equal(summary.failedRuns, 1);
+  assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.totalRuns]), [['claude', 1], ['codex', 1]]);
 });
 
 test('step conversation can start while roadmap dependencies are still incomplete', async () => {

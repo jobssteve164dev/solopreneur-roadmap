@@ -7,6 +7,7 @@ import { SyncEngine } from './db/syncEngine';
 import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
+import { getAgentUsageStatus } from './agentUsage';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
@@ -1130,6 +1131,15 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
               });
             }
           });
+          break;
+
+        case 'getAgentUsage':
+          if (activePanel) {
+            activePanel.webview.postMessage({
+              command: 'agentUsageLoaded',
+              status: await getAgentUsageStatus(getProjects(context), message.cliPath || getPersistedSettings(context).cliPath || 'agy')
+            });
+          }
           break;
       }
     },
@@ -5834,6 +5844,110 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       border-color: #00e5ff;
     }
 
+    .usage-panel {
+      border: 1px solid var(--border-glass);
+      border-radius: 8px;
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.035);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .usage-summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .usage-metric {
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 6px;
+      padding: 8px;
+      background: rgba(0, 0, 0, 0.12);
+      min-width: 0;
+    }
+
+    .usage-metric-value {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--text-main);
+      line-height: 1.1;
+    }
+
+    .usage-metric-label {
+      margin-top: 3px;
+      font-size: 9px;
+      color: var(--text-muted);
+    }
+
+    .usage-quota-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .usage-quota-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding-top: 7px;
+    }
+
+    .usage-quota-row:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .usage-quota-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .usage-quota-name {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
+    .usage-quota-detail {
+      font-size: 9px;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+
+    .usage-status {
+      flex-shrink: 0;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 9px;
+      font-weight: 800;
+      border: 1px solid var(--border-glass);
+      color: var(--text-muted);
+    }
+
+    .usage-status.ready {
+      border-color: rgba(0, 230, 118, 0.25);
+      color: #00e676;
+      background: rgba(0, 230, 118, 0.08);
+    }
+
+    .usage-status.unknown {
+      border-color: rgba(255, 183, 77, 0.28);
+      color: #ffcc80;
+      background: rgba(255, 183, 77, 0.08);
+    }
+
+    .usage-status.missing {
+      border-color: rgba(255, 82, 82, 0.24);
+      color: #ff8a80;
+      background: rgba(255, 82, 82, 0.08);
+    }
+
     .settings-actions {
       display: flex;
       gap: 8px;
@@ -6147,6 +6261,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-agent-usage">Agent Usage</label>
+      <div class="usage-panel" id="agent-usage-panel">
+        <div class="usage-summary">
+          <div class="usage-metric">
+            <div class="usage-metric-value" id="usage-today">0</div>
+            <div class="usage-metric-label" id="usage-today-label">Today</div>
+          </div>
+          <div class="usage-metric">
+            <div class="usage-metric-value" id="usage-week">0</div>
+            <div class="usage-metric-label" id="usage-week-label">7 days</div>
+          </div>
+          <div class="usage-metric">
+            <div class="usage-metric-value" id="usage-total">0</div>
+            <div class="usage-metric-label" id="usage-total-label">Total</div>
+          </div>
+        </div>
+        <div class="usage-quota-list" id="usage-quota-list"></div>
+        <button class="settings-action-btn test-btn" id="btn-refresh-agent-usage" style="width: 100%;"><span class="codicon codicon-refresh"></span><span id="text-refresh-agent-usage">Refresh Usage</span></button>
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
       <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Always keep changes minimal and run the narrowest relevant test."></textarea>
       <div id="help-global-prompt" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
@@ -6239,6 +6375,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
     const cliTestBadge = document.getElementById('cli-test-badge');
+    const btnRefreshAgentUsage = document.getElementById('btn-refresh-agent-usage');
+    const usageQuotaList = document.getElementById('usage-quota-list');
     const projectTypeSelect = document.getElementById('project-type-select');
     const projectPrioritySelect = document.getElementById('project-priority-select');
     let currentLanguage = 'zh';
@@ -6272,6 +6410,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalDataPath: '跨项目数据目录',
         globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
         globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
+        agentUsage: 'Agent 用量',
+        usageToday: '今日',
+        usageWeek: '近 7 天',
+        usageTotal: '总计',
+        refreshAgentUsage: '刷新用量',
+        usageLoading: '正在查询用量...',
+        quotaReady: '可读',
+        quotaUnknown: '未知',
+        quotaMissing: '未安装',
+        quotaNotExposed: '该 CLI 未提供可读剩余额度',
         skillInstall: '安装技能',
         skillInstallPlaceholder: '例如：https://skills.sh/owner/repo 或 owner/repo@skill',
         skillInstallHelp: '粘贴 skills.sh 或 GitHub 技能链接，SoloMap 会安装到全局技能库。',
@@ -6378,6 +6526,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalDataPath: 'Global Data Directory',
         globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
         globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
+        agentUsage: 'Agent Usage',
+        usageToday: 'Today',
+        usageWeek: '7 days',
+        usageTotal: 'Total',
+        refreshAgentUsage: 'Refresh Usage',
+        usageLoading: 'Checking usage...',
+        quotaReady: 'Readable',
+        quotaUnknown: 'Unknown',
+        quotaMissing: 'Missing',
+        quotaNotExposed: 'This CLI does not expose readable remaining quota',
         skillInstall: 'Install Skill',
         skillInstallPlaceholder: 'e.g. https://skills.sh/owner/repo or owner/repo@skill',
         skillInstallHelp: 'Paste a skills.sh or GitHub skill link. SoloMap installs it into the global skill library.',
@@ -6542,6 +6700,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-global-data-path', t('globalDataPath'));
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
       setText('help-global-data-path', t('globalDataPathHelp'));
+      setText('label-agent-usage', t('agentUsage'));
+      setText('usage-today-label', t('usageToday'));
+      setText('usage-week-label', t('usageWeek'));
+      setText('usage-total-label', t('usageTotal'));
+      setText('text-refresh-agent-usage', t('refreshAgentUsage'));
       setText('label-skill-install', t('skillInstall'));
       if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
       setText('help-skill-install', t('skillInstallHelp'));
@@ -6588,6 +6751,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         btnToggleRoadmapRevision.classList.remove('active');
         settingsPanel.style.display = 'flex';
         vscode.postMessage({ command: 'getSettings' });
+        requestAgentUsage();
       }
     });
 
@@ -6798,6 +6962,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             cliTestBadge.textContent = t('connectionFailed') + message.message;
           }
           break;
+        case 'agentUsageLoaded':
+          renderAgentUsage(message.status || {});
+          break;
         case 'skillInstallResult':
           if (skillInstallBadge) {
             skillInstallBadge.style.display = 'block';
@@ -6842,6 +7009,54 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         cliPath: getEffectiveSettingCliPath()
       });
     });
+
+    if (btnRefreshAgentUsage) {
+      btnRefreshAgentUsage.addEventListener('click', () => {
+        requestAgentUsage();
+      });
+    }
+
+    function requestAgentUsage() {
+      setAgentUsagePending();
+      vscode.postMessage({
+        command: 'getAgentUsage',
+        cliPath: getEffectiveSettingCliPath()
+      });
+    }
+
+    function setAgentUsagePending() {
+      setText('usage-today', '...');
+      setText('usage-week', '...');
+      setText('usage-total', '...');
+      if (usageQuotaList) {
+        usageQuotaList.innerHTML = '<div class="usage-quota-detail">' + escapeHtml(t('usageLoading')) + '</div>';
+      }
+    }
+
+    function renderAgentUsage(status) {
+      const usage = status.usage || {};
+      setText('usage-today', String(usage.todayRuns || 0));
+      setText('usage-week', String(usage.weekRuns || 0));
+      setText('usage-total', String(usage.totalRuns || 0));
+      if (!usageQuotaList) return;
+      const quotas = Array.isArray(status.quotas) ? status.quotas : [];
+      usageQuotaList.innerHTML = quotas.map((quota) => {
+        const state = quota.status === 'ready' ? 'ready' : (quota.status === 'missing' ? 'missing' : 'unknown');
+        const stateText = state === 'ready' ? t('quotaReady') : (state === 'missing' ? t('quotaMissing') : t('quotaUnknown'));
+        const detail = quota.quotaReadable
+          ? (quota.detail || quota.message || '')
+          : (quota.available ? t('quotaNotExposed') : (quota.message || t('quotaMissing')));
+        return \`
+          <div class="usage-quota-row">
+            <div class="usage-quota-main">
+              <div class="usage-quota-name">\${escapeHtml(quota.label || quota.family || '')}</div>
+              <div class="usage-quota-detail">\${escapeHtml(detail)}</div>
+            </div>
+            <span class="usage-status \${state}">\${escapeHtml(stateText)}</span>
+          </div>
+        \`;
+      }).join('');
+    }
 
     if (btnInstallSkill) {
       btnInstallSkill.addEventListener('click', () => {
