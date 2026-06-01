@@ -684,9 +684,11 @@ function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
 function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = false): ProjectDeliverySummary {
   const recentRuns = cache.workflowRuns.slice(0, DELIVERY_WORKFLOW_RUN_LIMIT);
   const latestRun = recentRuns[0] || null;
-  const failedWorkflowRuns = recentRuns
-    .filter((run) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
-    .length;
+  const failedWorkflowRuns = stale
+    ? 0
+    : recentRuns
+      .filter((run) => ['failure', 'timed_out', 'cancelled', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
+      .length;
   return {
     available: true,
     loading: false,
@@ -1701,6 +1703,7 @@ function inferDeliverySignal(delivery: ProjectDeliverySummary): string {
   if (!delivery?.available) return '';
   if (Number(delivery.failedWorkflowRuns || 0) > 0) return `Checks failed ${delivery.failedWorkflowRuns}`;
   if (delivery.latestRelease) return `Latest ${delivery.latestRelease}`;
+  if (delivery.stale && delivery.syncedAt) return 'Checks cached';
   if (delivery.latestWorkflowStatus) return `Checks ${delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus}`;
   return '';
 }
@@ -2430,6 +2433,40 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               message: result.message
             });
             this.sendProjects();
+            break;
+          }
+          case 'refreshProjectData': {
+            const projectPath = String(data.projectPath || '');
+            let issues: ProjectIssueSummary | null = null;
+            let delivery: ProjectDeliverySummary | null = null;
+            try {
+              [issues, delivery] = await Promise.all([
+                readProjectIssueSummaryAsync(projectPath),
+                readProjectDeliverySummaryAsync(projectPath)
+              ]);
+            } catch (error) {
+              console.error('SoloMap sidebar failed to refresh project data:', error);
+            }
+            if (issues) {
+              this._view?.webview.postMessage({
+                command: 'projectIssuesLoaded',
+                projectPath,
+                issues
+              });
+            }
+            if (delivery) {
+              this._view?.webview.postMessage({
+                command: 'projectDeliveryLoaded',
+                projectPath,
+                delivery
+              });
+            }
+            this._view?.webview.postMessage({
+              command: 'projectRefreshCompleted',
+              projectPath,
+              success: Boolean(issues?.available || delivery?.available),
+              message: issues?.message || delivery?.message || ''
+            });
             break;
           }
           case 'getProjects':
@@ -3839,6 +3876,41 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       gap: 8px;
     }
 
+    .portfolio-card-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .portfolio-refresh-btn {
+      width: 22px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 5px;
+      background: rgba(255,255,255,0.045);
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 0;
+    }
+
+    .portfolio-refresh-btn:hover {
+      color: var(--text-main);
+      border-color: rgba(0, 229, 255, 0.3);
+    }
+
+    .portfolio-refresh-btn.is-refreshing .codicon {
+      animation: solomap-spin 0.9s linear infinite;
+    }
+
+    @keyframes solomap-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
     .portfolio-card-meta {
       margin-top: 6px;
       font-size: 10px;
@@ -4757,6 +4829,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const projectContinueDrafts = {};
     const projectSoloFiles = {};
     const projectSoloDrafts = {};
+    const projectRefreshPaths = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
     const i18n = {
       zh: {
@@ -4839,6 +4912,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         projectOpen: '打开',
         projectContinue: '继续推进',
         projectReviewFailure: '处理失败',
+        refreshProjectData: '刷新项目数据',
+        refreshProjectDataDone: '已刷新',
+        checksCached: '检查缓存',
         projectModeContinue: '推进',
         projectModeSolo: 'Solo',
         emptyPortfolio: '还没有已登记项目。',
@@ -5002,6 +5078,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         projectOpen: 'Open',
         projectContinue: 'Continue',
         projectReviewFailure: 'Review Failure',
+        refreshProjectData: 'Refresh project data',
+        refreshProjectDataDone: 'Refreshed',
+        checksCached: 'Checks cached',
         projectModeContinue: 'Continue',
         projectModeSolo: 'Solo',
         emptyPortfolio: 'No registered projects yet.',
@@ -5293,6 +5372,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             project.path === message.projectPath ? { ...project, delivery: message.delivery, deliverySignal: deliverySignalText(message.delivery) } : project
           ));
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'projectRefreshCompleted':
+          projectRefreshPaths.delete(message.projectPath || '');
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -6200,6 +6284,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!delivery || !delivery.available) return '';
       if (Number(delivery.failedWorkflowRuns || 0) > 0) return 'Checks failed ' + Number(delivery.failedWorkflowRuns || 0);
       if (delivery.latestRelease) return 'Latest ' + delivery.latestRelease;
+      if (delivery.stale && delivery.syncedAt) return t('checksCached');
       if (delivery.latestWorkflowStatus) return 'Checks ' + (delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus);
       return '';
     }
@@ -6592,11 +6677,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const nextActionLabel = Number(project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue');
         const relativeTime = formatRelativeTime(project.recentActivityAt);
         const recommendation = project.recommendedNodeTitle || '';
+        const isRefreshing = projectRefreshPaths.has(project.path);
         return \`
           <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
               <span class="portfolio-project-name">\${escapeHtml(project.name)}</span>
-              <span class="global-priority \${escapeHtml(project.globalPriority || 'P2')}">\${escapeHtml(project.globalPriority || 'P2')}</span>
+              <span class="portfolio-card-controls">
+                <button class="portfolio-refresh-btn \${isRefreshing ? 'is-refreshing' : ''}" type="button" title="\${escapeHtml(t('refreshProjectData'))}" aria-label="\${escapeHtml(t('refreshProjectData'))}" data-refresh-project-path="\${escapeHtml(project.path)}" \${isRefreshing ? 'disabled' : ''}><span class="codicon codicon-refresh"></span></button>
+                <span class="global-priority \${escapeHtml(project.globalPriority || 'P2')}">\${escapeHtml(project.globalPriority || 'P2')}</span>
+              </span>
             </div>
             <div class="portfolio-global-row">
               <span class="global-chip">\${escapeHtml(t('globalType'))}: \${escapeHtml(project.projectType || '-')}</span>
@@ -6641,6 +6730,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           vscode.postMessage({
             command: 'openProjectFromPortfolio',
             projectPath: button.getAttribute('data-open-project-path')
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-refresh-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-refresh-project-path') || '';
+          if (!projectPath || projectRefreshPaths.has(projectPath)) return;
+          projectRefreshPaths.add(projectPath);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'refreshProjectData',
+            projectPath
           });
         });
       });

@@ -316,6 +316,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /createIssue/);
   assert.match(script, /closeIssue/);
   assert.match(script, /getIssueDetails/);
+  assert.match(script, /refreshProjectData/);
+  assert.match(script, /data-refresh-project-path/);
+  assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
   assert.match(html, /data-issue-panel/);
   assert.match(html, /data-toggle-issue-form/);
@@ -422,6 +425,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /页面加载慢/);
   assert.match(elements['portfolio-list'].innerHTML, /待关闭|Open/);
   assert.match(elements['portfolio-list'].innerHTML, /data-toggle-issue-form/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-refresh-project-path="\/workspace\/second"/);
+  assert.match(elements['portfolio-list'].innerHTML, /codicon-refresh/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-expand-issue-number="12"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
@@ -1039,8 +1044,10 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   const deliveryCache = sidebarModule.__readDeliveryCache(root, 'owner/repo');
   const deliverySummary = sidebarModule.__summarizeDeliveryCache('owner/repo', deliveryCache, true);
   assert.equal(deliverySummary.latestRelease, 'v1.2.3');
-  assert.equal(deliverySummary.failedWorkflowRuns, 1);
+  assert.equal(deliverySummary.failedWorkflowRuns, 0);
   assert.equal(deliverySummary.stale, true);
+  const liveDeliverySummary = sidebarModule.__summarizeDeliveryCache('owner/repo', deliveryCache, false);
+  assert.equal(liveDeliverySummary.failedWorkflowRuns, 1);
 });
 
 test('sidebar issue creation keeps labels auxiliary to creation', () => {
