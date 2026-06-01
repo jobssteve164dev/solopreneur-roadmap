@@ -1,0 +1,38 @@
+name: Seed user feedback
+description: Share what blocked you, what was unclear, or what you want next.
+title: "[Feedback] "
+labels:
+  - feedback
+  - seed-user
+body:
+  - type: dropdown
+    id: feedback_type
+    attributes:
+      label: Feedback type
+      options:
+        - I could not get it working
+        - I did not know the next step
+        - I want a capability
+    validations:
+      required: false
+  - type: checkboxes
+    id: core_path
+    attributes:
+      label: Core path reached
+      options:
+        - label: Added a local project
+        - label: Generated or opened a roadmap
+        - label: Ran an Agent or Solo conversation
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: A short description is enough.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: false

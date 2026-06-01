@@ -191,16 +191,34 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function buildFeedbackIssueUrl(title: string, body: string): string {
+function buildFeedbackIssueUrl(title: string, body: string, category = ''): string {
   const params = new URLSearchParams();
   const issueTitle = String(title || '').trim();
   const issueBody = String(body || '').trim();
+  const issueCategory = String(category || '').trim();
   if (issueTitle) {
     params.set('title', issueTitle);
   }
-  if (issueBody) {
-    params.set('body', issueBody);
+  const categoryLabel = issueCategory ? `Feedback type: ${issueCategory}` : '';
+  const defaultBody = [
+    categoryLabel,
+    '',
+    issueBody,
+    '',
+    'Core path check:',
+    '- [ ] Added a local project',
+    '- [ ] Generated or opened a roadmap',
+    '- [ ] Ran an Agent or Solo conversation',
+    '',
+    'What happened:',
+    '',
+    'What I expected:'
+  ].join('\n').trim();
+  if (defaultBody) {
+    params.set('body', defaultBody);
   }
+  params.set('template', 'seed-user-feedback.yml');
+  params.set('labels', 'feedback,seed-user');
   return `${FEEDBACK_ISSUE_URL}${params.toString() ? `?${params.toString()}` : ''}`;
 }
 
@@ -2544,7 +2562,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             }
             break;
           case 'openFeedbackIssue':
-            vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(data.title || '', data.body || '')));
+            vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(data.title || '', data.body || '', data.category || '')));
             break;
           case 'getIssueDetails':
             this.sendIssueDetails(data.projectPath || '', Number(data.issueNumber || 0));
@@ -2979,6 +2997,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       letter-spacing: -0.5px;
     }
 
+    .header-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
     .btn-gear {
       background: none;
       border: none;
@@ -3006,7 +3030,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     /* Settings Panel Overlay */
-    .settings-overlay {
+    .settings-overlay,
+    .feedback-overlay {
       position: absolute;
       top: 45px;
       left: 10px;
@@ -3022,6 +3047,29 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       max-height: calc(100vh - 70px);
       overflow-y: auto;
       animation: slide-down 0.2s ease-out;
+    }
+
+    .feedback-type-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+
+    .feedback-type-btn {
+      border: 1px solid var(--border-glass);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      border-radius: 6px;
+      padding: 7px 5px;
+      font-size: 10px;
+      cursor: pointer;
+    }
+
+    .feedback-type-btn.active {
+      color: #00e5ff;
+      border-color: rgba(0, 229, 255, 0.55);
+      background: rgba(0, 229, 255, 0.08);
     }
 
     @keyframes slide-down {
@@ -4709,7 +4757,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 <body>
   <div class="header-container">
     <h2 class="brand-title"><span class="codicon codicon-map"></span><span id="sidebar-title">SoloMap</span></h2>
-    <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
+    <div class="header-actions">
+      <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
+      <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
+    </div>
   </div>
 
   <div class="project-switcher">
@@ -4724,6 +4775,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div class="global-focus-panel" id="global-focus-panel"></div>
+
+  <div class="feedback-overlay" id="feedback-panel">
+    <div class="settings-header">
+      <h3><span class="codicon codicon-comment-discussion"></span> <span id="feedback-title">Feedback</span></h3>
+      <button class="btn-close-settings" id="btn-close-feedback"><span class="codicon codicon-close"></span></button>
+    </div>
+    <div class="feedback-type-row">
+      <button class="feedback-type-btn active" type="button" data-feedback-type="not_working" id="feedback-type-not-working">没跑通</button>
+      <button class="feedback-type-btn" type="button" data-feedback-type="next_step" id="feedback-type-next-step">不懂下一步</button>
+      <button class="feedback-type-btn" type="button" data-feedback-type="feature_request" id="feedback-type-feature">想要能力</button>
+    </div>
+    <div class="settings-field">
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-feedback-title"
+        placeholder="What should be improved?"
+      >
+      <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 78px; margin-top: 5px;"></textarea>
+      <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
+    </div>
+  </div>
 
   <div class="portfolio-panel">
     <div class="portfolio-header">
@@ -4859,18 +4932,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-feedback">Feedback</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-feedback-title"
-        placeholder="What should be improved?"
-      >
-      <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 54px; margin-top: 5px;"></textarea>
-      <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
-    </div>
-
-    <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
       <div class="dependency-panel" id="dependency-panel">
         <div class="dependency-row">
@@ -4923,6 +4984,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const portfolioFilters = document.getElementById('portfolio-filters');
 
     // Settings elements
+    const btnToggleFeedback = document.getElementById('btn-toggle-feedback');
+    const btnCloseFeedback = document.getElementById('btn-close-feedback');
+    const feedbackPanel = document.getElementById('feedback-panel');
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
@@ -4966,6 +5030,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let issueActionMessage = '';
     let currentDailyReview = null;
     let dailyReviewPollTimer = null;
+    let currentFeedbackType = 'not_working';
     const projectConversationModes = {};
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
@@ -5024,6 +5089,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
         feedback: '建议反馈',
+        feedbackNotWorking: '没跑通',
+        feedbackNextStep: '不懂下一步',
+        feedbackFeature: '想要能力',
+        feedbackPanelTitle: '反馈',
         feedbackTitlePlaceholder: '一句话说明想反馈的问题...',
         feedbackBodyPlaceholder: '补充现象、期望结果或改进建议...',
         openFeedback: '提交到 GitHub Issue',
@@ -5190,6 +5259,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
         feedback: 'Feedback',
+        feedbackNotWorking: 'Not working',
+        feedbackNextStep: 'Next step unclear',
+        feedbackFeature: 'Feature request',
+        feedbackPanelTitle: 'Feedback',
         feedbackTitlePlaceholder: 'Summarize the issue or idea...',
         feedbackBodyPlaceholder: 'Add what happened, what you expected, or the suggestion...',
         openFeedback: 'Open GitHub Issue',
@@ -5345,7 +5418,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('sidebar-title', t('title'));
       setText('portfolio-title', t('portfolioTitle'));
       btnToggleSettings.title = t('settingsTitle');
+      if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
       btnAddProject.title = t('chooseProject');
+      setText('feedback-title', t('feedbackPanelTitle'));
+      setText('feedback-type-not-working', t('feedbackNotWorking'));
+      setText('feedback-type-next-step', t('feedbackNextStep'));
+      setText('feedback-type-feature', t('feedbackFeature'));
       setText('settings-title', t('settingsTitle'));
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
@@ -5369,7 +5447,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
       setText('help-mcp-install', t('mcpInstallHelp'));
       setText('text-install-mcp', t('installMcp'));
-      setText('label-feedback', t('feedback'));
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -5392,10 +5469,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     // Toggle settings panel
+    if (btnToggleFeedback) {
+      btnToggleFeedback.addEventListener('click', () => {
+        if (feedbackPanel.style.display === 'block') {
+          feedbackPanel.style.display = 'none';
+        } else {
+          settingsPanel.style.display = 'none';
+          feedbackPanel.style.display = 'block';
+        }
+      });
+    }
+
+    if (btnCloseFeedback) {
+      btnCloseFeedback.addEventListener('click', () => {
+        feedbackPanel.style.display = 'none';
+      });
+    }
+
     btnToggleSettings.addEventListener('click', () => {
       if (settingsPanel.style.display === 'block') {
         settingsPanel.style.display = 'none';
       } else {
+        feedbackPanel.style.display = 'none';
         settingsPanel.style.display = 'block';
         vscode.postMessage({ command: 'getSettings' });
         requestAgentImpact();
@@ -5699,10 +5794,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({
           command: 'openFeedbackIssue',
           title: settingFeedbackTitle ? settingFeedbackTitle.value.trim() : '',
-          body: settingFeedbackBody ? settingFeedbackBody.value.trim() : ''
+          body: settingFeedbackBody ? settingFeedbackBody.value.trim() : '',
+          category: currentFeedbackType
         });
       });
     }
+
+    document.querySelectorAll('[data-feedback-type]').forEach(button => {
+      button.addEventListener('click', () => {
+        currentFeedbackType = button.getAttribute('data-feedback-type') || 'not_working';
+        document.querySelectorAll('[data-feedback-type]').forEach(item => {
+          item.classList.toggle('active', item === button);
+        });
+      });
+    });
 
     btnCheckDependencies.addEventListener('click', () => {
       setDependencyPending();

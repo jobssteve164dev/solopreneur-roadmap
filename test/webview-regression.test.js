@@ -315,6 +315,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /savePastedAttachments/);
   assert.match(script, /checkDependencies/);
   assert.match(script, /openFeedbackIssue/);
+  assert.match(html, /id="btn-toggle-feedback"/);
+  assert.match(html, /id="feedback-panel"/);
+  assert.doesNotMatch(html, /id="label-feedback"/);
   assert.match(script, /renderProjectIssuePanel/);
   assert.match(script, /createIssue/);
   assert.match(script, /closeIssue/);
@@ -336,6 +339,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
+    'btn-toggle-feedback',
+    'btn-close-feedback',
+    'feedback-panel',
+    'feedback-title',
+    'feedback-type-not-working',
+    'feedback-type-next-step',
+    'feedback-type-feature',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -375,13 +385,15 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   elements['btn-check-dependencies'].listeners.click();
   elements['btn-open-agent-install'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
+  elements['btn-toggle-feedback'].listeners.click();
+  assert.equal(elements['feedback-panel'].style.display, 'block');
   elements['setting-feedback-title'].value = '希望加载更快';
   elements['setting-feedback-body'].value = '打开侧边栏时先显示项目。';
   elements['btn-open-feedback'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'checkDependencies'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'agent-install'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'github-auth'));
-  assert.ok(postedMessages.some((message) => message.command === 'openFeedbackIssue' && message.title === '希望加载更快'));
+  assert.ok(postedMessages.some((message) => message.command === 'openFeedbackIssue' && message.title === '希望加载更快' && message.category === 'not_working'));
 
   dispatchMessage({
     command: 'settingsLoaded',
@@ -540,6 +552,9 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /bindPastedImageAttachments/);
   assert.match(script, /savePastedAttachments/);
   assert.match(script, /runRoadmapRevision[\s\S]*supplementFiles/);
+  assert.match(html, /id="btn-toggle-feedback"/);
+  assert.match(html, /id="feedback-panel"/);
+  assert.doesNotMatch(html, /id="label-feedback"/);
 
   const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'canvas',
@@ -556,6 +571,13 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'btn-close-roadmap-revision',
     'roadmap-revision-panel',
     'roadmap-revision-body',
+    'btn-toggle-feedback',
+    'btn-close-feedback',
+    'feedback-panel',
+    'feedback-title',
+    'feedback-type-not-working',
+    'feedback-type-next-step',
+    'feedback-type-feature',
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
@@ -563,6 +585,9 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'setting-cli-select',
     'setting-clipath-custom',
     'setting-global-prompt',
+    'setting-feedback-title',
+    'setting-feedback-body',
+    'btn-open-feedback',
     'btn-test-cli',
     'btn-save-settings',
     'cli-test-badge'
@@ -580,6 +605,12 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en'));
+  elements['btn-toggle-feedback'].listeners.click();
+  assert.equal(elements['feedback-panel'].style.display, 'flex');
+  elements['setting-feedback-title'].value = '看不懂下一步';
+  elements['setting-feedback-body'].value = '路线图打开后不知道先点哪里。';
+  elements['btn-open-feedback'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'openFeedbackIssue' && message.title === '看不懂下一步' && message.category === 'not_working'));
 
   postedMessages.length = 0;
   elements['btn-toggle-solo'].listeners.click();

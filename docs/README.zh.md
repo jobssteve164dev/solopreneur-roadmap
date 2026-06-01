@@ -21,6 +21,13 @@
 | `marketing/` | 对外发布和传播材料 | Product Hunt、小红书、朋友圈、发布计划 |
 | `assets/` | 文档配图和发布图片 | 截图、封面、宣传图 |
 
+## 种子用户反馈闭环
+
+- 人工触达记录：[product/seed-users.md](./product/seed-users.md)
+- 访谈问题与反馈表：[product/customer-discovery.zh.md](./product/customer-discovery.zh.md)
+- GitHub Issue 模板：`.github/ISSUE_TEMPLATE/seed-user-feedback.yml`
+- 插件内入口：侧边栏顶部反馈按钮
+
 ## 写入规则
 
 - 本轮做了什么、改了哪里、怎么验证，不写进 `docs/`，应留在 Agent 运行记录或环节交接中。

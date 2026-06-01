@@ -1077,7 +1077,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'openFeedbackIssue':
-          vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(message.title || '', message.body || '')));
+          vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(message.title || '', message.body || '', message.category || '')));
           break;
 
         case 'getNodeConversations':
@@ -1227,16 +1227,34 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function buildFeedbackIssueUrl(title: string, body: string): string {
+function buildFeedbackIssueUrl(title: string, body: string, category = ''): string {
   const params = new URLSearchParams();
   const issueTitle = String(title || '').trim();
   const issueBody = String(body || '').trim();
+  const issueCategory = String(category || '').trim();
   if (issueTitle) {
     params.set('title', issueTitle);
   }
-  if (issueBody) {
-    params.set('body', issueBody);
+  const categoryLabel = issueCategory ? `Feedback type: ${issueCategory}` : '';
+  const defaultBody = [
+    categoryLabel,
+    '',
+    issueBody,
+    '',
+    'Core path check:',
+    '- [ ] Added a local project',
+    '- [ ] Generated or opened a roadmap',
+    '- [ ] Ran an Agent or Solo conversation',
+    '',
+    'What happened:',
+    '',
+    'What I expected:'
+  ].join('\n').trim();
+  if (defaultBody) {
+    params.set('body', defaultBody);
   }
+  params.set('template', 'seed-user-feedback.yml');
+  params.set('labels', 'feedback,seed-user');
   return `${FEEDBACK_ISSUE_URL}${params.toString() ? `?${params.toString()}` : ''}`;
 }
 
@@ -5721,7 +5739,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     /* Settings Overlay Styles */
-    .settings-overlay {
+    .settings-overlay,
+    .feedback-overlay {
       position: absolute;
       top: 75px;
       right: 24px;
@@ -5739,6 +5758,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       max-height: calc(100vh - 110px);
       overflow-y: auto;
       animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .feedback-type-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .feedback-type-btn {
+      border: 1px solid var(--border-glass);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      border-radius: 6px;
+      padding: 8px 6px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .feedback-type-btn.active {
+      color: #00e5ff;
+      border-color: rgba(0, 229, 255, 0.55);
+      background: rgba(0, 229, 255, 0.08);
     }
 
     .roadmap-revision-popover {
@@ -6119,6 +6160,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
 
       .settings-overlay,
+      .feedback-overlay,
       .roadmap-revision-popover {
         top: 118px;
         left: 12px;
@@ -6193,6 +6235,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
         <button class="btn-project-remove" id="btn-remove-project" title="Remove project"><span class="codicon codicon-trash"></span></button>
         <button class="btn-roadmap-revision" id="btn-toggle-roadmap-revision" title="Revise Roadmap"><span class="codicon codicon-git-compare"></span></button>
+        <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
         <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
       </div>
     </header>
@@ -6220,6 +6263,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <button class="btn-close-revision" id="btn-close-roadmap-revision" title="Close"><span class="codicon codicon-close"></span></button>
     </div>
     <div class="roadmap-revision-body" id="roadmap-revision-body"></div>
+  </div>
+
+  <div class="feedback-overlay" id="feedback-panel">
+    <div class="settings-header">
+      <h3><span class="codicon codicon-comment-discussion"></span> <span id="feedback-title">Feedback</span></h3>
+      <button class="btn-close-settings" id="btn-close-feedback"><span class="codicon codicon-close"></span></button>
+    </div>
+    <div class="feedback-type-row">
+      <button class="feedback-type-btn active" type="button" data-feedback-type="not_working" id="feedback-type-not-working">Not working</button>
+      <button class="feedback-type-btn" type="button" data-feedback-type="next_step" id="feedback-type-next-step">Next step unclear</button>
+      <button class="feedback-type-btn" type="button" data-feedback-type="feature_request" id="feedback-type-feature">Feature request</button>
+    </div>
+    <div class="settings-field">
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-feedback-title"
+        placeholder="What should be improved?"
+      >
+      <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 84px; margin-top: 5px;"></textarea>
+      <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
+    </div>
   </div>
 
   <!-- Settings Panel Overlay -->
@@ -6347,18 +6412,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
     </div>
 
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-feedback">Feedback</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-feedback-title"
-        placeholder="What should be improved?"
-      >
-      <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 54px; margin-top: 5px;"></textarea>
-      <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
-    </div>
-
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -6382,6 +6435,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const roadmapRevisionBody = document.getElementById('roadmap-revision-body');
 
     // Settings Panel elements
+    const btnToggleFeedback = document.getElementById('btn-toggle-feedback');
+    const btnCloseFeedback = document.getElementById('btn-close-feedback');
+    const feedbackPanel = document.getElementById('feedback-panel');
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
@@ -6413,6 +6469,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let activeConversationId = '';
     let activeProjectPath = '';
     let currentCliPath = 'agy';
+    let currentFeedbackType = 'not_working';
     let activeMainView = 'roadmap';
     let currentRoadmapLoading = false;
     const roadmapRevisionId = '__roadmap_revision__';
@@ -6458,6 +6515,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
         feedback: '建议反馈',
+        feedbackNotWorking: '没跑通',
+        feedbackNextStep: '不懂下一步',
+        feedbackFeature: '想要能力',
+        feedbackPanelTitle: '反馈',
         feedbackTitlePlaceholder: '一句话说明想反馈的问题...',
         feedbackBodyPlaceholder: '补充现象、期望结果或改进建议...',
         openFeedback: '提交到 GitHub Issue',
@@ -6574,6 +6635,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
         feedback: 'Feedback',
+        feedbackNotWorking: 'Not working',
+        feedbackNextStep: 'Next step unclear',
+        feedbackFeature: 'Feature request',
+        feedbackPanelTitle: 'Feedback',
         feedbackTitlePlaceholder: 'Summarize the issue or idea...',
         feedbackBodyPlaceholder: 'Add what happened, what you expected, or the suggestion...',
         openFeedback: 'Open GitHub Issue',
@@ -6712,10 +6777,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       btnAddProject.title = t('addProject');
       btnRemoveProject.title = t('removeProject');
       btnToggleSolo.title = t('soloTitle');
+      if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
       setText('roadmap-view-tab-label', t('roadmapView'));
       setText('solo-view-tab-label', 'Solo');
       btnToggleRoadmapRevision.title = t('reviseRoadmap');
       setText('settings-title', t('settingsTitle'));
+      setText('feedback-title', t('feedbackPanelTitle'));
+      setText('feedback-type-not-working', t('feedbackNotWorking'));
+      setText('feedback-type-next-step', t('feedbackNextStep'));
+      setText('feedback-type-feature', t('feedbackFeature'));
       setText('roadmap-revision-title', t('reviseRoadmap'));
       setText('solo-title', t('soloTitle'));
       setText('label-language', t('language'));
@@ -6740,7 +6810,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
       setText('help-mcp-install', t('mcpInstallHelp'));
       setText('text-install-mcp', t('installMcp'));
-      setText('label-feedback', t('feedback'));
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -6768,6 +6837,26 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       renderSoloPanel(currentNodes);
     }
 
+    if (btnToggleFeedback) {
+      btnToggleFeedback.addEventListener('click', () => {
+        if (feedbackPanel.style.display === 'flex') {
+          feedbackPanel.style.display = 'none';
+        } else {
+          roadmapRevisionExpanded = false;
+          roadmapRevisionPanel.classList.remove('open');
+          btnToggleRoadmapRevision.classList.remove('active');
+          settingsPanel.style.display = 'none';
+          feedbackPanel.style.display = 'flex';
+        }
+      });
+    }
+
+    if (btnCloseFeedback) {
+      btnCloseFeedback.addEventListener('click', () => {
+        feedbackPanel.style.display = 'none';
+      });
+    }
+
     // Toggle Settings panel visibility
     btnToggleSettings.addEventListener('click', () => {
       if (settingsPanel.style.display === 'flex') {
@@ -6776,6 +6865,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         roadmapRevisionExpanded = false;
         roadmapRevisionPanel.classList.remove('open');
         btnToggleRoadmapRevision.classList.remove('active');
+        feedbackPanel.style.display = 'none';
         settingsPanel.style.display = 'flex';
         vscode.postMessage({ command: 'getSettings' });
         requestAgentImpact();
@@ -6807,6 +6897,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       btnToggleRoadmapRevision.classList.toggle('active', roadmapRevisionExpanded);
       if (roadmapRevisionExpanded) {
         settingsPanel.style.display = 'none';
+        feedbackPanel.style.display = 'none';
         cliTestBadge.style.display = 'none';
         setMainView('roadmap');
         if (!nodeConversations[roadmapRevisionId]) {
@@ -7138,10 +7229,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         vscode.postMessage({
           command: 'openFeedbackIssue',
           title: settingFeedbackTitle ? settingFeedbackTitle.value.trim() : '',
-          body: settingFeedbackBody ? settingFeedbackBody.value.trim() : ''
+          body: settingFeedbackBody ? settingFeedbackBody.value.trim() : '',
+          category: currentFeedbackType
         });
       });
     }
+
+    document.querySelectorAll('[data-feedback-type]').forEach(button => {
+      button.addEventListener('click', () => {
+        currentFeedbackType = button.getAttribute('data-feedback-type') || 'not_working';
+        document.querySelectorAll('[data-feedback-type]').forEach(item => {
+          item.classList.toggle('active', item === button);
+        });
+      });
+    });
 
     bindSoloSelect(projectSelect, (value) => {
       vscode.postMessage({

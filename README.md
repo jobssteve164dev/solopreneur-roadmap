@@ -143,9 +143,9 @@ SoloMap 不需要后端服务。路线图、任务记录、Agent 日志和环节
 
 ## Feedback / 反馈
 
-Issues and pull requests are welcome in the [GitHub repository](https://github.com/jobssteve164dev/solopreneur-roadmap).
+Issues and pull requests are welcome in the [GitHub repository](https://github.com/jobssteve164dev/solopreneur-roadmap). If you are trying SoloMap as a seed user, use the in-extension feedback button or open a [seed user feedback issue](https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml).
 
-欢迎在 [GitHub 仓库](https://github.com/jobssteve164dev/solopreneur-roadmap) 提交 Issue 或 Pull Request。
+欢迎在 [GitHub 仓库](https://github.com/jobssteve164dev/solopreneur-roadmap) 提交 Issue 或 Pull Request。如果你正在试用 SoloMap，可以直接使用插件里的反馈按钮，或提交 [种子用户反馈](https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml)。
 
 - Repository / 项目仓库: [jobssteve164dev/solopreneur-roadmap](https://github.com/jobssteve164dev/solopreneur-roadmap)
 - License / 许可协议: [MIT License](https://github.com/jobssteve164dev/solopreneur-roadmap/blob/main/LICENSE)
