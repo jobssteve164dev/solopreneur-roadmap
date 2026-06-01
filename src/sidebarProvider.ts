@@ -5218,6 +5218,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let currentDailyReview = null;
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
+    let currentCliPath = 'agy';
     const projectConversationModes = {};
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
@@ -5703,13 +5704,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     bindSoloSelect(settingCliSelect, () => {
       const selected = getSoloSelectValue(settingCliSelect);
       settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
+      currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
     });
 
     function getCliPresetFromCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
       if (!raw) return 'agy';
       // NOTE: this code runs inside a Webview <script> string; escaping must survive TS template literal parsing.
-      if (raw.includes('/') || raw.includes('\\\\')) return 'custom';
       const base = raw.split(/[\\\\/]/).pop().toLowerCase();
       if (['agy', 'antigravity', 'antigravity-cli'].includes(base)) return 'agy';
       if (['codex', 'codex-cli'].includes(base)) return 'codex';
@@ -5725,12 +5726,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (selected === 'custom') {
         return (settingCliPathCustom.value || '').trim() || 'agy';
       }
+      if (currentCliPath && getCliPresetFromCliPath(currentCliPath) === selected) {
+        return currentCliPath;
+      }
       return selected || 'agy';
     }
 
     function applySettingCliPath(cliPath) {
       const raw = String(cliPath || '').trim() || 'agy';
       const preset = getCliPresetFromCliPath(raw);
+      currentCliPath = raw;
       setSoloSelectValue(settingCliSelect, preset);
       if (preset === 'custom') {
         settingCliPathCustom.value = raw;
@@ -6509,9 +6514,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function getAgentOptions(node) {
       const options = [];
       function add(value) {
-        const normalized = normalizeAgentOption(value);
-        if (!normalized || options.includes(normalized)) return;
-        options.push(normalized);
+        const option = buildAgentOption(value);
+        if (!option || options.some(existing => existing.label === option.label)) return;
+        options.push(option);
       }
       add(getEffectiveSettingCliPath() || 'agy');
       add(node && node.agentCli);
@@ -6521,16 +6526,31 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       add('copilot');
       add('claude');
       add('opencode');
-      return options.map(option => ({ value: option, label: option }));
+      return options;
     }
 
-    function normalizeAgentOption(value) {
+    function buildAgentOption(value) {
+      const normalized = String(value || '').trim();
+      const label = normalizeAgentOptionLabel(normalized);
+      if (!label) return null;
+      const optionValue = normalized.includes('/') || normalized.includes('\\\\') ? normalized : label;
+      return { value: optionValue, label };
+    }
+
+    function normalizeAgentOptionLabel(value) {
       const normalized = String(value || '').trim();
       const name = normalized.split(/[\\\\/]/).pop().toLowerCase();
       if (name === 'codex-cli') return 'codex';
+      if (name === 'solomap-codex-auto') return 'codex';
       if (name === 'cursor-cli' || name === 'cursor-agent') return 'cursor';
+      if (name === 'solomap-cursor-auto') return 'cursor';
       if (name === 'copilot-cli') return 'copilot';
+      if (name === 'solomap-copilot-auto') return 'copilot';
       if (name === 'agy' || name === 'antigravity-cli') return 'antigravity';
+      if (name === 'solomap-antigravity-auto') return 'antigravity';
+      if (name === 'claude-code' || name === 'claude-code-cli') return 'claude';
+      if (name === 'solomap-claude-auto') return 'claude';
+      if (name === 'open-code' || name === 'open-code-cli') return 'opencode';
       return normalized;
     }
 

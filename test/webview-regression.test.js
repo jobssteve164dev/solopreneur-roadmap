@@ -403,8 +403,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }
+    settings: { cliPath: '/workspace/.solomap-global/agent-cli/agy', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }
   });
+  assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'agy');
+  assert.equal(elements['setting-clipath-custom'].style.display, 'none');
+  postedMessages.length = 0;
+  elements['btn-save-settings'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.cliPath === '/workspace/.solomap-global/agent-cli/agy'));
 
   dispatchMessage({
     command: 'projectsLoaded',
@@ -625,14 +630,16 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '' }
+    settings: { cliPath: '/workspace/.solomap-global/agent-cli/agy', language: 'zh', globalPrompt: '' }
   });
 
   elements['btn-toggle-solo'].listeners.click();
 
   assert.ok(elements['solo-panel'].classList.contains('active'));
   assert.ok(elements['solo-body'].innerHTML.includes('data-solo-input'));
-  assert.ok(elements['solo-body'].innerHTML.includes('data-value="copilot"'));
+  assert.ok(elements['solo-body'].innerHTML.includes('data-value="/workspace/.solomap-global/agent-cli/agy"'));
+  assert.ok(elements['solo-body'].innerHTML.includes('>antigravity</button>'));
+  assert.ok(!elements['solo-body'].innerHTML.includes('>/workspace/.solomap-global/agent-cli/agy</button>'));
   assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__solo__'));
   elements['btn-toggle-roadmap-view'].listeners.click();
 
