@@ -25,7 +25,7 @@ interface SolopreneurSettings {
   language: string;
   globalPrompt: string;
   globalDataPath: string;
-  taskPermissionMode: string;
+  taskPermissionMode?: string;
 }
 
 interface SolopreneurProject {
@@ -270,7 +270,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     language: saved.language || config.get('language') || 'zh',
     globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
     globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
-    taskPermissionMode: normalizeTaskPermissionMode(saved.taskPermissionMode ?? config.get('taskPermissionMode') ?? 'auto')
+    taskPermissionMode: 'auto'
   };
 }
 
@@ -281,7 +281,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     language: settings.language === 'en' ? 'en' : 'zh',
     globalPrompt: String(settings.globalPrompt || '').trim(),
     globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim(),
-    taskPermissionMode: normalizeTaskPermissionMode(settings.taskPermissionMode ?? currentSettings.taskPermissionMode)
+    taskPermissionMode: 'auto'
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -290,7 +290,6 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
   await config.update('globalPrompt', nextSettings.globalPrompt, vscode.ConfigurationTarget.Global);
   await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
-  await config.update('taskPermissionMode', nextSettings.taskPermissionMode, vscode.ConfigurationTarget.Global);
 }
 
 function projectName(projectPath: string): string {
@@ -1065,8 +1064,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
             cliPath: message.cliPath,
             language: message.language,
             globalPrompt: message.globalPrompt,
-            globalDataPath: message.globalDataPath,
-            taskPermissionMode: message.taskPermissionMode
+            globalDataPath: message.globalDataPath
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -1304,6 +1302,44 @@ function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
     return '--allow-all --no-ask-user';
   }
   return '';
+}
+
+function getAgentTaskAutomationStatus(agentCli: string): { supported: boolean; preconfigured: boolean; permissionArgs: string; message: string } {
+  const preconfigured = commandAlreadyGrantsTaskPermissions(agentCli);
+  const permissionArgs = getTaskPermissionArgs(agentCli, 'always');
+  if (preconfigured) {
+    return {
+      supported: true,
+      preconfigured: true,
+      permissionArgs,
+      message: `${agentCli} is already prepared for automatic task runs.`
+    };
+  }
+  if (permissionArgs) {
+    return {
+      supported: true,
+      preconfigured: false,
+      permissionArgs,
+      message: `SoloMap can prepare ${agentCli} automatically for task runs.`
+    };
+  }
+  return {
+    supported: false,
+    preconfigured: false,
+    permissionArgs: '',
+    message: `${agentCli} does not expose a supported automatic task permission mode yet.`
+  };
+}
+
+function ensureAgentTaskAutomation(agentCli: string): { ok: boolean; message: string } {
+  const status = getAgentTaskAutomationStatus(agentCli);
+  if (status.supported) {
+    return { ok: true, message: status.message };
+  }
+  return {
+    ok: false,
+    message: `${status.message} Choose a supported Agent CLI or use the native terminal continuation for interactive approval.`
+  };
 }
 
 function buildFeedbackIssueUrl(title: string, body: string, category = ''): string {
@@ -3983,6 +4019,19 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
+  const automation = ensureAgentTaskAutomation(agentCli);
+  if (!automation.ok) {
+    syncEngine.logAgentExecution(
+      roadmapRevisionId,
+      agentCli,
+      agentCli,
+      `User supplement:\n${revisionRequest}\n\nFailure category: agent_automation_not_ready\n\nFailure reason:\n${automation.message}`,
+      'Failed'
+    );
+    postNodeConversations(roadmapRevisionId);
+    vscode.window.showErrorMessage(automation.message);
+    return;
+  }
 
   const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', 'roadmap-revision');
   const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
@@ -4062,6 +4111,19 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     );
     postNodeConversations(soloConversationId);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
+    return;
+  }
+  const automation = ensureAgentTaskAutomation(agentCli);
+  if (!automation.ok) {
+    syncEngine.logAgentExecution(
+      soloConversationId,
+      agentCli,
+      agentCli,
+      `User supplement:\n${request}\n\nFailure category: agent_automation_not_ready\n\nFailure reason:\n${automation.message}`,
+      'Failed'
+    );
+    postNodeConversations(soloConversationId);
+    vscode.window.showErrorMessage(automation.message);
     return;
   }
 
@@ -4205,6 +4267,25 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     sendNodesToWebview();
     postNodeConversations(nodeId);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
+    return;
+  }
+  const automation = ensureAgentTaskAutomation(agentCli);
+  if (!automation.ok) {
+    syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    syncEngine.logAgentExecution(
+      nodeId,
+      agentCli,
+      agentCli,
+      [
+        userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
+        'Failure category: agent_automation_not_ready',
+        `Failure reason:\n${automation.message}`
+      ].filter(Boolean).join('\n\n'),
+      'Failed'
+    );
+    sendNodesToWebview();
+    postNodeConversations(nodeId);
+    vscode.window.showErrorMessage(automation.message);
     return;
   }
 
@@ -6432,24 +6513,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-task-permission-mode">Task Permissions</label>
-      <div class="solo-select settings-select" id="setting-task-permission-mode" data-solo-select data-value="auto">
-        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label>Auto</span>
-          <span class="codicon codicon-chevron-down solo-select-caret"></span>
-        </button>
-        <div class="solo-select-menu" data-solo-menu role="listbox">
-          <button type="button" class="solo-select-option" data-solo-option-value="auto" aria-selected="true">Auto</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="always" aria-selected="false">Auto-run</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="never" aria-selected="false">Ask each time</button>
-        </div>
-      </div>
-      <div id="help-task-permission-mode" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Controls whether SoloMap adds official no-approval flags to bounded task runs. Native continue never adds them.
-      </div>
-    </div>
-
-    <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
       <input
         type="text"
@@ -6553,7 +6616,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliSelect = document.getElementById('setting-cli-select');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
-    const settingTaskPermissionMode = document.getElementById('setting-task-permission-mode');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
@@ -6599,11 +6661,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeProject: '删除项目',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode）或可执行文件绝对路径。',
-        taskPermissionMode: '任务执行权限',
-        taskPermissionAuto: '自动',
-        taskPermissionAlways: '自动执行',
-        taskPermissionNever: '每次确认',
-        taskPermissionHelp: '控制主任务是否追加官方无审批参数；原生继续不会追加。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -6724,11 +6781,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         removeProject: 'Remove project',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, or opencode, or an absolute executable path.',
-        taskPermissionMode: 'Task Permissions',
-        taskPermissionAuto: 'Auto',
-        taskPermissionAlways: 'Auto-run',
-        taskPermissionNever: 'Ask each time',
-        taskPermissionHelp: 'Controls official no-approval flags for task runs. Native continue never adds them.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; guidance in the current conversation takes priority.',
@@ -6912,22 +6964,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
-      setText('label-task-permission-mode', t('taskPermissionMode'));
-      setText('help-task-permission-mode', t('taskPermissionHelp'));
-      if (settingTaskPermissionMode) {
-        const permissionLabels = {
-          auto: t('taskPermissionAuto'),
-          always: t('taskPermissionAlways'),
-          never: t('taskPermissionNever')
-        };
-        settingTaskPermissionMode.querySelectorAll('[data-solo-option-value]').forEach(option => {
-          const value = option.getAttribute('data-solo-option-value');
-          option.textContent = permissionLabels[value] || value;
-        });
-        const currentValue = getSoloSelectValue(settingTaskPermissionMode);
-        const label = settingTaskPermissionMode.querySelector('[data-solo-label]');
-        if (label) label.textContent = permissionLabels[currentValue] || currentValue;
-      }
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -7148,7 +7184,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
-          if (settingTaskPermissionMode) setSoloSelectValue(settingTaskPermissionMode, message.settings.taskPermissionMode || 'auto');
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -7246,8 +7281,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
-        taskPermissionMode: settingTaskPermissionMode ? getSoloSelectValue(settingTaskPermissionMode) : 'auto'
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';

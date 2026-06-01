@@ -13,7 +13,7 @@ interface SolopreneurSettings {
   language: string;
   globalPrompt: string;
   globalDataPath: string;
-  taskPermissionMode: string;
+  taskPermissionMode?: string;
 }
 
 interface SolopreneurProject {
@@ -147,6 +147,10 @@ interface ProjectIssueSummary {
 interface DependencyStatus {
   agentReady: boolean;
   agentMessage: string;
+  agentAutomationReady: boolean;
+  agentAutomationPreconfigured: boolean;
+  agentAutomationMessage: string;
+  agentAutomationCanPrepare: boolean;
   githubCliReady: boolean;
   githubAuthReady: boolean;
   githubMessage: string;
@@ -264,6 +268,33 @@ function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
     return '--allow-all --no-ask-user';
   }
   return '';
+}
+
+function getAgentTaskAutomationStatus(agentCli: string): { supported: boolean; preconfigured: boolean; permissionArgs: string; message: string } {
+  const preconfigured = commandAlreadyGrantsTaskPermissions(agentCli);
+  const permissionArgs = getTaskPermissionArgs(agentCli, 'always');
+  if (preconfigured) {
+    return {
+      supported: true,
+      preconfigured: true,
+      permissionArgs,
+      message: `${agentCli} is already prepared for automatic task runs.`
+    };
+  }
+  if (permissionArgs) {
+    return {
+      supported: true,
+      preconfigured: false,
+      permissionArgs,
+      message: `SoloMap can prepare ${agentCli} for automatic task runs.`
+    };
+  }
+  return {
+    supported: false,
+    preconfigured: false,
+    permissionArgs: '',
+    message: `${agentCli} does not expose a supported automatic task mode yet.`
+  };
 }
 
 function buildFeedbackIssueUrl(title: string, body: string, category = ''): string {
@@ -1376,6 +1407,9 @@ function closeProjectIssue(projectPath: string, issueNumber: number): { ok: bool
 function getDependencyStatus(cliPath: string): DependencyStatus {
   const agentCli = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
   const agentReady = commandExists(agentCli);
+  const automation = agentReady
+    ? getAgentTaskAutomationStatus(agentCli)
+    : { supported: false, preconfigured: false, permissionArgs: '', message: 'Agent CLI is not ready yet.' };
   const githubCliReady = commandExists('gh');
   let githubAuthReady = false;
   let githubMessage = githubCliReady ? 'GitHub CLI is installed.' : 'GitHub CLI is not installed.';
@@ -1391,6 +1425,10 @@ function getDependencyStatus(cliPath: string): DependencyStatus {
   return {
     agentReady,
     agentMessage: agentReady ? `${agentCli} is ready.` : `Agent CLI not found. Tried: ${getAgentCliCandidates(cliPath || 'agy', cliPath || 'agy').join(', ')}`,
+    agentAutomationReady: agentReady && automation.supported,
+    agentAutomationPreconfigured: Boolean(automation.preconfigured),
+    agentAutomationMessage: automation.message,
+    agentAutomationCanPrepare: agentReady && automation.supported && !automation.preconfigured,
     githubCliReady,
     githubAuthReady,
     githubMessage
@@ -1451,6 +1489,39 @@ function buildAgentInstallCommand(cliPath: string): string {
     `echo "SoloMap: no built-in installer is available for ${String(cliPath || 'this custom CLI').replace(/"/g, '\\"')}."`,
     'echo "Install that CLI with its official installer, then paste its executable absolute path into SoloMap settings."'
   ].join('; ');
+}
+
+function buildAgentAutomationWrapper(cliPath: string, globalDataPath: string, projects: SolopreneurProject[]): { ok: boolean; message: string; wrapperPath?: string } {
+  const agentCli = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
+  if (!commandExists(agentCli)) {
+    return { ok: false, message: `Agent CLI not found. Tried: ${getAgentCliCandidates(cliPath || 'agy', cliPath || 'agy').join(', ')}` };
+  }
+  const automation = getAgentTaskAutomationStatus(agentCli);
+  if (!automation.supported) {
+    return { ok: false, message: automation.message };
+  }
+  if (automation.preconfigured) {
+    return { ok: true, message: automation.message, wrapperPath: agentCli };
+  }
+  const family = getAgentCliFamily(agentCli || cliPath || 'agy');
+  const wrapperNameByFamily: Record<string, string> = {
+    antigravity: 'agy',
+    codex: 'codex',
+    cursor: 'cursor-agent',
+    claude: 'claude',
+    copilot: 'copilot'
+  };
+  const wrapperName = wrapperNameByFamily[family] || path.basename(agentCli).replace(/[^a-z0-9_-]/gi, '-') || 'agent';
+  const wrapperDir = path.join(normalizeGlobalDataPath(globalDataPath, projects), 'agent-cli');
+  const wrapperPath = path.join(wrapperDir, wrapperName);
+  fs.mkdirSync(wrapperDir, { recursive: true });
+  const script = [
+    '#!/bin/sh',
+    `exec ${shellQuote(agentCli)} ${automation.permissionArgs} "$@"`
+  ].join('\n');
+  fs.writeFileSync(wrapperPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
+  fs.chmodSync(wrapperPath, 0o755);
+  return { ok: true, message: `Agent prepared for automatic task runs: ${wrapperPath}`, wrapperPath };
 }
 
 function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
@@ -2582,7 +2653,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               language: data.language,
               globalPrompt: data.globalPrompt,
               globalDataPath: data.globalDataPath,
-              taskPermissionMode: data.taskPermissionMode
+              taskPermissionMode: 'auto'
             });
             vscode.window.showInformationMessage('SoloMap settings saved successfully!');
             // Broadcast to sync both Webviews
@@ -2622,6 +2693,30 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               status: getDependencyStatus(data.cliPath || this._getSettings().cliPath || 'agy')
             });
             break;
+          case 'prepareAgentAutomation': {
+            const settings = this._getSettings();
+            const projectState = this._getProjects();
+            const prepared = buildAgentAutomationWrapper(data.cliPath || settings.cliPath || 'agy', settings.globalDataPath, projectState.projects || []);
+            if (prepared.ok && prepared.wrapperPath) {
+              await this._updateSettings({
+                ...settings,
+                cliPath: prepared.wrapperPath,
+                taskPermissionMode: 'auto'
+              });
+              this.sendSettings();
+              vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+            }
+            this._view?.webview.postMessage({
+              command: 'dependenciesChecked',
+              status: getDependencyStatus(prepared.wrapperPath || data.cliPath || settings.cliPath || 'agy')
+            });
+            if (prepared.ok) {
+              vscode.window.showInformationMessage(prepared.message);
+            } else {
+              vscode.window.showErrorMessage(prepared.message);
+            }
+            break;
+          }
           case 'getAgentImpact':
             this._view?.webview.postMessage({
               command: 'agentImpactLoaded',
@@ -4942,24 +5037,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-task-permission-mode">Task Permissions</label>
-      <div class="solo-select settings-select" id="setting-task-permission-mode" data-solo-select data-value="auto">
-        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label>Auto</span>
-          <span class="codicon codicon-chevron-down solo-select-caret"></span>
-        </button>
-        <div class="solo-select-menu" data-solo-menu role="listbox">
-          <button type="button" class="solo-select-option" data-solo-option-value="auto" aria-selected="true">Auto</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="always" aria-selected="false">Auto-run</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="never" aria-selected="false">Ask each time</button>
-        </div>
-      </div>
-      <div id="help-task-permission-mode" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Controls whether SoloMap adds official no-approval flags to bounded task runs. Native continue never adds them.
-      </div>
-    </div>
-
-    <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
       <input
         type="text"
@@ -5044,6 +5121,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         </div>
         <div class="dependency-row">
           <div class="dependency-main">
+            <span class="dependency-name" id="dependency-automation-name">Task automation</span>
+            <span class="dependency-message" id="dependency-automation-message">Not checked yet.</span>
+          </div>
+          <span class="dependency-status" id="dependency-automation-status">Check</span>
+        </div>
+        <div class="dependency-row">
+          <div class="dependency-main">
             <span class="dependency-name" id="dependency-github-name">GitHub</span>
             <span class="dependency-message" id="dependency-github-message">Not checked yet.</span>
           </div>
@@ -5052,6 +5136,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         <div class="dependency-actions">
           <button class="dependency-action-btn" id="btn-check-dependencies"><span class="codicon codicon-search"></span><span id="text-check-dependencies">Check</span></button>
           <button class="dependency-action-btn" id="btn-open-agent-install"><span class="codicon codicon-cloud-download"></span><span id="text-open-agent-install">Install</span></button>
+          <button class="dependency-action-btn" id="btn-prepare-agent-automation"><span class="codicon codicon-shield"></span><span id="text-prepare-agent-automation">Prepare</span></button>
           <button class="dependency-action-btn" id="btn-open-agent-check"><span class="codicon codicon-terminal"></span><span id="text-open-agent-check">Agent</span></button>
           <button class="dependency-action-btn" id="btn-open-github-auth"><span class="codicon codicon-github"></span><span id="text-open-github-auth">GitHub</span></button>
         </div>
@@ -5093,7 +5178,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliSelect = document.getElementById('setting-cli-select');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
-    const settingTaskPermissionMode = document.getElementById('setting-task-permission-mode');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
@@ -5113,6 +5197,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const agentImpactList = document.getElementById('agent-impact-list');
     const btnCheckDependencies = document.getElementById('btn-check-dependencies');
     const btnOpenAgentInstall = document.getElementById('btn-open-agent-install');
+    const btnPrepareAgentAutomation = document.getElementById('btn-prepare-agent-automation');
     const btnOpenAgentCheck = document.getElementById('btn-open-agent-check');
     const btnOpenGithubAuth = document.getElementById('btn-open-github-auth');
     let currentLanguage = 'zh';
@@ -5251,11 +5336,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode）或可执行文件绝对路径。',
-        taskPermissionMode: '任务执行权限',
-        taskPermissionAuto: '自动',
-        taskPermissionAlways: '自动执行',
-        taskPermissionNever: '每次确认',
-        taskPermissionHelp: '控制主任务是否追加官方无审批参数；原生继续不会追加。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -5265,7 +5345,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         dependencyAction: '处理',
         dependencyNotChecked: '尚未检查。',
         dependencyAgent: 'Agent CLI',
+        dependencyAutomation: '自动任务',
         dependencyGithub: 'GitHub 授权',
+        prepareAgentAutomation: '准备 Agent',
         agentImpact: 'Agent 贡献',
         impactMinutes: '工作分钟',
         impactFiles: '改动文件',
@@ -5426,11 +5508,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         language: 'Language',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, or opencode, or an absolute executable path.',
-        taskPermissionMode: 'Task Permissions',
-        taskPermissionAuto: 'Auto',
-        taskPermissionAlways: 'Auto-run',
-        taskPermissionNever: 'Ask each time',
-        taskPermissionHelp: 'Controls official no-approval flags for task runs. Native continue never adds them.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
@@ -5440,7 +5517,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         dependencyAction: 'Action',
         dependencyNotChecked: 'Not checked yet.',
         dependencyAgent: 'Agent CLI',
+        dependencyAutomation: 'Task automation',
         dependencyGithub: 'GitHub authorization',
+        prepareAgentAutomation: 'Prepare Agent',
         agentImpact: 'Agent Impact',
         impactMinutes: 'Minutes',
         impactFiles: 'Files changed',
@@ -5540,22 +5619,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
-      setText('label-task-permission-mode', t('taskPermissionMode'));
-      setText('help-task-permission-mode', t('taskPermissionHelp'));
-      if (settingTaskPermissionMode) {
-        const permissionLabels = {
-          auto: t('taskPermissionAuto'),
-          always: t('taskPermissionAlways'),
-          never: t('taskPermissionNever')
-        };
-        settingTaskPermissionMode.querySelectorAll('[data-solo-option-value]').forEach(option => {
-          const value = option.getAttribute('data-solo-option-value');
-          option.textContent = permissionLabels[value] || value;
-        });
-        const currentValue = getSoloSelectValue(settingTaskPermissionMode);
-        const label = settingTaskPermissionMode.querySelector('[data-solo-label]');
-        if (label) label.textContent = permissionLabels[currentValue] || currentValue;
-      }
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -5580,9 +5643,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('text-open-feedback', t('openFeedback'));
       setText('label-dependencies', t('dependencies'));
       setText('dependency-agent-name', t('dependencyAgent'));
+      setText('dependency-automation-name', t('dependencyAutomation'));
       setText('dependency-github-name', t('dependencyGithub'));
       setText('text-check-dependencies', t('checkDependencies'));
       setText('text-open-agent-install', t('openAgentInstall'));
+      setText('text-prepare-agent-automation', t('prepareAgentAutomation'));
       setText('text-open-agent-check', t('openAgentCheck'));
       setText('text-open-github-auth', t('openGithubAuth'));
       setText('text-test-cli', t('testCli'));
@@ -5699,7 +5764,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
-          if (settingTaskPermissionMode) setSoloSelectValue(settingTaskPermissionMode, message.settings.taskPermissionMode || 'auto');
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -5848,8 +5912,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
-        taskPermissionMode: settingTaskPermissionMode ? getSoloSelectValue(settingTaskPermissionMode) : 'auto'
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -5963,6 +6026,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     });
 
+    if (btnPrepareAgentAutomation) {
+      btnPrepareAgentAutomation.addEventListener('click', () => {
+        vscode.postMessage({
+          command: 'prepareAgentAutomation',
+          cliPath: getEffectiveSettingCliPath()
+        });
+      });
+    }
+
     btnOpenGithubAuth.addEventListener('click', () => {
       vscode.postMessage({
         command: 'openDependencyAction',
@@ -5990,10 +6062,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function setDependencyPending() {
       setText('dependency-agent-message', t('testing'));
+      setText('dependency-automation-message', t('testing'));
       setText('dependency-github-message', t('testing'));
       const agentStatus = document.getElementById('dependency-agent-status');
+      const automationStatus = document.getElementById('dependency-automation-status');
       const githubStatus = document.getElementById('dependency-github-status');
-      [agentStatus, githubStatus].forEach(item => {
+      [agentStatus, automationStatus, githubStatus].forEach(item => {
         if (!item) return;
         item.className = 'dependency-status';
         item.textContent = t('checkDependencies');
@@ -6048,12 +6122,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function renderDependencyStatus(status) {
       const agentStatus = document.getElementById('dependency-agent-status');
+      const automationStatus = document.getElementById('dependency-automation-status');
       const githubStatus = document.getElementById('dependency-github-status');
       setText('dependency-agent-message', status.agentMessage || t('dependencyNotChecked'));
+      setText('dependency-automation-message', status.agentAutomationMessage || t('dependencyNotChecked'));
       setText('dependency-github-message', status.githubMessage || t('dependencyNotChecked'));
       if (agentStatus) {
         agentStatus.className = 'dependency-status ' + (status.agentReady ? 'ready' : 'needs-action');
         agentStatus.textContent = status.agentReady ? t('dependencyReady') : t('dependencyAction');
+      }
+      if (automationStatus) {
+        automationStatus.className = 'dependency-status ' + (status.agentAutomationReady ? 'ready' : 'needs-action');
+        automationStatus.textContent = status.agentAutomationReady ? t('dependencyReady') : t('dependencyAction');
       }
       if (githubStatus) {
         githubStatus.className = 'dependency-status ' + (status.githubCliReady && status.githubAuthReady ? 'ready' : 'needs-action');

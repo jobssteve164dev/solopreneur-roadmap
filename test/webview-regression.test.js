@@ -208,11 +208,6 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'opencode', label: 'opencode' },
     { value: 'custom', label: 'Custom...' }
   ]);
-  wireSoloSelect(elements['setting-task-permission-mode'], [
-    { value: 'auto', label: 'Auto' },
-    { value: 'always', label: 'Auto-run' },
-    { value: 'never', label: 'Ask each time' }
-  ]);
   wireSoloSelect(elements['project-select'], []);
   const context = {
     document: {
@@ -262,7 +257,7 @@ test('extension manifest uses SoloMap visible branding', () => {
   assert.equal(manifest.contributes.views['solopreneur-sidebar-container'][0].name, 'SoloMap');
   assert.equal(manifest.contributes.configuration.title, 'SoloMap Settings');
   assert.equal(manifest.contributes.configuration.properties['solopreneur.globalPrompt'].default, '');
-  assert.equal(manifest.contributes.configuration.properties['solopreneur.taskPermissionMode'].default, 'auto');
+  assert.equal(manifest.contributes.configuration.properties['solopreneur.taskPermissionMode'], undefined);
 });
 
 test('readme uses bilingual marketplace copy and stable remote logo', () => {
@@ -357,7 +352,6 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'settings-panel',
     'setting-language',
     'setting-cli-select',
-    'setting-task-permission-mode',
     'setting-clipath-custom',
     'setting-global-prompt',
     'setting-global-data-path',
@@ -368,10 +362,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-save-settings',
     'btn-check-dependencies',
     'btn-open-agent-install',
+    'btn-prepare-agent-automation',
     'btn-open-agent-check',
     'btn-open-github-auth',
     'dependency-agent-status',
     'dependency-agent-message',
+    'dependency-automation-status',
+    'dependency-automation-message',
     'dependency-github-status',
     'dependency-github-message',
     'cli-test-badge'
@@ -388,9 +385,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && message.taskPermissionMode === 'auto'));
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
   elements['btn-check-dependencies'].listeners.click();
   elements['btn-open-agent-install'].listeners.click();
+  elements['btn-prepare-agent-automation'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
   elements['btn-toggle-feedback'].listeners.click();
   assert.equal(elements['feedback-panel'].style.display, 'block');
@@ -399,12 +397,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   elements['btn-open-feedback'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'checkDependencies'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'agent-install'));
+  assert.ok(postedMessages.some((message) => message.command === 'prepareAgentAutomation'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'github-auth'));
   assert.ok(postedMessages.some((message) => message.command === 'openFeedbackIssue' && message.title === '希望加载更快' && message.category === 'not_working'));
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global', taskPermissionMode: 'auto' }
+    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }
   });
 
   dispatchMessage({
@@ -590,7 +589,6 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'settings-panel',
     'setting-language',
     'setting-cli-select',
-    'setting-task-permission-mode',
     'setting-clipath-custom',
     'setting-global-prompt',
     'setting-feedback-title',
@@ -612,7 +610,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.taskPermissionMode === 'auto'));
+  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
   elements['btn-toggle-feedback'].listeners.click();
   assert.equal(elements['feedback-panel'].style.display, 'flex');
   elements['setting-feedback-title'].value = '看不懂下一步';
@@ -627,7 +625,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '', taskPermissionMode: 'auto' }
+    settings: { cliPath: 'copilot', language: 'zh', globalPrompt: '' }
   });
 
   elements['btn-toggle-solo'].listeners.click();
@@ -1471,7 +1469,9 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__commandExists = commandExists;',
       'module.exports.__getCliVersionArgs = getCliVersionArgs;',
       'module.exports.__formatCliTestMessage = formatCliTestMessage;',
-      'module.exports.__buildAgentInstallCommand = buildAgentInstallCommand;'
+      'module.exports.__buildAgentInstallCommand = buildAgentInstallCommand;',
+      'module.exports.__getDependencyStatus = getDependencyStatus;',
+      'module.exports.__buildAgentAutomationWrapper = buildAgentAutomationWrapper;'
     ].join('\n')
   );
   assert.equal(
@@ -1508,6 +1508,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   fs.mkdirSync(path.dirname(fakeCliPath), { recursive: true });
   fs.writeFileSync(fakeCliPath, '#!/bin/sh\necho solo-test-agent\n', 'utf8');
   fs.chmodSync(fakeCliPath, 0o755);
+  const fakeAgyPath = path.join(cliHome, '.local', 'bin', 'agy');
+  fs.writeFileSync(fakeAgyPath, '#!/bin/sh\necho agy\n', 'utf8');
+  fs.chmodSync(fakeAgyPath, 0o755);
   const previousHome = process.env.HOME;
   const previousPath = process.env.PATH;
   const previousShell = process.env.SHELL;
@@ -1519,6 +1522,15 @@ test('agent command builder uses non-interactive task runs and native continuati
     assert.equal(extensionModule.__commandExists('solo-test-agent'), true);
     assert.equal(sidebarModule.__resolveExecutablePath('solo-test-agent'), fakeCliPath);
     assert.equal(sidebarModule.__commandExists('solo-test-agent'), true);
+    const dependencyStatus = sidebarModule.__getDependencyStatus('agy');
+    assert.equal(dependencyStatus.agentAutomationReady, true);
+    assert.equal(dependencyStatus.agentAutomationCanPrepare, true);
+    const wrapperRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-wrapper-root-'));
+    const prepared = sidebarModule.__buildAgentAutomationWrapper('agy', wrapperRoot, []);
+    assert.equal(prepared.ok, true);
+    assert.match(prepared.wrapperPath, /agent-cli\/agy$/);
+    assert.match(fs.readFileSync(prepared.wrapperPath, 'utf8'), /--dangerously-skip-permissions/);
+    assert.equal(sidebarModule.__getDependencyStatus(prepared.wrapperPath).agentAutomationPreconfigured, true);
   } finally {
     process.env.HOME = previousHome;
     process.env.PATH = previousPath;
@@ -1538,13 +1550,13 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec --color always -C .*--skip-git-repo-check -/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec --color always -C .*--skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -e -c/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /tee .*output\.log/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /codex' exec --color always -C .*--skip-git-repo-check -/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /codex' exec --color always -C .*--skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /FORCE_COLOR/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /timed out waiting for response|Error: timed out/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
