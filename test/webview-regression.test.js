@@ -1296,6 +1296,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildMcpInstallPrompt = buildMcpInstallPrompt;',
       'module.exports.__validateAndRegisterMcpInstall = validateAndRegisterMcpInstall;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
+      'module.exports.__buildRoadmapValidationScript = buildRoadmapValidationScript;',
+      'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
@@ -1979,6 +1981,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /将发布准备提前，并增加支付验证环节/);
   assert.match(revisionPrompt, /直接更新项目目录中的 `\.solopreneur\/roadmap\.csv`/);
   assert.match(revisionPrompt, /不要把本段提示词、解释文字或执行日志写进 CSV/);
+  assert.match(revisionPrompt, /validate-roadmap\.cjs --mode revision/);
   assert.match(revisionPrompt, /面向外部用户并需要获客或转化/);
   assert.match(revisionPrompt, /不要虚构营销或销售任务/);
   assert.match(revisionPrompt, /Always run focused checks/);
@@ -2235,10 +2238,33 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(dataReadme, /Git\/GitHub/);
   assert.match(bootstrapInstructions, /Bootstrap Roadmap Instructions/);
   assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
+  assert.match(bootstrapInstructions, /validate-roadmap\.cjs --mode bootstrap/);
   assert.match(bootstrapInstructions, /按项目真实目标选择适用的推进框架/);
   assert.match(bootstrapInstructions, /内部工具、迁移、研究、内容或基础设施项目不得被强行改写成营销销售路线/);
   assert.match(bootstrapInstructions, /Build -> Sell -> Learn -> Improve 作为底层审查/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
+  assert.match(extensionModule.__buildRoadmapValidationScript(), /--mode bootstrap/);
+  assert.match(extensionModule.__buildRoadmapValidationScript(), /--mode revision/);
+  assert.match(extensionModule.__buildLocalRoadmap('SaaS app', 'codex')[0].agentPrompt, /validate-roadmap\.cjs --mode bootstrap/);
+  const scriptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-roadmap-script-'));
+  const scriptSolopreneurDir = path.join(scriptRoot, '.solopreneur');
+  fs.mkdirSync(scriptSolopreneurDir, { recursive: true });
+  extensionModule.__ensureRoadmapValidationScript(scriptSolopreneurDir);
+  fs.writeFileSync(path.join(scriptSolopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
+    '20,实现首个 MVP 切片,完成最小闭环,产品与 MVP,10,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'), 'utf8');
+  const scriptPassOutput = childProcess.execFileSync(process.execPath, ['.solopreneur/validate-roadmap.cjs', '--mode', 'bootstrap'], { cwd: scriptRoot, encoding: 'utf8' });
+  assert.match(scriptPassOutput, /PASS roadmap validation: bootstrap/);
+  fs.writeFileSync(path.join(scriptSolopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '10,生成初始路线图,desc,问题与客户发现,,agy,"你的唯一主任务是直接重写 .solopreneur/roadmap.csv",Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'), 'utf8');
+  assert.throws(
+    () => childProcess.execFileSync(process.execPath, ['.solopreneur/validate-roadmap.cjs', '--mode', 'bootstrap'], { cwd: scriptRoot, encoding: 'utf8', stdio: 'pipe' }),
+    /FAIL roadmap validation/
+  );
   assert.match(methodologyInstructions, /商业化产品的默认四阶段/);
   assert.match(methodologyInstructions, /底层判断模型/);
   assert.match(methodologyInstructions, /不要为了满足模板/);
