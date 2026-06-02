@@ -210,15 +210,22 @@ Digest 进入长期经验前必须满足至少一个条件：
 
 ## 最小可落地版本
 
-第一版不需要 embedding，也不需要独立图数据库。
+第一版不需要 embedding，也不需要独立图数据库。当前插件首版已经采用项目本地 JSON digest 的方式落地。
 
-建议先做：
+已落地范围：
 
 1. 从现有 Raw Run 生成 digest JSON。
-2. 保存到项目或全局 execution 目录。
-3. 用文件路径、路线图环节、命令、状态做确定召回。
+2. 保存到 `.solopreneur/run-digests/`。
+3. 用文件路径、任务入口、运行类型、关键词做确定召回。
 4. Agent prompt 注入最多 3 条 Retrieval Pack。
-5. 任务结束时提示哪些 lesson 值得提升到 memory。
+5. 注入时保留“历史摘要不能覆盖本轮事实”的优先级约束。
+
+下一阶段再补：
+
+1. 更稳定的失败类型、验证命令和修复动作抽取。
+2. 多次命中后的 memory / pattern / skill 提升提示。
+3. 代码结构维度的 CodeGraph 连接器。
+4. 结构化召回不足时的 embedding 辅助召回。
 
 第一版成功标准：
 

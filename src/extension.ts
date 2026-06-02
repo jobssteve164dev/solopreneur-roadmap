@@ -611,6 +611,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '- `documentation.json`：项目解释性文档的索引与审计状态。它由 SoloMap 维护，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
+    '- `run-digests/`：每次 Agent 调用结束后的结构化执行摘要。下一轮相关任务会读取少量摘要来减少重复探索。',
     '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
     '',
     '## 请不要随意删除',
@@ -2573,6 +2574,278 @@ function buildRunHandoffEntry(
   };
 }
 
+interface RunDigest {
+  schemaVersion: number;
+  runId: string;
+  executionLogId: number;
+  projectPath: string;
+  nodeId: string;
+  runKind: string;
+  agentCli: string;
+  userIntent: string;
+  outcome: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  changedFiles: string[];
+  touchedFiles: string[];
+  commandSignals: string[];
+  verification: string[];
+  failures: string[];
+  reusableSignals: string[];
+  tags: string[];
+}
+
+interface RunDigestInput {
+  workspaceRoot: string;
+  nodeId: string;
+  runKind: string;
+  agentCli: string;
+  executionLogId: number;
+  userMessage: string;
+  resolvedCommand: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  changedFilesSummary: string;
+  touchedFilesSummary: string;
+  outputTail: string;
+  completionReason: string;
+  failureCode: string;
+  failureReason: string;
+}
+
+interface ExecutionExperienceQuery {
+  nodeId: string;
+  runKind: string;
+  contextText: string;
+  supplementFiles?: string[];
+}
+
+function getRunDigestRoot(workspaceRoot: string): string {
+  return path.join(workspaceRoot, '.solopreneur', 'run-digests');
+}
+
+function sanitizeRunDigestSegment(value: string): string {
+  return (value || 'run')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'run';
+}
+
+function stripFileSummaryPrefix(line: string): string {
+  return line.replace(/^[A-Z?]{1,2}\s+/, '').trim();
+}
+
+function parseFileSummaryLines(summary: string): string[] {
+  const seen = new Set<string>();
+  const files: string[] = [];
+  for (const line of (summary || '').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || /^No (workspace|git|project) /i.test(trimmed)) {
+      continue;
+    }
+    const file = stripFileSummaryPrefix(trimmed);
+    if (!file || seen.has(file)) {
+      continue;
+    }
+    seen.add(file);
+    files.push(file);
+    if (files.length >= 24) {
+      break;
+    }
+  }
+  return files;
+}
+
+function extractLinesByPattern(value: string, pattern: RegExp, limit: number): string[] {
+  const lines = (value || '')
+    .split('\n')
+    .map((line) => compactLine(line, 220))
+    .filter((line) => line && pattern.test(line));
+  return lines.slice(-limit);
+}
+
+function extractCommandSignals(resolvedCommand: string): string[] {
+  const command = compactLine(resolvedCommand || '', 280);
+  if (!command) {
+    return [];
+  }
+  return [command];
+}
+
+function extractVerificationSignals(outputTail: string, resolvedCommand: string, status: string): string[] {
+  const signals = [
+    ...extractLinesByPattern(outputTail, /\b(test|tests|passed|passing|validated|validation|verify|verified|tsc|vitest|jest|playwright|pytest|npm run|npm test|node --test)\b/i, 6)
+  ];
+  if (/\b(test|check|lint|validate|verify|tsc|vitest|jest|playwright|pytest)\b/i.test(resolvedCommand || '')) {
+    signals.unshift(`Command: ${compactLine(resolvedCommand, 220)}`);
+  }
+  if (status === 'Completed' && signals.length === 0) {
+    signals.push('Run completed without explicit verification signal in captured tail.');
+  }
+  return signals.filter((entry, index, all) => all.indexOf(entry) === index).slice(0, 6);
+}
+
+function extractFailureSignals(outputTail: string, failureCode: string, failureReason: string, status: string): string[] {
+  const signals = [
+    failureCode ? `Failure category: ${compactLine(failureCode, 120)}` : '',
+    failureReason ? `Failure reason: ${compactLine(failureReason, 260)}` : '',
+    ...extractLinesByPattern(outputTail, /\b(error|failed|failure|exception|traceback|timeout|denied|invalid|cannot|could not)\b/i, 6)
+  ].filter(Boolean);
+  if (status === 'Failed' && signals.length === 0) {
+    signals.push('Run failed without a captured failure line.');
+  }
+  return signals.filter((entry, index, all) => all.indexOf(entry) === index).slice(0, 8);
+}
+
+function extractReusableSignals(outputTail: string, completionReason: string, changedFiles: string[]): string[] {
+  const signals = [
+    completionReason ? `Completion: ${compactLine(completionReason, 260)}` : '',
+    changedFiles.length > 0 ? `Changed files: ${changedFiles.slice(0, 6).join(', ')}` : '',
+    ...extractLinesByPattern(outputTail, /\b(fix|fixed|implemented|added|updated|verified|validated|root cause|原因|修复|验证|完成|通过)\b/i, 4)
+  ].filter(Boolean);
+  return signals.filter((entry, index, all) => all.indexOf(entry) === index).slice(0, 6);
+}
+
+function tokenizeExperienceText(value: string): Set<string> {
+  const tokens = (value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9_\-/.]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3)
+    .slice(0, 300);
+  return new Set(tokens);
+}
+
+function buildRunDigest(input: RunDigestInput): RunDigest {
+  const changedFiles = parseFileSummaryLines(input.changedFilesSummary);
+  const touchedFiles = parseFileSummaryLines(input.touchedFilesSummary);
+  const runId = `${sanitizeRunDigestSegment(input.nodeId)}-${input.executionLogId || Date.parse(input.finishedAt) || Date.now()}`;
+  const contextTokens = Array.from(tokenizeExperienceText([
+    input.nodeId,
+    input.runKind,
+    input.userMessage,
+    changedFiles.join(' '),
+    touchedFiles.join(' '),
+    input.completionReason,
+    input.failureReason
+  ].join('\n'))).slice(0, 24);
+  return {
+    schemaVersion: 1,
+    runId,
+    executionLogId: Number(input.executionLogId || 0),
+    projectPath: input.workspaceRoot,
+    nodeId: String(input.nodeId || ''),
+    runKind: String(input.runKind || 'step'),
+    agentCli: String(input.agentCli || 'unknown'),
+    userIntent: compactLine(input.userMessage || '', 500),
+    outcome: compactLine(input.completionReason || input.failureReason || '', 500),
+    status: String(input.status || ''),
+    startedAt: String(input.startedAt || ''),
+    finishedAt: String(input.finishedAt || new Date().toISOString()),
+    durationMs: Number(input.durationMs || 0),
+    changedFiles,
+    touchedFiles,
+    commandSignals: extractCommandSignals(input.resolvedCommand),
+    verification: extractVerificationSignals(input.outputTail, input.resolvedCommand, input.status),
+    failures: extractFailureSignals(input.outputTail, input.failureCode, input.failureReason, input.status),
+    reusableSignals: extractReusableSignals(input.outputTail, input.completionReason, changedFiles),
+    tags: contextTokens
+  };
+}
+
+function writeRunDigest(workspaceRoot: string, digest: RunDigest): string {
+  const digestRoot = getRunDigestRoot(workspaceRoot);
+  fs.mkdirSync(digestRoot, { recursive: true });
+  const digestPath = path.join(digestRoot, `${sanitizeRunDigestSegment(digest.runId)}.json`);
+  fs.writeFileSync(digestPath, JSON.stringify(digest, null, 2), 'utf8');
+  return digestPath;
+}
+
+function readRunDigests(workspaceRoot: string): RunDigest[] {
+  const digestRoot = getRunDigestRoot(workspaceRoot);
+  if (!fs.existsSync(digestRoot)) {
+    return [];
+  }
+  return fs.readdirSync(digestRoot)
+    .filter((file) => file.endsWith('.json'))
+    .map((file) => {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(digestRoot, file), 'utf8'));
+        return parsed && parsed.schemaVersion === 1 ? parsed as RunDigest : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry): entry is RunDigest => Boolean(entry))
+    .sort((a, b) => String(b.finishedAt || '').localeCompare(String(a.finishedAt || '')))
+    .slice(0, 120);
+}
+
+function scoreRunDigest(digest: RunDigest, query: ExecutionExperienceQuery): { score: number; reasons: string[] } {
+  const context = query.contextText || '';
+  const contextTokens = tokenizeExperienceText([
+    context,
+    ...(query.supplementFiles || [])
+  ].join('\n'));
+  let score = 0;
+  const reasons: string[] = [];
+  if (digest.nodeId && digest.nodeId === query.nodeId) {
+    score += 8;
+    reasons.push('同一任务入口');
+  }
+  if (digest.runKind && digest.runKind === query.runKind) {
+    score += 2;
+    reasons.push('同类运行');
+  }
+  const digestFiles = [...(digest.changedFiles || []), ...(digest.touchedFiles || [])];
+  const matchedFiles = digestFiles.filter((file) => file && context.includes(file)).slice(0, 3);
+  if (matchedFiles.length > 0) {
+    score += matchedFiles.length * 5;
+    reasons.push(`文件相关：${matchedFiles.join(', ')}`);
+  }
+  const matchedTags = (digest.tags || []).filter((tag) => contextTokens.has(tag)).slice(0, 6);
+  if (matchedTags.length > 0) {
+    score += matchedTags.length;
+    reasons.push(`语义相关：${matchedTags.slice(0, 3).join(', ')}`);
+  }
+  return { score, reasons };
+}
+
+function buildExecutionExperiencePrompt(workspaceRoot: string, query: ExecutionExperienceQuery): string {
+  const matches = readRunDigests(workspaceRoot)
+    .map((digest) => ({ digest, ...scoreRunDigest(digest, query) }))
+    .filter((entry) => entry.score >= 3)
+    .sort((a, b) => b.score - a.score || String(b.digest.finishedAt || '').localeCompare(String(a.digest.finishedAt || '')))
+    .slice(0, 3);
+  if (matches.length === 0) {
+    return '';
+  }
+  const blocks = matches.map((entry, index) => {
+    const digest = entry.digest;
+    const fileSignals = [...(digest.changedFiles || []), ...(digest.touchedFiles || [])]
+      .filter((file, fileIndex, all) => file && all.indexOf(file) === fileIndex)
+      .slice(0, 6);
+    return [
+      `${index + 1}. 命中原因：${entry.reasons.join('；') || '近期相关执行'}`,
+      digest.userIntent ? `   - 上次目标：${digest.userIntent}` : '',
+      digest.outcome ? `   - 上次结果：${digest.outcome}` : `   - 上次状态：${digest.status}`,
+      fileSignals.length > 0 ? `   - 相关文件：${fileSignals.join(', ')}` : '',
+      (digest.reusableSignals || []).length > 0 ? `   - 可复用信号：${(digest.reusableSignals || []).slice(0, 3).join(' / ')}` : '',
+      (digest.verification || []).length > 0 ? `   - 验证信号：${(digest.verification || []).slice(0, 2).join(' / ')}` : '',
+      (digest.failures || []).length > 0 ? `   - 风险信号：${(digest.failures || []).slice(0, 2).join(' / ')}` : ''
+    ].filter(Boolean).join('\n');
+  });
+  return [
+    'SoloMap 相关执行经验（自动召回，最多 3 条）：',
+    '这些是历史结构化摘要，不是本轮事实；只能帮助减少重复探索，不能覆盖用户本轮要求、当前代码、测试或日志。',
+    ...blocks
+  ].join('\n');
+}
+
 function normalizeStepHandoffEntry(entry: any): Record<string, unknown> | null {
   if (!entry || typeof entry !== 'object') {
     return null;
@@ -3847,6 +4120,20 @@ function buildAgentConversationPrompt(
   );
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
+  const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
+    nodeId: node.id || '',
+    runKind: 'step',
+    contextText: [
+      node.title,
+      node.stage,
+      node.description,
+      node.agentPrompt,
+      normalizedUserMessage,
+      normalizedGithubIssueContext,
+      attachedFiles.join('\n')
+    ].join('\n'),
+    supplementFiles: attachedFiles
+  });
 
   return [
     '你正在 SoloMap 的一个路线图环节中工作。',
@@ -3873,6 +4160,7 @@ function buildAgentConversationPrompt(
     '',
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
+    ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
@@ -3919,6 +4207,12 @@ function buildRoadmapRevisionPrompt(
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
+  const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
+    nodeId: roadmapRevisionId,
+    runKind: 'roadmap_revision',
+    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    supplementFiles: attachedFiles
+  });
   return [
     '你正在 SoloMap 中调整当前项目路线图。',
     '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
@@ -3933,6 +4227,7 @@ function buildRoadmapRevisionPrompt(
     '',
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
+    ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
@@ -3979,6 +4274,12 @@ function buildSoloConversationPrompt(
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
+  const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
+    nodeId: soloConversationId,
+    runKind: 'solo',
+    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    supplementFiles: attachedFiles
+  });
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -3993,6 +4294,7 @@ function buildSoloConversationPrompt(
     '',
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
+    ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
@@ -5188,6 +5490,33 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         finishedAt
       })
       : null;
+    let runDigestSummary = '';
+    if (workspaceRoot) {
+      try {
+        const runDigest = buildRunDigest({
+          workspaceRoot,
+          nodeId,
+          runKind: String(runKind || (isSoloConversation ? 'solo' : 'step')),
+          agentCli: String(agentCli || commandPreview || command || 'Unknown CLI'),
+          executionLogId: Number(executionLogId || 0),
+          userMessage: String(userMessage || ''),
+          resolvedCommand,
+          status: nextStatus,
+          startedAt: String(startedAt || ''),
+          finishedAt,
+          durationMs: runDurationMs,
+          changedFilesSummary,
+          touchedFilesSummary,
+          outputTail,
+          completionReason,
+          failureCode,
+          failureReason
+        });
+        runDigestSummary = `Execution digest saved: ${toProjectRelativeRuntimePath(workspaceRoot, writeRunDigest(workspaceRoot, runDigest))}`;
+      } catch (error) {
+        runDigestSummary = `Execution digest not saved: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     const executionSummary = [
       userMessage ? `User supplement:\n${userMessage}` : '',
       sessionMode ? `Native session mode: ${sessionMode}` : '',
@@ -5202,6 +5531,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       completionReason ? `Completion decision: ${completionReason}` : '',
       stepHandoffSummary ? `Step handoff summary updated: ${getStepMemoryFilePath(workspaceRoot, nodeId)}` : '',
       documentationAudit ? `Documentation harness: ${documentationAudit.summary}` : '',
+      runDigestSummary,
       documentationAudit && documentationAudit.pendingReview.length > 0
         ? `Documentation review needed:\n${documentationAudit.pendingReview.map((item) => `- ${item.path}: ${item.reason}`).join('\n')}`
         : '',

@@ -1300,6 +1300,9 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
+      'module.exports.__buildRunDigest = buildRunDigest;',
+      'module.exports.__writeRunDigest = writeRunDigest;',
+      'module.exports.__buildExecutionExperiencePrompt = buildExecutionExperiencePrompt;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
       'module.exports.__parseStepHandoffEntries = parseStepHandoffEntries;',
       'module.exports.__buildStepHandoffSummary = buildStepHandoffSummary;',
@@ -2114,6 +2117,40 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(handoff.status, 'In Progress');
   assert.ok(handoff.changedFiles.some((line) => line.includes('README.md')));
   assert.match(handoff.usefulSignals, /Implemented the first slice/);
+
+  const digestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-run-digest-'));
+  const digest = extensionModule.__buildRunDigest({
+    workspaceRoot: digestRoot,
+    nodeId: '2',
+    runKind: 'step',
+    agentCli: 'codex',
+    executionLogId: 42,
+    userMessage: '修复 src/extension.ts 的 prompt 注入。',
+    resolvedCommand: 'npm test',
+    status: 'Completed',
+    startedAt: '2026-06-02T00:00:00.000Z',
+    finishedAt: '2026-06-02T00:01:00.000Z',
+    durationMs: 60000,
+    changedFilesSummary: 'M src/extension.ts\nM test/webview-regression.test.js',
+    touchedFilesSummary: 'M src/extension.ts',
+    outputTail: 'Implemented prompt injection.\nRAW_LOG_SHOULD_NOT_APPEAR\nnpm test passed',
+    completionReason: '相关执行经验已接入 prompt。',
+    failureCode: '',
+    failureReason: ''
+  });
+  const digestPath = extensionModule.__writeRunDigest(digestRoot, digest);
+  assert.ok(fs.existsSync(digestPath));
+  const experiencePrompt = extensionModule.__buildExecutionExperiencePrompt(digestRoot, {
+    nodeId: '2',
+    runKind: 'step',
+    contextText: '继续修复 src/extension.ts 的 SoloMap prompt 注入。',
+    supplementFiles: ['src/extension.ts']
+  });
+  assert.match(experiencePrompt, /SoloMap 相关执行经验/);
+  assert.match(experiencePrompt, /修复 src\/extension\.ts/);
+  assert.match(experiencePrompt, /src\/extension\.ts/);
+  assert.match(experiencePrompt, /npm test passed/);
+  assert.doesNotMatch(experiencePrompt, /RAW_LOG_SHOULD_NOT_APPEAR/);
 
   const dirtySummary = [
     '# 环节交接总结',
@@ -2934,6 +2971,8 @@ test('Solo completion stays project-scoped and preserves the existing roadmap', 
   assert.match(loggedOutput, /Solo conversation state: Completed/);
   assert.match(loggedOutput, /等待用户决定是否关联到路线图环节/);
   assert.match(loggedOutput, /Solo 对话不会直接调整路线图/);
+  assert.match(loggedOutput, /Execution digest saved: \.solopreneur\/run-digests\/__solo__-77\.json/);
+  assert.ok(fs.existsSync(path.join(solopreneurDir, 'run-digests', '__solo__-77.json')));
   assert.equal(fs.readFileSync(path.join(solopreneurDir, 'roadmap.csv'), 'utf8'), originalCsv);
 });
 
