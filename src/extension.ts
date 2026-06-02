@@ -673,7 +673,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     clearInterval(statusPoller);
     statusPoller = null;
   }
-  sendProjectsToWebviews(context);
+  sendLocalProjectsToWebviews(context);
   if (activePanel) {
     activePanel.webview.postMessage({ command: 'roadmapLoading', projectPath });
   }
@@ -697,7 +697,7 @@ async function updateProjectMetadata(context: vscode.ExtensionContext, projectPa
     };
   });
   await saveProjects(context, nextProjects);
-  sendProjectsToWebviews(context);
+  sendLocalProjectsToWebviews(context);
 }
 
 async function toggleProjectPinned(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
@@ -714,7 +714,7 @@ async function toggleProjectPinned(context: vscode.ExtensionContext, projectPath
     return pinnedAt ? rest : { ...project, pinnedAt: new Date().toISOString() };
   });
   await saveProjects(context, nextProjects);
-  sendProjectsToWebviews(context);
+  sendLocalProjectsToWebviews(context);
 }
 
 function buildSolopreneurDirectoryReadme(): string {
@@ -1345,6 +1345,19 @@ function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
   }
   if (sidebarProvider) {
     sidebarProvider.sendProjects();
+  }
+}
+
+function sendLocalProjectsToWebviews(context: vscode.ExtensionContext): void {
+  const projects = getProjectState(context);
+  if (activePanel) {
+    activePanel.webview.postMessage({
+      command: 'projectsLoaded',
+      projects
+    });
+  }
+  if (sidebarProvider) {
+    sidebarProvider.sendLocalProjects();
   }
 }
 

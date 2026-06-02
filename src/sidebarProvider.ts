@@ -2963,6 +2963,27 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  public sendLocalProjects() {
+    try {
+      if (!this._view) {
+        return;
+      }
+      const projectState = this._getProjects();
+      const portfolio = buildProjectPortfolioSummaries(projectState.projects);
+      const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
+      this._view.webview.postMessage({
+        command: 'projectsLoaded',
+        projects: {
+          ...projectState,
+          portfolio,
+          globalStore
+        }
+      });
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send local projects:', error);
+    }
+  }
+
   private schedulePortfolioEnrichment(projects: SolopreneurProject[], selectedProjectPath: string) {
     setTimeout(() => {
       try {
@@ -6944,6 +6965,33 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return ({ P0: 0, P1: 1, P2: 2, P3: 3 })[priority] ?? 4;
     }
 
+    function sortPinnedProjects(projects) {
+      return (projects || []).slice().sort((a, b) => {
+        const pinnedA = a && a.pinnedAt ? 1 : 0;
+        const pinnedB = b && b.pinnedAt ? 1 : 0;
+        if (pinnedA !== pinnedB) return pinnedB - pinnedA;
+        if ((a && a.pinnedAt) || (b && b.pinnedAt)) {
+          return String((b && b.pinnedAt) || '').localeCompare(String((a && a.pinnedAt) || ''));
+        }
+        return 0;
+      });
+    }
+
+    function applyLocalPinnedState(projectPath) {
+      const now = new Date().toISOString();
+      const toggle = project => {
+        if (!project || project.path !== projectPath) return project;
+        if (project.pinnedAt) {
+          const next = { ...project };
+          delete next.pinnedAt;
+          return next;
+        }
+        return { ...project, pinnedAt: now };
+      };
+      currentProjects.projects = sortPinnedProjects((currentProjects.projects || []).map(toggle));
+      currentProjects.portfolio = sortPinnedProjects((currentProjects.portfolio || []).map(toggle));
+    }
+
     function daysUntilMonthEnd(date) {
       const end = new Date(date.getFullYear(), date.getMonth() + 1, 0);
       return end.getDate() - date.getDate();
@@ -7404,6 +7452,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-toggle-pin-project-path') || '';
           if (!projectPath) return;
+          applyLocalPinnedState(projectPath);
+          renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'toggleProjectPinned',
             projectPath

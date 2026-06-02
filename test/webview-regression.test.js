@@ -947,6 +947,62 @@ test('adding a project asks for a global methodology project type', () => {
   assert.match(source, /type:\s*projectType\.value/);
 });
 
+test('local project actions use local refresh instead of external portfolio refresh', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const functionBody = (name) => {
+    const start = source.indexOf(`async function ${name}`);
+    assert.notEqual(start, -1, `${name} should exist`);
+    const next = source.indexOf('\nasync function ', start + 1);
+    return source.slice(start, next === -1 ? source.length : next);
+  };
+
+  ['selectProject', 'updateProjectMetadata', 'toggleProjectPinned'].forEach((name) => {
+    const body = functionBody(name);
+    assert.match(body, /sendLocalProjectsToWebviews\(context\)/);
+    assert.doesNotMatch(body, /sendProjectsToWebviews\(context\)/);
+  });
+});
+
+test('sidebar local project refresh does not schedule external data loads', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    async () => {},
+    () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+    async () => {},
+    () => ({
+      projects: [{ name: 'app', path: '/workspace/app', pinnedAt: '2026-01-01T00:00:00.000Z' }],
+      selectedProjectPath: '/workspace/app'
+    }),
+    async () => {},
+    async () => {}
+  );
+  let externalLoads = 0;
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+  provider.schedulePortfolioEnrichment = () => { externalLoads += 1; };
+  provider.scheduleIssueSummaryLoads = () => { externalLoads += 1; };
+  provider.scheduleDeliverySummaryLoads = () => { externalLoads += 1; };
+
+  provider.sendLocalProjects();
+
+  assert.equal(externalLoads, 0);
+  assert.equal(postedMessages.length, 1);
+  assert.equal(postedMessages[0].command, 'projectsLoaded');
+  assert.equal(postedMessages[0].projects.portfolio[0].pinnedAt, '2026-01-01T00:00:00.000Z');
+});
+
 test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
