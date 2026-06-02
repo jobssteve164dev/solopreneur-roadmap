@@ -55,6 +55,7 @@ interface SolomapSkillRegistryEntry {
   entry?: string;
   packagePath?: string;
   status?: string;
+  defaultCandidate?: boolean;
   source?: any;
   activation?: {
     keywords?: string[];
@@ -82,6 +83,47 @@ interface SolomapSkillRegistry {
   updatedAt: string;
   skills: SolomapSkillRegistryEntry[];
 }
+
+const BUILTIN_GLOBAL_EXECUTION_SKILL_ID = 'solomap-global-execution-guide';
+
+const BUILTIN_GLOBAL_EXECUTION_SKILL_MD = `---
+name: solomap-global-execution-guide
+description: Use for SoloMap project work by default. Guides agents to anchor reality, read relevant memory, keep user goals higher than implementation preference, make minimal verifiable changes, validate final artifacts, and preserve reusable lessons.
+---
+
+# SoloMap Global Execution Guide
+
+Use this skill for SoloMap roadmap steps, Solo conversations, roadmap revisions, and project work unless the user is only making casual conversation.
+
+## Execution Contract
+
+1. State the concrete deliverable in one sentence before implementation.
+2. Anchor on real files, commands, logs, tests, or current user-provided evidence before judging current implementation.
+3. Read the relevant SoloMap memory files when the task needs project or cross-project context; treat memory as context, not stronger evidence than current files.
+4. Preserve the user's goal, wording, boundaries, and requested path. Do not replace the task with a more familiar engineering problem.
+5. Make the smallest change that directly advances the goal. Avoid unrelated architecture changes, route changes, roadmap edits, or broad rewrites.
+6. For user-facing UI or content, optimize for the final user's action and comprehension. Remove engineering self-description, template language, implementation traces, and maintenance-facing copy.
+7. Validate the actual artifact the user will rely on. For generated scripts, templates, webviews, or configs, validate the generated output, not only the source template.
+8. Close the loop: classify temporary run artifacts, explain verification, and record reusable stable lessons in the appropriate memory location when they will matter later.
+
+## Before Acting
+
+- Identify the user's intended result.
+- Identify any explicit consistency, path, interface, or boundary the user wants preserved.
+- Identify anything the user explicitly rejected or is correcting.
+- Decide whether the user wants a result, a correction, a discussion, or a durable rule update.
+
+## Memory Use
+
+- Prefer the memory paths injected by SoloMap for the current run.
+- Read only high-signal memory files that can change the current decision.
+- Write stable reusable lessons to memory only after they are verified and broadly useful.
+- Put temporary observations in active or inbox-style memory rather than stable project, pattern, or decision files.
+
+## Completion Standard
+
+The task is not complete until the requested result is landed, the narrow relevant verification has run or is explicitly impossible, known tail items are classified, and the final response states what changed, what was verified, and remaining risk.
+`;
 
 interface SolomapMcpRegistryEntry {
   id: string;
@@ -2937,6 +2979,88 @@ function getSolomapSkillRegistryPath(workspaceRoot: string, globalDataPath = '')
   return path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), 'registry.json');
 }
 
+function ensureBuiltinSolomapSkills(skillsRoot: string, registryPath: string): void {
+  const installedAt = 'builtin';
+  const skillRoot = path.join(skillsRoot, 'installed', BUILTIN_GLOBAL_EXECUTION_SKILL_ID);
+  const packageRoot = path.join(skillRoot, 'package');
+  const entryPath = path.join(packageRoot, 'SKILL.md');
+  const skillJsonPath = path.join(skillRoot, 'solomap.skill.json');
+  const sourceLockPath = path.join(skillRoot, 'source.lock.json');
+  fs.mkdirSync(packageRoot, { recursive: true });
+  fs.writeFileSync(entryPath, BUILTIN_GLOBAL_EXECUTION_SKILL_MD, 'utf8');
+  const skillJson = {
+    id: BUILTIN_GLOBAL_EXECUTION_SKILL_ID,
+    title: 'SoloMap Global Execution Guide',
+    description: 'Default SoloMap execution guide for anchored, user-goal-preserving, verifiable project work.',
+    entry: `installed/${BUILTIN_GLOBAL_EXECUTION_SKILL_ID}/package/SKILL.md`,
+    packagePath: `installed/${BUILTIN_GLOBAL_EXECUTION_SKILL_ID}/package`,
+    status: 'installed',
+    defaultCandidate: true,
+    source: { type: 'builtin', owner: 'solomap' },
+    activation: {
+      keywords: ['SoloMap', '路线图', 'Solo', '执行', '验证', '闭环', '记忆', 'skill', '插件', 'UI', '界面', '文案', '修复', '实现'],
+      useWhen: [
+        'SoloMap 路线图环节、Solo 对话、路线图调整或项目执行任务',
+        '任务需要读取项目事实、全局经验库、文档或代码后再改动',
+        '任务需要交付可验证结果、用户向 UI、内容或工程闭环'
+      ],
+      doNotUseWhen: ['用户只是纯闲聊，且不涉及项目判断、执行、文档、代码或设计']
+    },
+    risk: {
+      hasScripts: false,
+      hasExecutables: false,
+      usesNetwork: false,
+      writesFiles: 'guidance-only',
+      requiresUserApprovalToRunScripts: true
+    },
+    installedAt,
+    updatedAt: installedAt
+  };
+  fs.writeFileSync(skillJsonPath, JSON.stringify(skillJson, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(sourceLockPath, JSON.stringify({
+    source: 'solomap-builtin',
+    skillId: BUILTIN_GLOBAL_EXECUTION_SKILL_ID,
+    installedAt,
+    version: 1
+  }, null, 2) + '\n', 'utf8');
+
+  let registry: SolomapSkillRegistry = { version: 1, updatedAt: '', skills: [] };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    registry = {
+      version: Number(parsed.version || 1),
+      updatedAt: String(parsed.updatedAt || ''),
+      skills: Array.isArray(parsed.skills) ? parsed.skills : []
+    };
+  } catch {
+    registry = { version: 1, updatedAt: '', skills: [] };
+  }
+  const builtinEntry: SolomapSkillRegistryEntry = {
+    id: BUILTIN_GLOBAL_EXECUTION_SKILL_ID,
+    title: skillJson.title,
+    description: skillJson.description,
+    entry: skillJson.entry,
+    packagePath: skillJson.packagePath,
+    status: 'installed',
+    defaultCandidate: true,
+    source: skillJson.source,
+    activation: skillJson.activation,
+    risk: skillJson.risk,
+    installedAt,
+    updatedAt: installedAt
+  };
+  const skills = registry.skills
+    .filter((skill) => skill.id !== BUILTIN_GLOBAL_EXECUTION_SKILL_ID)
+    .concat(builtinEntry)
+    .sort((a, b) => {
+      if (a.defaultCandidate !== b.defaultCandidate) {
+        return a.defaultCandidate ? -1 : 1;
+      }
+      return a.id.localeCompare(b.id);
+    });
+  fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), skills }, null, 2) + '\n', 'utf8');
+}
+
 function ensureSolomapSkillStore(workspaceRoot: string, globalDataPath = ''): { skillsRoot: string; installedRoot: string; runsRoot: string; registryPath: string } {
   const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
   const installedRoot = path.join(skillsRoot, 'installed');
@@ -2947,10 +3071,16 @@ function ensureSolomapSkillStore(workspaceRoot: string, globalDataPath = ''): { 
   if (!fs.existsSync(registryPath)) {
     fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), skills: [] }, null, 2), 'utf8');
   }
+  ensureBuiltinSolomapSkills(skillsRoot, registryPath);
   return { skillsRoot, installedRoot, runsRoot, registryPath };
 }
 
 function readSolomapSkillRegistry(workspaceRoot: string, globalDataPath = ''): SolomapSkillRegistry {
+  try {
+    ensureSolomapSkillStore(workspaceRoot, globalDataPath);
+  } catch {
+    return { version: 1, updatedAt: '', skills: [] };
+  }
   const registryPath = getSolomapSkillRegistryPath(workspaceRoot, globalDataPath);
   if (!fs.existsSync(registryPath)) {
     return { version: 1, updatedAt: '', skills: [] };
@@ -2997,6 +3127,10 @@ function scoreSolomapSkill(skill: SolomapSkillRegistryEntry, contextText: string
   const text = contextText.toLowerCase();
   const reasons: string[] = [];
   let score = 0;
+  if (skill.defaultCandidate) {
+    score += 1;
+    reasons.push('default');
+  }
   const keywords = normalizeSkillKeywords(skill.activation?.keywords);
   keywords.forEach((keyword) => {
     if (keyword && text.includes(keyword.toLowerCase())) {
@@ -3020,7 +3154,12 @@ function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPath: str
   return registry.skills
     .map((skill) => ({ skill, ...scoreSolomapSkill(skill, contextText) }))
     .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      if (a.skill.defaultCandidate !== b.skill.defaultCandidate) {
+        return a.skill.defaultCandidate ? -1 : 1;
+      }
+      return b.score - a.score;
+    })
     .slice(0, limit)
     .map(({ skill, reasons }) => ({ skill, reasons }));
 }

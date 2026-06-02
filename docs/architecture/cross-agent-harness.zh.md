@@ -61,6 +61,7 @@ Skill 是“做事方法包”，解决“Agent 应该按什么方法做这类�
 
 使用逻辑：
 
+- 插件内建 `solomap-global-execution-guide` 默认 skill。初始化 `.solomap-global/skills` 时会自动写入完整 package 和注册表条目，让全局工程执行指南以 skill 形式进入任务候选，而不只依赖系统提示词注入。
 - 插件只把少量候选 skill 注入给 Agent。
 - 高风险 skill 不自动作为候选。
 - Agent 判断是否读取使用，并在输出中说明实际使用情况。
@@ -141,6 +142,7 @@ MCP Connector 是“外部能力连接器”，解决“Agent 可以连接哪些
 
 - `.solomap-global/memory` 默认经验库。
 - `.solomap-global/skills` 跨 Agent skill 安装、注册和候选注入。
+- 内建全局工程执行指南默认 skill，作为普通项目任务的默认候选能力。
 - `.solomap-global/mcp` 跨 Agent MCP connector 安装、注册和候选注入。
 - 设置页提供 skill 和 connector 安装入口。
 - Agent 任务前可接收 skill/MCP 候选摘要。
