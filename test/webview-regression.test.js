@@ -325,6 +325,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /getIssueDetails/);
   assert.match(script, /refreshProjectData/);
   assert.match(script, /data-refresh-project-path/);
+  assert.match(script, /toggleProjectPinned/);
+  assert.match(script, /getProjectConversationHistory/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
   assert.match(html, /data-issue-panel/);
@@ -472,19 +474,19 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /最近一次推进|Latest run/);
   assert.match(elements['portfolio-list'].innerHTML, /data-sidebar-step-history/);
   dispatchMessage({
-    command: 'sidebarStepConversationLoaded',
+    command: 'sidebarProjectConversationLoaded',
     projectPath: '/workspace/second',
-    nodeId: 'step-1',
     conversations: [{
       id: 8,
+      nodeId: 'another-step',
       agentCli: 'codex',
       status: 'Completed',
       timestamp: '2026-05-26T10:05:00.000Z',
       command: 'codex exec',
-      output: 'User supplement:\n继续验证首页\n\nTouched project files:\nsrc/home.ts\n\nRun duration ms: 3000\n\nAgent output tail:\n首页验证已完成。'
+      output: 'User supplement:\n收尾另一个环节\n\nTouched project files:\nsrc/home.ts\n\nRun duration ms: 3000\n\nAgent output tail:\n另一个环节已完成。'
     }]
   });
-  assert.match(elements['portfolio-list'].innerHTML, /继续验证首页/);
+  assert.match(elements['portfolio-list'].innerHTML, /收尾另一个环节/);
   assert.match(elements['portfolio-list'].innerHTML, /data-sidebar-step-conversation/);
   dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: 'step-1', files: ['docs/brief.md'] });
   assert.match(elements['portfolio-list'].innerHTML, /docs\/brief\.md/);
@@ -798,9 +800,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /chooseSoloSupplementFiles/);
   assert.match(html, /soloSupplementFilesSelected/);
   assert.match(html, /getSoloConversationHistory/);
-  assert.match(html, /getStepConversationHistory/);
+  assert.match(html, /getProjectConversationHistory/);
   assert.match(html, /sidebarSoloConversationLoaded/);
-  assert.match(html, /sidebarStepConversationLoaded/);
+  assert.match(html, /sidebarProjectConversationLoaded/);
   assert.match(html, /renderSidebarSoloHistoryContent/);
   assert.match(html, /renderSidebarStepHistoryContent/);
   assert.match(html, /continueSoloConversation/);
@@ -3069,4 +3071,68 @@ test('agent execution log updates one conversation instead of creating a duplica
   assert.equal(cleanedLogs.length, 1);
   assert.equal(cleanedLogs[0].status, 'In Progress');
   store.close();
+});
+
+test('project-level execution history returns latest roadmap run across nodes', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-project-history-'));
+  const store = new SqliteStore(path.join(tempRoot, 'journal.db'), projectRoot);
+  await store.init();
+
+  store.logExecution('1', 'agy', 'agy first', 'Agent output tail:\nFirst.', 'Completed');
+  store.logExecution('__solo__', 'agy', 'agy solo', 'Agent output tail:\nSolo.', 'Completed');
+  const latestRoadmapLogId = store.logExecution('3', 'codex', 'codex latest', 'Agent output tail:\nLatest roadmap run.', 'In Progress');
+  const logs = store.getAllExecutionLogs().filter((conversation) => !['__solo__', '__roadmap_revision__'].includes(String(conversation.nodeId || '')));
+
+  assert.equal(logs[0].id, latestRoadmapLogId);
+  assert.equal(logs[0].nodeId, '3');
+  assert.match(logs[0].output, /Latest roadmap run/);
+  store.close();
+});
+
+test('project registry persists projects and pin state in the global SoloMap file', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__getProjects = getProjects;',
+      'module.exports.__toggleProjectPinned = toggleProjectPinned;'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-registry-'));
+  const globalRoot = path.join(tempRoot, '.solomap-global');
+  const makeContext = (legacyProjects = []) => {
+    const map = new Map([
+      ['solopreneur.settings', { cliPath: 'agy', language: 'zh', globalPrompt: '', globalDataPath: globalRoot }],
+      ['solopreneur.projects', legacyProjects],
+      ['solopreneur.hiddenProjects', []]
+    ]);
+    return {
+      extensionPath: projectRoot,
+      globalState: {
+        get(key) {
+          return map.get(key);
+        },
+        update(key, value) {
+          map.set(key, value);
+          return Promise.resolve();
+        }
+      }
+    };
+  };
+
+  const firstContext = makeContext([
+    { name: 'Alpha', path: '/workspace/alpha' },
+    { name: 'Beta', path: '/workspace/beta' }
+  ]);
+  assert.equal(extensionModule.__getProjects(firstContext).length, 2);
+  await extensionModule.__toggleProjectPinned(firstContext, '/workspace/beta');
+
+  const registryPath = path.join(globalRoot, 'projects.json');
+  const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  assert.equal(registry.projects.find((project) => project.path === '/workspace/beta').pinnedAt.length > 0, true);
+
+  const secondContext = makeContext([]);
+  const sharedProjects = extensionModule.__getProjects(secondContext);
+  assert.equal(sharedProjects[0].path, '/workspace/beta');
+  assert.equal(sharedProjects[1].path, '/workspace/alpha');
 });

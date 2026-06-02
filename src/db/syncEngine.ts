@@ -127,6 +127,13 @@ export class SyncEngine {
   }
 
   /**
+   * Reads agent conversation history across the whole project.
+   */
+  public getProjectAgentExecutions(): AgentConversation[] {
+    return this.sqliteStore.getAllExecutionLogs();
+  }
+
+  /**
    * Seed a beautiful initial roadmap for new projects to demonstrate the capability.
    */
   private createDefaultRoadmap(): RoadmapNode[] {

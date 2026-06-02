@@ -21,6 +21,7 @@ interface SolopreneurProject {
   path: string;
   type?: string;
   priority?: string;
+  pinnedAt?: string;
 }
 
 interface ProjectPortfolioSummary {
@@ -51,6 +52,7 @@ interface ProjectPortfolioSummary {
   deliverySignal: string;
   documentationDocumentCount: number;
   documentationPendingReview: number;
+  pinnedAt?: string;
 }
 
 interface GlobalEngineeringSnapshot {
@@ -2182,12 +2184,25 @@ function buildProjectPortfolioSummary(project: SolopreneurProject, options: { in
     delivery: baseSummary.delivery,
     deliverySignal,
     documentationDocumentCount: documentationSummary.documentCount,
-    documentationPendingReview: documentationSummary.pendingReviewCount
+    documentationPendingReview: documentationSummary.pendingReviewCount,
+    pinnedAt: project.pinnedAt || ''
   };
 }
 
 function buildProjectPortfolioSummaries(projects: SolopreneurProject[], options: { includeReusableSignals?: boolean } = {}): ProjectPortfolioSummary[] {
-  return projects.map((project) => buildProjectPortfolioSummary(project, options));
+  return projects
+    .map((project) => buildProjectPortfolioSummary(project, options))
+    .sort((a, b) => {
+      const pinnedA = a.pinnedAt ? 1 : 0;
+      const pinnedB = b.pinnedAt ? 1 : 0;
+      if (pinnedA !== pinnedB) {
+        return pinnedB - pinnedA;
+      }
+      if (a.pinnedAt || b.pinnedAt) {
+        return String(b.pinnedAt || '').localeCompare(String(a.pinnedAt || ''));
+      }
+      return 0;
+    });
 }
 
 function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
@@ -2581,6 +2596,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
     private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
     private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>,
+    private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
+    private readonly _toggleProjectPinned?: (projectPath: string) => Promise<void>,
     private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>,
     private readonly _installSkill?: (skillInput: string) => Promise<void>,
     private readonly _installMcp?: (mcpInput: string) => Promise<void>
@@ -2640,9 +2657,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           case 'getStepConversationHistory':
             await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
             break;
+          case 'getProjectConversationHistory':
+            await this.sendProjectConversationHistory(data.projectPath || '');
+            break;
           case 'continueSoloConversation':
             if (this._continueSoloConversation) {
               await this._continueSoloConversation(data.projectPath || '', Number(data.conversationId || 0));
+            }
+            break;
+          case 'toggleProjectPinned':
+            if (this._toggleProjectPinned) {
+              await this._toggleProjectPinned(data.projectPath || '');
             }
             break;
           case 'showFullRoadmap':
@@ -3076,6 +3101,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send step conversation history:', error);
+    }
+  }
+
+  public async sendProjectConversationHistory(projectPath: string) {
+    try {
+      if (!this._view || !this._getProjectConversationHistory || !projectPath) {
+        return;
+      }
+      const conversations = await this._getProjectConversationHistory(projectPath);
+      this._view.webview.postMessage({
+        command: 'sidebarProjectConversationLoaded',
+        projectPath,
+        conversations
+      });
+    } catch (error) {
+      console.error('SoloMap sidebar failed to send project conversation history:', error);
     }
   }
 
@@ -4291,6 +4332,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       border-color: rgba(0, 229, 255, 0.3);
     }
 
+    .portfolio-refresh-btn.is-pinned {
+      color: #ffd166;
+      border-color: rgba(255, 209, 102, 0.32);
+      background: rgba(255, 209, 102, 0.08);
+    }
+
     .portfolio-refresh-btn.is-refreshing .codicon {
       animation: solomap-spin 0.9s linear infinite;
     }
@@ -5228,8 +5275,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let sidebarSoloConversations = [];
     let sidebarSoloConversationExpanded = false;
     const sidebarStepConversations = {};
+    const sidebarProjectConversations = {};
     const sidebarStepConversationExpanded = {};
     const sidebarStepConversationRequested = {};
+    const sidebarProjectConversationRequested = {};
     let expandedIssueNumber = 0;
     let issueDetails = null;
     let issuePanelExpanded = false;
@@ -5341,6 +5390,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         projectReviewFailure: '处理失败',
         refreshProjectData: '刷新项目数据',
         refreshProjectDataDone: '已刷新',
+        pinProject: '置顶项目',
+        unpinProject: '取消置顶',
         checksCached: '检查缓存',
         projectModeContinue: '推进',
         projectModeSolo: 'Solo',
@@ -5517,6 +5568,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         projectReviewFailure: 'Review Failure',
         refreshProjectData: 'Refresh project data',
         refreshProjectDataDone: 'Refreshed',
+        pinProject: 'Pin project',
+        unpinProject: 'Unpin project',
         checksCached: 'Checks cached',
         projectModeContinue: 'Continue',
         projectModeSolo: 'Solo',
@@ -5844,11 +5897,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'projectRefreshCompleted':
           projectRefreshPaths.delete(message.projectPath || '');
-          Object.keys(sidebarStepConversationRequested).forEach(key => {
-            if (key.startsWith(String(message.projectPath || '') + '::')) {
-              delete sidebarStepConversationRequested[key];
-            }
-          });
+          delete sidebarProjectConversationRequested[message.projectPath || ''];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -5932,6 +5981,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
         }
+
+        case 'sidebarProjectConversationLoaded':
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          sidebarProjectConversations[message.projectPath] = message.conversations || [];
+          sidebarProjectConversationRequested[message.projectPath] = true;
+          sidebarStepConversationExpanded[message.projectPath] = false;
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
 
         case 'issueDetailsLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
@@ -6380,8 +6437,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function renderSidebarStepHistoryContent(projectPath, node) {
-      const key = stepConversationKey(projectPath, node && node.id);
-      const conversation = (sidebarStepConversations[key] || [])[0];
+      const key = String(projectPath || '');
+      const conversation = (sidebarProjectConversations[key] || [])[0];
       if (!conversation) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }
@@ -6445,11 +6502,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function bindSidebarStepHistory(container, projectPath) {
       const holder = container.querySelector('[data-sidebar-step-history]');
       if (!holder) return;
-      const nodeId = holder.getAttribute('data-step-node-id') || '';
-      const key = stepConversationKey(projectPath, nodeId);
-      if (projectPath && nodeId && !sidebarStepConversationRequested[key]) {
-        sidebarStepConversationRequested[key] = true;
-        vscode.postMessage({ command: 'getStepConversationHistory', projectPath, nodeId });
+      const key = String(projectPath || '');
+      if (projectPath && !sidebarProjectConversationRequested[key]) {
+        sidebarProjectConversationRequested[key] = true;
+        vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
       }
       const card = container.querySelector('[data-sidebar-step-conversation]');
       if (card) {
@@ -6701,7 +6757,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           </div>
           \${renderProjectConversationFiles(targetId, files)}
           \${activeMode === 'solo' ? \`<div class="sidebar-solo-history" data-sidebar-solo-history>\${renderSidebarSoloHistoryContent()}</div>\` : ''}
-          \${activeMode === 'continue' && node ? \`<div class="sidebar-solo-history" data-sidebar-step-history data-step-node-id="\${escapeHtml(node.id)}">\${renderSidebarStepHistoryContent(projectPath, node)}</div>\` : ''}
+          \${activeMode === 'continue' && node ? \`<div class="sidebar-solo-history" data-sidebar-step-history>\${renderSidebarStepHistoryContent(projectPath, node)}</div>\` : ''}
         </div>
       \`;
     }
@@ -6782,9 +6838,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           projectContinueDrafts[nodeId] = '';
           projectContinueFiles[nodeId] = [];
           if (projectPath && nodeId) {
-            const key = stepConversationKey(projectPath, nodeId);
-            delete sidebarStepConversationRequested[key];
-            vscode.postMessage({ command: 'getStepConversationHistory', projectPath, nodeId });
+            delete sidebarProjectConversationRequested[projectPath];
+            vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
           }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
@@ -7274,12 +7329,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const relativeTime = formatRelativeTime(project.recentActivityAt);
         const recommendation = project.recommendedNodeTitle || '';
         const isRefreshing = projectRefreshPaths.has(project.path);
+        const isPinned = Boolean(project.pinnedAt);
         return \`
           <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
               <span class="portfolio-project-name">\${escapeHtml(project.name)}</span>
               <span class="portfolio-card-controls">
                 <button class="portfolio-refresh-btn \${isRefreshing ? 'is-refreshing' : ''}" type="button" title="\${escapeHtml(t('refreshProjectData'))}" aria-label="\${escapeHtml(t('refreshProjectData'))}" data-refresh-project-path="\${escapeHtml(project.path)}" \${isRefreshing ? 'disabled' : ''}><span class="codicon codicon-refresh"></span></button>
+                <button class="portfolio-refresh-btn \${isPinned ? 'is-pinned' : ''}" type="button" title="\${escapeHtml(t(isPinned ? 'unpinProject' : 'pinProject'))}" aria-label="\${escapeHtml(t(isPinned ? 'unpinProject' : 'pinProject'))}" data-toggle-pin-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-pinned"></span></button>
                 <span class="global-priority \${escapeHtml(project.globalPriority || 'P2')}">\${escapeHtml(project.globalPriority || 'P2')}</span>
               </span>
             </div>
@@ -7338,6 +7395,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'refreshProjectData',
+            projectPath
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-toggle-pin-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-toggle-pin-project-path') || '';
+          if (!projectPath) return;
+          vscode.postMessage({
+            command: 'toggleProjectPinned',
             projectPath
           });
         });

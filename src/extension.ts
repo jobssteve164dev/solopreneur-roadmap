@@ -33,6 +33,14 @@ interface SolopreneurProject {
   path: string;
   type?: string;
   priority?: string;
+  pinnedAt?: string;
+}
+
+interface ProjectRegistryFile {
+  schemaVersion: number;
+  updatedAt: string;
+  projects: SolopreneurProject[];
+  hiddenProjects: string[];
 }
 
 interface AgentStepSession {
@@ -322,6 +330,7 @@ const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
+const projectRegistryFileName = 'projects.json';
 const roadmapRevisionId = '__roadmap_revision__';
 const soloConversationId = '__solo__';
 const agentTerminalBaseName = 'SoloMap Agent Console';
@@ -430,6 +439,12 @@ export async function activate(context: vscode.ExtensionContext) {
     async (projectPath, nodeId) => {
       return getStepConversationHistoryForProject(context, projectPath, nodeId);
     },
+    async (projectPath) => {
+      return getProjectConversationHistoryForProject(context, projectPath);
+    },
+    async (projectPath) => {
+      await toggleProjectPinned(context, projectPath);
+    },
     async (projectPath, scope, attachments) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
         vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
@@ -494,11 +509,100 @@ function getWorkspaceRoot(): string {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 }
 
-function getProjects(context: vscode.ExtensionContext): SolopreneurProject[] {
-  const savedProjects = context.globalState.get<SolopreneurProject[]>(projectsKey) || [];
-  const hiddenProjects = new Set(context.globalState.get<string[]>(hiddenProjectsKey) || []);
+function normalizeGlobalDataPathForExtension(rawPath: string): string {
+  const trimmed = String(rawPath || '').trim();
+  if (trimmed) {
+    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
+  }
   const workspaceRoot = getWorkspaceRoot();
-  const projects = [...savedProjects];
+  return path.join(path.dirname(workspaceRoot || process.cwd()), '.solomap-global');
+}
+
+function getProjectRegistryPath(context: vscode.ExtensionContext): string {
+  return path.join(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), projectRegistryFileName);
+}
+
+function normalizeProjectsForStorage(projects: SolopreneurProject[]): SolopreneurProject[] {
+  const seen = new Set<string>();
+  return (projects || [])
+    .map((project) => ({
+      name: String(project.name || projectName(project.path || '')).trim(),
+      path: String(project.path || '').trim(),
+      ...(project.type ? { type: String(project.type) } : {}),
+      ...(project.priority ? { priority: String(project.priority) } : {}),
+      ...(project.pinnedAt ? { pinnedAt: String(project.pinnedAt) } : {})
+    }))
+    .filter((project) => {
+      if (!project.path || seen.has(project.path)) {
+        return false;
+      }
+      seen.add(project.path);
+      return true;
+    });
+}
+
+function sortProjectsForDisplay(projects: SolopreneurProject[]): SolopreneurProject[] {
+  return [...projects].sort((a, b) => {
+    const pinnedA = a.pinnedAt ? 1 : 0;
+    const pinnedB = b.pinnedAt ? 1 : 0;
+    if (pinnedA !== pinnedB) {
+      return pinnedB - pinnedA;
+    }
+    if (a.pinnedAt || b.pinnedAt) {
+      return String(b.pinnedAt || '').localeCompare(String(a.pinnedAt || ''));
+    }
+    return 0;
+  });
+}
+
+function readProjectRegistry(context: vscode.ExtensionContext): ProjectRegistryFile | null {
+  const registryPath = getProjectRegistryPath(context);
+  if (!fs.existsSync(registryPath)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    return {
+      schemaVersion: 1,
+      updatedAt: String(parsed.updatedAt || ''),
+      projects: normalizeProjectsForStorage(Array.isArray(parsed.projects) ? parsed.projects : []),
+      hiddenProjects: Array.isArray(parsed.hiddenProjects)
+        ? parsed.hiddenProjects.map((item: unknown) => String(item || '').trim()).filter(Boolean)
+        : []
+    };
+  } catch (error) {
+    console.error('SoloMap failed to read global project registry:', error);
+    return null;
+  }
+}
+
+function writeProjectRegistry(context: vscode.ExtensionContext, projects: SolopreneurProject[], hiddenProjects: string[]): void {
+  const registryPath = getProjectRegistryPath(context);
+  fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+  const payload: ProjectRegistryFile = {
+    schemaVersion: 1,
+    updatedAt: new Date().toISOString(),
+    projects: normalizeProjectsForStorage(projects),
+    hiddenProjects: [...new Set((hiddenProjects || []).map((item) => String(item || '').trim()).filter(Boolean))]
+  };
+  fs.writeFileSync(registryPath, JSON.stringify(payload, null, 2), 'utf8');
+}
+
+function getHiddenProjects(context: vscode.ExtensionContext): string[] {
+  const registry = readProjectRegistry(context);
+  if (registry) {
+    return registry.hiddenProjects;
+  }
+  return context.globalState.get<string[]>(hiddenProjectsKey) || [];
+}
+
+function getProjects(context: vscode.ExtensionContext): SolopreneurProject[] {
+  const registry = readProjectRegistry(context);
+  const legacyProjects = context.globalState.get<SolopreneurProject[]>(projectsKey) || [];
+  const savedProjects = registry ? registry.projects : legacyProjects;
+  const hiddenProjects = new Set(registry ? registry.hiddenProjects : (context.globalState.get<string[]>(hiddenProjectsKey) || []));
+  const workspaceRoot = getWorkspaceRoot();
+  const projects = normalizeProjectsForStorage(savedProjects);
 
   if (workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
     projects.unshift({
@@ -507,9 +611,11 @@ function getProjects(context: vscode.ExtensionContext): SolopreneurProject[] {
     });
   }
 
-  return projects.filter((project, index, all) =>
-    project.path && all.findIndex((candidate) => candidate.path === project.path) === index
-  );
+  const normalizedProjects = normalizeProjectsForStorage(projects);
+  if (!registry) {
+    writeProjectRegistry(context, normalizedProjects, [...hiddenProjects]);
+  }
+  return sortProjectsForDisplay(normalizedProjects);
 }
 
 function getSelectedProjectPath(context: vscode.ExtensionContext): string {
@@ -530,16 +636,19 @@ function getProjectState(context: vscode.ExtensionContext): { projects: Solopren
 }
 
 async function saveProjects(context: vscode.ExtensionContext, projects: SolopreneurProject[]): Promise<void> {
-  await context.globalState.update(projectsKey, projects);
+  const normalizedProjects = normalizeProjectsForStorage(projects);
+  writeProjectRegistry(context, normalizedProjects, getHiddenProjects(context));
+  await context.globalState.update(projectsKey, normalizedProjects);
 }
 
 async function setProjectHidden(context: vscode.ExtensionContext, projectPath: string, hidden: boolean): Promise<void> {
-  const hiddenProjects = new Set(context.globalState.get<string[]>(hiddenProjectsKey) || []);
+  const hiddenProjects = new Set(getHiddenProjects(context));
   if (hidden) {
     hiddenProjects.add(projectPath);
   } else {
     hiddenProjects.delete(projectPath);
   }
+  writeProjectRegistry(context, getProjects(context), [...hiddenProjects]);
   await context.globalState.update(hiddenProjectsKey, [...hiddenProjects]);
 }
 
@@ -586,6 +695,23 @@ async function updateProjectMetadata(context: vscode.ExtensionContext, projectPa
       ...(updates.type !== undefined ? { type: String(updates.type || '') } : {}),
       ...(updates.priority !== undefined ? { priority: String(updates.priority || '') } : {})
     };
+  });
+  await saveProjects(context, nextProjects);
+  sendProjectsToWebviews(context);
+}
+
+async function toggleProjectPinned(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
+  const projects = getProjects(context);
+  if (!projects.some((project) => project.path === projectPath)) {
+    vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+    return;
+  }
+  const nextProjects = projects.map((project) => {
+    if (project.path !== projectPath) {
+      return project;
+    }
+    const { pinnedAt, ...rest } = project;
+    return pinnedAt ? rest : { ...project, pinnedAt: new Date().toISOString() };
   });
   await saveProjects(context, nextProjects);
   sendProjectsToWebviews(context);
@@ -1257,6 +1383,31 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
   await store.init();
   try {
     return store.getExecutionLogs(nodeId).slice(0, 1);
+  } finally {
+    store.close();
+  }
+}
+
+async function getProjectConversationHistoryForProject(context: vscode.ExtensionContext, projectPath: string): Promise<AgentConversation[]> {
+  if (!getProjects(context).some((project) => project.path === projectPath)) {
+    return [];
+  }
+  const excludeNodeIds = new Set([soloConversationId, roadmapRevisionId]);
+  if (syncEngine && activeProjectRoot === projectPath) {
+    return syncEngine.getProjectAgentExecutions()
+      .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
+      .slice(0, 1);
+  }
+  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  if (!fs.existsSync(journalPath)) {
+    return [];
+  }
+  const store = new SqliteStore(journalPath, context.extensionPath);
+  await store.init();
+  try {
+    return store.getAllExecutionLogs()
+      .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
+      .slice(0, 1);
   } finally {
     store.close();
   }

@@ -277,6 +277,44 @@ export class SqliteStore {
   }
 
   /**
+   * Retrieves execution history across all roadmap nodes, newest first.
+   */
+  public getAllExecutionLogs(): AgentConversation[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    const stmt = this.db.prepare(`
+      SELECT id, nodeId, timestamp, agentCli, command, output, status
+      FROM execution_logs
+      ORDER BY id DESC
+    `);
+    const logs: AgentConversation[] = [];
+    try {
+      while (stmt.step()) {
+        logs.push(stmt.getAsObject() as unknown as AgentConversation);
+      }
+    } finally {
+      stmt.free();
+    }
+    const latestFinishedByNode = new Map<string, number>();
+    logs.forEach((log) => {
+      if (log.status === 'Running') {
+        return;
+      }
+      const nodeId = String(log.nodeId || '');
+      latestFinishedByNode.set(nodeId, Math.max(latestFinishedByNode.get(nodeId) || 0, Number(log.id || 0)));
+    });
+    return logs.filter((log) => {
+      if (log.status !== 'Running' || Number(log.id || 0) > (latestFinishedByNode.get(String(log.nodeId || '')) || 0)) {
+        return true;
+      }
+      const output = String(log.output || '');
+      return !/Agent conversation started|Launched command in integrated terminal/.test(output);
+    });
+  }
+
+  /**
    * Closes the database.
    */
   public close(): void {
