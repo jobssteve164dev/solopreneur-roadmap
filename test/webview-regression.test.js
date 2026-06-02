@@ -1676,16 +1676,32 @@ test('agent command builder uses non-interactive task runs and native continuati
   const skillStore = extensionModule.__ensureSolomapSkillStore('/workspace/app', skillStoreRoot);
   assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'installed')));
   assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'runs')));
-  const builtinSkillPath = path.join(skillStore.skillsRoot, 'installed', 'solomap-global-execution-guide');
-  assert.ok(fs.existsSync(path.join(builtinSkillPath, 'package', 'SKILL.md')));
-  assert.ok(fs.existsSync(path.join(builtinSkillPath, 'solomap.skill.json')));
-  assert.ok(fs.existsSync(path.join(builtinSkillPath, 'source.lock.json')));
+  [
+    'solomap-global-execution-guide',
+    'solomap-roadmap-planning',
+    'solomap-project-docs-lifecycle',
+    'solomap-cross-project-memory'
+  ].forEach((skillId) => {
+    const builtinSkillPath = path.join(skillStore.skillsRoot, 'installed', skillId);
+    assert.ok(fs.existsSync(path.join(builtinSkillPath, 'package', 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(builtinSkillPath, 'solomap.skill.json')));
+    assert.ok(fs.existsSync(path.join(builtinSkillPath, 'source.lock.json')));
+  });
   const builtinRegistry = extensionModule.__readSolomapSkillRegistry('/workspace/app', skillStoreRoot);
-  const builtinSkill = builtinRegistry.skills.find((skill) => skill.id === 'solomap-global-execution-guide');
-  assert.equal(builtinSkill?.defaultCandidate, true);
-  const builtinInstructions = extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '更新项目文档');
+  assert.equal(builtinRegistry.skills.filter((skill) => skill.defaultCandidate).length, 4);
+  assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-global-execution-guide')?.defaultCandidate, true);
+  assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-roadmap-planning')?.defaultCandidate, true);
+  assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-project-docs-lifecycle')?.defaultCandidate, true);
+  assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-cross-project-memory')?.defaultCandidate, true);
+  const builtinInstructions = extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '调整路线图，更新项目文档，并沉淀跨项目记忆');
   assert.match(builtinInstructions, /SoloMap Global Execution Guide/);
   assert.match(builtinInstructions, /installed\/solomap-global-execution-guide\/package\/SKILL\.md/);
+  assert.match(builtinInstructions, /SoloMap Roadmap Planning/);
+  assert.match(builtinInstructions, /installed\/solomap-roadmap-planning\/package\/SKILL\.md/);
+  assert.match(builtinInstructions, /SoloMap Project Docs Lifecycle/);
+  assert.match(builtinInstructions, /installed\/solomap-project-docs-lifecycle\/package\/SKILL\.md/);
+  assert.match(builtinInstructions, /SoloMap Cross-Project Memory/);
+  assert.match(builtinInstructions, /installed\/solomap-cross-project-memory\/package\/SKILL\.md/);
   extensionModule.__writeSolomapSkillRegistry('/workspace/app', skillStoreRoot, {
     version: 1,
     updatedAt: '',

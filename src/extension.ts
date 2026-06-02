@@ -84,9 +84,28 @@ interface SolomapSkillRegistry {
   skills: SolomapSkillRegistryEntry[];
 }
 
-const BUILTIN_GLOBAL_EXECUTION_SKILL_ID = 'solomap-global-execution-guide';
+interface BuiltinSolomapSkillDefinition {
+  id: string;
+  title: string;
+  description: string;
+  keywords: string[];
+  useWhen: string[];
+  doNotUseWhen: string[];
+  skillMd: string;
+}
 
-const BUILTIN_GLOBAL_EXECUTION_SKILL_MD = `---
+const BUILTIN_SOLOMAP_SKILLS: BuiltinSolomapSkillDefinition[] = [{
+  id: 'solomap-global-execution-guide',
+  title: 'SoloMap Global Execution Guide',
+  description: 'Default SoloMap execution guide for anchored, user-goal-preserving, verifiable project work.',
+  keywords: ['SoloMap', '路线图', 'Solo', '执行', '验证', '闭环', '记忆', 'skill', '插件', 'UI', '界面', '文案', '修复', '实现'],
+  useWhen: [
+    'SoloMap 路线图环节、Solo 对话、路线图调整或项目执行任务',
+    '任务需要读取项目事实、全局经验库、文档或代码后再改动',
+    '任务需要交付可验证结果、用户向 UI、内容或工程闭环'
+  ],
+  doNotUseWhen: ['用户只是纯闲聊，且不涉及项目判断、执行、文档、代码或设计'],
+  skillMd: `---
 name: solomap-global-execution-guide
 description: Use for SoloMap project work by default. Guides agents to anchor reality, read relevant memory, keep user goals higher than implementation preference, make minimal verifiable changes, validate final artifacts, and preserve reusable lessons.
 ---
@@ -123,7 +142,137 @@ Use this skill for SoloMap roadmap steps, Solo conversations, roadmap revisions,
 ## Completion Standard
 
 The task is not complete until the requested result is landed, the narrow relevant verification has run or is explicitly impossible, known tail items are classified, and the final response states what changed, what was verified, and remaining risk.
-`;
+`
+}, {
+  id: 'solomap-roadmap-planning',
+  title: 'SoloMap Roadmap Planning',
+  description: 'Generate and revise SoloMap roadmaps from the user goal, project type, current project state, and validation rules.',
+  keywords: ['roadmap', '路线图', '生成初始路线图', '调整路线图', 'revision', 'bootstrap', 'Build', 'Sell', 'Learn', 'Improve', '项目类型'],
+  useWhen: [
+    '生成初始路线图、调整路线图或重排后续环节',
+    '用户改变项目目标、优先级、商业化方向或阶段边界',
+    '需要把方法论转成用户可执行的路线图环节'
+  ],
+  doNotUseWhen: ['任务只是在既有环节内执行代码、文档或修复，不需要修改路线图'],
+  skillMd: `---
+name: solomap-roadmap-planning
+description: Use when generating or revising SoloMap roadmaps. Converts project goals and project type into executable roadmap steps, preserves completed facts, and validates the final CSV.
+---
+
+# SoloMap Roadmap Planning
+
+Use this skill when the task is to generate an initial roadmap, revise a roadmap, or decide how project goals should map into SoloMap steps.
+
+## Workflow
+
+1. Read the current user request, project files, existing \`.solopreneur/roadmap.csv\`, roadmap methodology, and validation script when present.
+2. Classify the project type before choosing stages:
+   - Core product: cover Build, Sell, Learn, and Improve.
+   - Infrastructure: emphasize contracts, integration, versioning, compatibility, and verification.
+   - Content product: emphasize production, distribution, and feedback.
+   - Research or experiment: allow validation failure, but require a conclusion.
+   - Tooling scaffold: emphasize reusable entrypoints and handoff.
+   - Archive or maintenance: emphasize stability, monitoring, and low-risk upkeep.
+3. Preserve completed work unless the user explicitly asks to undo it.
+4. Turn methodology into user-executable steps. Do not create roadmap steps that merely explain methodology, internal directories, prompts, or maintenance mechanics.
+5. Each step must have a concrete user-facing or project-facing outcome, a clear stage, valid dependencies, and an Agent prompt that can be executed.
+6. Keep \`roadmap.csv\` schema intact: \`id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\`.
+7. Run the project validation command required by the prompt, usually \`node .solopreneur/validate-roadmap.cjs --mode bootstrap\` or \`--mode revision\`, and fix failures before finalizing.
+
+## Quality Bar
+
+- The user should see a practical next path, not an explanation of SoloMap's internal method.
+- Commercial products must not silently degrade into build-only plans.
+- Non-commercial projects must not receive fake sales or marketing stages.
+- Roadmap steps should be few enough to execute and specific enough to validate.
+`
+}, {
+  id: 'solomap-project-docs-lifecycle',
+  title: 'SoloMap Project Docs Lifecycle',
+  description: 'Maintain long-lived project engineering documents without creating noisy summaries, logs, or prompt dumps.',
+  keywords: ['文档', 'documentation', 'docs', 'README', 'business plan', 'methodology', 'architecture', 'boundary', 'manifest', '项目生命周期', '工程文档'],
+  useWhen: [
+    '任务需要新增、更新或审计项目长期文档',
+    '蓝图、方案、路线图、工程设计、边界或方法论需要落到仓库文档',
+    '需要判断某个信息应写入 README、方向文档、方法论文档、边界文档还是不应写入长期文档'
+  ],
+  doNotUseWhen: ['任务只是代码修复且没有长期文档判断或项目解释性产出'],
+  skillMd: `---
+name: solomap-project-docs-lifecycle
+description: Use when creating, updating, or auditing long-lived project documents in SoloMap projects. Keeps docs tied to durable project responsibilities instead of run summaries.
+---
+
+# SoloMap Project Docs Lifecycle
+
+Use this skill when project work needs durable documentation.
+
+## Document Placement
+
+1. Direction documents explain what the project is, who it serves, success criteria, and external expression.
+2. Methodology documents explain lifecycle models, execution models, or harness judgment rules.
+3. Boundary documents freeze product, engineering, or user-mindset boundaries to prevent future drift.
+4. UI guideline documents constrain long-term UI or governance-surface behavior.
+5. Reference documents hold long-lived explanatory background.
+6. Data ownership documents explain project data, cache, run records, and Git management boundaries.
+
+## Rules
+
+- Do not create low-semantic files such as \`summary.md\`, \`notes.md\`, \`plan.md\`, or run logs as long-term documentation.
+- Do not copy prompts, terminal logs, execution traces, or internal process narration into project docs.
+- If adding a new official document, choose a filename that states its durable responsibility, preferably under existing \`docs/architecture/\`, \`docs/methodology/\`, \`docs/ui/\`, \`docs/product/\`, or \`docs/decisions/\`.
+- Keep docs written for future project understanding, not for proving that the current run happened.
+- If the repository has a plugin-managed documentation manifest, do not hand-edit the manifest unless the codebase explicitly expects manual edits.
+
+## Completion Check
+
+Before finalizing, confirm that the document says something future work can reuse, that it is in the right responsibility bucket, and that no run-only material leaked into long-term docs.
+`
+}, {
+  id: 'solomap-cross-project-memory',
+  title: 'SoloMap Cross-Project Memory',
+  description: 'Classify and write reusable SoloMap memory into the right global memory location without leaking project-private details.',
+  keywords: ['memory', '记忆', '经验库', '沉淀', 'profile', 'operating-rules', 'patterns', 'decisions', 'domains', 'inbox', 'active', 'learning candidates', '跨项目'],
+  useWhen: [
+    '任务结束时需要沉淀跨会话或跨项目仍有价值的信息',
+    '需要判断信息应进入 profile、operating-rules、projects、patterns、decisions、domains、inbox、active 或 learning candidates',
+    '需要把一次经验抽象成可复用模式，同时避免泄漏项目私有事实'
+  ],
+  doNotUseWhen: ['本轮没有产生未来可复用的新事实、决策、模式、领域知识或交接信息'],
+  skillMd: `---
+name: solomap-cross-project-memory
+description: Use when recording reusable SoloMap memory. Classifies lessons into profile, operating rules, project memory, patterns, decisions, domains, inbox, active handoff, or learning candidates.
+---
+
+# SoloMap Cross-Project Memory
+
+Use this skill when the task creates information that should survive the current conversation.
+
+## Classification
+
+- \`profile.md\`: durable user preferences, collaboration style, recurring priorities, and prohibitions.
+- \`operating-rules.md\`: cross-task execution rules and agent behavior constraints.
+- \`projects/<project>.md\`: stable facts, entrypoints, decisions, and context for one project.
+- \`patterns/\`: reusable delivery, debugging, implementation, or verification patterns.
+- \`decisions/\`: confirmed cross-project decisions with rationale and impact.
+- \`domains/\`: reusable domain knowledge.
+- \`inbox/\`: observations that may become memory but are not verified enough.
+- \`active/\`: temporary current-session handoff.
+- \`learning/candidates/\`: candidate lessons produced by SoloMap learning flows.
+
+## Writing Protocol
+
+1. Verify the information against current files, tests, logs, or explicit user confirmation before writing stable memory.
+2. Read the target directory's \`_example.md\` before creating or appending a topic file.
+3. Write only distilled facts, decisions, patterns, or handoff context. Do not paste raw logs, prompts, or execution transcripts.
+4. Do not put project-specific names, fields, providers, database details, or deployment mechanics into global operating principles.
+5. Do not leak one project's private facts into another project's reusable memory.
+6. If the information is useful but not yet stable, write it to inbox or learning candidates instead of stable memory.
+
+## Completion Check
+
+Memory is useful only if it can change a future execution decision. If it is merely a record that this run happened, do not write it as long-term memory.
+`
+}];
 
 interface SolomapMcpRegistryEntry {
   id: string;
@@ -2981,49 +3130,6 @@ function getSolomapSkillRegistryPath(workspaceRoot: string, globalDataPath = '')
 
 function ensureBuiltinSolomapSkills(skillsRoot: string, registryPath: string): void {
   const installedAt = 'builtin';
-  const skillRoot = path.join(skillsRoot, 'installed', BUILTIN_GLOBAL_EXECUTION_SKILL_ID);
-  const packageRoot = path.join(skillRoot, 'package');
-  const entryPath = path.join(packageRoot, 'SKILL.md');
-  const skillJsonPath = path.join(skillRoot, 'solomap.skill.json');
-  const sourceLockPath = path.join(skillRoot, 'source.lock.json');
-  fs.mkdirSync(packageRoot, { recursive: true });
-  fs.writeFileSync(entryPath, BUILTIN_GLOBAL_EXECUTION_SKILL_MD, 'utf8');
-  const skillJson = {
-    id: BUILTIN_GLOBAL_EXECUTION_SKILL_ID,
-    title: 'SoloMap Global Execution Guide',
-    description: 'Default SoloMap execution guide for anchored, user-goal-preserving, verifiable project work.',
-    entry: `installed/${BUILTIN_GLOBAL_EXECUTION_SKILL_ID}/package/SKILL.md`,
-    packagePath: `installed/${BUILTIN_GLOBAL_EXECUTION_SKILL_ID}/package`,
-    status: 'installed',
-    defaultCandidate: true,
-    source: { type: 'builtin', owner: 'solomap' },
-    activation: {
-      keywords: ['SoloMap', '路线图', 'Solo', '执行', '验证', '闭环', '记忆', 'skill', '插件', 'UI', '界面', '文案', '修复', '实现'],
-      useWhen: [
-        'SoloMap 路线图环节、Solo 对话、路线图调整或项目执行任务',
-        '任务需要读取项目事实、全局经验库、文档或代码后再改动',
-        '任务需要交付可验证结果、用户向 UI、内容或工程闭环'
-      ],
-      doNotUseWhen: ['用户只是纯闲聊，且不涉及项目判断、执行、文档、代码或设计']
-    },
-    risk: {
-      hasScripts: false,
-      hasExecutables: false,
-      usesNetwork: false,
-      writesFiles: 'guidance-only',
-      requiresUserApprovalToRunScripts: true
-    },
-    installedAt,
-    updatedAt: installedAt
-  };
-  fs.writeFileSync(skillJsonPath, JSON.stringify(skillJson, null, 2) + '\n', 'utf8');
-  fs.writeFileSync(sourceLockPath, JSON.stringify({
-    source: 'solomap-builtin',
-    skillId: BUILTIN_GLOBAL_EXECUTION_SKILL_ID,
-    installedAt,
-    version: 1
-  }, null, 2) + '\n', 'utf8');
-
   let registry: SolomapSkillRegistry = { version: 1, updatedAt: '', skills: [] };
   try {
     const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
@@ -3035,23 +3141,64 @@ function ensureBuiltinSolomapSkills(skillsRoot: string, registryPath: string): v
   } catch {
     registry = { version: 1, updatedAt: '', skills: [] };
   }
-  const builtinEntry: SolomapSkillRegistryEntry = {
-    id: BUILTIN_GLOBAL_EXECUTION_SKILL_ID,
-    title: skillJson.title,
-    description: skillJson.description,
-    entry: skillJson.entry,
-    packagePath: skillJson.packagePath,
-    status: 'installed',
-    defaultCandidate: true,
-    source: skillJson.source,
-    activation: skillJson.activation,
-    risk: skillJson.risk,
-    installedAt,
-    updatedAt: installedAt
-  };
+  const builtinEntries = BUILTIN_SOLOMAP_SKILLS.map((builtinSkill) => {
+    const skillRoot = path.join(skillsRoot, 'installed', builtinSkill.id);
+    const packageRoot = path.join(skillRoot, 'package');
+    const entryPath = path.join(packageRoot, 'SKILL.md');
+    const skillJsonPath = path.join(skillRoot, 'solomap.skill.json');
+    const sourceLockPath = path.join(skillRoot, 'source.lock.json');
+    fs.mkdirSync(packageRoot, { recursive: true });
+    fs.writeFileSync(entryPath, builtinSkill.skillMd, 'utf8');
+    const skillJson = {
+      id: builtinSkill.id,
+      title: builtinSkill.title,
+      description: builtinSkill.description,
+      entry: `installed/${builtinSkill.id}/package/SKILL.md`,
+      packagePath: `installed/${builtinSkill.id}/package`,
+      status: 'installed',
+      defaultCandidate: true,
+      source: { type: 'builtin', owner: 'solomap' },
+      activation: {
+        keywords: builtinSkill.keywords,
+        useWhen: builtinSkill.useWhen,
+        doNotUseWhen: builtinSkill.doNotUseWhen
+      },
+      risk: {
+        hasScripts: false,
+        hasExecutables: false,
+        usesNetwork: false,
+        writesFiles: 'guidance-only',
+        requiresUserApprovalToRunScripts: true
+      },
+      installedAt,
+      updatedAt: installedAt
+    };
+    fs.writeFileSync(skillJsonPath, JSON.stringify(skillJson, null, 2) + '\n', 'utf8');
+    fs.writeFileSync(sourceLockPath, JSON.stringify({
+      source: 'solomap-builtin',
+      skillId: builtinSkill.id,
+      installedAt,
+      version: 1
+    }, null, 2) + '\n', 'utf8');
+    return {
+      id: builtinSkill.id,
+      title: skillJson.title,
+      description: skillJson.description,
+      entry: skillJson.entry,
+      packagePath: skillJson.packagePath,
+      status: 'installed',
+      defaultCandidate: true,
+      source: skillJson.source,
+      activation: skillJson.activation,
+      risk: skillJson.risk,
+      installedAt,
+      updatedAt: installedAt
+    };
+  });
+  const builtinIds = new Set(BUILTIN_SOLOMAP_SKILLS.map((skill) => skill.id));
   const skills = registry.skills
-    .filter((skill) => skill.id !== BUILTIN_GLOBAL_EXECUTION_SKILL_ID)
-    .concat(builtinEntry)
+    .filter((skill) => !builtinIds.has(skill.id))
+    .concat(builtinEntries)
     .sort((a, b) => {
       if (a.defaultCandidate !== b.defaultCandidate) {
         return a.defaultCandidate ? -1 : 1;
@@ -3149,7 +3296,7 @@ function scoreSolomapSkill(skill: SolomapSkillRegistryEntry, contextText: string
   return { score, reasons };
 }
 
-function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 3): Array<{ skill: SolomapSkillRegistryEntry; reasons: string[] }> {
+function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 6): Array<{ skill: SolomapSkillRegistryEntry; reasons: string[] }> {
   const registry = readSolomapSkillRegistry(workspaceRoot, globalDataPath);
   return registry.skills
     .map((skill) => ({ skill, ...scoreSolomapSkill(skill, contextText) }))
@@ -3165,7 +3312,7 @@ function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPath: str
 }
 
 function buildSolomapSkillCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): string {
-  const candidates = selectSolomapSkillCandidates(workspaceRoot, globalDataPath, contextText, 3);
+  const candidates = selectSolomapSkillCandidates(workspaceRoot, globalDataPath, contextText, 6);
   if (candidates.length === 0) {
     return '';
   }
