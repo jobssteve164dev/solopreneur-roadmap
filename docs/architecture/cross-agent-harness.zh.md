@@ -4,7 +4,7 @@
 
 SoloMap 的初衷是补齐 Agent CLI 和用户项目生命周期之间的最后十公里。它不是新的 Agent CLI，也不应该重建模型调用、工具执行、代码生成或权限体系。大厂和成熟社区已经在 Agent CLI 上投入了大量能力，SoloMap 应充分利用这些 CLI 的潜力。
 
-SoloMap 要做好的事情是管理 Agent CLI 如何服务项目生命周期：把项目目标转成路线图，把路线图环节转成可执行对话，把 memory、skill 和 MCP connector 放到统一上下文里，把执行日志、文件变更、状态、交接和验收沉淀回项目。用户面对的是项目推进，不是 Agent 配置工程。
+SoloMap 要做好的事情是管理 Agent CLI 如何服务项目生命周期：把项目目标转成路线图，把路线图环节转成可执行对话，把 memory、skill 和 MCP connector 放到统一上下文里，把执行日志、文件变更、状态、交接和验收沉淀回项目，并把可复用执行经验带入下一轮任务。用户面对的是项目推进，不是 Agent 配置工程。
 
 ## 目标
 
@@ -16,8 +16,9 @@ SoloMap 的跨 Agent harness 负责让不同 Agent CLI 在同一套项目上下�
 - Agent 共享同一份项目经验、可复用 skill 和 MCP 能力连接器。
 - 插件吸收不同 CLI 的提示词、配置、权限和安装差异。
 - 高风险能力默认不自动启用，避免把外部写入、发消息、云资源或密钥风险交给隐式匹配。
+- Agent 运行记录能沉淀为下一轮任务可用的执行经验，而不是停留在原始日志。
 
-## 三层能力
+## 四层能力
 
 ### 1. Memory
 
@@ -104,6 +105,16 @@ MCP Connector 是“外部能力连接器”，解决“Agent 可以连接哪些
 - 涉及外部写入、发消息、云资源、密钥或付费动作时，必须先停下要求用户明确授权。
 - 高风险 MCP 默认不自动候选。
 
+### 4. Execution Experience
+
+位置：第一版依托 `.solopreneur/agent-runs/`、`.solopreneur/step-memory/`、`.solomap-global/memory` 和 `.solomap-global/learning`；后续可补 Run Digest 与 Execution Graph 索引。
+
+Execution Experience 保存项目推进过程中的可复用执行经验，解决“Agent 下次如何少探索、少犯同样错误、复用正确验证”。
+
+它不替代 Agent CLI 原生 memory，也不重建模型推理或代码生成。它只把 SoloMap 已经记录的运行事实转成下一轮任务可用的上下文。
+
+详细边界见 [SoloMap 全局执行经验层设计](./execution-experience-layer.zh.md)，方法论见 [SoloMap 执行经验层方法论](../methodology/execution-experience-methodology.zh.md)。
+
 ## Prompt 投递
 
 所有非交互 Agent 任务都以文件承载完整任务：
@@ -150,6 +161,7 @@ MCP Connector 是“外部能力连接器”，解决“Agent 可以连接哪些
 - `.solomap-global/mcp` 跨 Agent MCP connector 安装、注册和候选注入。
 - 设置页提供 skill 和 connector 安装入口。
 - Agent 任务前可接收 skill/MCP 候选摘要。
+- 全局执行经验层设计与方法论文档。
 
 暂不做：
 
@@ -158,5 +170,6 @@ MCP Connector 是“外部能力连接器”，解决“Agent 可以连接哪些
 - 自动注入高风险 MCP。
 - MCP 凭证保存。
 - 完整管理 UI。
+- 独立 Execution Graph 数据库、embedding 召回和自动经验升级。
 
 这些应在后续讨论中按用户动作和风险边界逐步展开。
