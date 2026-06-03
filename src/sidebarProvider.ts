@@ -5291,7 +5291,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-enhancement-toggles">Harness Enhancements</label>
       <div id="help-enhancement-toggles" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Enable curated external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.
+        Enable curated external enhancements. SoloMap installs managed runtime support and falls back to the original path when evidence matters.
       </div>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-command-output-optimizer" style="margin-top:2px;">
@@ -5505,7 +5505,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
         enhancementToggles: 'Harness 增强',
-        enhancementTogglesHelp: '启用经过调研和适配的外部增强；SoloMap 会保持可选使用，并在关键证据场景回退原始路径。',
+        enhancementTogglesHelp: '启用后 SoloMap 会安装和配置受管增强运行环境；关键证据场景仍回退原始路径。',
         enhancementCommandOutputOptimizer: '命令输出优化',
         enhancementCommandOutputOptimizerHelp: '在不需要完整原始日志时减少长命令输出占用。',
         enhancementCodeStructureAssistant: '代码结构辅助',
@@ -5707,7 +5707,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
         enhancementToggles: 'Harness Enhancements',
-        enhancementTogglesHelp: 'Enable researched and adapted external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.',
+        enhancementTogglesHelp: 'Enable managed enhancement runtime setup. SoloMap installs/configures support and falls back to the original path when evidence matters.',
         enhancementCommandOutputOptimizer: 'Command Output Optimizer',
         enhancementCommandOutputOptimizerHelp: 'Reduce long terminal output when full raw logs are not needed.',
         enhancementCodeStructureAssistant: 'Code Structure Assistant',

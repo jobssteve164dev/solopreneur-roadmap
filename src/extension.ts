@@ -492,6 +492,8 @@ const BUILTIN_SOLOMAP_ENHANCEMENTS: BuiltinSolomapEnhancementDefinition[] = [{
   }
 }];
 
+const SOLOMAP_RTK_WRAPPED_COMMANDS = ['ls', 'tree', 'find', 'rg', 'grep', 'git', 'gh'];
+
 const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
@@ -690,6 +692,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
   await config.update('reviewerCliPath', nextSettings.reviewerCliPath, vscode.ConfigurationTarget.Global);
   await config.update('collaborationReviewMode', nextSettings.collaborationReviewMode, vscode.ConfigurationTarget.Global);
+  startHarnessEnhancementSetup(context, nextSettings, currentSettings);
 }
 
 function projectName(projectPath: string): string {
@@ -3401,6 +3404,10 @@ function getSolomapEnhancementsRoot(workspaceRoot: string, globalDataPath = ''):
   return path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'enhancements');
 }
 
+function getSolomapEnhancementRuntimeRoot(workspaceRoot: string, globalDataPath = ''): string {
+  return path.join(getSolomapEnhancementsRoot(workspaceRoot, globalDataPath), 'runtime');
+}
+
 function getProjectMemoryFilePath(workspaceRoot: string, globalDataPath = ''): string {
   const projectName = path.basename(workspaceRoot || 'project');
   const projectSlug = sanitizeAttachmentScope(projectName.toLowerCase()) || 'project';
@@ -4406,6 +4413,191 @@ function writeSolomapEnhancementRegistry(workspaceRoot: string, globalDataPath: 
   fs.writeFileSync(registryPath, JSON.stringify(normalized, null, 2), 'utf8');
 }
 
+function enabledEnhancementIds(enabledEnhancements: Record<string, boolean> = {}): string[] {
+  return BUILTIN_SOLOMAP_ENHANCEMENTS
+    .map((enhancement) => enhancement.id)
+    .filter((id) => Boolean(enabledEnhancements[id]));
+}
+
+function writeManagedEnhancementMetadata(workspaceRoot: string, globalDataPath: string, enabledEnhancements: Record<string, boolean> = {}): void {
+  const { enhancementsRoot, installedRoot } = ensureSolomapEnhancementStore(workspaceRoot, globalDataPath);
+  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const nextEnhancements = registry.enhancements.filter((enhancement) => !BUILTIN_SOLOMAP_ENHANCEMENTS.some((builtin) => builtin.id === enhancement.id));
+  const now = new Date().toISOString();
+  BUILTIN_SOLOMAP_ENHANCEMENTS.forEach((builtin) => {
+    const enabled = Boolean(enabledEnhancements[builtin.id]);
+    const installedPath = path.join(installedRoot, builtin.id);
+    const profilesPath = path.join(installedPath, 'profiles');
+    fs.mkdirSync(profilesPath, { recursive: true });
+    const entry: SolomapEnhancementRegistryEntry = {
+      ...builtin,
+      source: { ...(builtin.source || {}), curated: true },
+      status: enabled ? 'installed' : 'disabled',
+      installedPath: path.relative(enhancementsRoot, installedPath).replace(/\\/g, '/'),
+      configPath: path.relative(enhancementsRoot, path.join(installedPath, 'solomap.enhancement.json')).replace(/\\/g, '/'),
+      installedAt: now,
+      updatedAt: now
+    };
+    fs.writeFileSync(path.join(installedPath, 'solomap.enhancement.json'), JSON.stringify(entry, null, 2), 'utf8');
+    fs.writeFileSync(path.join(installedPath, 'source.lock.json'), JSON.stringify({
+      id: builtin.id,
+      source: builtin.source || {},
+      managedBy: 'SoloMap',
+      updatePolicy: 'follow upstream installer or package manager; no vendored third-party source in SoloMap repo',
+      updatedAt: now
+    }, null, 2), 'utf8');
+    fs.writeFileSync(path.join(profilesPath, 'README.md'), [
+      `# ${builtin.title}`,
+      '',
+      'SoloMap manages this enhancement as a curated built-in capability.',
+      'The user-facing setting is an enable switch; adapter details stay in the Harness layer.',
+      'If the upstream runtime is unavailable, SoloMap falls back to the original task path.'
+    ].join('\n'), 'utf8');
+    nextEnhancements.push(entry);
+  });
+  writeSolomapEnhancementRegistry(workspaceRoot, globalDataPath, { ...registry, enhancements: nextEnhancements.sort((a, b) => a.id.localeCompare(b.id)) });
+}
+
+function buildRtkCommandWrapper(commandName: string): string {
+  return [
+    '#!/usr/bin/env bash',
+    'set -e',
+    `cmd=${shellQuote(commandName)}`,
+    'self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"',
+    'path_without_self="$(printf "%s" "$PATH" | awk -v RS=: -v ORS=: -v self="$self_dir" \'$0 != self && $0 != "" { print }\')"',
+    'path_without_self="${path_without_self%:}"',
+    'if PATH="$path_without_self" command -v rtk >/dev/null 2>&1 && PATH="$path_without_self" rtk gain >/dev/null 2>&1; then',
+    '  exec rtk "$cmd" "$@"',
+    'fi',
+    'original="$(PATH="$path_without_self" command -v "$cmd" || true)"',
+    'if [ -n "$original" ]; then',
+    '  exec "$original" "$@"',
+    'fi',
+    'echo "SoloMap enhancement fallback failed: original command not found: $cmd" >&2',
+    'exit 127',
+    ''
+  ].join('\n');
+}
+
+function ensureSolomapEnhancementRuntime(
+  workspaceRoot: string,
+  globalDataPath: string,
+  enabledEnhancements: Record<string, boolean> = {}
+): { envLines: string[]; preflightLines: string[]; runtimeRoot: string; binRoot: string } {
+  const runtimeRoot = getSolomapEnhancementRuntimeRoot(workspaceRoot, globalDataPath);
+  const binRoot = path.join(runtimeRoot, 'bin');
+  if (!enabledEnhancementIds(enabledEnhancements).length) {
+    return { envLines: [], preflightLines: [], runtimeRoot, binRoot };
+  }
+  fs.mkdirSync(binRoot, { recursive: true });
+  writeManagedEnhancementMetadata(workspaceRoot, globalDataPath, enabledEnhancements);
+
+  const envLines: string[] = [
+    `export SOLOMAP_ENHANCEMENTS_ROOT=${shellQuote(getSolomapEnhancementsRoot(workspaceRoot, globalDataPath))}`
+  ];
+  const preflightLines: string[] = [];
+
+  if (enabledEnhancements['command-output-optimizer']) {
+    SOLOMAP_RTK_WRAPPED_COMMANDS.forEach((commandName) => {
+      const wrapperPath = path.join(binRoot, commandName);
+      fs.writeFileSync(wrapperPath, buildRtkCommandWrapper(commandName), { encoding: 'utf8', mode: 0o755 });
+    });
+    envLines.push(`export PATH=${shellQuote(binRoot)}:"$PATH"`);
+    envLines.push('export SOLOMAP_RTK_OUTPUT_OPTIMIZER=1');
+  }
+
+  if (enabledEnhancements['code-structure-assistant']) {
+    preflightLines.push([
+      'if command -v codegraph >/dev/null 2>&1; then',
+      '  if [ -d .git ]; then mkdir -p .git/info; grep -qxF ".codegraph/" .git/info/exclude 2>/dev/null || printf "\\n.codegraph/\\n" >> .git/info/exclude; fi',
+      `  if [ ! -d ${shellQuote(path.join(workspaceRoot, '.codegraph'))} ]; then codegraph init -i >> ${shellQuote(path.join(runtimeRoot, 'codegraph-init.log'))} 2>&1 || true; fi`,
+      'fi'
+    ].join(' '));
+  }
+
+  return { envLines, preflightLines, runtimeRoot, binRoot };
+}
+
+function buildHarnessEnhancementSetupScript(
+  workspaceRoot: string,
+  globalDataPath: string,
+  enabledEnhancements: Record<string, boolean> = {}
+): { scriptPath: string; logPath: string; enabledIds: string[] } {
+  const enabledIds = enabledEnhancementIds(enabledEnhancements);
+  const runtimeRoot = getSolomapEnhancementRuntimeRoot(workspaceRoot, globalDataPath);
+  const runsRoot = path.join(getSolomapEnhancementsRoot(workspaceRoot, globalDataPath), 'runs');
+  const runDir = path.join(runsRoot, `setup-${Date.now()}`);
+  fs.mkdirSync(runDir, { recursive: true });
+  const scriptPath = path.join(runDir, 'setup-enhancements.sh');
+  const logPath = path.join(runDir, 'setup.log');
+  ensureSolomapEnhancementRuntime(workspaceRoot, globalDataPath, enabledEnhancements);
+
+  const lines = [
+    '#!/usr/bin/env bash',
+    'set +e',
+    `cd ${shellQuote(workspaceRoot)}`,
+    'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"',
+    `mkdir -p ${shellQuote(runtimeRoot)} ${shellQuote(path.join(runtimeRoot, 'bin'))}`,
+    `exec > >(tee -a ${shellQuote(logPath)}) 2>&1`,
+    'echo "SoloMap Harness enhancement setup started."',
+    `echo "Enabled: ${enabledIds.join(', ') || 'none'}"`,
+    enabledEnhancements['command-output-optimizer'] ? [
+      'if ! command -v rtk >/dev/null 2>&1 || ! rtk gain >/dev/null 2>&1; then',
+      '  echo "Installing rtk command output optimizer..."',
+      '  if command -v cargo >/dev/null 2>&1; then cargo install --git https://github.com/rtk-ai/rtk; else curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh; fi',
+      'fi',
+      'if command -v rtk >/dev/null 2>&1; then',
+      '  rtk gain || true',
+      '  rtk init -g --codex --auto-patch || true',
+      '  rtk init --agent antigravity || true',
+      'fi'
+    ].join('\n') : 'echo "Command output optimizer disabled."',
+    enabledEnhancements['code-structure-assistant'] ? [
+      'if ! command -v codegraph >/dev/null 2>&1; then',
+      '  echo "Installing CodeGraph..."',
+      '  if command -v npm >/dev/null 2>&1; then npm install -g @colbymchenry/codegraph; else echo "npm not found; install Node/npm to enable CodeGraph."; fi',
+      'fi',
+      'if command -v codegraph >/dev/null 2>&1; then',
+      '  codegraph install --target=auto --location=global --yes || true',
+      '  if [ -d .git ]; then mkdir -p .git/info; grep -qxF ".codegraph/" .git/info/exclude 2>/dev/null || printf "\\n.codegraph/\\n" >> .git/info/exclude; fi',
+      '  codegraph init -i || true',
+      'fi'
+    ].join('\n') : 'echo "Code structure assistant disabled."',
+    enabledEnhancements['mcp-description-compressor'] ? [
+      'if command -v npx >/dev/null 2>&1; then',
+      '  echo "Installing caveman MCP description compressor..."',
+      '  npx -y github:JuliusBrussee/caveman -- --minimal --with-mcp-shrink --non-interactive || npx -y github:JuliusBrussee/caveman -- --with-mcp-shrink --non-interactive || true',
+      'else',
+      '  echo "npx not found; install Node/npm to enable MCP description compressor."',
+      'fi'
+    ].join('\n') : 'echo "MCP description compressor disabled."',
+    'echo "SoloMap Harness enhancement setup finished."',
+    ''
+  ];
+  fs.writeFileSync(scriptPath, lines.join('\n'), { encoding: 'utf8', mode: 0o755 });
+  return { scriptPath, logPath, enabledIds };
+}
+
+function startHarnessEnhancementSetup(context: vscode.ExtensionContext, settings: SolopreneurSettings, previousSettings?: SolopreneurSettings): void {
+  const workspaceRoot = getWorkspaceRoot();
+  const enabledIds = enabledEnhancementIds(settings.enabledEnhancements || {});
+  if (!workspaceRoot || !enabledIds.length) {
+    return;
+  }
+  const previousIds = new Set(enabledEnhancementIds(previousSettings?.enabledEnhancements || {}));
+  const hasNewEnable = enabledIds.some((id) => !previousIds.has(id));
+  if (!hasNewEnable && previousSettings) {
+    writeManagedEnhancementMetadata(workspaceRoot, settings.globalDataPath, settings.enabledEnhancements || {});
+    return;
+  }
+  void context;
+  const setup = buildHarnessEnhancementSetupScript(workspaceRoot, settings.globalDataPath, settings.enabledEnhancements || {});
+  const terminal = vscode.window.createTerminal({ name: 'SoloMap Harness Enhancements', cwd: workspaceRoot });
+  terminal.show(true);
+  terminal.sendText(`bash ${shellQuote(setup.scriptPath)}`);
+  vscode.window.showInformationMessage(`SoloMap is setting up enabled Harness enhancements: ${setup.enabledIds.join(', ')}.`);
+}
+
 function scoreSolomapEnhancement(enhancement: SolomapEnhancementRegistryEntry, contextText: string): { score: number; reasons: string[] } {
   if (!enhancement || enhancement.status === 'disabled' || enhancement.status === 'failed') {
     return { score: 0, reasons: [] };
@@ -4852,7 +5044,8 @@ function buildAgentShellScript(
   globalDataPath = '',
   taskPermissionMode = 'auto',
   reviewerCliPath = '',
-  collaborationReviewMode = 'high_risk'
+  collaborationReviewMode = 'high_risk',
+  enabledEnhancements: Record<string, boolean> = {}
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
@@ -4881,6 +5074,7 @@ function buildAgentShellScript(
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  const enhancementRuntime = ensureSolomapEnhancementRuntime(workspaceRoot, globalDataPath, enabledEnhancements);
   const promptExportScript = directExecutionCommand
     ? [`agent_prompt=$(cat ${shellQuote(promptFilePath)})`, 'export agent_prompt']
     : [];
@@ -4894,11 +5088,13 @@ function buildAgentShellScript(
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
     'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
+    ...enhancementRuntime.envLines,
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
     workspaceSnapshotScript,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
+    ...enhancementRuntime.preflightLines,
     ...promptExportScript,
     terminalExecutionScript,
     sessionCaptureScript,
@@ -5640,7 +5836,8 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     settings.globalDataPath,
     settings.taskPermissionMode,
     settings.reviewerCliPath,
-    settings.collaborationReviewMode
+    settings.collaborationReviewMode,
+    settings.enabledEnhancements
   );
   const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`);
   terminal.show(true);
@@ -5740,7 +5937,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     settings.globalDataPath,
     settings.taskPermissionMode,
     settings.reviewerCliPath,
-    settings.collaborationReviewMode
+    settings.collaborationReviewMode,
+    settings.enabledEnhancements
   );
   const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`);
   terminal.show(true);
@@ -5907,7 +6105,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   );
   postNodeConversations(nodeId);
 
-  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode);
+  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements);
 
   const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`);
   terminal.show(true);
@@ -8348,7 +8546,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-enhancement-toggles">Harness Enhancements</label>
       <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Enable curated external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.
+        Enable curated external enhancements. SoloMap installs managed runtime support and falls back to the original path when evidence matters.
       </div>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-command-output-optimizer" style="margin-top:2px;">
@@ -8488,7 +8686,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
         enhancementToggles: 'Harness 增强',
-        enhancementTogglesHelp: '启用经过调研和适配的外部增强；SoloMap 会保持可选使用，并在关键证据场景回退原始路径。',
+        enhancementTogglesHelp: '启用后 SoloMap 会安装和配置受管增强运行环境；关键证据场景仍回退原始路径。',
         enhancementCommandOutputOptimizer: '命令输出优化',
         enhancementCommandOutputOptimizerHelp: '在不需要完整原始日志时减少长命令输出占用。',
         enhancementCodeStructureAssistant: '代码结构辅助',
@@ -8631,7 +8829,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
         enhancementToggles: 'Harness Enhancements',
-        enhancementTogglesHelp: 'Enable researched and adapted external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.',
+        enhancementTogglesHelp: 'Enable managed enhancement runtime setup. SoloMap installs/configures support and falls back to the original path when evidence matters.',
         enhancementCommandOutputOptimizer: 'Command Output Optimizer',
         enhancementCommandOutputOptimizerHelp: 'Reduce long terminal output when full raw logs are not needed.',
         enhancementCodeStructureAssistant: 'Code Structure Assistant',

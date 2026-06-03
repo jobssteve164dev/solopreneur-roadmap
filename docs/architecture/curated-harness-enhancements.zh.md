@@ -56,9 +56,15 @@ MCP 工具描述压缩    开 / 关
 - 代码结构辅助。
 - MCP 工具描述压缩。
 
-这三个开关进入设置页和 Agent prompt 注入链路。用户关闭时不注入；用户开启后，Harness 仍按任务关键词、适用边界和风险策略判断是否作为本轮候选注入。
+这三个开关进入设置页、受管安装配置链路和 Agent runtime 挂载链路。用户关闭时不注入、不挂载；用户开启后，SoloMap 会启动受管 setup 终端，按上游安装器或包管理器安装/配置对应能力，并在后续 Agent run 中挂载真实运行环境。
 
-首版不开放任意增强能力安装入口，也不把第三方仓库代码复制进主仓。供应方来源只作为内置 manifest 的 source 信息和后续适配依据保留。真实接入应优先跟随上游仓库或包管理器更新，由 Harness 侧生成 profile、命令建议或 MCP 配置建议。
+首版仍不开放任意增强能力安装入口，也不把第三方仓库代码复制进主仓。供应方来源只作为内置 manifest 的 source 信息、安装命令和后续适配依据保留。真实接入跟随上游仓库或包管理器更新，由 Harness 侧生成 profile、wrapper、MCP 配置建议和 fallback。
+
+首版真实影响：
+
+- 命令输出优化：生成 SoloMap 受管 PATH wrapper，在 Agent run 中前置常见 shell 命令；rtk 可用时走 `rtk <command>`，不可用时回退原始命令。
+- 代码结构辅助：setup 安装/配置 CodeGraph；Agent run 前检测 `codegraph`，缺少 `.codegraph/` 时初始化索引，并把 `.codegraph/` 加入 git info exclude。
+- MCP 工具描述压缩：setup 运行 caveman installer 的 MCP shrink 路径，注册 caveman-shrink 描述压缩能力；失败时不阻断主任务。
 
 极简回复模式和记忆文件压缩暂不进入首版自动挂载：
 
@@ -105,13 +111,15 @@ MCP 工具描述压缩    开 / 关
 }
 ```
 
-SoloMap 不应全局安装第三方 shell hook。首版挂载应从任务 prompt 注入开始：
+SoloMap 不应依赖全局 shell hook 作为唯一主路径。首版真实挂载使用 SoloMap runtime PATH wrapper：
 
-- 告诉 Agent 本轮可优先使用命令输出优化器查看目录、搜索和失败摘要。
+- 在 `.solomap-global/enhancements/runtime/bin/` 生成 `ls`、`tree`、`find`、`rg`、`grep`、`git`、`gh` wrapper。
+- Agent run 脚本前置该目录到 `PATH`。
+- wrapper 检测到正确 rtk 时执行 `rtk <command>`，否则执行原始命令。
 - 要求根因、验收、安全、权限和发布判断必须回读原始输出。
 - 如果优化器不可用，直接运行原始命令。
 
-后续如果进入真实命令改写，应只改 SoloMap 启动的 Agent 任务 shell，不改用户全局 shell 或 Agent 私有配置。
+setup 仍可运行上游 rtk init 来配置支持的 Agent，但 SoloMap 自身的可验证影响来自本轮 Agent shell 的受管 wrapper，不依赖用户全局 shell。
 
 ### 设置页呈现
 
@@ -163,6 +171,8 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 
 挂载规则：
 
+- setup 使用上游 `codegraph install --target=auto --location=global --yes` 配置支持的 Agent。
+- Agent run 前如果 `codegraph` 可用且当前项目没有 `.codegraph/`，执行 `codegraph init -i` 建立索引。
 - 任务开始前可提供相关符号、模块、调用关系的短摘要。
 - Agent 必须用当前文件和测试验证 CodeGraph 结果。
 - 索引失败或过期时回到 `rg`、文件读取和测试。
@@ -212,10 +222,10 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 }
 ```
 
-虽然底层是 MCP proxy，但用户不需要理解 proxy。SoloMap 应在内部生成 profile 建议：
+虽然底层是 MCP proxy，但用户不需要理解 proxy。SoloMap 应在内部生成 profile 建议，并在 setup 中运行上游 caveman installer 的 MCP shrink 配置路径：
 
 - 对低风险 MCP server，可生成 wrapped profile。
-- 不直接改 Agent 私有 MCP 配置。
+- 不把 MCP proxy 细节暴露给用户前台。
 - 不压缩 `tools/call` 返回，不改请求体。
 - proxy 失败时回到原 MCP server。
 

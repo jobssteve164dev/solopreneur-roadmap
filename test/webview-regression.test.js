@@ -1371,6 +1371,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__readSolomapEnhancementRegistry = readSolomapEnhancementRegistry;',
       'module.exports.__writeSolomapEnhancementRegistry = writeSolomapEnhancementRegistry;',
       'module.exports.__buildSolomapEnhancementCandidateInstructions = buildSolomapEnhancementCandidateInstructions;',
+      'module.exports.__ensureSolomapEnhancementRuntime = ensureSolomapEnhancementRuntime;',
+      'module.exports.__buildHarnessEnhancementSetupScript = buildHarnessEnhancementSetupScript;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__buildRoadmapValidationScript = buildRoadmapValidationScript;',
       'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
@@ -1983,6 +1985,29 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(enhancementInstructions, /原始证据要求/);
   assert.doesNotMatch(enhancementInstructions, /Agent Config Writer/);
 
+  const enhancementRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-enhancement-runtime-'));
+  const runtime = extensionModule.__ensureSolomapEnhancementRuntime('/workspace/app', enhancementRuntimeRoot, {
+    'command-output-optimizer': true,
+    'code-structure-assistant': true,
+    'mcp-description-compressor': true
+  });
+  assert.ok(fs.existsSync(path.join(runtime.binRoot, 'git')));
+  assert.match(fs.readFileSync(path.join(runtime.binRoot, 'git'), 'utf8'), /exec rtk "\$cmd" "\$@"/);
+  assert.match(runtime.envLines.join('\n'), /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
+  assert.match(runtime.preflightLines.join('\n'), /codegraph init -i/);
+
+  const setup = extensionModule.__buildHarnessEnhancementSetupScript('/workspace/app', enhancementRuntimeRoot, {
+    'command-output-optimizer': true,
+    'code-structure-assistant': true,
+    'mcp-description-compressor': true
+  });
+  const setupScript = fs.readFileSync(setup.scriptPath, 'utf8');
+  assert.match(setupScript, /github\.com\/rtk-ai\/rtk/);
+  assert.match(setupScript, /@colbymchenry\/codegraph/);
+  assert.match(setupScript, /codegraph install --target=auto --location=global --yes/);
+  assert.match(setupScript, /github:JuliusBrussee\/caveman/);
+  assert.match(setupScript, /--with-mcp-shrink/);
+
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',
     'Ship the MVP',
@@ -1998,6 +2023,30 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$\(cat/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /@prompt-file/);
+
+  const enhancedShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-enhanced-shell-'));
+  const enhancedShellScript = extensionModule.__buildAgentShellScript(
+    'agy',
+    'Ship the MVP',
+    enhancedShellRoot,
+    '2',
+    46,
+    '',
+    undefined,
+    '',
+    '',
+    'step',
+    '',
+    enhancementRuntimeRoot,
+    'auto',
+    '',
+    'high_risk',
+    { 'command-output-optimizer': true, 'code-structure-assistant': true }
+  );
+  const enhancedRunScript = fs.readFileSync(enhancedShellScript.runScriptPath, 'utf8');
+  assert.match(enhancedRunScript, /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
+  assert.match(enhancedRunScript, /export PATH=.*enhancements\/runtime\/bin/);
+  assert.match(enhancedRunScript, /codegraph init -i/);
 
   const claudeShellScript = extensionModule.__buildAgentShellScript(
     'claude',
