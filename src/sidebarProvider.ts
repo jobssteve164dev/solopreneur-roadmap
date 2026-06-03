@@ -3380,6 +3380,26 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       gap: 3px;
     }
 
+    .settings-card {
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: rgba(255, 255, 255, 0.035);
+      border-radius: 7px;
+      padding: 9px;
+      margin-bottom: 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .settings-card-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10.5px;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
     .settings-lbl-title {
       font-size: 8.5px;
       text-transform: uppercase;
@@ -5084,6 +5104,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-globe"></span><span id="settings-section-basic">Basics</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-language">Language</label>
       <div class="solo-select settings-select" id="setting-language" data-solo-select data-value="zh">
@@ -5097,7 +5119,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         </div>
       </div>
     </div>
+    </div>
     
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-robot"></span><span id="settings-section-agent">Agent Collaboration</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
       <div class="settings-cli-select-wrap">
@@ -5130,26 +5155,32 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-global-data-path"
-        placeholder="e.g. /home/ubuntu/project/.solomap-global"
-      >
-      <div id="help-global-data-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Directory used to store cross-project SoloMap data such as portfolio, dependencies, learning candidates, and metrics.
-      </div>
-    </div>
-
-    <div class="settings-field">
       <label class="settings-lbl-title" id="label-reviewer-cli-path">Review Agent</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-reviewer-cli-path"
-        placeholder="Leave empty to use the main Agent"
-      >
+      <div class="settings-cli-select-wrap">
+        <div class="solo-select settings-select" id="setting-reviewer-cli-select" data-solo-select data-value="">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+            <span class="solo-select-trigger-label" data-solo-label>Same as main Agent</span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox">
+            <button type="button" class="solo-select-option" data-solo-option-value="" aria-selected="true" id="option-reviewer-same">Same as main Agent</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="agy" aria-selected="false">agy</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="codex" aria-selected="false">codex</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="cursor" aria-selected="false">cursor</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="copilot" aria-selected="false">copilot</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="claude" aria-selected="false">claude</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="opencode" aria-selected="false">opencode</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="custom" aria-selected="false">Custom...</button>
+          </div>
+        </div>
+        <input
+          type="text"
+          class="settings-input"
+          id="setting-reviewer-clipath-custom"
+          placeholder="e.g. /usr/local/bin/codex"
+          style="display:none; margin-top: 6px;"
+        >
+      </div>
       <div id="help-reviewer-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
         Optional secondary CLI for read-only review after task runs.
       </div>
@@ -5170,6 +5201,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       </div>
       <div id="help-collaboration-review-mode" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
         Review runs are read-only and appear as a separate conversation in the same step.
+      </div>
+    </div>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-database"></span><span id="settings-section-data">Project Data</span></div>
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-global-data-path"
+        placeholder="e.g. /home/ubuntu/project/.solomap-global"
+      >
+      <div id="help-global-data-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Directory used to store cross-project SoloMap data such as portfolio, dependencies, learning candidates, and metrics.
       </div>
     </div>
 
@@ -5194,7 +5241,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         <button class="dependency-action-btn" id="btn-refresh-agent-impact" style="width: 100%;"><span class="codicon codicon-refresh"></span><span id="text-refresh-agent-impact">Refresh Impact</span></button>
       </div>
     </div>
+    </div>
 
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-edit"></span><span id="settings-section-instructions">Instructions</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
       <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Keep changes minimal and run the narrowest relevant test."></textarea>
@@ -5202,7 +5252,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         Injected into every task conversation. Current conversation guidance takes priority.
       </div>
     </div>
+    </div>
 
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-extensions"></span><span id="settings-section-abilities">Abilities</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-skill-install">Install Skill</label>
       <input
@@ -5232,7 +5285,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">Install Connector</span></button>
       <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
     </div>
+    </div>
 
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-checklist"></span><span id="settings-section-readiness">Readiness</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
       <div class="dependency-panel" id="dependency-panel">
@@ -5265,6 +5321,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           <button class="dependency-action-btn" id="btn-open-github-auth"><span class="codicon codicon-github"></span><span id="text-open-github-auth">GitHub</span></button>
         </div>
       </div>
+    </div>
     </div>
 
     <div class="settings-actions">
@@ -5305,7 +5362,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
-    const settingReviewerCliPath = document.getElementById('setting-reviewer-cli-path');
+    const settingReviewerCliSelect = document.getElementById('setting-reviewer-cli-select');
+    const settingReviewerCliPathCustom = document.getElementById('setting-reviewer-clipath-custom');
     const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
     const settingSkillInput = document.getElementById('setting-skill-input');
     const btnInstallSkill = document.getElementById('btn-install-skill');
@@ -5402,6 +5460,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         reviewerCliPathHelp: '可选的副 Agent CLI，只读复核任务结果，不直接改文件。',
         collaborationReviewMode: '自动复核',
         collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
+        reviewerSame: '跟随主 Agent',
+        settingsSectionBasic: '基础',
+        settingsSectionAgent: 'Agent 协作',
+        settingsSectionData: '项目数据',
+        settingsSectionInstructions: '默认指令',
+        settingsSectionAbilities: '能力扩展',
+        settingsSectionReadiness: '本地状态',
         reviewHighRisk: '高风险任务',
         reviewAll: '每次任务',
         reviewOff: '关闭',
@@ -5588,6 +5653,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         reviewerCliPathHelp: 'Optional secondary CLI for read-only review after task runs.',
         collaborationReviewMode: 'Auto Review',
         collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
+        reviewerSame: 'Same as main Agent',
+        settingsSectionBasic: 'Basics',
+        settingsSectionAgent: 'Agent Collaboration',
+        settingsSectionData: 'Project Data',
+        settingsSectionInstructions: 'Instructions',
+        settingsSectionAbilities: 'Abilities',
+        settingsSectionReadiness: 'Readiness',
         reviewHighRisk: 'High-risk tasks',
         reviewAll: 'Every task',
         reviewOff: 'Off',
@@ -5786,10 +5858,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
       setText('help-global-data-path', t('globalDataPathHelp'));
       setText('label-reviewer-cli-path', t('reviewerCliPath'));
-      if (settingReviewerCliPath) settingReviewerCliPath.placeholder = t('reviewerCliPathPlaceholder');
+      if (settingReviewerCliPathCustom) settingReviewerCliPathCustom.placeholder = t('reviewerCliPathPlaceholder');
       setText('help-reviewer-cli-path', t('reviewerCliPathHelp'));
       setText('label-collaboration-review-mode', t('collaborationReviewMode'));
       setText('help-collaboration-review-mode', t('collaborationReviewHelp'));
+      setText('option-reviewer-same', t('reviewerSame'));
+      if (settingReviewerCliSelect) setSoloSelectValue(settingReviewerCliSelect, getSoloSelectValue(settingReviewerCliSelect));
+      setText('settings-section-basic', t('settingsSectionBasic'));
+      setText('settings-section-agent', t('settingsSectionAgent'));
+      setText('settings-section-data', t('settingsSectionData'));
+      setText('settings-section-instructions', t('settingsSectionInstructions'));
+      setText('settings-section-abilities', t('settingsSectionAbilities'));
+      setText('settings-section-readiness', t('settingsSectionReadiness'));
       setText('option-review-high-risk', t('reviewHighRisk'));
       setText('option-review-all', t('reviewAll'));
       setText('option-review-off', t('reviewOff'));
@@ -5874,6 +5954,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
       currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
     });
+    bindSoloSelect(settingReviewerCliSelect, () => {
+      const selected = getSoloSelectValue(settingReviewerCliSelect);
+      if (settingReviewerCliPathCustom) {
+        settingReviewerCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
+      }
+    });
     bindSoloSelect(settingCollaborationReviewMode, () => {});
 
     function getCliPresetFromCliPath(cliPath) {
@@ -5915,6 +6001,38 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    function getEffectiveReviewerCliPath() {
+      const selected = getSoloSelectValue(settingReviewerCliSelect);
+      if (!selected) return '';
+      if (selected === 'custom') {
+        return (settingReviewerCliPathCustom.value || '').trim();
+      }
+      return selected;
+    }
+
+    function applyReviewerCliPath(cliPath) {
+      const raw = String(cliPath || '').trim();
+      if (!raw) {
+        setSoloSelectValue(settingReviewerCliSelect, '');
+        if (settingReviewerCliPathCustom) {
+          settingReviewerCliPathCustom.value = '';
+          settingReviewerCliPathCustom.style.display = 'none';
+        }
+        return;
+      }
+      const preset = getCliPresetFromCliPath(raw);
+      setSoloSelectValue(settingReviewerCliSelect, preset);
+      if (settingReviewerCliPathCustom) {
+        if (preset === 'custom') {
+          settingReviewerCliPathCustom.value = raw;
+          settingReviewerCliPathCustom.style.display = 'block';
+        } else {
+          settingReviewerCliPathCustom.value = '';
+          settingReviewerCliPathCustom.style.display = 'none';
+        }
+      }
+    }
+
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
@@ -5938,7 +6056,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
-          if (settingReviewerCliPath) settingReviewerCliPath.value = message.settings.reviewerCliPath || '';
+          applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
@@ -6108,7 +6226,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
-        reviewerCliPath: settingReviewerCliPath ? settingReviewerCliPath.value.trim() : '',
+        reviewerCliPath: getEffectiveReviewerCliPath(),
         collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk'
       });
       settingsPanel.style.display = 'none';
