@@ -95,6 +95,21 @@
           "type": "string",
           "default": "",
           "description": "Directory path used for SoloMap cross-project data. SoloMap stores .solomap-global data here; if a parent directory is provided, .solomap-global is created inside it."
+        },
+        "solopreneur.reviewerCliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional secondary Agent CLI used for read-only review after task runs. If empty, SoloMap uses the main Agent CLI."
+        },
+        "solopreneur.collaborationReviewMode": {
+          "type": "string",
+          "default": "high_risk",
+          "enum": [
+            "off",
+            "high_risk",
+            "all"
+          ],
+          "description": "Controls when SoloMap runs a secondary read-only Agent review after a task run."
         }
       }
     }

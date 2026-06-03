@@ -26,6 +26,8 @@ interface SolopreneurSettings {
   globalPrompt: string;
   globalDataPath: string;
   taskPermissionMode?: string;
+  reviewerCliPath?: string;
+  collaborationReviewMode?: string;
 }
 
 interface SolopreneurProject {
@@ -479,8 +481,14 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     language: saved.language || config.get('language') || 'zh',
     globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
     globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
-    taskPermissionMode: 'auto'
+    taskPermissionMode: 'auto',
+    reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
+    collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk')
   };
+}
+
+function normalizeCollaborationReviewMode(value: unknown): string {
+  return ['off', 'high_risk', 'all'].includes(String(value || '')) ? String(value) : 'high_risk';
 }
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
@@ -490,7 +498,9 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     language: settings.language === 'en' ? 'en' : 'zh',
     globalPrompt: String(settings.globalPrompt || '').trim(),
     globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim(),
-    taskPermissionMode: 'auto'
+    taskPermissionMode: 'auto',
+    reviewerCliPath: String(settings.reviewerCliPath ?? currentSettings.reviewerCliPath ?? '').trim(),
+    collaborationReviewMode: normalizeCollaborationReviewMode(settings.collaborationReviewMode ?? currentSettings.collaborationReviewMode)
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -499,6 +509,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
   await config.update('globalPrompt', nextSettings.globalPrompt, vscode.ConfigurationTarget.Global);
   await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
+  await config.update('reviewerCliPath', nextSettings.reviewerCliPath, vscode.ConfigurationTarget.Global);
+  await config.update('collaborationReviewMode', nextSettings.collaborationReviewMode, vscode.ConfigurationTarget.Global);
 }
 
 function projectName(projectPath: string): string {
@@ -1628,7 +1640,9 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
             cliPath: message.cliPath,
             language: message.language,
             globalPrompt: message.globalPrompt,
-            globalDataPath: message.globalDataPath
+            globalDataPath: message.globalDataPath,
+            reviewerCliPath: message.reviewerCliPath,
+            collaborationReviewMode: message.collaborationReviewMode
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -4485,7 +4499,9 @@ function buildAgentShellScript(
   runKind = 'step',
   roadmapBackupFilePath = '',
   globalDataPath = '',
-  taskPermissionMode = 'auto'
+  taskPermissionMode = 'auto',
+  reviewerCliPath = '',
+  collaborationReviewMode = 'high_risk'
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
   const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
@@ -4506,7 +4522,7 @@ function buildAgentShellScript(
   const commandPreview = `${agentCli} [${sessionMode}]`;
   const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode);
   const executionCommand = directExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode);
-  const statusBase = { nodeId, runKind, roadmapBackupFilePath, globalDataPath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt };
+  const statusBase = { nodeId, runKind, roadmapBackupFilePath, globalDataPath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
@@ -4549,6 +4565,238 @@ function buildAgentShellScript(
     promptFilePath,
     runScriptPath
   };
+}
+
+function isReviewableRunKind(runKind: string, nodeId: string): boolean {
+  return runKind !== 'agent_review' && nodeId !== soloConversationId && runKind !== 'solo';
+}
+
+function shouldRunAgentReview(
+  mode: string,
+  runKind: string,
+  nodeId: string,
+  nextStatus: string,
+  changedFilesSummary: string,
+  touchedFilesSummary: string
+): boolean {
+  const normalizedMode = normalizeCollaborationReviewMode(mode);
+  if (normalizedMode === 'off' || !isReviewableRunKind(runKind, nodeId)) {
+    return false;
+  }
+  if (!['Completed', 'In Progress'].includes(nextStatus)) {
+    return false;
+  }
+  if (normalizedMode === 'all') {
+    return true;
+  }
+  const combined = [changedFilesSummary, touchedFilesSummary].join('\n');
+  return Boolean(combined.trim() || runKind === 'roadmap_revision' || nextStatus === 'Completed');
+}
+
+function buildAgentReviewPrompt(input: {
+  workspaceRoot: string;
+  nodeId: string;
+  runKind: string;
+  userMessage: string;
+  mainAgentCli: string;
+  mainStatus: string;
+  mainResolvedCommand: string;
+  completionReason: string;
+  changedFilesSummary: string;
+  touchedFilesSummary: string;
+  outputTail: string;
+  reviewResultFilePath: string;
+}): string {
+  return [
+    '# SoloMap 副 Agent 复核任务',
+    '',
+    '你是本轮任务的只读复核 Agent。你的职责是判断主 Agent 的交付是否足以闭环，不要修改项目文件，不要提交，不要发布，不要删除文件。',
+    '',
+    '## 复核目标',
+    '- 检查用户原始目标是否被满足。',
+    '- 检查主 Agent 是否留下足够完成证据。',
+    '- 检查是否还需要验证、用户确认或继续修正。',
+    '- 如果涉及普通用户可见界面、内容或文案，额外检查是否残留工程自描述、维护者口吻、模板说明或实现痕迹。',
+    '',
+    '## 必须输出',
+    `请把复核结论写入：${input.reviewResultFilePath}`,
+    'JSON 格式必须是：',
+    '{"status":"pass|revise|needs_user_confirmation","summary":"一句话结论","findings":["可执行问题或确认点"],"nextAction":"下一步动作"}',
+    '',
+    'status 含义：',
+    '- pass：可以接受本轮结果。',
+    '- revise：有明确可执行问题，应打回主 Agent 继续修正。',
+    '- needs_user_confirmation：涉及授权、产品取舍、发布、删除或无法由证据裁决的问题，需要用户确认。',
+    '',
+    '## 本轮事实',
+    `- workspace: ${input.workspaceRoot}`,
+    `- nodeId: ${input.nodeId}`,
+    `- runKind: ${input.runKind}`,
+    `- mainAgent: ${input.mainAgentCli}`,
+    `- mainStatus: ${input.mainStatus}`,
+    input.userMessage ? `- userSupplement: ${input.userMessage}` : '- userSupplement: 无',
+    input.completionReason ? `- completionDecision: ${input.completionReason}` : '- completionDecision: 无',
+    input.mainResolvedCommand ? `- mainCommand: ${input.mainResolvedCommand}` : '',
+    '',
+    '## Workspace changes',
+    input.changedFilesSummary || 'No captured git changes.',
+    '',
+    '## Touched files',
+    input.touchedFilesSummary || 'No captured touched files.',
+    '',
+    '## Main Agent output tail',
+    input.outputTail || 'No captured output tail.',
+    '',
+    '## 约束',
+    '- 只读复核，不改文件。',
+    '- 不要输出长篇讨论。',
+    '- 如果没有足够证据确认完成，应选择 revise 或 needs_user_confirmation。',
+    '- 完成写入 JSON 后正常退出。'
+  ].filter(Boolean).join('\n');
+}
+
+function parseAgentReviewResult(resultFilePath: string): { status: string; summary: string; findings: string[]; nextAction: string } {
+  if (!resultFilePath || !fs.existsSync(resultFilePath)) {
+    return { status: 'needs_user_confirmation', summary: '复核结果文件不存在。', findings: [], nextAction: '请查看复核运行输出。' };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(resultFilePath, 'utf8'));
+    const status = ['pass', 'revise', 'needs_user_confirmation'].includes(String(parsed.status || ''))
+      ? String(parsed.status)
+      : 'needs_user_confirmation';
+    const findings = Array.isArray(parsed.findings)
+      ? parsed.findings.map((item: unknown) => compactLine(String(item || ''), 260)).filter(Boolean).slice(0, 8)
+      : [];
+    return {
+      status,
+      summary: compactLine(String(parsed.summary || ''), 500),
+      findings,
+      nextAction: compactLine(String(parsed.nextAction || ''), 500)
+    };
+  } catch {
+    return { status: 'needs_user_confirmation', summary: '复核结果文件无法解析。', findings: [], nextAction: '请查看复核运行输出。' };
+  }
+}
+
+function formatAgentReviewResult(result: { status: string; summary: string; findings: string[]; nextAction: string }): string {
+  return [
+    `Review decision: ${result.status}`,
+    result.summary ? `Review summary: ${result.summary}` : '',
+    result.findings.length > 0 ? `Review findings:\n${result.findings.map((item) => `- ${item}`).join('\n')}` : '',
+    result.nextAction ? `Review next action: ${result.nextAction}` : ''
+  ].filter(Boolean).join('\n');
+}
+
+function startAgentReviewRun(input: {
+  workspaceRoot: string;
+  nodeId: string;
+  runKind: string;
+  reviewerCli: string;
+  mainAgentCli: string;
+  mainExecutionLogId: number;
+  mainResolvedCommand: string;
+  userMessage: string;
+  mainStatus: string;
+  completionReason: string;
+  changedFilesSummary: string;
+  touchedFilesSummary: string;
+  outputTail: string;
+  targetStatus: string;
+  globalDataPath: string;
+  taskPermissionMode: string;
+}): void {
+  if (!syncEngine) {
+    return;
+  }
+  const reviewRunId = `review-${input.mainExecutionLogId || Date.now()}`;
+  const runDir = path.join(input.workspaceRoot, '.solopreneur', 'agent-runs', input.nodeId, reviewRunId);
+  const statusFilePath = path.join(input.workspaceRoot, '.agent_status.json');
+  const outputFilePath = path.join(runDir, 'output.log');
+  const commandFilePath = path.join(runDir, 'command.txt');
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const runScriptPath = path.join(runDir, 'run-agent-review.sh');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  const workspaceSnapshotPath = path.join(runDir, 'workspace-before.json');
+  const reviewResultFilePath = path.join(runDir, 'review-result.json');
+  const startedAt = new Date().toISOString();
+  fs.mkdirSync(runDir, { recursive: true });
+
+  const prompt = buildAgentReviewPrompt({
+    workspaceRoot: input.workspaceRoot,
+    nodeId: input.nodeId,
+    runKind: input.runKind,
+    userMessage: input.userMessage,
+    mainAgentCli: input.mainAgentCli,
+    mainStatus: input.mainStatus,
+    mainResolvedCommand: input.mainResolvedCommand,
+    completionReason: input.completionReason,
+    changedFilesSummary: input.changedFilesSummary,
+    touchedFilesSummary: input.touchedFilesSummary,
+    outputTail: input.outputTail,
+    reviewResultFilePath
+  });
+  fs.writeFileSync(promptFilePath, prompt, 'utf8');
+
+  const loggedCommand = buildAgentCommandForPromptFile(input.reviewerCli, promptFilePath, input.workspaceRoot, input.taskPermissionMode);
+  fs.writeFileSync(commandFilePath, loggedCommand, 'utf8');
+  const executionLogId = syncEngine.logAgentExecution(
+    input.nodeId,
+    input.reviewerCli,
+    loggedCommand,
+    [
+      'Agent review started.',
+      `Review of execution: ${input.mainExecutionLogId}`,
+      `Run started at: ${startedAt}`,
+      input.userMessage.trim() ? `User supplement:\n${input.userMessage.trim()}` : ''
+    ].filter(Boolean).join('\n\n'),
+    'Running'
+  );
+  postNodeConversations(input.nodeId);
+
+  const statusBase = {
+    nodeId: input.nodeId,
+    runKind: 'agent_review',
+    globalDataPath: input.globalDataPath,
+    agentCli: input.reviewerCli,
+    commandPreview: `${input.reviewerCli} [review]`,
+    commandFilePath,
+    executionLogId,
+    userMessage: input.userMessage,
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    reviewResultFilePath,
+    reviewOfExecutionLogId: input.mainExecutionLogId,
+    reviewTargetStatus: input.targetStatus,
+    startedAt
+  };
+  const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
+  const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
+  const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_review_failed', failureReason: 'Review Agent exited before writing a valid review decision.' });
+  const workspaceSnapshotScript = buildWorkspaceSnapshotScript(input.workspaceRoot, workspaceSnapshotPath);
+  const workspaceDiffScript = buildWorkspaceDiffScript(input.workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  const terminalExecutionScript = [
+    `(${loggedCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
+    'status=${PIPESTATUS[0]}'
+  ].join(' ');
+  const script = [
+    `cd ${shellQuote(input.workspaceRoot)}`,
+    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
+    `mkdir -p ${shellQuote(runDir)}`,
+    workspaceSnapshotScript,
+    `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
+    terminalExecutionScript,
+    `git -C ${shellQuote(input.workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
+    workspaceDiffScript,
+    `node -e "const fs=require('fs');try{const p=${JSON.stringify(reviewResultFilePath)};const v=JSON.parse(fs.readFileSync(p,'utf8'));if(!['pass','revise','needs_user_confirmation'].includes(String(v.status||''))) process.exit(2);}catch(e){process.exit(2)}" || status=125`,
+    `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
+  ].join('; ');
+  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
+
+  const terminal = createAgentTerminal(input.workspaceRoot, `review-${input.nodeId}-${executionLogId}`);
+  terminal.show(true);
+  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
 }
 
 function getOutputTail(filePath: string): string {
@@ -5036,7 +5284,9 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     'roadmap_revision',
     roadmapBackupFilePath,
     settings.globalDataPath,
-    settings.taskPermissionMode
+    settings.taskPermissionMode,
+    settings.reviewerCliPath,
+    settings.collaborationReviewMode
   );
   const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`);
   terminal.show(true);
@@ -5134,7 +5384,9 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     'solo',
     roadmapBackupFilePath,
     settings.globalDataPath,
-    settings.taskPermissionMode
+    settings.taskPermissionMode,
+    settings.reviewerCliPath,
+    settings.collaborationReviewMode
   );
   const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`);
   terminal.show(true);
@@ -5300,7 +5552,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   );
   postNodeConversations(nodeId);
 
-  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode);
+  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode);
 
   const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`);
   terminal.show(true);
@@ -5491,19 +5743,33 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const statusData = JSON.parse(fileContent);
-    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
 
     if (!nodeId || !status || status === 'Running' || !syncEngine) {
       return;
     }
 
+    const isReviewRun = runKind === 'agent_review';
     const isSoloConversation = runKind === 'solo' || nodeId === soloConversationId;
     let nextStatus = status as RoadmapNode['status'];
     let completionReason = '';
     let failureCode = String(statusData.failureCode || '').trim();
     let failureReason = String(statusData.failureReason || '').trim();
     const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
-    if (status === 'In Progress' && completionDecisionFilePath && fs.existsSync(completionDecisionFilePath)) {
+    let reviewResult: ReturnType<typeof parseAgentReviewResult> | null = null;
+    if (isReviewRun && status === 'In Progress') {
+      reviewResult = parseAgentReviewResult(String(reviewResultFilePath || ''));
+      if (reviewResult.status === 'pass') {
+        nextStatus = 'Completed';
+        completionReason = reviewResult.summary || '副 Agent 复核通过。';
+      } else if (reviewResult.status === 'revise') {
+        nextStatus = 'In Progress';
+        completionReason = reviewResult.summary || '副 Agent 发现需要继续修正的问题。';
+      } else {
+        nextStatus = 'In Progress';
+        completionReason = reviewResult.summary || '副 Agent 认为需要用户确认。';
+      }
+    } else if (status === 'In Progress' && completionDecisionFilePath && fs.existsSync(completionDecisionFilePath)) {
       try {
         const completionDecision = JSON.parse(fs.readFileSync(completionDecisionFilePath, 'utf8'));
         if (completionDecision.markCompleted === true) {
@@ -5527,7 +5793,14 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const preserveCompletedNode = currentNode?.status === 'Completed';
     let shouldWriteNodeStatus = !preserveCompletedNode && !isSoloConversation;
     let shouldRefreshRoadmap = false;
-    if (workspaceRoot && isSoloConversation) {
+    let reviewDeferredCompletion = false;
+    if (isReviewRun) {
+      shouldWriteNodeStatus = !preserveCompletedNode && !isSoloConversation;
+      shouldRefreshRoadmap = false;
+      if (reviewResult?.status === 'pass' && String(reviewTargetStatus || '') !== 'Completed') {
+        shouldWriteNodeStatus = false;
+      }
+    } else if (workspaceRoot && isSoloConversation) {
       shouldWriteNodeStatus = false;
       if (status === 'In Progress') {
         nextStatus = 'Completed';
@@ -5589,6 +5862,21 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       shouldWriteNodeStatus = false;
       shouldRefreshRoadmap = true;
     }
+    const shouldStartReview = workspaceRoot && !isReviewRun && shouldRunAgentReview(
+      collaborationReviewMode === undefined ? 'off' : String(collaborationReviewMode || 'high_risk'),
+      String(runKind || 'step'),
+      String(nodeId || ''),
+      nextStatus,
+      changedFilesSummary,
+      touchedFilesSummary
+    );
+    if (shouldStartReview && shouldWriteNodeStatus && nextStatus === 'Completed') {
+      reviewDeferredCompletion = true;
+      nextStatus = 'In Progress';
+      completionReason = completionReason
+        ? `${completionReason} 正在等待副 Agent 复核。`
+        : '主 Agent 已标记完成，正在等待副 Agent 复核。';
+    }
     if (shouldWriteNodeStatus) {
       const completedAt = nextStatus === 'Completed' ? new Date().toISOString() : '';
       syncEngine.updateNode(nodeId, {
@@ -5619,7 +5907,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const finishedAt = new Date().toISOString();
     const startedTime = startedAt ? Date.parse(String(startedAt)) : NaN;
     const runDurationMs = Number.isFinite(startedTime) ? Math.max(0, Date.now() - startedTime) : 0;
-    const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation
+    const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation && !isReviewRun
       ? buildRunHandoffEntry(
         nextStatus,
         [changedFilesSummary, touchedFilesSummary].filter(Boolean).join('\n'),
@@ -5630,7 +5918,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const stepHandoffSummary = workspaceRoot && handoffEntry
       ? updateStepHandoffSummary(getStepMemoryFilePath(workspaceRoot, nodeId), handoffEntry)
       : '';
-    if (workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation) {
+    if (workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation && !isReviewRun) {
       recordSolomapLearningCycle(
         workspaceRoot,
         String(globalDataPath || ''),
@@ -5643,7 +5931,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         finishedAt
       );
     }
-    const documentationAudit = workspaceRoot
+    const documentationAudit = workspaceRoot && !isReviewRun
       ? auditDocumentationAfterRun(workspaceRoot, {
         nodeId,
         runKind,
@@ -5693,6 +5981,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       failureCode ? `Failure category: ${failureCode}` : '',
       failureReason ? `Failure reason:\n${failureReason}` : '',
       completionReason ? `Completion decision: ${completionReason}` : '',
+      reviewResult ? formatAgentReviewResult(reviewResult) : '',
+      isReviewRun && reviewOfExecutionLogId ? `Review of execution: ${reviewOfExecutionLogId}` : '',
       stepHandoffSummary ? `Step handoff summary updated: ${getStepMemoryFilePath(workspaceRoot, nodeId)}` : '',
       documentationAudit ? `Documentation harness: ${documentationAudit.summary}` : '',
       runDigestSummary,
@@ -5722,6 +6012,45 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         executionSummary,
         nextStatus
       );
+    }
+
+    if (shouldStartReview) {
+      const requestedReviewerCli = String(reviewerCliPath || agentCli || '').trim();
+      const reviewerCli = resolveAgentCli(requestedReviewerCli || String(agentCli || 'agy'), requestedReviewerCli ? '' : String(agentCli || 'agy'));
+      if (commandExists(reviewerCli)) {
+        startAgentReviewRun({
+          workspaceRoot,
+          nodeId,
+          runKind: String(runKind || 'step'),
+          reviewerCli,
+          mainAgentCli: String(agentCli || commandPreview || command || 'Unknown CLI'),
+          mainExecutionLogId: Number(executionLogId || 0),
+          mainResolvedCommand: resolvedCommand,
+          userMessage: String(userMessage || ''),
+          mainStatus: reviewDeferredCompletion ? 'Completed' : nextStatus,
+          completionReason,
+          changedFilesSummary,
+          touchedFilesSummary,
+          outputTail,
+          targetStatus: reviewDeferredCompletion ? 'Completed' : nextStatus,
+          globalDataPath: String(globalDataPath || ''),
+          taskPermissionMode: 'auto'
+        });
+      } else {
+        syncEngine.logAgentExecution(
+          nodeId,
+          requestedReviewerCli || reviewerCli,
+          requestedReviewerCli || reviewerCli,
+          [
+            'Agent review could not start.',
+            `Review of execution: ${executionLogId || 0}`,
+            'Failure category: reviewer_cli_not_found',
+            `Failure reason:\nReview Agent CLI not found. Tried: ${getAgentCliCandidates(requestedReviewerCli || String(agentCli || 'agy'), requestedReviewerCli ? '' : String(agentCli || 'agy')).join(', ')}.`
+          ].join('\n\n'),
+          'Failed'
+        );
+        postNodeConversations(nodeId);
+      }
     }
 
     if (workspaceRoot && shouldRefreshRoadmap) {
@@ -7519,6 +7848,37 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-reviewer-cli-path">Review Agent</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-reviewer-cli-path"
+        placeholder="Leave empty to use the main Agent"
+      >
+      <div id="help-reviewer-cli-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Optional secondary CLI for read-only review after task runs.
+      </div>
+    </div>
+
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-collaboration-review-mode">Auto Review</label>
+      <div class="solo-select settings-select" id="setting-collaboration-review-mode" data-solo-select data-value="high_risk">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>High-risk tasks</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="high_risk" aria-selected="true" id="option-review-high-risk">High-risk tasks</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="all" aria-selected="false" id="option-review-all">Every task</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="off" aria-selected="false" id="option-review-off">Off</button>
+        </div>
+      </div>
+      <div id="help-collaboration-review-mode" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Review runs are read-only and appear as a separate conversation in the same step.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-agent-impact">Agent Impact</label>
       <div class="impact-panel" id="agent-impact-panel">
         <div class="impact-summary">
@@ -7612,6 +7972,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
+    const settingReviewerCliPath = document.getElementById('setting-reviewer-cli-path');
+    const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
     const settingSkillInput = document.getElementById('setting-skill-input');
     const btnInstallSkill = document.getElementById('btn-install-skill');
     const skillInstallBadge = document.getElementById('skill-install-badge');
@@ -7660,6 +8022,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalDataPath: '跨项目数据目录',
         globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
         globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
+        reviewerCliPath: '复核 Agent',
+        reviewerCliPathPlaceholder: '留空则使用主 Agent',
+        reviewerCliPathHelp: '可选的副 Agent CLI，只读复核任务结果，不直接改文件。',
+        collaborationReviewMode: '自动复核',
+        collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
+        reviewHighRisk: '高风险任务',
+        reviewAll: '每次任务',
+        reviewOff: '关闭',
         agentImpact: 'Agent 贡献',
         impactMinutes: '工作分钟',
         impactFiles: '改动文件',
@@ -7780,6 +8150,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalDataPath: 'Global Data Directory',
         globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
         globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
+        reviewerCliPath: 'Review Agent',
+        reviewerCliPathPlaceholder: 'Leave empty to use the main Agent',
+        reviewerCliPathHelp: 'Optional secondary CLI for read-only review after task runs.',
+        collaborationReviewMode: 'Auto Review',
+        collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
+        reviewHighRisk: 'High-risk tasks',
+        reviewAll: 'Every task',
+        reviewOff: 'Off',
         agentImpact: 'Agent Impact',
         impactMinutes: 'Minutes',
         impactFiles: 'Files changed',
@@ -7963,6 +8341,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-global-data-path', t('globalDataPath'));
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
       setText('help-global-data-path', t('globalDataPathHelp'));
+      setText('label-reviewer-cli-path', t('reviewerCliPath'));
+      if (settingReviewerCliPath) settingReviewerCliPath.placeholder = t('reviewerCliPathPlaceholder');
+      setText('help-reviewer-cli-path', t('reviewerCliPathHelp'));
+      setText('label-collaboration-review-mode', t('collaborationReviewMode'));
+      setText('help-collaboration-review-mode', t('collaborationReviewHelp'));
+      setText('option-review-high-risk', t('reviewHighRisk'));
+      setText('option-review-all', t('reviewAll'));
+      setText('option-review-off', t('reviewOff'));
+      if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, getSoloSelectValue(settingCollaborationReviewMode) || 'high_risk');
       setText('label-agent-impact', t('agentImpact'));
       setText('impact-minutes-label', t('impactMinutes'));
       setText('impact-files-label', t('impactFiles'));
@@ -8092,6 +8479,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
       currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
     });
+    bindSoloSelect(settingCollaborationReviewMode, () => {});
 
     function getCliPresetFromCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
@@ -8179,6 +8567,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
+          if (settingReviewerCliPath) settingReviewerCliPath.value = message.settings.reviewerCliPath || '';
+          if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -8276,7 +8666,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
+        reviewerCliPath: settingReviewerCliPath ? settingReviewerCliPath.value.trim() : '',
+        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk'
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';

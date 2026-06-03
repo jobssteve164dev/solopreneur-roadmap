@@ -14,6 +14,8 @@ interface SolopreneurSettings {
   globalPrompt: string;
   globalDataPath: string;
   taskPermissionMode?: string;
+  reviewerCliPath?: string;
+  collaborationReviewMode?: string;
 }
 
 interface SolopreneurProject {
@@ -2682,6 +2684,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               language: data.language,
               globalPrompt: data.globalPrompt,
               globalDataPath: data.globalDataPath,
+              reviewerCliPath: data.reviewerCliPath,
+              collaborationReviewMode: data.collaborationReviewMode,
               taskPermissionMode: 'auto'
             });
             vscode.window.showInformationMessage('SoloMap settings saved successfully!');
@@ -5139,6 +5143,37 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-reviewer-cli-path">Review Agent</label>
+      <input
+        type="text"
+        class="settings-input"
+        id="setting-reviewer-cli-path"
+        placeholder="Leave empty to use the main Agent"
+      >
+      <div id="help-reviewer-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Optional secondary CLI for read-only review after task runs.
+      </div>
+    </div>
+
+    <div class="settings-field">
+      <label class="settings-lbl-title" id="label-collaboration-review-mode">Auto Review</label>
+      <div class="solo-select settings-select" id="setting-collaboration-review-mode" data-solo-select data-value="high_risk">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>High-risk tasks</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="high_risk" aria-selected="true" id="option-review-high-risk">High-risk tasks</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="all" aria-selected="false" id="option-review-all">Every task</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="off" aria-selected="false" id="option-review-off">Off</button>
+        </div>
+      </div>
+      <div id="help-collaboration-review-mode" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Review runs are read-only and appear as a separate conversation in the same step.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-agent-impact">Agent Impact</label>
       <div class="impact-panel" id="agent-impact-panel">
         <div class="impact-summary">
@@ -5270,6 +5305,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
+    const settingReviewerCliPath = document.getElementById('setting-reviewer-cli-path');
+    const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
     const settingSkillInput = document.getElementById('setting-skill-input');
     const btnInstallSkill = document.getElementById('btn-install-skill');
     const skillInstallBadge = document.getElementById('skill-install-badge');
@@ -5360,6 +5397,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         globalDataPath: '跨项目数据目录',
         globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
         globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
+        reviewerCliPath: '复核 Agent',
+        reviewerCliPathPlaceholder: '留空则使用主 Agent',
+        reviewerCliPathHelp: '可选的副 Agent CLI，只读复核任务结果，不直接改文件。',
+        collaborationReviewMode: '自动复核',
+        collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
+        reviewHighRisk: '高风险任务',
+        reviewAll: '每次任务',
+        reviewOff: '关闭',
         skillInstall: '安装技能',
         skillInstallPlaceholder: '例如：https://skills.sh/owner/repo 或 owner/repo@skill',
         skillInstallHelp: '粘贴 skills.sh 或 GitHub 技能链接，SoloMap 会安装到全局技能库。',
@@ -5538,6 +5583,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         globalDataPath: 'Global Data Directory',
         globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
         globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
+        reviewerCliPath: 'Review Agent',
+        reviewerCliPathPlaceholder: 'Leave empty to use the main Agent',
+        reviewerCliPathHelp: 'Optional secondary CLI for read-only review after task runs.',
+        collaborationReviewMode: 'Auto Review',
+        collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
+        reviewHighRisk: 'High-risk tasks',
+        reviewAll: 'Every task',
+        reviewOff: 'Off',
         skillInstall: 'Install Skill',
         skillInstallPlaceholder: 'e.g. https://skills.sh/owner/repo or owner/repo@skill',
         skillInstallHelp: 'Paste a skills.sh or GitHub skill link. SoloMap installs it into the global skill library.',
@@ -5732,6 +5785,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-global-data-path', t('globalDataPath'));
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
       setText('help-global-data-path', t('globalDataPathHelp'));
+      setText('label-reviewer-cli-path', t('reviewerCliPath'));
+      if (settingReviewerCliPath) settingReviewerCliPath.placeholder = t('reviewerCliPathPlaceholder');
+      setText('help-reviewer-cli-path', t('reviewerCliPathHelp'));
+      setText('label-collaboration-review-mode', t('collaborationReviewMode'));
+      setText('help-collaboration-review-mode', t('collaborationReviewHelp'));
+      setText('option-review-high-risk', t('reviewHighRisk'));
+      setText('option-review-all', t('reviewAll'));
+      setText('option-review-off', t('reviewOff'));
+      if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, getSoloSelectValue(settingCollaborationReviewMode) || 'high_risk');
       setText('label-agent-impact', t('agentImpact'));
       setText('impact-minutes-label', t('impactMinutes'));
       setText('impact-files-label', t('impactFiles'));
@@ -5812,6 +5874,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
       currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
     });
+    bindSoloSelect(settingCollaborationReviewMode, () => {});
 
     function getCliPresetFromCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
@@ -5875,6 +5938,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
+          if (settingReviewerCliPath) settingReviewerCliPath.value = message.settings.reviewerCliPath || '';
+          if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -6042,7 +6107,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         cliPath: effectiveCliPath,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : ''
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
+        reviewerCliPath: settingReviewerCliPath ? settingReviewerCliPath.value.trim() : '',
+        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk'
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';

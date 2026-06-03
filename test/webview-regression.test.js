@@ -2769,6 +2769,143 @@ test('invalid Agent completion state is recorded as a visible failed conversatio
   assert.match(loggedOutput, /Failure reason:\nAgent completion decision file could not be parsed/);
 });
 
+test('completed step starts read-only Agent review before marking the step complete', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
+      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-start-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":true,"reason":"实现已完成"}', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M src/app.js\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M src/app.js\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'output.log'), 'Implemented and validated.\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.agent_status.json');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '2',
+    runKind: 'step',
+    status: 'In Progress',
+    agentCli: 'codex',
+    reviewerCliPath: 'agy',
+    collaborationReviewMode: 'high_risk',
+    executionLogId: 12,
+    userMessage: '完成 MVP',
+    outputFilePath: path.join(runDir, 'output.log'),
+    changesFilePath: path.join(runDir, 'changes.txt'),
+    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
+    commandFilePath: path.join(runDir, 'command.txt'),
+    completionDecisionFilePath: path.join(runDir, 'completion.json'),
+    startedAt: '2026-05-24T00:00:00.000Z'
+  }), 'utf8');
+
+  let nodeUpdate = null;
+  const executionUpdates = [];
+  const executionLogs = [];
+  let reviewCommand = '';
+  extensionModule.__setCommandExistsForTest(() => true);
+  extensionModule.__setTerminalForTest(() => ({
+    show() {},
+    sendText(command) {
+      reviewCommand = command;
+    }
+  }));
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
+    updateNode: (_nodeId, update) => { nodeUpdate = update; },
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      executionUpdates.push({ output, status });
+      return true;
+    },
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      executionLogs.push({ nodeId, agentCli, command, output, status });
+      return 88;
+    },
+    getAgentExecutions: () => []
+  }, tempRoot);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(nodeUpdate.status, 'In Progress');
+  assert.match(executionUpdates[0].output, /正在等待副 Agent 复核/);
+  assert.equal(executionLogs.length, 1);
+  assert.equal(path.basename(executionLogs[0].agentCli), 'agy');
+  assert.equal(executionLogs[0].status, 'Running');
+  assert.match(executionLogs[0].output, /Agent review started/);
+  assert.match(reviewCommand, /run-agent-review\.sh/);
+  const reviewPrompt = fs.readFileSync(path.join(runDir, 'review-12', 'prompt.txt'), 'utf8');
+  assert.match(reviewPrompt, /只读复核 Agent/);
+  assert.match(reviewPrompt, /不要修改项目文件/);
+});
+
+test('passing Agent review completes the deferred roadmap step', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-pass-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2', 'review-12');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'review-result.json'), JSON.stringify({
+    status: 'pass',
+    summary: '复核通过，可以完成环节。',
+    findings: [],
+    nextAction: '写入完成证据'
+  }), 'utf8');
+  fs.writeFileSync(path.join(runDir, 'changes.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'output.log'), 'Review passed.\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'command.txt'), 'agy review\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.agent_status.json');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '2',
+    runKind: 'agent_review',
+    status: 'In Progress',
+    agentCli: 'agy',
+    executionLogId: 88,
+    reviewOfExecutionLogId: 12,
+    reviewTargetStatus: 'Completed',
+    reviewResultFilePath: path.join(runDir, 'review-result.json'),
+    outputFilePath: path.join(runDir, 'output.log'),
+    changesFilePath: path.join(runDir, 'changes.txt'),
+    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
+    commandFilePath: path.join(runDir, 'command.txt'),
+    startedAt: '2026-05-24T00:00:00.000Z'
+  }), 'utf8');
+
+  let nodeUpdate = null;
+  let loggedOutput = '';
+  let loggedStatus = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
+    updateNode: (_nodeId, update) => { nodeUpdate = update; },
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      loggedOutput = output;
+      loggedStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 1,
+    getAgentExecutions: () => []
+  }, tempRoot);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(nodeUpdate.status, 'Completed');
+  assert.ok(nodeUpdate.completedAt);
+  assert.equal(loggedStatus, 'Completed');
+  assert.match(loggedOutput, /Review decision: pass/);
+  assert.match(loggedOutput, /复核通过，可以完成环节/);
+});
+
 test('manual completion immediately persists the user decision for an active Agent run', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
