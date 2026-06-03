@@ -80,18 +80,20 @@ Pro 版本：
 
 ### 收入逻辑
 
-建议定价：
+建议定价以 [SoloMap Pro ROI 分析与定价指导报告](./roi-pricing-guidance.zh.md) 为准：
 
-- Free：足够形成日常使用习惯。
-- Pro：每月 12-19 美元，或每年 99-149 美元。
-- Studio：每月 29-49 美元，面向小团队和代理商。
-- 早期 Founder Lifetime：99-199 美元，限量并明确早期访问属性。
-- 模板包：一次性 19-49 美元。
+- Free：足够形成日常使用习惯，保留单项目路线图、今日安排、本地 Agent 推进和基础反馈。
+- Pro Early Access：建议 $29/年，用于验证真实付费意愿。
+- Pro 正式首发：建议 $5/月或 $49/年，核心付费理由是金字塔战略驾驶舱。
+- Pro 成熟后：当战略判断模型、反馈闭环和金字塔视图成熟后，可提升到 $9/月或 $79/年。
+- Studio/Team：后续再单独设计，面向小团队、代理商、客户项目治理和共享报告。
+- 模板包：可作为一次性增购，但不应替代 Pro 订阅。
 
 定价逻辑：
 
 - SoloMap 位于主 AI IDE 之下，应补充而不是替代付费编码 Agent。
 - BYOK 和本地优先降低了推理成本压力，因为核心计划不需要为大模型调用买单。
+- 低边际成本不代表应该按成本定价；价格应绑定用户节省时间、避免错误项目判断和提高交付概率带来的 ROI。
 
 ## 5. 目标用户
 
@@ -444,4 +446,3 @@ SoloMap 应赢在“独立开发者产品想法”和“AI 编码 Agent”之间
 - Cursor pricing: https://cursor.com/pricing
 - Kilo AI product page: https://kilo.ai/
 - Kilo open-source/BYOK commitment: https://kilo.ai/open
-
