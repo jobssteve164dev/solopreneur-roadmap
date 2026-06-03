@@ -495,6 +495,8 @@ const BUILTIN_SOLOMAP_ENHANCEMENTS: BuiltinSolomapEnhancementDefinition[] = [{
 const SOLOMAP_RTK_WRAPPED_COMMANDS = ['ls', 'tree', 'find', 'rg', 'grep', 'git', 'gh'];
 
 const settingsKey = 'solopreneur.settings';
+const harnessEnhancementSetupSignatureKey = 'solopreneur.harnessEnhancementSetupSignature';
+const harnessEnhancementSetupVersion = '2026-06-03-real-runtime-v1';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
@@ -634,6 +636,8 @@ export async function activate(context: vscode.ExtensionContext) {
       sidebarProvider
     )
   );
+
+  startHarnessEnhancementSetup(context, getPersistedSettings(context));
 
   // Initialize storage in the background after the UI provider is registered.
   void ensureSyncEngine(context);
@@ -4586,12 +4590,19 @@ function startHarnessEnhancementSetup(context: vscode.ExtensionContext, settings
   }
   const previousIds = new Set(enabledEnhancementIds(previousSettings?.enabledEnhancements || {}));
   const hasNewEnable = enabledIds.some((id) => !previousIds.has(id));
-  if (!hasNewEnable && previousSettings) {
+  const setupSignature = JSON.stringify({
+    version: harnessEnhancementSetupVersion,
+    workspaceRoot,
+    globalDataPath: settings.globalDataPath || '',
+    enabledIds
+  });
+  const previousSignature = context.globalState.get<string>(harnessEnhancementSetupSignatureKey) || '';
+  if (!hasNewEnable && previousSignature === setupSignature) {
     writeManagedEnhancementMetadata(workspaceRoot, settings.globalDataPath, settings.enabledEnhancements || {});
     return;
   }
-  void context;
   const setup = buildHarnessEnhancementSetupScript(workspaceRoot, settings.globalDataPath, settings.enabledEnhancements || {});
+  void context.globalState.update(harnessEnhancementSetupSignatureKey, setupSignature);
   const terminal = vscode.window.createTerminal({ name: 'SoloMap Harness Enhancements', cwd: workspaceRoot });
   terminal.show(true);
   terminal.sendText(`bash ${shellQuote(setup.scriptPath)}`);
