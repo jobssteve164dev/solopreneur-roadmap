@@ -81,6 +81,7 @@ function loadCompiledModule(relativePath, exportPatch) {
     console,
     process,
     URL,
+    URLSearchParams,
     Buffer,
     __dirname: path.dirname(filename),
     __filename: filename
@@ -271,6 +272,29 @@ test('readme uses bilingual marketplace copy and stable remote logo', () => {
   assert.match(readme, /Data Location \/ 数据位置/);
   assert.match(readme, /Privacy \/ 隐私/);
   assert.match(readme, /Feedback \/ 反馈/);
+});
+
+test('feedback issue URL includes local usage summary when provided', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildFeedbackIssueUrl = buildFeedbackIssueUrl;'
+  );
+  const url = new URL(extensionModule.__buildFeedbackIssueUrl(
+    '加载问题',
+    '侧边栏打开后没有继续动作。',
+    'not_working',
+    'Counters:\\n- Activations: 2\\nPrivacy:\\n- No project paths included.'
+  ));
+
+  assert.equal(url.searchParams.get('template'), 'seed-user-feedback.yml');
+  assert.equal(url.searchParams.get('labels'), 'feedback,seed-user');
+  assert.equal(url.searchParams.get('title'), '加载问题');
+  const body = url.searchParams.get('body') || '';
+  assert.match(body, /Feedback type: not_working/);
+  assert.match(body, /侧边栏打开后没有继续动作。/);
+  assert.match(body, /Local usage summary:/);
+  assert.match(body, /Activations: 2/);
+  assert.match(body, /No project paths included/);
 });
 
 test('pasted image attachments are saved as project-relative SoloMap files', () => {

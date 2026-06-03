@@ -302,11 +302,12 @@ function getAgentTaskAutomationStatus(agentCli: string): { supported: boolean; p
   };
 }
 
-function buildFeedbackIssueUrl(title: string, body: string, category = ''): string {
+function buildFeedbackIssueUrl(title: string, body: string, category = '', usageSummary = ''): string {
   const params = new URLSearchParams();
   const issueTitle = String(title || '').trim();
   const issueBody = String(body || '').trim();
   const issueCategory = String(category || '').trim();
+  const localUsageSummary = String(usageSummary || '').trim();
   if (issueTitle) {
     params.set('title', issueTitle);
   }
@@ -320,6 +321,9 @@ function buildFeedbackIssueUrl(title: string, body: string, category = ''): stri
     '- [ ] Added a local project',
     '- [ ] Generated or opened a roadmap',
     '- [ ] Ran an Agent or Solo conversation',
+    '',
+    'Local usage summary:',
+    localUsageSummary || 'No local usage summary file was available.',
     '',
     'What happened:',
     '',
@@ -2603,7 +2607,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _toggleProjectPinned?: (projectPath: string) => Promise<void>,
     private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>,
     private readonly _installSkill?: (skillInput: string) => Promise<void>,
-    private readonly _installMcp?: (mcpInput: string) => Promise<void>
+    private readonly _installMcp?: (mcpInput: string) => Promise<void>,
+    private readonly _getFeedbackUsageSummary?: () => string
   ) {}
 
   public resolveWebviewView(
@@ -2775,7 +2780,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             }
             break;
           case 'openFeedbackIssue':
-            vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(data.title || '', data.body || '', data.category || '')));
+            vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(data.title || '', data.body || '', data.category || '', this._getFeedbackUsageSummary ? this._getFeedbackUsageSummary() : '')));
             break;
           case 'getIssueDetails':
             this.sendIssueDetails(data.projectPath || '', Number(data.issueNumber || 0));

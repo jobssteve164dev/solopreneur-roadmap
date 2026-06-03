@@ -36,3 +36,10 @@ body:
       label: What did you expect?
     validations:
       required: false
+  - type: textarea
+    id: local_usage_summary
+    attributes:
+      label: Local usage summary
+      description: SoloMap may prefill anonymous local counters here only when you open this issue from the extension. Remove it if you do not want to share it.
+    validations:
+      required: false
