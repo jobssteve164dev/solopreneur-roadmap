@@ -1993,6 +1993,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   });
   assert.ok(fs.existsSync(path.join(runtime.binRoot, 'git')));
   assert.match(fs.readFileSync(path.join(runtime.binRoot, 'git'), 'utf8'), /exec rtk "\$cmd" "\$@"/);
+  assert.match(fs.readFileSync(path.join(runtime.binRoot, 'git'), 'utf8'), /SOLOMAP_RTK_BYPASS/);
   assert.match(runtime.envLines.join('\n'), /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
   assert.match(runtime.preflightLines.join('\n'), /codegraph init -i/);
 
@@ -2031,7 +2032,7 @@ test('agent command builder uses non-interactive task runs and native continuati
     enhancedShellRoot,
     '2',
     46,
-    '',
+    '检查函数引用和影响面',
     undefined,
     '',
     '',
@@ -2044,9 +2045,17 @@ test('agent command builder uses non-interactive task runs and native continuati
     { 'command-output-optimizer': true, 'code-structure-assistant': true }
   );
   const enhancedRunScript = fs.readFileSync(enhancedShellScript.runScriptPath, 'utf8');
+  const enhancedPrompt = fs.readFileSync(enhancedShellScript.promptFilePath, 'utf8');
   assert.match(enhancedRunScript, /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
   assert.match(enhancedRunScript, /export PATH=.*enhancements\/runtime\/bin/);
   assert.match(enhancedRunScript, /codegraph init -i/);
+  assert.match(enhancedRunScript, /harness-enhancements\.md/);
+  assert.match(enhancedRunScript, /codegraph status/);
+  assert.match(enhancedRunScript, /codegraph query/);
+  assert.match(enhancedRunScript, /codegraph affected --stdin --quiet/);
+  assert.match(enhancedPrompt, /SoloMap Harness 增强运行时/);
+  assert.match(enhancedPrompt, /SOLOMAP_RTK_BYPASS=1/);
+  childProcess.execFileSync('bash', ['-n', enhancedShellScript.runScriptPath]);
 
   const claudeShellScript = extensionModule.__buildAgentShellScript(
     'claude',

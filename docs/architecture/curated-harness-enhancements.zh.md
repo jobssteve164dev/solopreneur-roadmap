@@ -66,6 +66,13 @@ MCP 工具描述压缩    开 / 关
 - 代码结构辅助：setup 安装/配置 CodeGraph；Agent run 前检测 `codegraph`，缺少 `.codegraph/` 时初始化索引，并把 `.codegraph/` 加入 git info exclude。
 - MCP 工具描述压缩：setup 运行 caveman installer 的 MCP shrink 路径，注册 caveman-shrink 描述压缩能力；失败时不阻断主任务。
 
+第二轮共同消费层：
+
+- 每次 Agent run 生成 `.solopreneur/agent-runs/<scope>/harness-enhancements.md`。
+- 该文件记录增强健康状态、rtk 原始输出旁路、CodeGraph 状态、任务搜索、索引文件概览、当前 diff 影响测试和 MCP 描述压缩状态。
+- Agent prompt 必须先读取该文件，再决定是否使用增强结果。
+- 共同层统一规则是：增强只降低探索成本，不替代当前文件、原始日志、测试和用户最新要求。
+
 极简回复模式和记忆文件压缩暂不进入首版自动挂载：
 
 - 极简回复模式容易影响用户可读性，只适合在用户明确要求省 token 或内部低风险汇报时启用。
@@ -116,6 +123,7 @@ SoloMap 不应依赖全局 shell hook 作为唯一主路径。首版真实挂载
 - 在 `.solomap-global/enhancements/runtime/bin/` 生成 `ls`、`tree`、`find`、`rg`、`grep`、`git`、`gh` wrapper。
 - Agent run 脚本前置该目录到 `PATH`。
 - wrapper 检测到正确 rtk 时执行 `rtk <command>`，否则执行原始命令。
+- 关键证据命令可用 `SOLOMAP_RTK_BYPASS=1 <command>` 强制旁路 wrapper。
 - 要求根因、验收、安全、权限和发布判断必须回读原始输出。
 - 如果优化器不可用，直接运行原始命令。
 
@@ -173,6 +181,7 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 
 - setup 使用上游 `codegraph install --target=auto --location=global --yes` 配置支持的 Agent。
 - Agent run 前如果 `codegraph` 可用且当前项目没有 `.codegraph/`，执行 `codegraph init -i` 建立索引。
+- Agent run 前生成 CodeGraph 上下文包，包含 `codegraph status`、基于本轮任务文本的 `codegraph query`、`codegraph files` 和当前 diff 的 `codegraph affected`。
 - 任务开始前可提供相关符号、模块、调用关系的短摘要。
 - Agent 必须用当前文件和测试验证 CodeGraph 结果。
 - 索引失败或过期时回到 `rg`、文件读取和测试。

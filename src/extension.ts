@@ -4470,10 +4470,15 @@ function buildRtkCommandWrapper(commandName: string): string {
     'self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"',
     'path_without_self="$(printf "%s" "$PATH" | awk -v RS=: -v ORS=: -v self="$self_dir" \'$0 != self && $0 != "" { print }\')"',
     'path_without_self="${path_without_self%:}"',
+    'original="$(PATH="$path_without_self" command -v "$cmd" || true)"',
+    'if [ "${SOLOMAP_RTK_BYPASS:-}" = "1" ]; then',
+    '  if [ -n "$original" ]; then exec "$original" "$@"; fi',
+    '  echo "SoloMap enhancement raw bypass failed: original command not found: $cmd" >&2',
+    '  exit 127',
+    'fi',
     'if PATH="$path_without_self" command -v rtk >/dev/null 2>&1 && PATH="$path_without_self" rtk gain >/dev/null 2>&1; then',
     '  exec rtk "$cmd" "$@"',
     'fi',
-    'original="$(PATH="$path_without_self" command -v "$cmd" || true)"',
     'if [ -n "$original" ]; then',
     '  exec "$original" "$@"',
     'fi',
@@ -4516,10 +4521,107 @@ function ensureSolomapEnhancementRuntime(
       '  if [ -d .git ]; then mkdir -p .git/info; grep -qxF ".codegraph/" .git/info/exclude 2>/dev/null || printf "\\n.codegraph/\\n" >> .git/info/exclude; fi',
       `  if [ ! -d ${shellQuote(path.join(workspaceRoot, '.codegraph'))} ]; then codegraph init -i >> ${shellQuote(path.join(runtimeRoot, 'codegraph-init.log'))} 2>&1 || true; fi`,
       'fi'
-    ].join(' '));
+    ].join('\n'));
   }
 
   return { envLines, preflightLines, runtimeRoot, binRoot };
+}
+
+function buildSolomapEnhancementContextPreflight(
+  workspaceRoot: string,
+  contextFilePath: string,
+  userMessage: string,
+  runtimeRoot: string,
+  enabledEnhancements: Record<string, boolean> = {}
+): string[] {
+  if (!enabledEnhancementIds(enabledEnhancements).length) {
+    return [];
+  }
+  const contextSearch = String(userMessage || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const lines = [
+    `enhancement_context_file=${shellQuote(contextFilePath)}`,
+    `mkdir -p ${shellQuote(path.dirname(contextFilePath))} ${shellQuote(runtimeRoot)}`,
+    '{',
+    '  echo "# SoloMap Harness Enhancement Context"',
+    '  echo ""',
+    `  echo "Generated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"`,
+    '  echo ""',
+    enabledEnhancements['command-output-optimizer'] ? [
+      '  echo "## Command Output Optimizer"',
+      '  if command -v rtk >/dev/null 2>&1 && rtk gain >/dev/null 2>&1; then',
+      '    echo "- Status: available; common shell commands are routed through rtk wrappers."',
+      '  else',
+      '    echo "- Status: unavailable; wrappers will fall back to original commands."',
+      '  fi',
+      '  echo "- Raw evidence bypass: prefix critical commands with SOLOMAP_RTK_BYPASS=1."',
+      '  echo ""'
+    ].join('\n') : [
+      '  echo "## Command Output Optimizer"',
+      '  echo "- Status: disabled."',
+      '  echo ""'
+    ].join('\n'),
+    enabledEnhancements['code-structure-assistant'] ? [
+      '  echo "## CodeGraph"',
+      '  if command -v codegraph >/dev/null 2>&1; then',
+      '    echo "### Status"',
+      '    codegraph status . 2>&1 | head -n 80 || true',
+      '    echo ""',
+      contextSearch ? [
+        '    echo "### Task Search"',
+        `    codegraph query ${shellQuote(contextSearch)} --limit 8 2>&1 | head -n 120 || true`,
+        '    echo ""'
+      ].join('\n') : '',
+      '    echo "### Indexed Files"',
+      '    codegraph files . --format tree --max-depth 3 2>&1 | head -n 120 || true',
+      '    echo ""',
+      '    if [ -d .git ]; then',
+      '      echo "### Affected Tests From Current Diff"',
+      '      SOLOMAP_RTK_BYPASS=1 git diff --name-only HEAD 2>/dev/null | codegraph affected --stdin --quiet 2>&1 | head -n 80 || true',
+      '      echo ""',
+      '    fi',
+      '  else',
+      '    echo "- Status: unavailable; use direct file search and tests."',
+      '    echo ""',
+      '  fi'
+    ].filter(Boolean).join('\n') : [
+      '  echo "## CodeGraph"',
+      '  echo "- Status: disabled."',
+      '  echo ""'
+    ].join('\n'),
+    enabledEnhancements['mcp-description-compressor'] ? [
+      '  echo "## MCP Description Compressor"',
+      '  if command -v caveman >/dev/null 2>&1; then',
+      '    caveman --version 2>&1 | head -n 5 || true',
+      '    echo "- Status: caveman command available; MCP shrink profile may be active depending on agent profile."',
+      '  else',
+      '    echo "- Status: setup-managed; verify MCP shrink through the active agent MCP tool list when needed."',
+      '  fi',
+      '  echo "- Scope: compresses MCP catalog descriptions only; tool call results and schemas remain evidence-critical."',
+      '  echo ""'
+    ].join('\n') : [
+      '  echo "## MCP Description Compressor"',
+      '  echo "- Status: disabled."',
+      '  echo ""'
+    ].join('\n'),
+    `} > ${shellQuote(contextFilePath)} 2>> ${shellQuote(path.join(runtimeRoot, 'enhancement-context.log'))} || true`
+  ];
+  return [lines.filter(Boolean).join('\n')];
+}
+
+function buildSolomapEnhancementRuntimeInstructions(contextFilePath: string, enabledEnhancements: Record<string, boolean> = {}): string {
+  if (!enabledEnhancementIds(enabledEnhancements).length) {
+    return '';
+  }
+  const instructions = [
+    'SoloMap Harness 增强运行时：',
+    `- 本轮增强上下文文件：${contextFilePath}`,
+    '- 如果该文件存在，先读取它，再决定是否使用增强结果；它包含 CodeGraph 状态、任务搜索、索引文件概览、受影响测试和增强健康状态。',
+    '- 增强结果只用于减少探索成本和定位候选；最终判断仍以当前文件、原始日志、测试和用户最新要求为准。',
+    '- 如需关键原始命令输出，使用 `SOLOMAP_RTK_BYPASS=1 <command>` 旁路 rtk wrapper。',
+    '- 如 CodeGraph 可用，代码结构、调用关系、影响范围和受影响测试优先参考 CodeGraph；但修改前后仍要读取真实文件并运行最窄验证。',
+    '- 如 MCP 描述压缩启用，只把它视为工具目录减噪能力；不要因为描述变短而跳过参数、权限或写入风险判断。'
+  ];
+  return instructions.join('\n');
 }
 
 function buildHarnessEnhancementSetupScript(
@@ -5086,6 +5188,9 @@ function buildAgentShellScript(
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
   const enhancementRuntime = ensureSolomapEnhancementRuntime(workspaceRoot, globalDataPath, enabledEnhancements);
+  const enhancementContextFilePath = path.join(runDir, 'harness-enhancements.md');
+  const enhancementContextPreflight = buildSolomapEnhancementContextPreflight(workspaceRoot, enhancementContextFilePath, userMessage, enhancementRuntime.runtimeRoot, enabledEnhancements);
+  const enhancementRuntimeInstructions = buildSolomapEnhancementRuntimeInstructions(enhancementContextFilePath, enabledEnhancements);
   const promptExportScript = directExecutionCommand
     ? [`agent_prompt=$(cat ${shellQuote(promptFilePath)})`, 'export agent_prompt']
     : [];
@@ -5094,7 +5199,7 @@ function buildAgentShellScript(
     'status=${PIPESTATUS[0]}'
   ].join(' ');
   fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(promptFilePath, conversationPrompt, 'utf8');
+  fs.writeFileSync(promptFilePath, enhancementRuntimeInstructions ? [conversationPrompt, '', enhancementRuntimeInstructions].join('\n') : conversationPrompt, 'utf8');
   fs.writeFileSync(commandFilePath, loggedCommand, 'utf8');
   const script = [
     `cd ${shellQuote(workspaceRoot)}`,
@@ -5106,6 +5211,7 @@ function buildAgentShellScript(
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
     ...enhancementRuntime.preflightLines,
+    ...enhancementContextPreflight,
     ...promptExportScript,
     terminalExecutionScript,
     sessionCaptureScript,
