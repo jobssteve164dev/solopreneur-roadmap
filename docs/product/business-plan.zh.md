@@ -94,6 +94,7 @@ Pro 版本：
 - SoloMap 位于主 AI IDE 之下，应补充而不是替代付费编码 Agent。
 - BYOK 和本地优先降低了推理成本压力，因为核心计划不需要为大模型调用买单。
 - 低边际成本不代表应该按成本定价；价格应绑定用户节省时间、避免错误项目判断和提高交付概率带来的 ROI。
+- 现在可以推出 Pro Early Access，但不应现在强硬收费；官网首版应作为产品验证页承接下载、反馈和 Early Access 意向，指导文档见 [SoloMap 官网与 Early Access 承接指导](../marketing/website-early-access-guidance.zh.md)。
 
 ## 5. 目标用户
 

@@ -30,6 +30,7 @@
 - 人工触达记录：[product/seed-users.md](./product/seed-users.md)
 - 访谈问题与反馈表：[product/customer-discovery.zh.md](./product/customer-discovery.zh.md)
 - Pro 定价基准：[product/roi-pricing-guidance.zh.md](./product/roi-pricing-guidance.zh.md)
+- 官网与 Early Access 承接：[marketing/website-early-access-guidance.zh.md](./marketing/website-early-access-guidance.zh.md)
 - GitHub Issue 模板：`.github/ISSUE_TEMPLATE/seed-user-feedback.yml`
 - 插件内入口：侧边栏顶部反馈按钮
 
