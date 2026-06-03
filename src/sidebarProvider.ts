@@ -16,6 +16,7 @@ interface SolopreneurSettings {
   taskPermissionMode?: string;
   reviewerCliPath?: string;
   collaborationReviewMode?: string;
+  enabledEnhancements?: Record<string, boolean>;
 }
 
 interface SolopreneurProject {
@@ -2602,8 +2603,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _toggleProjectPinned?: (projectPath: string) => Promise<void>,
     private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>,
     private readonly _installSkill?: (skillInput: string) => Promise<void>,
-    private readonly _installMcp?: (mcpInput: string) => Promise<void>,
-    private readonly _installEnhancement?: (enhancementInput: string) => Promise<void>
+    private readonly _installMcp?: (mcpInput: string) => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -2687,6 +2687,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               globalDataPath: data.globalDataPath,
               reviewerCliPath: data.reviewerCliPath,
               collaborationReviewMode: data.collaborationReviewMode,
+              enabledEnhancements: data.enabledEnhancements,
               taskPermissionMode: 'auto'
             });
             vscode.window.showInformationMessage('SoloMap settings saved successfully!');
@@ -2703,11 +2704,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           case 'installMcp':
             if (this._installMcp) {
               await this._installMcp(data.mcpInput || '');
-            }
-            break;
-          case 'installEnhancement':
-            if (this._installEnhancement) {
-              await this._installEnhancement(data.enhancementInput || '');
             }
             break;
           case 'testCli':
@@ -2928,14 +2924,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public postMcpInstallResult(success: boolean, message: string) {
     this._view?.webview.postMessage({
       command: 'mcpInstallResult',
-      success,
-      message
-    });
-  }
-
-  public postEnhancementInstallResult(success: boolean, message: string) {
-    this._view?.webview.postMessage({
-      command: 'enhancementInstallResult',
       success,
       message
     });
@@ -5301,18 +5289,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-enhancement-install">Install Enhancement</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-enhancement-input"
-        placeholder="e.g. rtk, CodeGraph, GitHub URL, command, or config snippet"
-      >
-      <div id="help-enhancement-install" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Paste an enhancement source. SoloMap will register it as an optional harness enhancement.
+      <label class="settings-lbl-title" id="label-enhancement-toggles">Harness Enhancements</label>
+      <div id="help-enhancement-toggles" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Enable curated external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.
       </div>
-      <button class="settings-action-btn test-btn" id="btn-install-enhancement" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-beaker"></span><span id="text-install-enhancement">Install Enhancement</span></button>
-      <div class="cli-badge" id="enhancement-install-badge" style="display:none;"></div>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
+        <input type="checkbox" id="setting-enhancement-command-output-optimizer" style="margin-top:2px;">
+        <span><span id="label-enhancement-command-output-optimizer">Command Output Optimizer</span><br><span id="help-enhancement-command-output-optimizer" style="font-size:8.5px; color:var(--text-muted);">Reduce long terminal output when raw logs are not needed.</span></span>
+      </label>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
+        <input type="checkbox" id="setting-enhancement-code-structure-assistant" style="margin-top:2px;">
+        <span><span id="label-enhancement-code-structure-assistant">Code Structure Assistant</span><br><span id="help-enhancement-code-structure-assistant" style="font-size:8.5px; color:var(--text-muted);">Use code graph lookup to narrow source reading and impact checks.</span></span>
+      </label>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
+        <input type="checkbox" id="setting-enhancement-mcp-description-compressor" style="margin-top:2px;">
+        <span><span id="label-enhancement-mcp-description-compressor">MCP Description Compressor</span><br><span id="help-enhancement-mcp-description-compressor" style="font-size:8.5px; color:var(--text-muted);">Compress MCP metadata descriptions while keeping tool calls unchanged.</span></span>
+      </label>
     </div>
     </div>
 
@@ -5400,9 +5392,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingMcpInput = document.getElementById('setting-mcp-input');
     const btnInstallMcp = document.getElementById('btn-install-mcp');
     const mcpInstallBadge = document.getElementById('mcp-install-badge');
-    const settingEnhancementInput = document.getElementById('setting-enhancement-input');
-    const btnInstallEnhancement = document.getElementById('btn-install-enhancement');
-    const enhancementInstallBadge = document.getElementById('enhancement-install-badge');
+    const settingEnhancementCommandOutputOptimizer = document.getElementById('setting-enhancement-command-output-optimizer');
+    const settingEnhancementCodeStructureAssistant = document.getElementById('setting-enhancement-code-structure-assistant');
+    const settingEnhancementMcpDescriptionCompressor = document.getElementById('setting-enhancement-mcp-description-compressor');
     const settingFeedbackTitle = document.getElementById('setting-feedback-title');
     const settingFeedbackBody = document.getElementById('setting-feedback-body');
     const btnOpenFeedback = document.getElementById('btn-open-feedback');
@@ -5512,10 +5504,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
-        enhancementInstall: '安装增强能力',
-        enhancementInstallPlaceholder: '例如：rtk、CodeGraph、GitHub 链接、命令或配置片段',
-        enhancementInstallHelp: '粘贴增强能力来源，SoloMap 会注册为可选 Harness 增强。',
-        installEnhancement: '安装增强能力',
+        enhancementToggles: 'Harness 增强',
+        enhancementTogglesHelp: '启用经过调研和适配的外部增强；SoloMap 会保持可选使用，并在关键证据场景回退原始路径。',
+        enhancementCommandOutputOptimizer: '命令输出优化',
+        enhancementCommandOutputOptimizerHelp: '在不需要完整原始日志时减少长命令输出占用。',
+        enhancementCodeStructureAssistant: '代码结构辅助',
+        enhancementCodeStructureAssistantHelp: '用代码图谱辅助缩小源码阅读和影响面检查范围。',
+        enhancementMcpDescriptionCompressor: 'MCP 描述压缩',
+        enhancementMcpDescriptionCompressorHelp: '压缩 MCP 元数据描述，但不改变实际工具调用。',
         installingEnhancement: '正在启动安装...',
         feedback: '建议反馈',
         feedbackNotWorking: '没跑通',
@@ -5710,10 +5706,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
-        enhancementInstall: 'Install Enhancement',
-        enhancementInstallPlaceholder: 'e.g. rtk, CodeGraph, GitHub URL, command, or config snippet',
-        enhancementInstallHelp: 'Paste an enhancement source. SoloMap registers it as an optional harness enhancement.',
-        installEnhancement: 'Install Enhancement',
+        enhancementToggles: 'Harness Enhancements',
+        enhancementTogglesHelp: 'Enable researched and adapted external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.',
+        enhancementCommandOutputOptimizer: 'Command Output Optimizer',
+        enhancementCommandOutputOptimizerHelp: 'Reduce long terminal output when full raw logs are not needed.',
+        enhancementCodeStructureAssistant: 'Code Structure Assistant',
+        enhancementCodeStructureAssistantHelp: 'Use code graph lookup to narrow source reading and impact checks.',
+        enhancementMcpDescriptionCompressor: 'MCP Description Compressor',
+        enhancementMcpDescriptionCompressorHelp: 'Compress MCP metadata descriptions while keeping tool calls unchanged.',
         installingEnhancement: 'Starting install...',
         feedback: 'Feedback',
         feedbackNotWorking: 'Not working',
@@ -5929,10 +5929,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
       setText('help-mcp-install', t('mcpInstallHelp'));
       setText('text-install-mcp', t('installMcp'));
-      setText('label-enhancement-install', t('enhancementInstall'));
-      if (settingEnhancementInput) settingEnhancementInput.placeholder = t('enhancementInstallPlaceholder');
-      setText('help-enhancement-install', t('enhancementInstallHelp'));
-      setText('text-install-enhancement', t('installEnhancement'));
+      setText('label-enhancement-toggles', t('enhancementToggles'));
+      setText('help-enhancement-toggles', t('enhancementTogglesHelp'));
+      setText('label-enhancement-command-output-optimizer', t('enhancementCommandOutputOptimizer'));
+      setText('help-enhancement-command-output-optimizer', t('enhancementCommandOutputOptimizerHelp'));
+      setText('label-enhancement-code-structure-assistant', t('enhancementCodeStructureAssistant'));
+      setText('help-enhancement-code-structure-assistant', t('enhancementCodeStructureAssistantHelp'));
+      setText('label-enhancement-mcp-description-compressor', t('enhancementMcpDescriptionCompressor'));
+      setText('help-enhancement-mcp-description-compressor', t('enhancementMcpDescriptionCompressorHelp'));
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -6079,6 +6083,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    function getEnabledEnhancementsFromSettings() {
+      return {
+        'command-output-optimizer': Boolean(settingEnhancementCommandOutputOptimizer && settingEnhancementCommandOutputOptimizer.checked),
+        'code-structure-assistant': Boolean(settingEnhancementCodeStructureAssistant && settingEnhancementCodeStructureAssistant.checked),
+        'mcp-description-compressor': Boolean(settingEnhancementMcpDescriptionCompressor && settingEnhancementMcpDescriptionCompressor.checked)
+      };
+    }
+
+    function applyEnabledEnhancements(enabledEnhancements) {
+      const enabled = enabledEnhancements || {};
+      if (settingEnhancementCommandOutputOptimizer) settingEnhancementCommandOutputOptimizer.checked = Boolean(enabled['command-output-optimizer']);
+      if (settingEnhancementCodeStructureAssistant) settingEnhancementCodeStructureAssistant.checked = Boolean(enabled['code-structure-assistant']);
+      if (settingEnhancementMcpDescriptionCompressor) settingEnhancementMcpDescriptionCompressor.checked = Boolean(enabled['mcp-description-compressor']);
+    }
+
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
@@ -6104,6 +6123,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          applyEnabledEnhancements(message.settings.enabledEnhancements || {});
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -6189,14 +6209,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             mcpInstallBadge.textContent = message.message || '';
           }
           break;
-        case 'enhancementInstallResult':
-          if (enhancementInstallBadge) {
-            enhancementInstallBadge.style.display = 'block';
-            enhancementInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
-            enhancementInstallBadge.textContent = message.message || '';
-          }
-          break;
-
         case 'soloSupplementFilesSelected':
           if (message.targetId) {
             if (String(message.targetId).startsWith('solo:')) {
@@ -6280,7 +6292,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         globalPrompt: settingGlobalPrompt.value.trim(),
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
         reviewerCliPath: getEffectiveReviewerCliPath(),
-        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk'
+        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
+        enabledEnhancements: getEnabledEnhancementsFromSettings()
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -6347,28 +6360,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           mcpInstallBadge.textContent = t('installingMcp');
         }
         vscode.postMessage({ command: 'installMcp', mcpInput });
-      });
-    }
-
-    if (btnInstallEnhancement) {
-      btnInstallEnhancement.addEventListener('click', () => {
-        const enhancementInput = (settingEnhancementInput ? settingEnhancementInput.value : '').trim();
-        if (!enhancementInput) {
-          if (enhancementInstallBadge) {
-            enhancementInstallBadge.style.display = 'block';
-            enhancementInstallBadge.className = 'cli-badge error';
-            enhancementInstallBadge.textContent = t('enhancementInstallPlaceholder');
-          }
-          return;
-        }
-        if (enhancementInstallBadge) {
-          enhancementInstallBadge.style.display = 'block';
-          enhancementInstallBadge.className = 'cli-badge';
-          enhancementInstallBadge.style.background = 'rgba(255,255,255,0.05)';
-          enhancementInstallBadge.style.color = 'var(--text-muted)';
-          enhancementInstallBadge.textContent = t('installingEnhancement');
-        }
-        vscode.postMessage({ command: 'installEnhancement', enhancementInput });
       });
     }
 

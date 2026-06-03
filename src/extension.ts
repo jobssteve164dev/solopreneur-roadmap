@@ -28,6 +28,7 @@ interface SolopreneurSettings {
   taskPermissionMode?: string;
   reviewerCliPath?: string;
   collaborationReviewMode?: string;
+  enabledEnhancements?: Record<string, boolean>;
 }
 
 interface SolopreneurProject {
@@ -380,6 +381,117 @@ interface SolomapEnhancementRegistry {
   enhancements: SolomapEnhancementRegistryEntry[];
 }
 
+interface BuiltinSolomapEnhancementDefinition extends SolomapEnhancementRegistryEntry {
+  id: string;
+  title: string;
+  description: string;
+}
+
+const BUILTIN_SOLOMAP_ENHANCEMENTS: BuiltinSolomapEnhancementDefinition[] = [{
+  id: 'command-output-optimizer',
+  title: 'Command Output Optimizer',
+  description: 'Use an external command-output proxy such as rtk to reduce routine terminal output token cost while preserving raw-output fallback requirements.',
+  status: 'disabled',
+  source: { kind: 'curated_builtin', repo: 'https://github.com/rtk-ai/rtk', updatePolicy: 'track_upstream_release_or_commit' },
+  capability: 'Command output filtering and token reduction.',
+  benefit: 'Reduces repeated terminal-output payloads for build, test, search, and log-heavy agent tasks.',
+  adapter: {
+    type: 'command_rewrite',
+    runtime: 'external_command_proxy',
+    fallback: 'run_original_command'
+  },
+  activation: {
+    keywords: ['token', '输出', '命令', '日志', '构建', '测试', 'compile', 'test', 'rg', 'grep', 'git', 'output'],
+    useWhen: [
+      '命令输出很长但只需要错误摘要、匹配片段或状态结论',
+      '重复执行构建、测试、搜索或日志命令，且需要节省 agent token 占用'
+    ],
+    doNotUseWhen: [
+      '需要逐行审计原始命令输出',
+      '失败原因、数据内容或安全判断依赖完整 stdout/stderr'
+    ]
+  },
+  risk: {
+    level: 'medium',
+    requiresExplicitEnable: false,
+    hidesRawOutput: true,
+    usesNetwork: false,
+    writesFiles: false
+  },
+  evidencePolicy: {
+    mustReadRawWhen: ['命令失败', '需要引用具体日志', '输出摘要不足以支撑判断'],
+    mustVerifyWith: ['必要时重新运行原始命令或打开原始日志']
+  }
+}, {
+  id: 'code-structure-assistant',
+  title: 'Code Structure Assistant',
+  description: 'Use an external code graph capability to help agents inspect symbols, references, and impact paths without replacing source-file reading.',
+  status: 'disabled',
+  source: { kind: 'curated_builtin', name: 'CodeGraph', updatePolicy: 'track_upstream_release_or_commit' },
+  capability: 'Code graph lookup, dependency navigation, and symbol/reference discovery.',
+  benefit: 'Helps agents narrow source-reading scope before refactors, bug fixes, and impact analysis.',
+  adapter: {
+    type: 'mcp',
+    runtime: 'external_mcp_connector',
+    fallback: 'read_source_files_directly'
+  },
+  activation: {
+    keywords: ['codegraph', 'code graph', '调用', '引用', '符号', '依赖', '影响面', '重构', 'debug', 'refactor', 'symbol', 'reference'],
+    useWhen: [
+      '需要定位函数、引用、调用链或改动影响面',
+      '仓库较大，直接全文搜索不足以快速缩小代码阅读范围'
+    ],
+    doNotUseWhen: [
+      '任务只涉及单个已知文件',
+      '图谱结果与当前源码不一致或无法证明新鲜度'
+    ]
+  },
+  risk: {
+    level: 'low',
+    requiresExplicitEnable: false,
+    usesNetwork: 'depends_on_connector',
+    writesFiles: false
+  },
+  evidencePolicy: {
+    mustReadRawWhen: ['准备修改代码', '图谱结果影响架构判断', '引用关系存在歧义'],
+    mustVerifyWith: ['读取当前源文件', '运行最窄相关测试或静态检查']
+  }
+}, {
+  id: 'mcp-description-compressor',
+  title: 'MCP Description Compressor',
+  description: 'Use caveman-shrink style MCP proxying to compress tool, prompt, and resource descriptions while keeping tool calls unmodified.',
+  status: 'disabled',
+  source: { kind: 'curated_builtin', repo: 'https://github.com/JuliusBrussee/caveman', updatePolicy: 'track_upstream_release_or_commit' },
+  capability: 'MCP schema and description compression.',
+  benefit: 'Reduces MCP metadata context overhead for tool-heavy agent sessions.',
+  adapter: {
+    type: 'mcp',
+    runtime: 'external_mcp_proxy',
+    fallback: 'connect_to_original_mcp_server'
+  },
+  activation: {
+    keywords: ['mcp', 'connector', '工具描述', 'schema', 'description', 'tool', 'resource', 'prompt', '上下文'],
+    useWhen: [
+      'MCP 工具、资源或 prompt 描述占用大量上下文',
+      '增强只压缩描述，不改变实际 tools/call 执行'
+    ],
+    doNotUseWhen: [
+      '需要完整阅读工具描述来判断安全或权限',
+      'MCP server 本身不稳定，压缩代理会增加排障复杂度'
+    ]
+  },
+  risk: {
+    level: 'low',
+    requiresExplicitEnable: false,
+    usesNetwork: 'depends_on_mcp_server',
+    writesFiles: false
+  },
+  evidencePolicy: {
+    mustReadRawWhen: ['工具权限、安全边界或参数含义不清楚', '压缩描述导致可用性下降'],
+    mustVerifyWith: ['必要时查看原始 MCP 描述或直接连接原 MCP server']
+  }
+}];
+
 const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
@@ -511,9 +623,6 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async (mcpInput) => {
       await handleInstallSolomapMcp(context, mcpInput);
-    },
-    async (enhancementInput) => {
-      await handleInstallSolomapEnhancement(context, enhancementInput);
     }
   );
 
@@ -538,12 +647,26 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
     taskPermissionMode: 'auto',
     reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
-    collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk')
+    collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
+    enabledEnhancements: normalizeEnabledEnhancements(saved.enabledEnhancements)
   };
 }
 
 function normalizeCollaborationReviewMode(value: unknown): string {
   return ['off', 'high_risk', 'all'].includes(String(value || '')) ? String(value) : 'high_risk';
+}
+
+function normalizeEnabledEnhancements(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+  return Object.entries(value as Record<string, unknown>).reduce<Record<string, boolean>>((acc, [key, enabled]) => {
+    const normalizedKey = String(key || '').trim();
+    if (normalizedKey) {
+      acc[normalizedKey] = Boolean(enabled);
+    }
+    return acc;
+  }, {});
 }
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
@@ -555,7 +678,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim(),
     taskPermissionMode: 'auto',
     reviewerCliPath: String(settings.reviewerCliPath ?? currentSettings.reviewerCliPath ?? '').trim(),
-    collaborationReviewMode: normalizeCollaborationReviewMode(settings.collaborationReviewMode ?? currentSettings.collaborationReviewMode)
+    collaborationReviewMode: normalizeCollaborationReviewMode(settings.collaborationReviewMode ?? currentSettings.collaborationReviewMode),
+    enabledEnhancements: normalizeEnabledEnhancements(settings.enabledEnhancements ?? currentSettings.enabledEnhancements)
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -1697,7 +1821,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
             globalPrompt: message.globalPrompt,
             globalDataPath: message.globalDataPath,
             reviewerCliPath: message.reviewerCliPath,
-            collaborationReviewMode: message.collaborationReviewMode
+            collaborationReviewMode: message.collaborationReviewMode,
+            enabledEnhancements: message.enabledEnhancements
           });
           vscode.window.showInformationMessage('SoloMap settings saved successfully!');
           // Broadcast to sync both Webviews
@@ -1710,10 +1835,6 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'installMcp':
           await handleInstallSolomapMcp(context, message.mcpInput || '');
-          break;
-
-        case 'installEnhancement':
-          await handleInstallSolomapEnhancement(context, message.enhancementInput || '');
           break;
 
         case 'openFeedbackIssue':
@@ -4317,9 +4438,42 @@ function scoreSolomapEnhancement(enhancement: SolomapEnhancementRegistryEntry, c
   return { score, reasons };
 }
 
-function selectSolomapEnhancementCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 3): Array<{ enhancement: SolomapEnhancementRegistryEntry; reasons: string[] }> {
+function mergeBuiltinSolomapEnhancements(
+  registryEnhancements: SolomapEnhancementRegistryEntry[],
+  enabledEnhancements: Record<string, boolean> = {}
+): SolomapEnhancementRegistryEntry[] {
+  const merged = new Map<string, SolomapEnhancementRegistryEntry>();
+  (registryEnhancements || []).forEach((enhancement) => {
+    if (enhancement?.id) {
+      merged.set(enhancement.id, enhancement);
+    }
+  });
+  BUILTIN_SOLOMAP_ENHANCEMENTS.forEach((builtin) => {
+    const existing: Partial<SolomapEnhancementRegistryEntry> = merged.get(builtin.id) || {};
+    const enabled = Boolean(enabledEnhancements[builtin.id]);
+    merged.set(builtin.id, {
+      ...builtin,
+      ...existing,
+      source: { ...(builtin.source || {}), ...(existing.source || {}), curated: true },
+      adapter: { ...(builtin.adapter || {}), ...(existing.adapter || {}) },
+      activation: { ...(builtin.activation || {}), ...(existing.activation || {}) },
+      risk: { ...(builtin.risk || {}), ...(existing.risk || {}) },
+      evidencePolicy: { ...(builtin.evidencePolicy || {}), ...(existing.evidencePolicy || {}) },
+      status: enabled ? 'installed' : 'disabled'
+    });
+  });
+  return Array.from(merged.values());
+}
+
+function selectSolomapEnhancementCandidates(
+  workspaceRoot: string,
+  globalDataPath: string,
+  contextText: string,
+  limit = 3,
+  enabledEnhancements: Record<string, boolean> = {}
+): Array<{ enhancement: SolomapEnhancementRegistryEntry; reasons: string[] }> {
   const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
-  return registry.enhancements
+  return mergeBuiltinSolomapEnhancements(registry.enhancements, enabledEnhancements)
     .map((enhancement) => ({ enhancement, ...scoreSolomapEnhancement(enhancement, contextText) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.enhancement.id.localeCompare(b.enhancement.id))
@@ -4327,8 +4481,13 @@ function selectSolomapEnhancementCandidates(workspaceRoot: string, globalDataPat
     .map(({ enhancement, reasons }) => ({ enhancement, reasons }));
 }
 
-function buildSolomapEnhancementCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): string {
-  const candidates = selectSolomapEnhancementCandidates(workspaceRoot, globalDataPath, contextText, 3);
+function buildSolomapEnhancementCandidateInstructions(
+  workspaceRoot: string,
+  globalDataPath: string,
+  contextText: string,
+  enabledEnhancements: Record<string, boolean> = {}
+): string {
+  const candidates = selectSolomapEnhancementCandidates(workspaceRoot, globalDataPath, contextText, 3, enabledEnhancements);
   if (!candidates.length) {
     return '';
   }
@@ -4338,6 +4497,7 @@ function buildSolomapEnhancementCandidateInstructions(workspaceRoot: string, glo
     ...candidates.map(({ enhancement, reasons }, index) => {
       const configPath = enhancement.configPath ? path.join(enhancementsRoot, enhancement.configPath) : '';
       const adapterType = enhancement.adapter?.type || 'unknown';
+      const adapterRuntime = enhancement.adapter?.runtime ? ` / ${enhancement.adapter.runtime}` : '';
       const useWhen = normalizeSkillKeywords(enhancement.activation?.useWhen).slice(0, 3).join('；');
       const doNotUseWhen = normalizeSkillKeywords(enhancement.activation?.doNotUseWhen).slice(0, 3).join('；');
       const mustReadRawWhen = normalizeSkillKeywords(enhancement.evidencePolicy?.mustReadRawWhen).slice(0, 3).join('；');
@@ -4345,7 +4505,7 @@ function buildSolomapEnhancementCandidateInstructions(workspaceRoot: string, glo
         `${index + 1}. ${enhancement.title || enhancement.id}`,
         `   - 能力：${enhancement.description || enhancement.capability || '-'}`,
         `   - 收益：${enhancement.benefit || '-'}`,
-        `   - 接入：${adapterType}${configPath ? ` (${configPath})` : ''}`,
+        `   - 接入：${adapterType}${adapterRuntime}${configPath ? ` (${configPath})` : ''}`,
         `   - 适用：${useWhen || '-'}`,
         `   - 不适用：${doNotUseWhen || '-'}`,
         `   - 原始证据要求：${mustReadRawWhen || '关键判断必须回看当前文件、日志或测试输出'}`,
@@ -4354,163 +4514,6 @@ function buildSolomapEnhancementCandidateInstructions(workspaceRoot: string, glo
     }),
     '增强能力使用协议：这些只是可选增强，不是强制工具。adapter 类型只是实现细节，不要把它暴露成用户需要理解的新入口；不要自行安装、启用或修改外部配置。增强结果不能替代当前文件、日志、测试和用户最新证据；遇到压缩、摘要、索引、命令改写或外部读取结果时，关键判断必须回看原始证据。增强失败时回退到原始执行路径，并在最终输出中简短说明本轮实际使用的增强能力。'
   ].join('\n');
-}
-
-function buildEnhancementInstallPrompt(enhancementInput: string, workspaceRoot: string, globalDataPath: string, resultFilePath: string): string {
-  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-  const enhancementsRoot = getSolomapEnhancementsRoot(workspaceRoot, globalDataPath);
-  return [
-    '你正在为 SoloMap 安装一个可选 Harness 增强能力。',
-    '',
-    `项目目录：${workspaceRoot}`,
-    `用户提供的增强能力来源：${enhancementInput}`,
-    `SoloMap Global 目录：${globalRoot}`,
-    `SoloMap Enhancements 目录：${enhancementsRoot}`,
-    `安装结果 JSON 必须写入：${resultFilePath}`,
-    '',
-    '目标目录结构：',
-    '- `.solomap-global/enhancements/installed/<enhancement-id>/package/`：完整增强能力 package、仓库快照或配置说明。',
-    '- `.solomap-global/enhancements/installed/<enhancement-id>/solomap.enhancement.json`：SoloMap 统一增强能力元数据。',
-    '- `.solomap-global/enhancements/installed/<enhancement-id>/source.lock.json`：来源、commit、安装时间、文件 hash 或目录 hash。',
-    '- `.solomap-global/enhancements/installed/<enhancement-id>/profiles/`：可选的 Agent 配置建议或 adapter 配置片段，只能作为建议保存。',
-    '',
-    '安装要求：',
-    '1. 解析来源。支持 GitHub URL、npm package、命令行工具、MCP server、文档页或用户粘贴的配置片段。',
-    '2. 只做下载、复制、分析和生成配置建议；不要启动后台服务，不要执行全局 hook，不要登录外部服务，不要写入任何 Agent 私有配置目录。',
-    '3. 选择稳定 `enhancement-id`：只允许小写字母、数字和连字符。',
-    '4. 生成 `solomap.enhancement.json`。至少包含 id、title、description、status、source、capability、benefit、adapter、activation、risk、evidencePolicy、installedAt、updatedAt。',
-    '5. `adapter.type` 必须是 `mcp`、`command_rewrite`、`prompt_policy`、`preflight`、`background_service` 或 `output_filter` 之一。',
-    '6. 识别风险：是否访问外网、是否写文件、是否修改 Agent 配置、是否启动后台服务、是否隐藏原始输出、是否访问密钥；不确定时按高风险处理并设置 `requiresExplicitEnable: true`。',
-    '7. 生成各 Agent 的 profile/config 建议，但只写入 `.solomap-global/enhancements/installed/<enhancement-id>/profiles/`，不要应用到真实 Agent 配置。',
-    '',
-    '结果 JSON 格式：',
-    '{',
-    '  "ok": true,',
-    '  "enhancementId": "enhancement-id",',
-    '  "installedPath": ".solomap-global/enhancements/installed/enhancement-id",',
-    '  "packagePath": ".solomap-global/enhancements/installed/enhancement-id/package",',
-    '  "solomapEnhancementJson": ".solomap-global/enhancements/installed/enhancement-id/solomap.enhancement.json",',
-    '  "sourceLockJson": ".solomap-global/enhancements/installed/enhancement-id/source.lock.json",',
-    '  "profilesPath": ".solomap-global/enhancements/installed/enhancement-id/profiles",',
-    '  "metadata": { "name": "enhancement-id", "description": "...", "version": "..." },',
-    '  "source": { "input": "...", "repo": "owner/repo", "commit": "..." },',
-    '  "adapter": { "type": "mcp|command_rewrite|prompt_policy|preflight|background_service|output_filter", "runtime": "...", "fallback": "use_original_path" },',
-    '  "activation": { "keywords": [], "useWhen": [], "doNotUseWhen": [] },',
-    '  "risk": { "level": "low|medium|high", "requiresExplicitEnable": true },',
-    '  "evidencePolicy": { "mustReadRawWhen": [], "mustVerifyWith": [] }',
-    '}',
-    '',
-    '失败时也必须写 result.json：',
-    '{ "ok": false, "error": "清晰说明失败原因", "source": { "input": "..." } }',
-    '',
-    '安全边界：不要启动增强能力，不要写入用户 home 下的 Agent 配置，不要保存明文密钥，不要删除任何已有文件。'
-  ].join('\n');
-}
-
-function validateAndRegisterEnhancementInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): { ok: boolean; message: string; enhancementId?: string } {
-  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-  const enhancementsRoot = getSolomapEnhancementsRoot(workspaceRoot, globalDataPath);
-  const installedRoot = path.join(enhancementsRoot, 'installed');
-  if (!fs.existsSync(resultFilePath)) {
-    return { ok: false, message: 'Enhancement install result.json was not created.' };
-  }
-  let result: any;
-  try {
-    result = JSON.parse(fs.readFileSync(resultFilePath, 'utf8'));
-  } catch (error: any) {
-    return { ok: false, message: `Enhancement install result.json is invalid: ${error.message}` };
-  }
-  if (!result.ok) {
-    return { ok: false, message: String(result.error || 'Enhancement installation failed.') };
-  }
-  const enhancementId = sanitizeAttachmentScope(String(result.enhancementId || result.metadata?.name || '').toLowerCase());
-  if (!enhancementId) {
-    return { ok: false, message: 'Enhancement install result is missing enhancementId.' };
-  }
-  const installedPath = resolveSkillResultPath(globalRoot, result.installedPath || path.join(installedRoot, enhancementId));
-  const packagePath = resolveSkillResultPath(globalRoot, result.packagePath || path.join(installedPath, 'package'));
-  const solomapEnhancementJson = resolveSkillResultPath(globalRoot, result.solomapEnhancementJson || path.join(installedPath, 'solomap.enhancement.json'));
-  const sourceLockJson = resolveSkillResultPath(globalRoot, result.sourceLockJson || path.join(installedPath, 'source.lock.json'));
-  const profilesPath = resolveSkillResultPath(globalRoot, result.profilesPath || path.join(installedPath, 'profiles'));
-  if (!pathInside(installedRoot, installedPath)) {
-    return { ok: false, message: 'Enhancement installedPath is outside SoloMap enhancements/installed.' };
-  }
-  if (!pathInside(installedPath, packagePath)) {
-    return { ok: false, message: 'Enhancement package path is outside the installed enhancement directory.' };
-  }
-  if (profilesPath && !pathInside(installedPath, profilesPath)) {
-    return { ok: false, message: 'Enhancement profiles path is outside installed enhancement directory.' };
-  }
-  if (![solomapEnhancementJson, sourceLockJson].every((filePath) => fs.existsSync(filePath) && fs.statSync(filePath).isFile())) {
-    return { ok: false, message: 'Enhancement package is missing solomap.enhancement.json or source.lock.json.' };
-  }
-  let enhancementJson: any;
-  try {
-    enhancementJson = JSON.parse(fs.readFileSync(solomapEnhancementJson, 'utf8'));
-  } catch (error: any) {
-    return { ok: false, message: `solomap.enhancement.json is invalid: ${error.message}` };
-  }
-  const allowedAdapters = new Set(['mcp', 'command_rewrite', 'prompt_policy', 'preflight', 'background_service', 'output_filter']);
-  const adapterType = String(enhancementJson.adapter?.type || result.adapter?.type || '').trim();
-  if (!allowedAdapters.has(adapterType)) {
-    return { ok: false, message: 'Enhancement adapter.type is missing or unsupported.' };
-  }
-  const now = new Date().toISOString();
-  const riskLevel = String(enhancementJson.risk?.level || result.risk?.level || 'unknown');
-  const startsBackgroundService = Boolean(enhancementJson.risk?.startsBackgroundService || result.risk?.startsBackgroundService || adapterType === 'background_service');
-  const modifiesAgentConfig = Boolean(enhancementJson.risk?.modifiesAgentConfig || result.risk?.modifiesAgentConfig);
-  const canAccessSecrets = Boolean(enhancementJson.risk?.canAccessSecrets || result.risk?.canAccessSecrets);
-  const canWriteExternal = Boolean(enhancementJson.risk?.canWriteExternal || result.risk?.canWriteExternal);
-  const entry: SolomapEnhancementRegistryEntry = {
-    id: enhancementId,
-    title: String(enhancementJson.title || enhancementJson.name || result.metadata?.name || enhancementId),
-    description: String(enhancementJson.description || result.metadata?.description || ''),
-    status: String(enhancementJson.status || 'installed'),
-    source: enhancementJson.source || result.source || {},
-    capability: String(enhancementJson.capability || result.capability || ''),
-    benefit: String(enhancementJson.benefit || result.benefit || ''),
-    installedPath: path.relative(enhancementsRoot, installedPath).replace(/\\/g, '/'),
-    configPath: path.relative(enhancementsRoot, solomapEnhancementJson).replace(/\\/g, '/'),
-    adapter: {
-      type: adapterType,
-      detect: String(enhancementJson.adapter?.detect || result.adapter?.detect || ''),
-      installCheck: String(enhancementJson.adapter?.installCheck || result.adapter?.installCheck || ''),
-      runtime: String(enhancementJson.adapter?.runtime || result.adapter?.runtime || ''),
-      fallback: String(enhancementJson.adapter?.fallback || result.adapter?.fallback || 'use_original_path'),
-      tools: normalizeSkillKeywords(enhancementJson.adapter?.tools || result.adapter?.tools)
-    },
-    activation: {
-      keywords: normalizeSkillKeywords(enhancementJson.activation?.keywords || result.activation?.keywords),
-      useWhen: normalizeSkillKeywords(enhancementJson.activation?.useWhen || result.activation?.useWhen),
-      doNotUseWhen: normalizeSkillKeywords(enhancementJson.activation?.doNotUseWhen || result.activation?.doNotUseWhen),
-      projectTypes: normalizeSkillKeywords(enhancementJson.activation?.projectTypes || result.activation?.projectTypes),
-      taskKinds: normalizeSkillKeywords(enhancementJson.activation?.taskKinds || result.activation?.taskKinds),
-      fileGlobs: normalizeSkillKeywords(enhancementJson.activation?.fileGlobs || result.activation?.fileGlobs),
-      manualOnly: Boolean(enhancementJson.activation?.manualOnly || result.activation?.manualOnly)
-    },
-    risk: {
-      level: riskLevel,
-      requiresExplicitEnable: Boolean(enhancementJson.risk?.requiresExplicitEnable ?? result.risk?.requiresExplicitEnable ?? (riskLevel === 'high' || startsBackgroundService || modifiesAgentConfig || canAccessSecrets || canWriteExternal)),
-      usesNetwork: enhancementJson.risk?.usesNetwork ?? result.risk?.usesNetwork ?? 'unknown',
-      writesFiles: enhancementJson.risk?.writesFiles ?? result.risk?.writesFiles ?? 'unknown',
-      canWriteExternal,
-      canAccessSecrets,
-      modifiesAgentConfig,
-      startsBackgroundService,
-      hidesRawOutput: Boolean(enhancementJson.risk?.hidesRawOutput || result.risk?.hidesRawOutput)
-    },
-    evidencePolicy: {
-      mustReadRawWhen: normalizeSkillKeywords(enhancementJson.evidencePolicy?.mustReadRawWhen || result.evidencePolicy?.mustReadRawWhen),
-      mustVerifyWith: normalizeSkillKeywords(enhancementJson.evidencePolicy?.mustVerifyWith || result.evidencePolicy?.mustVerifyWith)
-    },
-    installedAt: String(enhancementJson.installedAt || result.installedAt || now),
-    updatedAt: now
-  };
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
-  const nextEnhancements = registry.enhancements.filter((enhancement) => enhancement.id !== enhancementId);
-  nextEnhancements.push(entry);
-  writeSolomapEnhancementRegistry(workspaceRoot, globalDataPath, { ...registry, enhancements: nextEnhancements.sort((a, b) => a.id.localeCompare(b.id)) });
-  return { ok: true, message: `Harness enhancement installed: ${enhancementId}`, enhancementId };
 }
 
 function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = ''): string {
@@ -4551,7 +4554,8 @@ function buildAgentConversationPrompt(
   supplementFiles: string[] = [],
   globalPrompt = '',
   githubIssueContext = '',
-  globalDataPath = ''
+  globalDataPath = '',
+  enabledEnhancements: Record<string, boolean> = {}
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const normalizedGlobalPrompt = globalPrompt.trim();
@@ -4633,7 +4637,8 @@ function buildAgentConversationPrompt(
   const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(
     workspaceRoot,
     globalDataPath,
-    [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
+    [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n'),
+    enabledEnhancements
   );
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
@@ -4701,7 +4706,8 @@ function buildRoadmapRevisionPrompt(
   workspaceRoot: string,
   globalPrompt = '',
   supplementFiles: string[] = [],
-  globalDataPath = ''
+  globalDataPath = '',
+  enabledEnhancements: Record<string, boolean> = {}
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -4723,7 +4729,7 @@ function buildRoadmapRevisionPrompt(
   const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
-  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
+  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage, enabledEnhancements);
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
@@ -4771,7 +4777,8 @@ function buildSoloConversationPrompt(
   workspaceRoot: string,
   globalPrompt = '',
   supplementFiles: string[] = [],
-  globalDataPath = ''
+  globalDataPath = '',
+  enabledEnhancements: Record<string, boolean> = {}
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -4793,7 +4800,7 @@ function buildSoloConversationPrompt(
   const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
   const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
-  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
+  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage, enabledEnhancements);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
     nodeId: soloConversationId,
@@ -5303,11 +5310,6 @@ function postMcpInstallResult(success: boolean, message: string): void {
   sidebarProvider?.postMcpInstallResult(success, message);
 }
 
-function postEnhancementInstallResult(success: boolean, message: string): void {
-  activePanel?.webview.postMessage({ command: 'enhancementInstallResult', success, message });
-  sidebarProvider?.postEnhancementInstallResult(success, message);
-}
-
 async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSkillInput: string): Promise<void> {
   const skillInput = String(rawSkillInput || '').trim();
   if (!skillInput) {
@@ -5434,70 +5436,6 @@ async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpI
     } else {
       vscode.window.showErrorMessage(`SoloMap MCP install failed validation: ${validation.message}`);
       postMcpInstallResult(false, validation.message);
-    }
-  }, 2000);
-}
-
-async function handleInstallSolomapEnhancement(context: vscode.ExtensionContext, rawEnhancementInput: string): Promise<void> {
-  const enhancementInput = String(rawEnhancementInput || '').trim();
-  if (!enhancementInput) {
-    vscode.window.showWarningMessage('Paste an enhancement link, package, command, or config before installing.');
-    return;
-  }
-  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const settings = getPersistedSettings(context);
-  const requestedAgentCli = (settings.cliPath || 'agy').trim();
-  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
-  if (!commandExists(agentCli)) {
-    const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
-    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}.`);
-    return;
-  }
-  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
-  const { enhancementsRoot, runsRoot } = ensureSolomapEnhancementStore(workspaceRoot, settings.globalDataPath);
-  const runId = `enhancement-install-${Date.now()}`;
-  const runDir = path.join(runsRoot, runId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const outputFilePath = path.join(runDir, 'output.log');
-  const resultFilePath = path.join(runDir, 'result.json');
-  const commandFilePath = path.join(runDir, 'command.txt');
-  const runScriptPath = path.join(runDir, 'run-enhancement-install.sh');
-  fs.mkdirSync(runDir, { recursive: true });
-  const prompt = buildEnhancementInstallPrompt(enhancementInput, workspaceRoot, settings.globalDataPath, resultFilePath);
-  fs.writeFileSync(promptFilePath, prompt, 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
-  fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
-  const script = [
-    `cd ${shellQuote(workspaceRoot)}`,
-    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
-    'export DISABLE_TELEMETRY=1',
-    `mkdir -p ${shellQuote(runDir)} ${shellQuote(enhancementsRoot)}`,
-    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`,
-    `printf '\\nSoloMap enhancement install run finished. Result expected at: ${resultFilePath}\\n' >> ${shellQuote(outputFilePath)}`
-  ].join('; ');
-  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
-  const terminal = createAgentTerminal(workspaceRoot, `enh-${runId.slice(-6)}`);
-  terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
-  vscode.window.showInformationMessage('SoloMap enhancement install started. The Agent terminal will complete the controlled install.');
-
-  const startedAt = Date.now();
-  const poller = setInterval(() => {
-    if (!fs.existsSync(resultFilePath)) {
-      if (Date.now() - startedAt > 30 * 60 * 1000) {
-        clearInterval(poller);
-        vscode.window.showWarningMessage('SoloMap enhancement install is still waiting for result.json. Check the Agent terminal output.');
-      }
-      return;
-    }
-    clearInterval(poller);
-    const validation = validateAndRegisterEnhancementInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
-    if (validation.ok) {
-      vscode.window.showInformationMessage(validation.message);
-      postEnhancementInstallResult(true, validation.message);
-    } else {
-      vscode.window.showErrorMessage(`SoloMap enhancement install failed validation: ${validation.message}`);
-      postEnhancementInstallResult(false, validation.message);
     }
   }, 2000);
 }
@@ -5670,7 +5608,7 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   ensureRoadmapValidationScript(path.join(activeProjectRoot, '.solopreneur'));
   ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath);
+  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot, settings.taskPermissionMode);
   const executionLogId = syncEngine.logAgentExecution(
@@ -5768,7 +5706,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath);
+  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
   const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode);
   const executionLogId = syncEngine.logAgentExecution(
     soloConversationId,
@@ -5945,7 +5883,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     attachedFiles,
     settings.globalPrompt,
     githubIssueContext,
-    settings.globalDataPath
+    settings.globalDataPath,
+    settings.enabledEnhancements
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
@@ -8407,18 +8346,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-enhancement-install">Install Enhancement</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-enhancement-input"
-        placeholder="e.g. rtk, CodeGraph, GitHub URL, command, or config snippet"
-      >
-      <div id="help-enhancement-install" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Paste an enhancement source. SoloMap will register it as an optional harness enhancement.
+      <label class="settings-lbl-title" id="label-enhancement-toggles">Harness Enhancements</label>
+      <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Enable curated external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.
       </div>
-      <button class="settings-action-btn test-btn" id="btn-install-enhancement" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-beaker"></span><span id="text-install-enhancement">Install Enhancement</span></button>
-      <div class="cli-badge" id="enhancement-install-badge" style="display:none;"></div>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
+        <input type="checkbox" id="setting-enhancement-command-output-optimizer" style="margin-top:2px;">
+        <span><span id="label-enhancement-command-output-optimizer">Command Output Optimizer</span><br><span id="help-enhancement-command-output-optimizer" style="font-size:9px; color:var(--text-muted);">Reduce long terminal output when raw logs are not needed.</span></span>
+      </label>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
+        <input type="checkbox" id="setting-enhancement-code-structure-assistant" style="margin-top:2px;">
+        <span><span id="label-enhancement-code-structure-assistant">Code Structure Assistant</span><br><span id="help-enhancement-code-structure-assistant" style="font-size:9px; color:var(--text-muted);">Use code graph lookup to narrow source reading and impact checks.</span></span>
+      </label>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
+        <input type="checkbox" id="setting-enhancement-mcp-description-compressor" style="margin-top:2px;">
+        <span><span id="label-enhancement-mcp-description-compressor">MCP Description Compressor</span><br><span id="help-enhancement-mcp-description-compressor" style="font-size:9px; color:var(--text-muted);">Compress MCP metadata descriptions while keeping tool calls unchanged.</span></span>
+      </label>
     </div>
     </div>
 
@@ -8465,9 +8408,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingMcpInput = document.getElementById('setting-mcp-input');
     const btnInstallMcp = document.getElementById('btn-install-mcp');
     const mcpInstallBadge = document.getElementById('mcp-install-badge');
-    const settingEnhancementInput = document.getElementById('setting-enhancement-input');
-    const btnInstallEnhancement = document.getElementById('btn-install-enhancement');
-    const enhancementInstallBadge = document.getElementById('enhancement-install-badge');
+    const settingEnhancementCommandOutputOptimizer = document.getElementById('setting-enhancement-command-output-optimizer');
+    const settingEnhancementCodeStructureAssistant = document.getElementById('setting-enhancement-code-structure-assistant');
+    const settingEnhancementMcpDescriptionCompressor = document.getElementById('setting-enhancement-mcp-description-compressor');
     const settingFeedbackTitle = document.getElementById('setting-feedback-title');
     const settingFeedbackBody = document.getElementById('setting-feedback-body');
     const btnOpenFeedback = document.getElementById('btn-open-feedback');
@@ -8544,10 +8487,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
-        enhancementInstall: '安装增强能力',
-        enhancementInstallPlaceholder: '例如：rtk、CodeGraph、GitHub 链接、命令或配置片段',
-        enhancementInstallHelp: '粘贴增强能力来源，SoloMap 会注册为可选 Harness 增强。',
-        installEnhancement: '安装增强能力',
+        enhancementToggles: 'Harness 增强',
+        enhancementTogglesHelp: '启用经过调研和适配的外部增强；SoloMap 会保持可选使用，并在关键证据场景回退原始路径。',
+        enhancementCommandOutputOptimizer: '命令输出优化',
+        enhancementCommandOutputOptimizerHelp: '在不需要完整原始日志时减少长命令输出占用。',
+        enhancementCodeStructureAssistant: '代码结构辅助',
+        enhancementCodeStructureAssistantHelp: '用代码图谱辅助缩小源码阅读和影响面检查范围。',
+        enhancementMcpDescriptionCompressor: 'MCP 描述压缩',
+        enhancementMcpDescriptionCompressorHelp: '压缩 MCP 元数据描述，但不改变实际工具调用。',
         installingEnhancement: '正在启动安装...',
         feedback: '建议反馈',
         feedbackNotWorking: '没跑通',
@@ -8683,10 +8630,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
-        enhancementInstall: 'Install Enhancement',
-        enhancementInstallPlaceholder: 'e.g. rtk, CodeGraph, GitHub URL, command, or config snippet',
-        enhancementInstallHelp: 'Paste an enhancement source. SoloMap registers it as an optional harness enhancement.',
-        installEnhancement: 'Install Enhancement',
+        enhancementToggles: 'Harness Enhancements',
+        enhancementTogglesHelp: 'Enable researched and adapted external enhancements. SoloMap keeps them optional and falls back to the original path when evidence matters.',
+        enhancementCommandOutputOptimizer: 'Command Output Optimizer',
+        enhancementCommandOutputOptimizerHelp: 'Reduce long terminal output when full raw logs are not needed.',
+        enhancementCodeStructureAssistant: 'Code Structure Assistant',
+        enhancementCodeStructureAssistantHelp: 'Use code graph lookup to narrow source reading and impact checks.',
+        enhancementMcpDescriptionCompressor: 'MCP Description Compressor',
+        enhancementMcpDescriptionCompressorHelp: 'Compress MCP metadata descriptions while keeping tool calls unchanged.',
         installingEnhancement: 'Starting install...',
         feedback: 'Feedback',
         feedbackNotWorking: 'Not working',
@@ -8880,10 +8831,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
       setText('help-mcp-install', t('mcpInstallHelp'));
       setText('text-install-mcp', t('installMcp'));
-      setText('label-enhancement-install', t('enhancementInstall'));
-      if (settingEnhancementInput) settingEnhancementInput.placeholder = t('enhancementInstallPlaceholder');
-      setText('help-enhancement-install', t('enhancementInstallHelp'));
-      setText('text-install-enhancement', t('installEnhancement'));
+      setText('label-enhancement-toggles', t('enhancementToggles'));
+      setText('help-enhancement-toggles', t('enhancementTogglesHelp'));
+      setText('label-enhancement-command-output-optimizer', t('enhancementCommandOutputOptimizer'));
+      setText('help-enhancement-command-output-optimizer', t('enhancementCommandOutputOptimizerHelp'));
+      setText('label-enhancement-code-structure-assistant', t('enhancementCodeStructureAssistant'));
+      setText('help-enhancement-code-structure-assistant', t('enhancementCodeStructureAssistantHelp'));
+      setText('label-enhancement-mcp-description-compressor', t('enhancementMcpDescriptionCompressor'));
+      setText('help-enhancement-mcp-description-compressor', t('enhancementMcpDescriptionCompressorHelp'));
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -9079,6 +9034,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
     }
 
+    function getEnabledEnhancementsFromSettings() {
+      return {
+        'command-output-optimizer': Boolean(settingEnhancementCommandOutputOptimizer && settingEnhancementCommandOutputOptimizer.checked),
+        'code-structure-assistant': Boolean(settingEnhancementCodeStructureAssistant && settingEnhancementCodeStructureAssistant.checked),
+        'mcp-description-compressor': Boolean(settingEnhancementMcpDescriptionCompressor && settingEnhancementMcpDescriptionCompressor.checked)
+      };
+    }
+
+    function applyEnabledEnhancements(enabledEnhancements) {
+      const enabled = enabledEnhancements || {};
+      if (settingEnhancementCommandOutputOptimizer) settingEnhancementCommandOutputOptimizer.checked = Boolean(enabled['command-output-optimizer']);
+      if (settingEnhancementCodeStructureAssistant) settingEnhancementCodeStructureAssistant.checked = Boolean(enabled['code-structure-assistant']);
+      if (settingEnhancementMcpDescriptionCompressor) settingEnhancementMcpDescriptionCompressor.checked = Boolean(enabled['mcp-description-compressor']);
+    }
+
     // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
@@ -9128,6 +9098,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          applyEnabledEnhancements(message.settings.enabledEnhancements || {});
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -9214,13 +9185,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             mcpInstallBadge.textContent = message.message || '';
           }
           break;
-        case 'enhancementInstallResult':
-          if (enhancementInstallBadge) {
-            enhancementInstallBadge.style.display = 'block';
-            enhancementInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
-            enhancementInstallBadge.textContent = message.message || '';
-          }
-          break;
       }
     });
 
@@ -9234,7 +9198,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         globalPrompt: settingGlobalPrompt.value.trim(),
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
         reviewerCliPath: getEffectiveReviewerCliPath(),
-        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk'
+        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
+        enabledEnhancements: getEnabledEnhancementsFromSettings()
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -9347,28 +9312,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           mcpInstallBadge.textContent = t('installingMcp');
         }
         vscode.postMessage({ command: 'installMcp', mcpInput });
-      });
-    }
-
-    if (btnInstallEnhancement) {
-      btnInstallEnhancement.addEventListener('click', () => {
-        const enhancementInput = (settingEnhancementInput ? settingEnhancementInput.value : '').trim();
-        if (!enhancementInput) {
-          if (enhancementInstallBadge) {
-            enhancementInstallBadge.style.display = 'block';
-            enhancementInstallBadge.className = 'cli-badge error';
-            enhancementInstallBadge.textContent = t('enhancementInstallPlaceholder');
-          }
-          return;
-        }
-        if (enhancementInstallBadge) {
-          enhancementInstallBadge.style.display = 'block';
-          enhancementInstallBadge.className = 'cli-badge';
-          enhancementInstallBadge.style.background = 'rgba(255,255,255,0.05)';
-          enhancementInstallBadge.style.color = 'var(--text-muted)';
-          enhancementInstallBadge.textContent = t('installingEnhancement');
-        }
-        vscode.postMessage({ command: 'installEnhancement', enhancementInput });
       });
     }
 
