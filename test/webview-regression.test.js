@@ -689,6 +689,10 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /id="btn-install-mcp"/);
   assert.match(script, /installMcp/);
   assert.match(script, /mcpInstallResult/);
+  assert.match(html, /id="setting-enhancement-input"/);
+  assert.match(html, /id="btn-install-enhancement"/);
+  assert.match(script, /installEnhancement/);
+  assert.match(script, /enhancementInstallResult/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -856,6 +860,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="btn-install-mcp"/);
   assert.match(html, /installMcp/);
   assert.match(html, /mcpInstallResult/);
+  assert.match(html, /id="setting-enhancement-input"/);
+  assert.match(html, /id="btn-install-enhancement"/);
+  assert.match(html, /installEnhancement/);
+  assert.match(html, /enhancementInstallResult/);
   assert.match(html, /\.onboarding-panel\s*\{/);
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);
@@ -1353,6 +1361,12 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildSolomapMcpCandidateInstructions = buildSolomapMcpCandidateInstructions;',
       'module.exports.__buildMcpInstallPrompt = buildMcpInstallPrompt;',
       'module.exports.__validateAndRegisterMcpInstall = validateAndRegisterMcpInstall;',
+      'module.exports.__ensureSolomapEnhancementStore = ensureSolomapEnhancementStore;',
+      'module.exports.__readSolomapEnhancementRegistry = readSolomapEnhancementRegistry;',
+      'module.exports.__writeSolomapEnhancementRegistry = writeSolomapEnhancementRegistry;',
+      'module.exports.__buildSolomapEnhancementCandidateInstructions = buildSolomapEnhancementCandidateInstructions;',
+      'module.exports.__buildEnhancementInstallPrompt = buildEnhancementInstallPrompt;',
+      'module.exports.__validateAndRegisterEnhancementInstall = validateAndRegisterEnhancementInstall;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__buildRoadmapValidationScript = buildRoadmapValidationScript;',
       'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
@@ -1900,6 +1914,79 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(mcpValidation.ok, true);
   const mcpRegistryAfterValidation = extensionModule.__readSolomapMcpRegistry('/workspace/app', mcpStoreRoot);
   assert.equal(mcpRegistryAfterValidation.connectors.some((connector) => connector.id === 'github-readonly'), true);
+
+  const enhancementStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-enhancement-store-'));
+  const enhancementStore = extensionModule.__ensureSolomapEnhancementStore('/workspace/app', enhancementStoreRoot);
+  assert.ok(fs.existsSync(path.join(enhancementStore.enhancementsRoot, 'installed')));
+  assert.ok(fs.existsSync(path.join(enhancementStore.enhancementsRoot, 'runs')));
+  extensionModule.__writeSolomapEnhancementRegistry('/workspace/app', enhancementStoreRoot, {
+    version: 1,
+    updatedAt: '',
+    enhancements: [{
+      id: 'rtk-output-filter',
+      title: 'rtk Output Filter',
+      description: 'Compress command output before Agent reads it.',
+      status: 'installed',
+      configPath: 'installed/rtk-output-filter/solomap.enhancement.json',
+      benefit: 'Reduce noisy command output token usage.',
+      adapter: { type: 'command_rewrite', fallback: 'use_original_path' },
+      activation: { keywords: ['token', '命令输出'], useWhen: ['任务需要减少命令输出 token'] },
+      risk: { level: 'low', requiresExplicitEnable: false, hidesRawOutput: true },
+      evidencePolicy: { mustReadRawWhen: ['失败日志', '关键判断'] }
+    }, {
+      id: 'agent-config-writer',
+      title: 'Agent Config Writer',
+      status: 'installed',
+      activation: { keywords: ['agent'] },
+      adapter: { type: 'prompt_policy' },
+      risk: { level: 'high', modifiesAgentConfig: true, requiresExplicitEnable: true }
+    }]
+  });
+  const enhancementInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions('/workspace/app', enhancementStoreRoot, '需要减少命令输出 token，同时保留失败日志');
+  assert.match(enhancementInstructions, /rtk Output Filter/);
+  assert.match(enhancementInstructions, /command_rewrite/);
+  assert.match(enhancementInstructions, /原始证据要求/);
+  assert.doesNotMatch(enhancementInstructions, /Agent Config Writer/);
+
+  const enhancementInstallPrompt = extensionModule.__buildEnhancementInstallPrompt('https://github.com/rtk-ai/rtk', '/workspace/app', enhancementStoreRoot, path.join(enhancementStore.runsRoot, 'run', 'result.json'));
+  assert.match(enhancementInstallPrompt, /可选 Harness 增强能力/);
+  assert.match(enhancementInstallPrompt, /solomap\.enhancement\.json/);
+  assert.match(enhancementInstallPrompt, /adapter\.type/);
+  assert.match(enhancementInstallPrompt, /不要启动后台服务/);
+
+  const fakeEnhancementDir = path.join(enhancementStore.enhancementsRoot, 'installed', 'rtk-output-filter');
+  fs.mkdirSync(path.join(fakeEnhancementDir, 'package'), { recursive: true });
+  fs.mkdirSync(path.join(fakeEnhancementDir, 'profiles'), { recursive: true });
+  fs.writeFileSync(path.join(fakeEnhancementDir, 'solomap.enhancement.json'), JSON.stringify({
+    id: 'rtk-output-filter',
+    title: 'rtk Output Filter',
+    description: 'Compress command output.',
+    status: 'installed',
+    capability: 'Filter command output.',
+    benefit: 'Reduce noisy command output token usage.',
+    adapter: { type: 'command_rewrite', runtime: 'rtk', fallback: 'use_original_path' },
+    activation: { keywords: ['token'], useWhen: ['reduce command output token usage'] },
+    risk: { level: 'low', requiresExplicitEnable: false, hidesRawOutput: true },
+    evidencePolicy: { mustReadRawWhen: ['critical evidence'] }
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(fakeEnhancementDir, 'source.lock.json'), JSON.stringify({ source: 'rtk-ai/rtk' }, null, 2), 'utf8');
+  const fakeEnhancementResultPath = path.join(enhancementStore.runsRoot, 'fake-result.json');
+  fs.writeFileSync(fakeEnhancementResultPath, JSON.stringify({
+    ok: true,
+    enhancementId: 'rtk-output-filter',
+    installedPath: fakeEnhancementDir,
+    packagePath: path.join(fakeEnhancementDir, 'package'),
+    solomapEnhancementJson: path.join(fakeEnhancementDir, 'solomap.enhancement.json'),
+    sourceLockJson: path.join(fakeEnhancementDir, 'source.lock.json'),
+    profilesPath: path.join(fakeEnhancementDir, 'profiles'),
+    metadata: { name: 'rtk-output-filter', description: 'Compress command output.' },
+    adapter: { type: 'command_rewrite' },
+    risk: { level: 'low', requiresExplicitEnable: false }
+  }, null, 2), 'utf8');
+  const enhancementValidation = extensionModule.__validateAndRegisterEnhancementInstall('/workspace/app', enhancementStoreRoot, fakeEnhancementResultPath);
+  assert.equal(enhancementValidation.ok, true);
+  const enhancementRegistryAfterValidation = extensionModule.__readSolomapEnhancementRegistry('/workspace/app', enhancementStoreRoot);
+  assert.equal(enhancementRegistryAfterValidation.enhancements.some((enhancement) => enhancement.id === 'rtk-output-filter'), true);
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',
