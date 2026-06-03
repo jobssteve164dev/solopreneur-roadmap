@@ -61,17 +61,36 @@ jobs:
       - name: Bump Version
         id: bump
         run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          echo "PREVIOUS_TAG=$PREVIOUS_TAG" >> $GITHUB_ENV
           # 自动递增 package.json 的 patch 版本（末位数 +1）并自动生成 Git 提交与 Tag
           NEW_VERSION=$(npm version patch -m "chore(release): bump version to %s [skip ci]")
+          VERSION="${NEW_VERSION#v}"
           echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "新版本号: $NEW_VERSION"
+
+      - name: Generate Release Notes
+        run: |
+          NOTES_PATH="/tmp/solomap-release-notes.md"
+          TO_REF="HEAD~1"
+          node scripts/generate-release-notes.cjs \
+            --version "$VERSION" \
+            --from "$PREVIOUS_TAG" \
+            --to "$TO_REF" \
+            --notes "$NOTES_PATH" \
+            --changelog CHANGELOG.md
+          git add CHANGELOG.md
+          git commit --amend --no-edit
+          git tag -f -a "$NEW_VERSION" -m "$NEW_VERSION"
+          echo "RELEASE_NOTES_PATH=$NOTES_PATH" >> $GITHUB_ENV
 
       - name: Push Version Changes and Tag
         run: |
           # 将修改后的 package.json 推送回远程 main 分支
           git push origin main
           # 将自动生成的新版本 Tag 推送到远程仓库
-          git push origin ${{ env.NEW_VERSION }}
+          git push --force origin ${{ env.NEW_VERSION }}
 
       - name: Compile Extension
         run: npm run compile
@@ -121,6 +140,16 @@ jobs:
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
 
+      - name: Create GitHub Release
+        run: |
+          if gh release view "$NEW_VERSION" >/dev/null 2>&1; then
+            gh release edit "$NEW_VERSION" --title "$NEW_VERSION" --notes-file "$RELEASE_NOTES_PATH" --latest
+          else
+            gh release create "$NEW_VERSION" --title "$NEW_VERSION" --notes-file "$RELEASE_NOTES_PATH" --target main --latest
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Verify Open VSX Availability
         run: |
           for i in {1..30}; do
@@ -131,5 +160,5 @@ jobs:
             fi
             sleep 20
           done
-          echo "Open VSX did not expose SZLK.solopreneur-roadmap $VERSION in time."
-          exit 1
+          echo "::warning::Open VSX accepted publish but did not expose SZLK.solopreneur-roadmap $VERSION in time. Treating visibility as pending instead of failing the release."
+          exit 0
