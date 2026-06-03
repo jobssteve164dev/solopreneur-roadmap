@@ -139,13 +139,13 @@ Harness Enhancement 是“外部增强能力”，解决“Harness 如何让 Age
 - `installed/<enhancement-id>/profiles/`：不同 Agent CLI 或运行路径的接入建议。
 - `runs/`：安装、检测、修复和验证记录。
 
-安装逻辑沿用 skill / MCP 的受控安装心智：
+挂载逻辑采用内置 curated 能力：
 
-1. 用户在设置中粘贴增强能力来源，例如 GitHub repo、npm 包、二进制下载说明或本地路径。
-2. 插件唤起默认 Agent CLI，并注入增强能力受控安装提示词。
-3. Agent 下载、复制、分析并生成 manifest、profiles 和 `result.json`。
-4. 插件校验 package、`solomap.enhancement.json`、`source.lock.json`、可用性检测命令和风险声明。
-5. 校验通过后写入 `registry.json`。
+1. SoloMap 先调研和适配第三方能力，不向普通用户开放任意来源安装。
+2. 插件内置或登记经过验证的 enhancement manifest、source lock、profiles 和 fallback。
+3. 设置页只展示用户可理解的增强开关，例如命令输出优化、代码结构辅助、MCP 工具描述压缩。
+4. 用户决定是否启用能力；插件负责检测可用性、注入策略、记录效果和回退。
+5. 开放安装流程只作为内部开发者、实验或未来 curated catalog 的维护路径，不作为普通用户动作。
 
 运行逻辑：
 
@@ -159,6 +159,9 @@ Harness Enhancement 是“外部增强能力”，解决“Harness 如何让 Age
 
 - `rtk` 代表执行输出优化：它适合作为可选命令输出压缩辅助，帮助 Agent 在 `ls`、`grep`、构建、测试摘要和大文件结构扫描中减少 token 消耗；它不是无损事实来源，进入根因定位、验收、安全、权限或发布判断时必须允许 Agent 回读原始输出、原始文件和完整日志。
 - `CodeGraph` 代表代码结构理解增强：它适合作为代码符号、调用关系和影响半径维度，帮助 Agent 在任务开始前减少盲目搜索；它不负责判断运行是否成功，也不替代执行经验、用户纠偏、验证命令和当前代码事实。
+- `caveman` 代表输出、MCP 描述和记忆压缩增强：`caveman-shrink` 适合作为 MCP 工具描述压缩试点；`caveman` 回复模式只能作为用户显式启用的极简回复策略；`caveman-compress` 会改写文件，只能作为手动确认工具。
+
+三类能力的具体范围和挂载顺序见 [SoloMap 内置 Harness 增强能力挂载指导](./curated-harness-enhancements.zh.md)。
 
 第一版不做通用插件生态，而是验证三件事：
 
@@ -195,7 +198,7 @@ Harness Enhancement 是“外部增强能力”，解决“Harness 如何让 Age
 - 设置跨项目数据目录。
 - 安装技能。
 - 安装连接器。
-- 安装增强能力。
+- 启用或关闭内置增强能力。
 - 查看安装结果。
 
 后续可以增加：
@@ -225,7 +228,7 @@ Harness Enhancement 是“外部增强能力”，解决“Harness 如何让 Age
 - 自动启动或健康检查 MCP server。
 - 自动注入高风险 MCP。
 - MCP 凭证保存。
-- Harness Enhancement 安装与 registry。
+- 向普通用户开放任意第三方 Harness Enhancement 安装。
 - 自动运行第三方工具的全局 hook 安装。
 - 把第三方增强能力的 tracking、tee、索引或运行日志混入 SoloMap 主运行记录。
 - 完整管理 UI。

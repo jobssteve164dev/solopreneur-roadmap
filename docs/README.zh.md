@@ -7,10 +7,11 @@
 1. [单项目方法论](./methodology/methodology.zh.md)：理解 SoloMap 如何把项目推进成可执行路线图。
 2. [项目生命周期工程文档体系方法论](./methodology/project-lifecycle-engineering-docs.zh.md)：理解项目解释性文档应该如何产出和维护。
 3. [跨 Agent Harness 设计](./architecture/cross-agent-harness.zh.md)：理解 memory、skill、MCP connector 和外部增强能力如何服务项目生命周期。
-4. [Harness Enhancement Adapter 设计指导](./architecture/harness-enhancement-adapter-guidelines.zh.md)：理解外部增强能力如何统一治理，同时保留不同底层接入方式。
-5. [Agent 协作机制产品边界](./architecture/agent-collaboration-boundary.zh.md)：理解主副 Agent 协作如何进入任务闭环，同时避免把内部编排负担暴露给用户。
-6. [Agent Task Flow 方法论](./methodology/agent-task-flow-methodology.zh.md)：理解 SoloMap 如何从 Agent 启动器升级为可复核、可续推、可验收的任务流。
-7. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
+4. [内置 Harness 增强能力挂载指导](./architecture/curated-harness-enhancements.zh.md)：理解 rtk、CodeGraph、caveman 等调研能力如何作为内置增强开关进入 SoloMap。
+5. [Harness Enhancement Adapter 设计指导](./architecture/harness-enhancement-adapter-guidelines.zh.md)：理解外部增强能力如何统一治理，同时保留不同底层接入方式。
+6. [Agent 协作机制产品边界](./architecture/agent-collaboration-boundary.zh.md)：理解主副 Agent 协作如何进入任务闭环，同时避免把内部编排负担暴露给用户。
+7. [Agent Task Flow 方法论](./methodology/agent-task-flow-methodology.zh.md)：理解 SoloMap 如何从 Agent 启动器升级为可复核、可续推、可验收的任务流。
+8. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
 
 ## 目录职责
 
