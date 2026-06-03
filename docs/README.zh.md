@@ -7,7 +7,9 @@
 1. [单项目方法论](./methodology/methodology.zh.md)：理解 SoloMap 如何把项目推进成可执行路线图。
 2. [项目生命周期工程文档体系方法论](./methodology/project-lifecycle-engineering-docs.zh.md)：理解项目解释性文档应该如何产出和维护。
 3. [跨 Agent Harness 设计](./architecture/cross-agent-harness.zh.md)：理解 memory、skill、MCP connector 如何服务项目生命周期。
-4. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
+4. [Agent 协作机制产品边界](./architecture/agent-collaboration-boundary.zh.md)：理解主副 Agent 协作如何进入任务闭环，同时避免把内部编排负担暴露给用户。
+5. [Agent Task Flow 方法论](./methodology/agent-task-flow-methodology.zh.md)：理解 SoloMap 如何从 Agent 启动器升级为可复核、可续推、可验收的任务流。
+6. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
 
 ## 目录职责
 
