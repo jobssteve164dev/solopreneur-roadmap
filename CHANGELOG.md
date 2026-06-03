@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.147 - 2026-06-03
+
+### Changed
+- Prefill feedback issue form fields (c669ba9)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.146 - 2026-06-03
 
 ### Changed
