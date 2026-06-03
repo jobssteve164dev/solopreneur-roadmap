@@ -5251,6 +5251,9 @@ function postNodeConversations(nodeId: string): void {
     void sidebarProvider.sendSoloConversationHistory(activeProjectRoot);
   } else if (sidebarProvider && activeProjectRoot) {
     void sidebarProvider.sendStepConversationHistory(activeProjectRoot, nodeId);
+    if (nodeId !== roadmapRevisionId) {
+      void sidebarProvider.sendProjectConversationHistory(activeProjectRoot);
+    }
   }
 }
 

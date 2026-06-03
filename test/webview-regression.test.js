@@ -3370,6 +3370,37 @@ test('project-level execution history returns latest roadmap run across nodes', 
   store.close();
 });
 
+test('posting a step conversation refreshes the sidebar project-level latest run card', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__postNodeConversations = postNodeConversations;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const calls = [];
+  extensionModule.__setRuntimeForTest({
+    getAgentExecutions: () => []
+  }, '/workspace/project', {
+    sendStepConversationHistory(projectPath, nodeId) {
+      calls.push(['step', projectPath, nodeId]);
+    },
+    sendProjectConversationHistory(projectPath) {
+      calls.push(['project', projectPath]);
+    },
+    sendSoloConversationHistory(projectPath) {
+      calls.push(['solo', projectPath]);
+    }
+  });
+
+  extensionModule.__postNodeConversations('3');
+
+  assert.deepEqual(calls, [
+    ['step', '/workspace/project', '3'],
+    ['project', '/workspace/project']
+  ]);
+});
+
 test('project registry persists projects and pin state in the global SoloMap file', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
