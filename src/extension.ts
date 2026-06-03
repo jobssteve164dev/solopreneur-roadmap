@@ -2460,6 +2460,15 @@ function buildFeedbackIssueUrl(title: string, body: string, category = '', usage
   if (defaultBody) {
     params.set('body', defaultBody);
   }
+  if (issueBody) {
+    params.set('what_happened', issueBody);
+  }
+  if (issueCategory) {
+    params.set('feedback_type', issueCategory);
+  }
+  if (localUsageSummary) {
+    params.set('local_usage_summary', localUsageSummary);
+  }
   params.set('template', 'seed-user-feedback.yml');
   params.set('labels', 'feedback,seed-user');
   return `${FEEDBACK_ISSUE_URL}${params.toString() ? `?${params.toString()}` : ''}`;

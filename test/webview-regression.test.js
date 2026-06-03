@@ -289,6 +289,9 @@ test('feedback issue URL includes local usage summary when provided', () => {
   assert.equal(url.searchParams.get('template'), 'seed-user-feedback.yml');
   assert.equal(url.searchParams.get('labels'), 'feedback,seed-user');
   assert.equal(url.searchParams.get('title'), '加载问题');
+  assert.equal(url.searchParams.get('what_happened'), '侧边栏打开后没有继续动作。');
+  assert.equal(url.searchParams.get('feedback_type'), 'not_working');
+  assert.match(url.searchParams.get('local_usage_summary') || '', /Activations: 2/);
   const body = url.searchParams.get('body') || '';
   assert.match(body, /Feedback type: not_working/);
   assert.match(body, /侧边栏打开后没有继续动作。/);
