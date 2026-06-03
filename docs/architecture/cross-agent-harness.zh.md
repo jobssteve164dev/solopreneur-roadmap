@@ -166,6 +166,8 @@ Harness Enhancement 是“外部增强能力”，解决“Harness 如何让 Age
 - Harness 能在正确任务中注入正确增强。
 - Harness 能在增强失败或不适用时回退到原流程。
 
+不同增强能力的底层接入方式不应强行统一。Harness 统一 registry、policy、risk、fallback 和效果记录；`mcp`、`command_rewrite`、`prompt_policy`、`preflight`、`background_service`、`output_filter` 等差异由 adapter 吸收。设计指导见 [SoloMap Harness Enhancement Adapter 设计指导](./harness-enhancement-adapter-guidelines.zh.md)。
+
 ## Prompt 投递
 
 所有非交互 Agent 任务都以文件承载完整任务：
