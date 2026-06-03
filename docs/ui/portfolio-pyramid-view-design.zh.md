@@ -496,6 +496,89 @@ SoloMap 的三个驾驶舱分工如下：
 
 任何推断都必须以“低置信度建议”呈现，不能伪装成财务或战略事实。
 
+### 数据保存形态
+
+战略金字塔是跨项目视图，不属于某一个项目，因此数据不应写入单项目的 `.solopreneur/roadmap.csv`。推荐保存到 `.solomap-global/strategy/`：
+
+```text
+.solomap-global/
+  strategy/
+    project-strategy.csv
+    ability-registry.csv
+    pyramid-snapshot.json
+```
+
+首版只保留这三个文件，不提前铺完整财务、品牌或能力数据库。
+
+#### `project-strategy.csv`
+
+保存用户少量稳定战略标记。项目一行一个，便于 Git diff 和人工审阅。
+
+```csv
+projectPath,role,businessStage,revenueTier,timeLoad,strategicAction,abilities,updatedAt
+/home/me/solomap,core_product,commercial_validation,main,high,double_down,"cli-tools;agent-orchestration",2026-06-03
+/home/me/oldtool,maintenance,stable,no_revenue,medium,freeze,"react;devops",2026-06-03
+```
+
+字段含义：
+
+- `projectPath`：项目本地路径，用于关联 SoloMap 项目注册表。
+- `role`：`core_product / incubation / maintenance / experiment / frozen`。
+- `businessStage`：`idea / build / validation / commercial_validation / stable / sunset`。
+- `revenueTier`：`none / small / stable / main / unknown`。
+- `timeLoad`：`low / medium / high / unknown`。
+- `strategicAction`：`double_down / maintain / reduce / freeze / explore / sunset`。
+- `abilities`：分号分隔的能力标签。
+- `updatedAt`：最后更新时间。
+
+#### `ability-registry.csv`
+
+保存跨项目能力标签，只维护稳定标签，不做首版复杂能力 ROI。
+
+```csv
+abilityId,name,category,marketRelevance,notes,updatedAt
+cli-tools,CLI 工具设计,technical,high,,2026-06-03
+agent-orchestration,Agent 编排,technical,high,,2026-06-03
+technical-writing,技术写作,marketing,medium,,2026-06-03
+```
+
+#### `pyramid-snapshot.json`
+
+保存系统最近一次自动聚合出来的战略快照。JSON 适合保存层级结构、证据数组、置信度和建议。
+
+```json
+{
+  "generatedAt": "2026-06-03T12:00:00.000Z",
+  "confidence": "medium",
+  "stage": "focused_growth",
+  "signals": [
+    {
+      "type": "build_heavy",
+      "severity": "medium",
+      "summary": "Build 项目偏多，Sell / Learn 信号不足",
+      "evidence": ["3 projects in Build", "1 project in Sell"]
+    }
+  ],
+  "recommendations": [
+    {
+      "type": "strategic_action",
+      "action": "reduce_new_build",
+      "summary": "未来 30 天减少新功能建设，补商业化与反馈验证",
+      "confidence": "medium",
+      "evidence": ["Build-heavy portfolio", "low feedback signal"]
+    }
+  ]
+}
+```
+
+保存原则：
+
+- 用户战略标记用 CSV：稳定、可审阅、Git diff 清楚。
+- 系统战略快照用 JSON：结构化、可缓存、可解释。
+- 原始事实不重复保存：路线图、Issue、Actions、Release、学习候选已有来源，金字塔只引用和聚合。
+- Agent 结论必须带 `evidence`，不能只保存一句建议。
+- 单项目 `.solopreneur/roadmap.csv` 继续只服务项目推进驾驶舱，不承载战略金字塔数据。
+
 ### Agent 的数据边界
 
 Agent 只能做解释、归纳和建议，不能成为战略驾驶舱的事实源。
@@ -610,6 +693,35 @@ Pro 版解决一人公司经营：
 - 不把每次打开 Pro 功能都做成实时授权请求。
 - 不因为付费订阅而要求用户把本地项目数据同步到云端。
 - 不把战略驾驶舱的数据来源从本地事实带偏成云端账号数据。
+
+### 开源与 Pro 代码边界
+
+商业化不必等于闭源，但需要明确“代码可见性”和“功能使用权”是两件事。
+
+可选路径：
+
+| 路径 | 含义 | 优点 | 风险 |
+| --- | --- | --- | --- |
+| Pro 代码开源但需授权 | Pro 代码在公开仓库，正式发行版通过 Passport entitlement 解锁 | 透明度最高，符合 local-first 信任 | 容易被 fork 去掉授权 |
+| Core 开源，Pro 代码闭源 | Free/Core 代码公开，Pro 功能代码放私有仓库或私有包 | 商业保护更强 | local-first 信任感下降 |
+| Core 开源，Pro 规则闭源 | UI、数据边界、授权流程开源，高级评分/聚合规则可闭源 | 平衡透明与商业保护 | 需要清楚模块边界 |
+| 全部开源，只卖官方授权与服务 | 代码全公开，付费购买官方订阅、可信发行版、支持和 seat | 传播与信任最好 | 防盗版最弱 |
+
+当前建议：
+
+- 第一阶段优先采用“代码尽量开源，Pro 通过 SZLK Passport 授权控制”。
+- 先验证是否有人愿意为战略驾驶舱和跨项目洞察付费，不要过早复杂化授权结构。
+- 如果后续出现真实复制风险，再考虑把高级战略分析规则或 Pro-only 聚合模块拆成闭源包。
+
+授权选择上，GPL 可以强化强 copyleft，但会增加商业合作和 Pro 模块组合的不确定性。更适合 SoloMap 的方向是：
+
+- Core 继续保持开放透明。
+- 若需要比 MIT 更强的开源保护，可优先评估 MPL-2.0 这类文件级 copyleft。
+- Pro 功能的正式使用权仍由 SZLK Passport 控制。
+
+判断原则：
+
+> SoloMap 读取用户本地项目数据，因此透明度是产品信任资产；Pro 商业化应优先控制正式使用权，而不是一开始就牺牲 local-first 信任感。
 
 ---
 
