@@ -136,16 +136,18 @@ Harness Enhancement 是“外部增强能力”，解决“Harness 如何让 Age
 - `installed/<enhancement-id>/package/`：增强能力 package、适配说明或本地安装材料。
 - `installed/<enhancement-id>/solomap.enhancement.json`：统一增强能力元数据。
 - `installed/<enhancement-id>/source.lock.json`：来源锁定信息。
+- `installed/<enhancement-id>/health.json`：本机检测结果、版本、配置改动摘要和警告。
 - `installed/<enhancement-id>/profiles/`：不同 Agent CLI 或运行路径的接入建议。
 - `runs/`：安装、检测、修复和验证记录。
 
 挂载逻辑采用内置 curated 能力：
 
 1. SoloMap 先调研和适配第三方能力，不向普通用户开放任意来源安装。
-2. 插件内置或登记经过验证的 enhancement manifest、source lock、profiles 和 fallback。
-3. 设置页只展示用户可理解的增强开关，例如命令输出优化、代码结构辅助、MCP 工具描述压缩。
-4. 用户决定是否启用能力；插件负责检测可用性、注入策略、记录效果和回退。
-5. 开放安装流程只作为内部开发者、实验或未来 curated catalog 的维护路径，不作为普通用户动作。
+2. 插件内置或登记经过验证的 enhancement manifest、source lock、health、profiles 和 fallback。
+3. 设置页只展示用户可理解的增强状态卡，例如命令输出优化、代码结构辅助、MCP 工具描述压缩。
+4. 用户点击安装、修复或重新检测；复杂安装与配置由 Agent CLI 按 SoloMap 增强安装 skill 执行。
+5. 插件复验 Agent 写出的 result、manifest、source lock、health 和版本，通过后才允许后续任务注入或挂载。
+6. 开放任意来源安装流程只作为内部开发者、实验或未来 curated catalog 的维护路径，不作为普通用户动作。
 
 运行逻辑：
 

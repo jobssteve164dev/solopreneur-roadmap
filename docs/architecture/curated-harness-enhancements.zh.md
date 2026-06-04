@@ -2,12 +2,12 @@
 
 ## 这份文档固定什么
 
-SoloMap Harness Enhancement 不作为开放插件市场面向用户。下一阶段采用 **内置增强能力 + 用户启用开关** 的产品路径。
+SoloMap Harness Enhancement 不作为开放插件市场面向用户。下一阶段采用 **内置增强能力 + 安装/检测状态卡** 的产品路径。
 
 用户不需要粘贴 GitHub 仓库、npm 包、二进制下载地址或 adapter 配置。用户只需要知道：
 
 - 这个增强能力解决什么问题。
-- 当前是否启用。
+- 当前是否已安装、是否可用、安装版本是多少。
 - 是否需要授权。
 - 失败后是否回到原流程。
 
@@ -17,7 +17,7 @@ SoloMap Harness Enhancement 不作为开放插件市场面向用户。下一阶�
 
 增强能力服务项目推进，不服务插件管理。
 
-设置页不开放“安装任意增强能力”。设置页只展示经过 SoloMap 调研、适配和验证的能力开关：
+设置页不开放“安装任意增强能力”。设置页只展示经过 SoloMap 调研、适配和验证的能力卡片：
 
 - 命令输出优化。
 - 代码结构辅助。
@@ -25,46 +25,45 @@ SoloMap Harness Enhancement 不作为开放插件市场面向用户。下一阶�
 - 极简回复模式。
 - 记忆文件压缩。
 
-能力可以显示收益和风险，但不把 `mcp`、`command_rewrite`、`output_filter`、hook、profile、source lock、registry path 当作用户主语。
+能力可以显示收益、状态、版本和下一步动作，但不把 `mcp`、`command_rewrite`、`output_filter`、hook、profile、source lock、registry path 当作用户主语。
 
 ## 内部挂载模型
 
-每个内置增强能力仍然进入 `.solomap-global/enhancements` 的 registry 和 manifest，但来源安装、更新、兼容性和 fallback 由 SoloMap 维护。
+每个内置增强能力仍然进入 `.solomap-global/enhancements` 的 registry 和 manifest，但真实安装、更新和修复由 Agent CLI 按 SoloMap 安装 skill 执行；插件只负责复验、登记、状态展示、运行时消费和 fallback。
 
 内部结构保留：
 
 - `solomap.enhancement.json`：能力身份、适用场景、风险、adapter、fallback、证据策略。
 - `source.lock.json`：供应方来源、版本、commit、校验信息。
+- `health.json`：本机可用性、版本、检测时间、配置改动摘要和警告。
 - `profiles/`：不同 Agent CLI 或运行链路的接入建议。
 - `runs/`：检测、验证和排障记录。
 
-用户界面只映射到开关：
+用户界面只映射到状态和动作：
 
 ```text
-命令输出优化        开 / 关
-代码结构辅助        开 / 关
-MCP 工具描述压缩    开 / 关
-极简回复模式        关 / 手动 / 始终
-记忆文件压缩        手动运行
+命令输出优化        未安装 / 已安装 / 需要修复    版本    安装 / 修复 / 重新检测
+代码结构辅助        未安装 / 已安装 / 需要修复    版本    安装 / 修复 / 重新检测
+MCP 工具描述压缩    未安装 / 已安装 / 需要修复    版本    安装 / 修复 / 重新检测
 ```
 
 ## 第一版闭环边界
 
-首版只落地三个低维护成本的内置开关：
+首版只落地三个内置增强能力卡片：
 
 - 命令输出优化。
 - 代码结构辅助。
 - MCP 工具描述压缩。
 
-这三个开关进入设置页、受管安装配置链路和 Agent runtime 挂载链路。用户关闭时不注入、不挂载；用户开启后，SoloMap 会启动受管 setup 终端，按上游安装器或包管理器安装/配置对应能力，并在后续 Agent run 中挂载真实运行环境。
+这三个能力进入设置页、Agent 安装链路、插件复验链路和 Agent runtime 挂载链路。未安装或复验未通过时不注入、不挂载；用户点击安装或修复后，SoloMap 唤起当前默认 Agent CLI，要求 Agent 按内置增强安装 skill 安装、配置、写 manifest/source lock/health/result；插件读取 result 并复验通过后才标记为可用。
 
 首版仍不开放任意增强能力安装入口，也不把第三方仓库代码复制进主仓。供应方来源只作为内置 manifest 的 source 信息、安装命令和后续适配依据保留。真实接入跟随上游仓库或包管理器更新，由 Harness 侧生成 profile、wrapper、MCP 配置建议和 fallback。
 
 首版真实影响：
 
 - 命令输出优化：生成 SoloMap 受管 PATH wrapper，在 Agent run 中前置常见 shell 命令；rtk 可用时走 `rtk <command>`，不可用时回退原始命令。
-- 代码结构辅助：setup 安装/配置 CodeGraph；Agent run 前检测 `codegraph`，缺少 `.codegraph/` 时初始化索引，并把 `.codegraph/` 加入 git info exclude。
-- MCP 工具描述压缩：setup 运行 caveman installer 的 MCP shrink 路径，注册 caveman-shrink 描述压缩能力；失败时不阻断主任务。
+- 代码结构辅助：Agent 安装/配置 CodeGraph；Agent run 前检测 `codegraph`，缺少 `.codegraph/` 时初始化索引，并把 `.codegraph/` 加入 git info exclude。
+- MCP 工具描述压缩：Agent 安装 caveman MCP shrink 路径，注册描述压缩能力；失败时不阻断主任务。
 
 第二轮共同消费层：
 
@@ -179,7 +178,7 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 
 挂载规则：
 
-- setup 使用上游 `codegraph install --target=auto --location=global --yes` 配置支持的 Agent。
+- 安装 Agent 负责按上游方式安装和配置 CodeGraph，并在 health/result 中记录版本与配置改动。
 - Agent run 前如果 `codegraph` 可用且当前项目没有 `.codegraph/`，执行 `codegraph init -i` 建立索引。
 - Agent run 前生成 CodeGraph 上下文包，包含 `codegraph status`、基于本轮任务文本的 `codegraph query`、`codegraph files` 和当前 diff 的 `codegraph affected`。
 - 任务开始前可提供相关符号、模块、调用关系的短摘要。
@@ -363,15 +362,16 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 
 ## 下一步集成顺序
 
-第一步：把设置页从“安装增强能力”改成“内置增强能力开关”。
-第二步：在 registry 中写入内置 curated enhancement manifest。
-第三步：先实现只读/低副作用能力：
+第一步：把设置页从“启用开关”改成“内置增强能力安装/检测状态卡”。
+第二步：新增增强安装 skill，并让 Agent CLI 负责复杂安装与配置。
+第三步：插件复验 result、manifest、source lock、health 和版本后写入 registry。
+第四步：先实现只读/低副作用能力：
 
 1. MCP 工具描述压缩 profile 生成。
 2. 命令输出优化的 prompt 建议和原始输出回退协议。
 3. 代码结构辅助的候选注入占位和可用性检测。
 
-第四步：把高风险能力保持为手动动作：
+第五步：把高风险能力保持为手动动作：
 
 - 极简回复模式仅影响内部技术对话。
 - 记忆文件压缩必须逐文件确认。
@@ -380,7 +380,8 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 
 - 禁止开放任意第三方增强来源安装给普通用户。
 - 禁止把供应方名称当作设置页主语。
-- 禁止默认写入 Agent 私有配置、全局 shell hook、IDE rule file 或 OpenClaw workspace。
+- 禁止由插件直接执行复杂安装命令；复杂安装、配置和修复必须交给 Agent CLI 的受控安装任务，插件只做复验与登记。
+- 禁止默认写入 Agent 私有配置、全局 shell hook、IDE rule file 或 OpenClaw workspace；若上游安装器确实修改配置，Agent 必须在 health/result 中列出改动。
 - 禁止让增强能力替代当前文件、命令输出、测试和日志。
 - 禁止让增强失败阻断主任务。
 - 禁止自动压缩长期文档或用户可见内容。

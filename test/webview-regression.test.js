@@ -738,13 +738,13 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /id="btn-install-mcp"/);
   assert.match(script, /installMcp/);
   assert.match(script, /mcpInstallResult/);
-  assert.match(html, /id="setting-enhancement-command-output-optimizer"/);
-  assert.match(html, /id="setting-enhancement-code-structure-assistant"/);
-  assert.match(html, /id="setting-enhancement-mcp-description-compressor"/);
+  assert.match(html, /id="enhancement-list"/);
+  assert.match(html, /id="enhancement-install-badge"/);
   assert.doesNotMatch(html, /id="setting-enhancement-input"/);
-  assert.doesNotMatch(html, /id="btn-install-enhancement"/);
-  assert.doesNotMatch(script, /installEnhancement/);
-  assert.doesNotMatch(script, /enhancementInstallResult/);
+  assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
+  assert.match(script, /installEnhancement/);
+  assert.match(script, /checkEnhancement/);
+  assert.match(script, /enhancementInstallResult/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -912,13 +912,13 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="btn-install-mcp"/);
   assert.match(html, /installMcp/);
   assert.match(html, /mcpInstallResult/);
-  assert.match(html, /id="setting-enhancement-command-output-optimizer"/);
-  assert.match(html, /id="setting-enhancement-code-structure-assistant"/);
-  assert.match(html, /id="setting-enhancement-mcp-description-compressor"/);
+  assert.match(html, /id="enhancement-list"/);
+  assert.match(html, /id="enhancement-install-badge"/);
   assert.doesNotMatch(html, /id="setting-enhancement-input"/);
-  assert.doesNotMatch(html, /id="btn-install-enhancement"/);
-  assert.doesNotMatch(html, /installEnhancement/);
-  assert.doesNotMatch(html, /enhancementInstallResult/);
+  assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
+  assert.match(html, /installEnhancement/);
+  assert.match(html, /checkEnhancement/);
+  assert.match(html, /enhancementInstallResult/);
   assert.match(html, /\.onboarding-panel\s*\{/);
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);
@@ -1421,7 +1421,10 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__writeSolomapEnhancementRegistry = writeSolomapEnhancementRegistry;',
       'module.exports.__buildSolomapEnhancementCandidateInstructions = buildSolomapEnhancementCandidateInstructions;',
       'module.exports.__ensureSolomapEnhancementRuntime = ensureSolomapEnhancementRuntime;',
-      'module.exports.__buildHarnessEnhancementSetupScript = buildHarnessEnhancementSetupScript;',
+      'module.exports.__buildEnhancementInstallPrompt = buildEnhancementInstallPrompt;',
+      'module.exports.__validateAndRegisterEnhancementInstall = validateAndRegisterEnhancementInstall;',
+      'module.exports.__getSolomapEnhancementStatusSummaries = getSolomapEnhancementStatusSummaries;',
+      'module.exports.__checkAndRegisterEnhancement = checkAndRegisterEnhancement;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__buildRoadmapValidationScript = buildRoadmapValidationScript;',
       'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
@@ -1810,7 +1813,8 @@ test('agent command builder uses non-interactive task runs and native continuati
     'solomap-global-execution-guide',
     'solomap-roadmap-planning',
     'solomap-project-docs-lifecycle',
-    'solomap-cross-project-memory'
+    'solomap-cross-project-memory',
+    'solomap-enhancement-installer'
   ].forEach((skillId) => {
     const builtinSkillPath = path.join(skillStore.skillsRoot, 'installed', skillId);
     assert.ok(fs.existsSync(path.join(builtinSkillPath, 'package', 'SKILL.md')));
@@ -1823,6 +1827,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-roadmap-planning')?.defaultCandidate, true);
   assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-project-docs-lifecycle')?.defaultCandidate, true);
   assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-cross-project-memory')?.defaultCandidate, true);
+  assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-enhancement-installer')?.defaultCandidate, false);
   const builtinInstructions = extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '调整路线图，更新项目文档，并沉淀跨项目记忆');
   assert.match(builtinInstructions, /SoloMap Global Execution Guide/);
   assert.match(builtinInstructions, /installed\/solomap-global-execution-guide\/package\/SKILL\.md/);
@@ -2000,11 +2005,34 @@ test('agent command builder uses non-interactive task runs and native continuati
   const disabledBuiltinInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions('/workspace/app', enhancementStoreRoot, '需要减少命令输出 token，同时保留失败日志');
   assert.doesNotMatch(disabledBuiltinInstructions, /Command Output Optimizer/);
 
+  const builtinInstalledRegistry = extensionModule.__readSolomapEnhancementRegistry('/workspace/app', enhancementStoreRoot);
+  extensionModule.__writeSolomapEnhancementRegistry('/workspace/app', enhancementStoreRoot, {
+    ...builtinInstalledRegistry,
+    enhancements: builtinInstalledRegistry.enhancements.concat([{
+      id: 'command-output-optimizer',
+      title: 'Command Output Optimizer',
+      status: 'installed',
+      version: '1.0.0',
+      health: { ok: true, version: '1.0.0', message: 'Ready' }
+    }, {
+      id: 'code-structure-assistant',
+      title: 'Code Structure Assistant',
+      status: 'installed',
+      version: '2.0.0',
+      health: { ok: true, version: '2.0.0', message: 'Ready' }
+    }, {
+      id: 'mcp-description-compressor',
+      title: 'MCP Description Compressor',
+      status: 'installed',
+      version: '3.0.0',
+      health: { ok: true, version: '3.0.0', message: 'Ready' }
+    }])
+  });
+
   const enabledBuiltinInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
     '/workspace/app',
     enhancementStoreRoot,
-    '需要减少命令输出 token，同时保留失败日志',
-    { 'command-output-optimizer': true }
+    '需要减少命令输出 token，同时保留失败日志'
   );
   assert.match(enabledBuiltinInstructions, /Command Output Optimizer/);
   assert.match(enabledBuiltinInstructions, /command_rewrite/);
@@ -2013,8 +2041,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   const codeGraphInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
     '/workspace/app',
     enhancementStoreRoot,
-    '重构前需要检查函数引用和调用影响面',
-    { 'code-structure-assistant': true }
+    '重构前需要检查函数引用和调用影响面'
   );
   assert.match(codeGraphInstructions, /Code Structure Assistant/);
   assert.match(codeGraphInstructions, /mcp/);
@@ -2022,8 +2049,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   const mcpShrinkInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
     '/workspace/app',
     enhancementStoreRoot,
-    'MCP tool description 和 schema 占用太多上下文',
-    { 'mcp-description-compressor': true }
+    'MCP tool description 和 schema 占用太多上下文'
   );
   assert.match(mcpShrinkInstructions, /MCP Description Compressor/);
   assert.match(mcpShrinkInstructions, /external_mcp_proxy/);
@@ -2046,17 +2072,51 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(runtime.envLines.join('\n'), /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
   assert.match(runtime.preflightLines.join('\n'), /codegraph init -i/);
 
-  const setup = extensionModule.__buildHarnessEnhancementSetupScript('/workspace/app', enhancementRuntimeRoot, {
-    'command-output-optimizer': true,
-    'code-structure-assistant': true,
-    'mcp-description-compressor': true
-  });
-  const setupScript = fs.readFileSync(setup.scriptPath, 'utf8');
-  assert.match(setupScript, /github\.com\/rtk-ai\/rtk/);
-  assert.match(setupScript, /@colbymchenry\/codegraph/);
-  assert.match(setupScript, /codegraph install --target=auto --location=global --yes/);
-  assert.match(setupScript, /github:JuliusBrussee\/caveman/);
-  assert.match(setupScript, /--with-mcp-shrink/);
+  const enhancementInstallPrompt = extensionModule.__buildEnhancementInstallPrompt(
+    'code-structure-assistant',
+    '/workspace/app',
+    enhancementRuntimeRoot,
+    path.join(enhancementRuntimeRoot, 'enhancements/runs/run/result.json')
+  );
+  assert.match(enhancementInstallPrompt, /solomap-enhancement-installer/);
+  assert.match(enhancementInstallPrompt, /code-structure-assistant/);
+  assert.match(enhancementInstallPrompt, /安装结果 JSON 必须写入/);
+  assert.doesNotMatch(enhancementInstallPrompt, /codegraph install --target=auto --location=global --yes\s*\|\| true/);
+
+  const validationEnhancementStore = extensionModule.__ensureSolomapEnhancementStore('/workspace/app', enhancementRuntimeRoot);
+  const fakeEnhancementRoot = path.join(validationEnhancementStore.installedRoot, 'code-structure-assistant');
+  fs.mkdirSync(fakeEnhancementRoot, { recursive: true });
+  const fakeEnhancementJson = path.join(fakeEnhancementRoot, 'solomap.enhancement.json');
+  const fakeSourceLock = path.join(fakeEnhancementRoot, 'source.lock.json');
+  const fakeHealth = path.join(fakeEnhancementRoot, 'health.json');
+  fs.writeFileSync(fakeEnhancementJson, JSON.stringify({
+    id: 'code-structure-assistant',
+    title: 'Code Structure Assistant',
+    description: 'Use code graph lookup.',
+    status: 'installed',
+    version: '1.2.3',
+    activation: { keywords: ['codegraph'] },
+    risk: { level: 'low' }
+  }, null, 2), 'utf8');
+  fs.writeFileSync(fakeSourceLock, JSON.stringify({ source: { name: 'CodeGraph' }, version: '1.2.3' }, null, 2), 'utf8');
+  fs.writeFileSync(fakeHealth, JSON.stringify({ ok: true, version: '1.2.3', message: 'Ready' }, null, 2), 'utf8');
+  const fakeEnhancementResult = path.join(enhancementRuntimeRoot, 'enhancement-result.json');
+  fs.writeFileSync(fakeEnhancementResult, JSON.stringify({
+    ok: true,
+    enhancementId: 'code-structure-assistant',
+    installedPath: fakeEnhancementRoot,
+    solomapEnhancementJson: fakeEnhancementJson,
+    sourceLockJson: fakeSourceLock,
+    healthJson: fakeHealth,
+    metadata: { version: '1.2.3' },
+    health: { ok: true, version: '1.2.3', message: 'Ready' }
+  }, null, 2), 'utf8');
+  const enhancementValidation = extensionModule.__validateAndRegisterEnhancementInstall('/workspace/app', enhancementRuntimeRoot, fakeEnhancementResult);
+  assert.equal(enhancementValidation.ok, true);
+  const enhancementStatuses = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot);
+  const codeGraphStatus = enhancementStatuses.find((item) => item.id === 'code-structure-assistant');
+  assert.equal(codeGraphStatus.installed, true);
+  assert.equal(codeGraphStatus.version, '1.2.3');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',
