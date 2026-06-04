@@ -24,6 +24,209 @@ const securityHeaders = {
   "x-frame-options": "DENY"
 };
 
+const content = {
+  en: {
+    lang: "en",
+    pathPrefix: "",
+    homePath: "/",
+    privacyPath: "/privacy-local-first",
+    alternateLabel: "中文",
+    alternateHomePath: "/zh",
+    alternatePrivacyPath: "/zh/privacy-local-first",
+    nav: {
+      product: "Product",
+      pro: "Pro",
+      docs: "Docs",
+      github: "GitHub",
+      install: "Install"
+    },
+    meta: {
+      title: "SoloMap - Local-first roadmap and strategy cockpit for AI-built projects",
+      description: "SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.",
+      ogDescription: "Keep your AI-built projects moving with a local-first roadmap and strategy cockpit in VS Code."
+    },
+    hero: {
+      eyebrow: "Local-first VS Code extension",
+      title: "Keep your AI-built projects moving.",
+      copy: "SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.",
+      support: "Let AI agents execute. Let SoloMap keep the direction clear.",
+      primaryCta: "Install from VS Code Marketplace",
+      secondaryCta: "Get it on Open VSX",
+      githubCta: "View on GitHub",
+      proofLabel: "Product highlights",
+      proof: ["Works in your workspace", "Bring your own Agent CLI", "Free core workflow"],
+      screenshotLabel: "SoloMap running in VS Code",
+      screenshotAlt: "SoloMap roadmap and Agent terminal running inside Visual Studio Code"
+    },
+    problem: {
+      title: "AI can write code. It does not keep your product on track.",
+      lead: "SoloMap keeps plans, Agent runs, next actions, and project memory in the place where you already work.",
+      cards: [
+        ["Scattered context", "Project plans, AI chats, terminal output, TODOs, and code changes stop living as disconnected fragments."],
+        ["Clear next step", "Come back days later and see what needs attention without rereading every chat and file."],
+        ["Beyond only Build", "Roadmaps can keep Sell, Learn, Improve, feedback, and delivery signals visible while code keeps moving."]
+      ]
+    },
+    workflow: {
+      title: "From idea to shipped progress, without losing the thread.",
+      lead: "Four actions are enough to start with one real project.",
+      steps: [
+        ["Add your local project", "Choose a workspace folder and let SoloMap create the project operating surface there."],
+        ["Create a roadmap", "Describe the outcome and get a set of executable steps you can revise as reality changes."],
+        ["Run your AI agent", "Start your local Agent CLI from the right roadmap step with the context already attached."],
+        ["Come back and continue", "See today's priorities, project status, and recent progress when you reopen VS Code."]
+      ]
+    },
+    trust: {
+      title: "Local-first by default.",
+      copy: "SoloMap's core workflow does not require a hosted backend. Roadmaps, task records, and project memory stay in your workspace first.",
+      items: [
+        "Your project roadmap and memory stay with your local project.",
+        "You bring the AI Agent CLI you already use.",
+        "GitHub signals are pulled when you connect or refresh them."
+      ]
+    },
+    pro: {
+      title: "Free moves one project forward. Pro helps run your one-person company.",
+      features: [
+        "Strategy cockpit",
+        "Multi-project scoring",
+        "Portfolio health",
+        "Ability compounding",
+        "Market and delivery diagnosis",
+        "Early access roadmap input"
+      ],
+      label: "Pro Early Access",
+      price: "$29/year",
+      copy: "Get early access to the strategy cockpit and help shape the Pro roadmap. The Free core workflow stays available.",
+      cta: "Join Pro Early Access"
+    },
+    install: {
+      title: "Try SoloMap with one project first.",
+      lead: "If it helps you keep momentum, tell us what the strategy cockpit should show next.",
+      marketplace: "VS Code Marketplace",
+      openVsx: "Open VSX",
+      github: "GitHub repository",
+      feedback: "Send feedback"
+    },
+    footer: {
+      feedback: "Feedback",
+      privacy: "Privacy / Local-first note"
+    },
+    privacy: {
+      title: "SoloMap Local-first Note",
+      back: "Back to SoloMap",
+      heading: "Local-first note",
+      copy: "SoloMap's core workflow keeps roadmap state, task records, and project memory in your local workspace by default. It does not require a hosted SoloMap backend to run the main project workflow.",
+      items: [
+        "Your AI provider usage depends on the local Agent CLI you choose.",
+        "GitHub data is used when you connect or refresh GitHub-backed signals.",
+        "Feedback is sent only when you open or submit a feedback issue yourself."
+      ]
+    }
+  },
+  zh: {
+    lang: "zh-Hans",
+    pathPrefix: "/zh",
+    homePath: "/zh",
+    privacyPath: "/zh/privacy-local-first",
+    alternateLabel: "English",
+    alternateHomePath: "/",
+    alternatePrivacyPath: "/privacy-local-first",
+    nav: {
+      product: "产品",
+      pro: "Pro",
+      docs: "文档",
+      github: "GitHub",
+      install: "安装"
+    },
+    meta: {
+      title: "SoloMap - 给 AI Agent 项目的本地优先路线图与战略驾驶舱",
+      description: "SoloMap 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。",
+      ogDescription: "让 AI Agent 负责执行，让 SoloMap 负责不丢方向。"
+    },
+    hero: {
+      eyebrow: "本地优先的 VS Code 插件",
+      title: "让 AI 项目持续往前走。",
+      copy: "SoloMap 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。",
+      support: "把产品想法、路线图、Agent 执行历史和下一步动作放回你的本地工作区。",
+      primaryCta: "从 VS Code Marketplace 安装",
+      secondaryCta: "在 Open VSX 获取",
+      githubCta: "查看 GitHub",
+      proofLabel: "产品亮点",
+      proof: ["在你的工作区里运行", "使用你已有的 Agent CLI", "Free 主路径保持可用"],
+      screenshotLabel: "SoloMap 在 VS Code 中运行",
+      screenshotAlt: "SoloMap 路线图和 Agent 终端在 Visual Studio Code 中运行"
+    },
+    problem: {
+      title: "AI 能写代码，但不会自动帮你经营项目方向。",
+      lead: "SoloMap 把计划、Agent 执行、下一步动作和项目记忆留在你真正工作的地方。",
+      cards: [
+        ["上下文散落", "项目计划、AI 对话、终端输出、TODO 和代码修改不再散落在不同地方。"],
+        ["下一步清楚", "几天后重新打开项目，也能立刻看见当前该处理什么。"],
+        ["不只停在 Build", "路线图持续提醒 Sell、Learn、Improve、反馈和交付信号，不让项目只是在改代码。"]
+      ]
+    },
+    workflow: {
+      title: "从想法到真实推进，不丢掉上下文。",
+      lead: "从一个真实项目开始，只需要四个动作。",
+      steps: [
+        ["添加本地项目", "选择一个工作区文件夹，让 SoloMap 在那里建立项目推进界面。"],
+        ["生成路线图", "描述目标，得到一组可执行、可调整的路线图环节。"],
+        ["运行你的 AI Agent", "从正确的路线图环节启动本地 Agent CLI，并自动带上上下文。"],
+        ["回来继续推进", "下次打开 VS Code 时，直接看到今日安排、项目状态和最近进展。"]
+      ]
+    },
+    trust: {
+      title: "默认本地优先。",
+      copy: "SoloMap 的核心工作流不要求托管后端。路线图、任务记录和项目记忆优先留在你的本地工作区。",
+      items: [
+        "项目路线图和记忆跟随你的本地项目保存。",
+        "你继续使用自己已经安装的 AI Agent CLI。",
+        "GitHub 信号只在你连接或刷新时拉取。"
+      ]
+    },
+    pro: {
+      title: "Free 帮你推进一个项目；Pro 帮你经营一人公司。",
+      features: [
+        "战略驾驶舱",
+        "多项目战略评分",
+        "项目组合健康度",
+        "能力复利分析",
+        "市场与交付结构诊断",
+        "Early Access 路线图共创"
+      ],
+      label: "Pro Early Access",
+      price: "$29/年",
+      copy: "提前使用战略驾驶舱，并参与塑造 Pro 路线图。Free 核心工作流会继续保持可用。",
+      cta: "加入 Pro Early Access"
+    },
+    install: {
+      title: "先用一个项目试试 SoloMap。",
+      lead: "如果它帮你保持推进，请告诉我们金字塔战略驾驶舱下一步应该看见什么。",
+      marketplace: "VS Code Marketplace",
+      openVsx: "Open VSX",
+      github: "GitHub 仓库",
+      feedback: "提交反馈"
+    },
+    footer: {
+      feedback: "反馈",
+      privacy: "隐私 / 本地优先说明"
+    },
+    privacy: {
+      title: "SoloMap 本地优先说明",
+      back: "返回 SoloMap",
+      heading: "本地优先说明",
+      copy: "SoloMap 的核心工作流默认把路线图状态、任务记录和项目记忆保存在你的本地工作区。主项目推进流程不要求托管的 SoloMap 后端。",
+      items: [
+        "AI 服务的使用取决于你选择的本地 Agent CLI。",
+        "GitHub 数据只在你连接或刷新相关信号时使用。",
+        "反馈只会在你主动打开或提交反馈 Issue 时发送。"
+      ]
+    }
+  }
+};
+
 function htmlResponse(body, status = 200) {
   return new Response(body, {
     status,
@@ -45,20 +248,50 @@ function textResponse(body, contentType = "text/plain; charset=utf-8") {
   });
 }
 
-function buildPage() {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function absoluteUrl(path, origin) {
+  return `${origin}${path}`;
+}
+
+function englishPathFor(pagePath) {
+  if (!pagePath.startsWith("/zh")) {
+    return pagePath;
+  }
+  return pagePath.slice(3) || "/";
+}
+
+function chinesePathFor(pagePath) {
+  if (pagePath.startsWith("/zh")) {
+    return pagePath;
+  }
+  return `/zh${pagePath === "/" ? "" : pagePath}`;
+}
+
+function buildHead(t, origin, pagePath) {
+  return `<meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SoloMap - Local-first roadmap and strategy cockpit for AI-built projects</title>
-  <meta name="description" content="SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.">
+  <title>${escapeHtml(t.meta.title)}</title>
+  <meta name="description" content="${escapeHtml(t.meta.description)}">
+  <link rel="canonical" href="${absoluteUrl(pagePath, origin)}">
+  <link rel="alternate" hreflang="en" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
+  <link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
+  <link rel="alternate" hreflang="x-default" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
   <meta property="og:title" content="SoloMap">
-  <meta property="og:description" content="Keep your AI-built projects moving with a local-first roadmap and strategy cockpit in VS Code.">
+  <meta property="og:description" content="${escapeHtml(t.meta.ogDescription)}">
   <meta property="og:image" content="${SCREENSHOT_URL}">
-  <meta property="og:url" content="${SITE_ORIGIN}">
-  <meta name="twitter:card" content="summary_large_image">
-  <style>
+  <meta property="og:url" content="${absoluteUrl(pagePath, origin)}">
+  <meta name="twitter:card" content="summary_large_image">`;
+}
+
+function buildStyles() {
+  return `<style>
     :root {
       color-scheme: dark;
       --ink: #f6f0e8;
@@ -110,11 +343,16 @@ function buildPage() {
     .links {
       display: flex;
       align-items: center;
-      gap: 20px;
+      gap: 18px;
       color: var(--soft);
       font-size: 14px;
     }
     .links a:hover { color: var(--ink); }
+    .language-link {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 10px;
+    }
     .install-link {
       color: #11100e;
       background: var(--ink);
@@ -150,8 +388,8 @@ function buildPage() {
     h1 {
       margin: 0;
       max-width: 720px;
-      font-size: clamp(46px, 8vw, 86px);
-      line-height: 0.94;
+      font-size: clamp(44px, 8vw, 86px);
+      line-height: 0.96;
       letter-spacing: 0;
     }
     .hero-copy {
@@ -180,6 +418,7 @@ function buildPage() {
       padding: 0 18px;
       font-weight: 760;
       border: 1px solid var(--line);
+      text-align: center;
     }
     .button.primary { background: var(--red); border-color: var(--red); color: white; }
     .button.secondary { color: #11100e !important; background: #f6f0e8; }
@@ -225,7 +464,7 @@ function buildPage() {
     h2 {
       margin: 0;
       font-size: clamp(30px, 4vw, 52px);
-      line-height: 1;
+      line-height: 1.05;
       letter-spacing: 0;
     }
     .section-head p,
@@ -364,8 +603,25 @@ function buildPage() {
       flex-wrap: wrap;
       gap: 16px;
     }
+    .privacy-page {
+      width: min(760px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 72px 0;
+    }
+    .privacy-nav {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 32px;
+    }
+    .privacy-page a { color: var(--cyan); }
+    .privacy-page h1 { margin-bottom: 22px; }
+    .privacy-page p,
+    .privacy-page li { color: var(--soft); font-size: 18px; }
+    .privacy-page ul { padding-left: 22px; }
     @media (max-width: 920px) {
-      .links a:not(.install-link) { display: none; }
+      .links a:not(.install-link):not(.language-link) { display: none; }
       .hero { min-height: auto; padding-top: 44px; }
       .hero-grid,
       .section-head,
@@ -384,28 +640,58 @@ function buildPage() {
     @media (max-width: 560px) {
       .shell { width: min(100% - 28px, 1160px); }
       .brand span { font-size: 15px; }
-      .install-link { padding: 8px 10px; }
-      h1 { font-size: 46px; }
+      .links { gap: 8px; }
+      .install-link,
+      .language-link { padding: 8px 10px; }
+      h1 { font-size: 44px; }
       .hero-copy { font-size: 17px; }
       .button { width: 100%; }
       .install-actions { grid-template-columns: 1fr; }
       .section { padding: 58px 0; }
     }
-  </style>
+  </style>`;
+}
+
+function renderCards(cards) {
+  return cards.map(([title, copy]) => `<article class="card">
+            <h3>${escapeHtml(title)}</h3>
+            <p>${escapeHtml(copy)}</p>
+          </article>`).join("");
+}
+
+function renderSteps(steps) {
+  return steps.map(([title, copy], index) => `<article class="card step" data-step="${index + 1}">
+            <h3>${escapeHtml(title)}</h3>
+            <p>${escapeHtml(copy)}</p>
+          </article>`).join("");
+}
+
+function renderListItems(items, tagName) {
+  return items.map((item) => `<${tagName}>${escapeHtml(item)}</${tagName}>`).join("");
+}
+
+function buildPage(locale, origin) {
+  const t = content[locale];
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead(t, origin, t.homePath, t.alternateHomePath)}
+  ${buildStyles()}
 </head>
 <body>
   <header class="topbar">
     <nav class="shell nav" aria-label="Primary">
-      <a class="brand" href="/" aria-label="SoloMap home">
+      <a class="brand" href="${t.homePath}" aria-label="SoloMap home">
         <img src="${LOGO_URL}" width="34" height="34" alt="">
         <span>SoloMap</span>
       </a>
       <div class="links">
-        <a href="#product">Product</a>
-        <a href="#pro">Pro</a>
-        <a href="${DOCS_URL}">Docs</a>
-        <a href="${GITHUB_URL}">GitHub</a>
-        <a class="install-link" href="${MARKETPLACE_URL}">Install</a>
+        <a href="#product">${escapeHtml(t.nav.product)}</a>
+        <a href="#pro">${escapeHtml(t.nav.pro)}</a>
+        <a href="${DOCS_URL}">${escapeHtml(t.nav.docs)}</a>
+        <a href="${GITHUB_URL}">${escapeHtml(t.nav.github)}</a>
+        <a class="language-link" href="${t.alternateHomePath}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
+        <a class="install-link" href="${MARKETPLACE_URL}">${escapeHtml(t.nav.install)}</a>
       </div>
     </nav>
   </header>
@@ -414,23 +700,21 @@ function buildPage() {
     <section class="hero">
       <div class="shell hero-grid">
         <div>
-          <div class="eyebrow">Local-first VS Code extension</div>
-          <h1>Keep your AI-built projects moving.</h1>
-          <p class="hero-copy">SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.</p>
-          <p class="cn-line">让 AI Agent 负责执行，让 SoloMap 负责不丢方向。</p>
+          <div class="eyebrow">${escapeHtml(t.hero.eyebrow)}</div>
+          <h1>${escapeHtml(t.hero.title)}</h1>
+          <p class="hero-copy">${escapeHtml(t.hero.copy)}</p>
+          <p class="cn-line">${escapeHtml(t.hero.support)}</p>
           <div class="cta-row">
-            <a class="button primary" href="${MARKETPLACE_URL}">Install from VS Code Marketplace</a>
-            <a class="button secondary" href="${OPEN_VSX_URL}">Get it on Open VSX</a>
-            <a class="button ghost" href="${GITHUB_URL}">View on GitHub</a>
+            <a class="button primary" href="${MARKETPLACE_URL}">${escapeHtml(t.hero.primaryCta)}</a>
+            <a class="button secondary" href="${OPEN_VSX_URL}">${escapeHtml(t.hero.secondaryCta)}</a>
+            <a class="button ghost" href="${GITHUB_URL}">${escapeHtml(t.hero.githubCta)}</a>
           </div>
-          <div class="proof" aria-label="Product highlights">
-            <span>Works in your workspace</span>
-            <span>Bring your own Agent CLI</span>
-            <span>Free core workflow</span>
+          <div class="proof" aria-label="${escapeHtml(t.hero.proofLabel)}">
+            ${renderListItems(t.hero.proof, "span")}
           </div>
         </div>
-        <figure class="screenshot-wrap" aria-label="SoloMap running in VS Code">
-          <img src="${SCREENSHOT_URL}" width="1024" height="1024" alt="SoloMap roadmap and Agent terminal running inside Visual Studio Code">
+        <figure class="screenshot-wrap" aria-label="${escapeHtml(t.hero.screenshotLabel)}">
+          <img src="${SCREENSHOT_URL}" width="1024" height="1024" alt="${escapeHtml(t.hero.screenshotAlt)}">
         </figure>
       </div>
     </section>
@@ -438,22 +722,11 @@ function buildPage() {
     <section class="section" id="product">
       <div class="shell">
         <div class="section-head">
-          <h2>AI can write code. It does not keep your product on track.</h2>
-          <p>SoloMap keeps plans, Agent runs, next actions, and project memory in the place where you already work.</p>
+          <h2>${escapeHtml(t.problem.title)}</h2>
+          <p>${escapeHtml(t.problem.lead)}</p>
         </div>
         <div class="grid-3">
-          <article class="card">
-            <h3>Scattered context</h3>
-            <p>Project plans, AI chats, terminal output, TODOs, and code changes stop living as disconnected fragments.</p>
-          </article>
-          <article class="card">
-            <h3>Clear next step</h3>
-            <p>Come back days later and see what needs attention without rereading every chat and file.</p>
-          </article>
-          <article class="card">
-            <h3>Beyond only Build</h3>
-            <p>Roadmaps can keep Sell, Learn, Improve, feedback, and delivery signals visible while code keeps moving.</p>
-          </article>
+          ${renderCards(t.problem.cards)}
         </div>
       </div>
     </section>
@@ -461,26 +734,11 @@ function buildPage() {
     <section class="section">
       <div class="shell">
         <div class="section-head">
-          <h2>From idea to shipped progress, without losing the thread.</h2>
-          <p>Four actions are enough to start with one real project.</p>
+          <h2>${escapeHtml(t.workflow.title)}</h2>
+          <p>${escapeHtml(t.workflow.lead)}</p>
         </div>
         <div class="grid-4">
-          <article class="card step" data-step="1">
-            <h3>Add your local project</h3>
-            <p>Choose a workspace folder and let SoloMap create the project operating surface there.</p>
-          </article>
-          <article class="card step" data-step="2">
-            <h3>Create a roadmap</h3>
-            <p>Describe the outcome and get a set of executable steps you can revise as reality changes.</p>
-          </article>
-          <article class="card step" data-step="3">
-            <h3>Run your AI agent</h3>
-            <p>Start your local Agent CLI from the right roadmap step with the context already attached.</p>
-          </article>
-          <article class="card step" data-step="4">
-            <h3>Come back and continue</h3>
-            <p>See today's priorities, project status, and recent progress when you reopen VS Code.</p>
-          </article>
+          ${renderSteps(t.workflow.steps)}
         </div>
       </div>
     </section>
@@ -488,13 +746,11 @@ function buildPage() {
     <section class="section">
       <div class="shell trust-band">
         <div class="trust-copy">
-          <h2>Local-first by default.</h2>
-          <p>SoloMap's core workflow does not require a hosted backend. Roadmaps, task records, and project memory stay in your workspace first.</p>
+          <h2>${escapeHtml(t.trust.title)}</h2>
+          <p>${escapeHtml(t.trust.copy)}</p>
         </div>
         <div class="trust-list">
-          <div>Your project roadmap and memory stay with your local project.</div>
-          <div>You bring the AI Agent CLI you already use.</div>
-          <div>GitHub signals are pulled when you connect or refresh them.</div>
+          ${renderListItems(t.trust.items, "div")}
         </div>
       </div>
     </section>
@@ -503,23 +759,18 @@ function buildPage() {
       <div class="shell pro">
         <div>
           <div class="section-head" style="display:block;margin-bottom:22px">
-            <h2>Free moves one project forward. Pro helps run your one-person company.</h2>
+            <h2>${escapeHtml(t.pro.title)}</h2>
           </div>
           <div class="feature-list">
-            <span>Strategy cockpit</span>
-            <span>Multi-project scoring</span>
-            <span>Portfolio health</span>
-            <span>Ability compounding</span>
-            <span>Market and delivery diagnosis</span>
-            <span>Early access roadmap input</span>
+            ${renderListItems(t.pro.features, "span")}
           </div>
         </div>
-        <aside class="price" aria-label="Pro Early Access">
-          <span>Pro Early Access</span>
-          <strong>$29/year</strong>
-          <p>Get early access to the strategy cockpit and help shape the Pro roadmap. The Free core workflow stays available.</p>
+        <aside class="price" aria-label="${escapeHtml(t.pro.label)}">
+          <span>${escapeHtml(t.pro.label)}</span>
+          <strong>${escapeHtml(t.pro.price)}</strong>
+          <p>${escapeHtml(t.pro.copy)}</p>
           <div class="cta-row">
-            <a class="button primary" href="${FEEDBACK_URL}">Join Pro Early Access</a>
+            <a class="button primary" href="${FEEDBACK_URL}">${escapeHtml(t.pro.cta)}</a>
           </div>
         </aside>
       </div>
@@ -528,14 +779,14 @@ function buildPage() {
     <section class="section" id="install">
       <div class="shell install-panel">
         <div>
-          <h2>Try SoloMap with one project first.</h2>
-          <p class="lead">If it helps you keep momentum, tell us what the strategy cockpit should show next.</p>
+          <h2>${escapeHtml(t.install.title)}</h2>
+          <p class="lead">${escapeHtml(t.install.lead)}</p>
         </div>
         <div class="install-actions">
-          <a class="button primary" href="${MARKETPLACE_URL}">VS Code Marketplace</a>
-          <a class="button secondary" href="${OPEN_VSX_URL}">Open VSX</a>
-          <a class="button ghost" href="${GITHUB_URL}">GitHub repository</a>
-          <a class="button ghost" href="${FEEDBACK_URL}">Send feedback</a>
+          <a class="button primary" href="${MARKETPLACE_URL}">${escapeHtml(t.install.marketplace)}</a>
+          <a class="button secondary" href="${OPEN_VSX_URL}">${escapeHtml(t.install.openVsx)}</a>
+          <a class="button ghost" href="${GITHUB_URL}">${escapeHtml(t.install.github)}</a>
+          <a class="button ghost" href="${FEEDBACK_URL}">${escapeHtml(t.install.feedback)}</a>
         </div>
       </div>
     </section>
@@ -548,8 +799,8 @@ function buildPage() {
         <a href="${GITHUB_URL}">GitHub</a>
         <a href="${MARKETPLACE_URL}">VS Code Marketplace</a>
         <a href="${OPEN_VSX_URL}">Open VSX</a>
-        <a href="${FEEDBACK_URL}">Feedback</a>
-        <a href="/privacy-local-first">Privacy / Local-first note</a>
+        <a href="${FEEDBACK_URL}">${escapeHtml(t.footer.feedback)}</a>
+        <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
       </div>
     </div>
   </footer>
@@ -557,35 +808,77 @@ function buildPage() {
 </html>`;
 }
 
-function buildLocalFirstPage() {
+function buildLocalFirstPage(locale, origin) {
+  const t = content[locale];
   return `<!doctype html>
-<html lang="en">
+<html lang="${t.lang}">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SoloMap Local-first Note</title>
-  <style>
-    body { margin: 0; background: #11100e; color: #f6f0e8; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.55; }
-    main { width: min(760px, calc(100% - 40px)); margin: 0 auto; padding: 72px 0; }
-    a { color: #49d6d0; }
-    h1 { font-size: clamp(36px, 7vw, 64px); line-height: 1; margin: 0 0 22px; letter-spacing: 0; }
-    p, li { color: #ded4c8; font-size: 18px; }
-    ul { padding-left: 22px; }
-  </style>
+  ${buildHead(
+    { ...t, meta: { ...t.meta, title: t.privacy.title, description: t.privacy.copy, ogDescription: t.privacy.copy } },
+    origin,
+    t.privacyPath,
+    t.alternatePrivacyPath
+  )}
+  ${buildStyles()}
 </head>
 <body>
-  <main>
-    <a href="/">Back to SoloMap</a>
-    <h1>Local-first note</h1>
-    <p>SoloMap's core workflow keeps roadmap state, task records, and project memory in your local workspace by default. It does not require a hosted SoloMap backend to run the main project workflow.</p>
+  <main class="privacy-page">
+    <div class="privacy-nav">
+      <a href="${t.homePath}">${escapeHtml(t.privacy.back)}</a>
+      <a class="language-link" href="${t.alternatePrivacyPath}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
+    </div>
+    <h1>${escapeHtml(t.privacy.heading)}</h1>
+    <p>${escapeHtml(t.privacy.copy)}</p>
     <ul>
-      <li>Your AI provider usage depends on the local Agent CLI you choose.</li>
-      <li>GitHub data is used when you connect or refresh GitHub-backed signals.</li>
-      <li>Feedback is sent only when you open or submit a feedback issue yourself.</li>
+      ${renderListItems(t.privacy.items, "li")}
     </ul>
   </main>
 </body>
 </html>`;
+}
+
+function resolveRoute(pathname) {
+  if (pathname === "/" || pathname === "/en") {
+    return { type: "home", locale: "en", status: 200 };
+  }
+  if (pathname === "/zh" || pathname === "/zh/") {
+    return { type: "home", locale: "zh", status: 200 };
+  }
+  if (pathname === "/privacy-local-first") {
+    return { type: "privacy", locale: "en", status: 200 };
+  }
+  if (pathname === "/zh/privacy-local-first") {
+    return { type: "privacy", locale: "zh", status: 200 };
+  }
+  return { type: "home", locale: pathname.startsWith("/zh") ? "zh" : "en", status: 404 };
+}
+
+function buildSitemap(origin) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+  xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>${origin}/</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh" />
+  </url>
+  <url>
+    <loc>${origin}/zh</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh" />
+  </url>
+  <url>
+    <loc>${origin}/privacy-local-first</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/privacy-local-first" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/privacy-local-first" />
+  </url>
+  <url>
+    <loc>${origin}/zh/privacy-local-first</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/privacy-local-first" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/privacy-local-first" />
+  </url>
+</urlset>
+`;
 }
 
 export default {
@@ -605,22 +898,14 @@ Sitemap: ${origin}/sitemap.xml
     }
 
     if (url.pathname === "/sitemap.xml") {
-      return textResponse(`<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>${origin}/</loc></url>
-  <url><loc>${origin}/privacy-local-first</loc></url>
-</urlset>
-`, "application/xml; charset=utf-8");
+      return textResponse(buildSitemap(origin), "application/xml; charset=utf-8");
     }
 
-    if (url.pathname === "/privacy-local-first") {
-      return htmlResponse(buildLocalFirstPage());
+    const route = resolveRoute(url.pathname);
+    if (route.type === "privacy") {
+      return htmlResponse(buildLocalFirstPage(route.locale, origin), route.status);
     }
 
-    if (url.pathname !== "/") {
-      return htmlResponse(buildPage(), 404);
-    }
-
-    return htmlResponse(buildPage());
+    return htmlResponse(buildPage(route.locale, origin), route.status);
   }
 };
