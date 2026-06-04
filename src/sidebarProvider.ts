@@ -1982,6 +1982,7 @@ function detectProjectType(nodes: RoadmapNodeLike[]): string {
   if (/内容|发布|分发|文章|小说|报告|content/.test(text)) return 'content';
   if (/试验|实验|研究|验证假设|prototype|experiment|research/.test(text)) return 'experiment';
   if (/工具|脚手架|模板|自动化|tool|scaffold/.test(text)) return 'tool';
+  if (/日常|事务|支持|运营|客服|排障|daily|routine|support|ops/.test(text)) return 'daily_work';
   if (/维护|监控|告警|归档|archive|maintenance/.test(text)) return 'archive';
   return 'core_product';
 }
@@ -2611,6 +2612,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
     private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
+    private readonly _continueStepConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>,
     private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>,
     private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
     private readonly _toggleProjectPinned?: (projectPath: string) => Promise<void>,
@@ -2680,6 +2682,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           case 'continueSoloConversation':
             if (this._continueSoloConversation) {
               await this._continueSoloConversation(data.projectPath || '', Number(data.conversationId || 0));
+            }
+            break;
+          case 'continueStepConversation':
+            if (this._continueStepConversation) {
+              await this._continueStepConversation(data.projectPath || '', data.nodeId || '', Number(data.conversationId || 0));
             }
             break;
           case 'toggleProjectPinned':
@@ -5303,21 +5310,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-enhancement-toggles">Harness Enhancements</label>
+      <label class="settings-lbl-title" id="label-enhancement-toggles">执行增强</label>
       <div id="help-enhancement-toggles" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Enable curated external enhancements. SoloMap installs managed runtime support and falls back to the original path when evidence matters.
+        启用后 SoloMap 会安装和配置受管增强运行环境；关键证据场景仍回退原始路径。
       </div>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-command-output-optimizer" style="margin-top:2px;">
-        <span><span id="label-enhancement-command-output-optimizer">Command Output Optimizer</span><br><span id="help-enhancement-command-output-optimizer" style="font-size:8.5px; color:var(--text-muted);">Reduce long terminal output when raw logs are not needed.</span></span>
+        <span><span id="label-enhancement-command-output-optimizer">命令输出优化</span><br><span id="help-enhancement-command-output-optimizer" style="font-size:8.5px; color:var(--text-muted);">在不需要完整原始日志时减少长命令输出占用。</span></span>
       </label>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-code-structure-assistant" style="margin-top:2px;">
-        <span><span id="label-enhancement-code-structure-assistant">Code Structure Assistant</span><br><span id="help-enhancement-code-structure-assistant" style="font-size:8.5px; color:var(--text-muted);">Use code graph lookup to narrow source reading and impact checks.</span></span>
+        <span><span id="label-enhancement-code-structure-assistant">代码结构辅助</span><br><span id="help-enhancement-code-structure-assistant" style="font-size:8.5px; color:var(--text-muted);">用代码图谱辅助缩小源码阅读和影响面检查范围。</span></span>
       </label>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-mcp-description-compressor" style="margin-top:2px;">
-        <span><span id="label-enhancement-mcp-description-compressor">MCP Description Compressor</span><br><span id="help-enhancement-mcp-description-compressor" style="font-size:8.5px; color:var(--text-muted);">Compress MCP metadata descriptions while keeping tool calls unchanged.</span></span>
+        <span><span id="label-enhancement-mcp-description-compressor">MCP 描述压缩</span><br><span id="help-enhancement-mcp-description-compressor" style="font-size:8.5px; color:var(--text-muted);">压缩 MCP 元数据描述，但不改变实际工具调用。</span></span>
       </label>
     </div>
     </div>
@@ -5518,7 +5525,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
-        enhancementToggles: 'Harness 增强',
+        enhancementToggles: '执行增强',
         enhancementTogglesHelp: '启用后 SoloMap 会安装和配置受管增强运行环境；关键证据场景仍回退原始路径。',
         enhancementCommandOutputOptimizer: '命令输出优化',
         enhancementCommandOutputOptimizerHelp: '在不需要完整原始日志时减少长命令输出占用。',
@@ -6737,6 +6744,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const duration = formatSoloDuration(conversation);
       const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
       const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
+      const conversationNodeId = String(conversation.nodeId || node?.id || '');
+      const continueButton = conversation.status !== 'Running' && conversationNodeId && extractNativeSessionId(conversation.output)
+        ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-step-id="\${escapeHtml(conversation.id)}" data-continue-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
+        : '';
       return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('continueHistory'))}</div>
         <div class="sidebar-conversation" data-sidebar-step-conversation="\${escapeHtml(key)}">
@@ -6761,6 +6772,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <pre>\${escapeHtml(conversation.output || '')}</pre>
             </div>
           \` : ''}
+          \${continueButton ? \`<div class="sidebar-conversation-footer">\${continueButton}</div>\` : ''}
         </div>
       \`;
     }
@@ -6800,6 +6812,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       }
+      container.querySelectorAll('[data-continue-sidebar-step-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'continueStepConversation',
+            projectPath,
+            nodeId: item.getAttribute('data-continue-sidebar-step-node-id'),
+            conversationId: item.getAttribute('data-continue-sidebar-step-id')
+          });
+        });
+      });
     }
 
     function formatRelativeTime(value) {
@@ -6857,6 +6880,29 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (node.status === 'Pending') return t('nextActionReasonPending');
       if ((nodes || []).every(candidate => candidate.status === 'Completed')) return t('nextActionReasonComplete');
       return t('nextActionReasonPending');
+    }
+
+    function projectTypeLabel(value) {
+      const labels = currentLanguage === 'zh'
+        ? {
+          core_product: '核心产品',
+          infra: '基础设施',
+          content: '内容产品',
+          experiment: '试验研究',
+          tool: '工具脚手架',
+          daily_work: '日常工作处理',
+          archive: '归档维护'
+        }
+        : {
+          core_product: 'Core product',
+          infra: 'Infrastructure',
+          content: 'Content product',
+          experiment: 'Experiment',
+          tool: 'Tooling',
+          daily_work: 'Daily work',
+          archive: 'Maintenance'
+        };
+      return labels[String(value || '')] || value || '-';
     }
 
     function escapeHtml(value) {
@@ -7654,7 +7700,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               </span>
             </div>
             <div class="portfolio-global-row">
-              <span class="global-chip">\${escapeHtml(t('globalType'))}: \${escapeHtml(project.projectType || '-')}</span>
+              <span class="global-chip">\${escapeHtml(t('globalType'))}: \${escapeHtml(projectTypeLabel(project.projectType))}</span>
               <span class="global-chip">\${escapeHtml(statusText(project.overallStatus))}</span>
               \${project.reusableSignals ? \`<span class="global-chip">\${escapeHtml(t('globalReusable'))}: \${escapeHtml(project.reusableSignals)}</span>\` : ''}
               \${project.issuePressure ? \`<span class="global-chip">\${escapeHtml(t('issues'))}: \${escapeHtml(project.issuePressure)}</span>\` : ''}

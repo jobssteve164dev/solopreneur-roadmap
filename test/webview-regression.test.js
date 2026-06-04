@@ -317,6 +317,26 @@ test('pasted image attachments are saved as project-relative SoloMap files', () 
   assert.equal(fs.readFileSync(path.join(root, files[0]), 'utf8'), 'hello');
 });
 
+test('attachment picker candidates are local project files and skip run artifacts', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__listProjectAttachmentCandidates = listProjectAttachmentCandidates;'
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-attachment-candidates-'));
+  fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+  fs.mkdirSync(path.join(root, '.solopreneur', 'agent-runs', 'step-1'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'README.md'), 'readme', 'utf8');
+  fs.writeFileSync(path.join(root, 'docs', 'brief.md'), 'brief', 'utf8');
+  fs.writeFileSync(path.join(root, '.solopreneur', 'agent-runs', 'step-1', 'output.log'), 'log', 'utf8');
+
+  const files = extensionModule.__listProjectAttachmentCandidates(root);
+
+  assert.ok(files.includes('README.md'));
+  assert.ok(files.includes('docs/brief.md'));
+  assert.ok(!files.some((file) => file.startsWith('.solopreneur/agent-runs/')));
+  assert.ok(files.every((file) => !path.isAbsolute(file)));
+});
+
 test('sidebar webview runtime script parses and opens settings panel', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -510,11 +530,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       status: 'Completed',
       timestamp: '2026-05-26T10:05:00.000Z',
       command: 'codex exec',
-      output: 'User supplement:\n收尾另一个环节\n\nTouched project files:\nsrc/home.ts\n\nRun duration ms: 3000\n\nAgent output tail:\n另一个环节已完成。'
+      output: 'User supplement:\n收尾另一个环节\n\nTouched project files:\nsrc/home.ts\n\nRun duration ms: 3000\n\nNative Agent session saved: .solopreneur/step-sessions/another-step.json (3350a3b7-7761-4ed5-9661-2e9c9de8f924)\n\nAgent output tail:\n另一个环节已完成。'
     }]
   });
   assert.match(elements['portfolio-list'].innerHTML, /收尾另一个环节/);
   assert.match(elements['portfolio-list'].innerHTML, /data-sidebar-step-conversation/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-id="8"/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-node-id="another-step"/);
   dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: 'step-1', files: ['docs/brief.md'] });
   assert.match(elements['portfolio-list'].innerHTML, /docs\/brief\.md/);
 

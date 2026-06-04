@@ -640,6 +640,19 @@ export async function activate(context: vscode.ExtensionContext) {
         await handleContinueNativeConversation(context, soloConversationId, Number(conversationId || 0));
       }
     },
+    async (projectPath, nodeId, conversationId) => {
+      if (!getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+        return;
+      }
+      if (getSelectedProjectPath(context) !== projectPath) {
+        await selectProject(context, projectPath);
+      }
+      const ready = await ensureSyncEngine(context);
+      if (ready && activeProjectRoot === projectPath) {
+        await handleContinueNativeConversation(context, String(nodeId || ''), Number(conversationId || 0));
+      }
+    },
     async (projectPath, nodeId) => {
       return getStepConversationHistoryForProject(context, projectPath, nodeId);
     },
@@ -1737,24 +1750,116 @@ async function chooseSupplementFilesForNode(nodeId: string): Promise<void> {
 }
 
 async function chooseSupplementFilesForProject(projectRoot: string): Promise<string[]> {
-  const selected = await vscode.window.showOpenDialog({
-    canSelectFiles: true,
-    canSelectFolders: false,
-    canSelectMany: true,
-    openLabel: 'Attach Files',
-    defaultUri: vscode.Uri.file(projectRoot)
-  });
+  const files = listProjectAttachmentCandidates(projectRoot);
+  if (!files.length) {
+    vscode.window.showInformationMessage('当前项目里还没有可选择的补充文件。');
+    return [];
+  }
 
-  return (selected || [])
-    .map((uri) => {
-      const absolutePath = uri.fsPath;
-      const relativeToRoot = path.relative(projectRoot, absolutePath);
-      if (!relativeToRoot || relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
-        return '';
+  const selected = await vscode.window.showQuickPick(
+    files.map((file) => ({
+      label: file,
+      description: path.dirname(file) === '.' ? '' : path.dirname(file)
+    })),
+    {
+      canPickMany: true,
+      matchOnDescription: true,
+      placeHolder: '选择要附加给 Agent 的项目文件',
+      title: '添加补充文件'
+    }
+  );
+
+  return (selected || []).map((item) => item.label).slice(0, 10);
+}
+
+function listProjectAttachmentCandidates(projectRoot: string): string[] {
+  const fromGit = listProjectFilesFromGit(projectRoot);
+  if (fromGit.length > 0) {
+    return fromGit;
+  }
+  const fromRipgrep = listProjectFilesFromCommand('rg', ['--files', '--hidden', '-g', '!.git', '-g', '!node_modules', '-g', '!cache', '-g', '!.solopreneur/agent-runs'], projectRoot);
+  if (fromRipgrep.length > 0) {
+    return fromRipgrep;
+  }
+  return listProjectFilesByWalking(projectRoot);
+}
+
+function listProjectFilesFromGit(projectRoot: string): string[] {
+  const files = listProjectFilesFromCommand('git', ['-C', projectRoot, 'ls-files', '--cached', '--others', '--exclude-standard'], projectRoot);
+  return files.filter((file) => !file.startsWith('.solopreneur/agent-runs/'));
+}
+
+function listProjectFilesFromCommand(command: string, args: string[], projectRoot: string): string[] {
+  try {
+    const output = childProcess.execFileSync(command, args, {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 1500,
+      maxBuffer: 1024 * 1024
+    });
+    return normalizeAttachmentCandidateFiles(projectRoot, output.split(/\r?\n/));
+  } catch {
+    return [];
+  }
+}
+
+function listProjectFilesByWalking(projectRoot: string): string[] {
+  const results: string[] = [];
+  const skip = new Set(['.git', 'node_modules', 'cache']);
+  const walk = (directory: string) => {
+    if (results.length >= 1500) {
+      return;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (results.length >= 1500) {
+        return;
       }
-      return relativeToRoot.split(path.sep).join('/');
+      if (skip.has(entry.name)) {
+        continue;
+      }
+      const absolutePath = path.join(directory, entry.name);
+      const relativePath = path.relative(projectRoot, absolutePath).split(path.sep).join('/');
+      if (relativePath.startsWith('.solopreneur/agent-runs/')) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        walk(absolutePath);
+      } else if (entry.isFile()) {
+        results.push(relativePath);
+      }
+    }
+  };
+  walk(projectRoot);
+  return normalizeAttachmentCandidateFiles(projectRoot, results);
+}
+
+function normalizeAttachmentCandidateFiles(projectRoot: string, files: string[]): string[] {
+  const seen = new Set<string>();
+  return files
+    .map((file) => String(file || '').trim().replace(/\\/g, '/'))
+    .filter(Boolean)
+    .filter((file) => {
+      if (seen.has(file)) {
+        return false;
+      }
+      seen.add(file);
+      const absolutePath = path.resolve(projectRoot, file);
+      const relativeToRoot = path.relative(projectRoot, absolutePath);
+      return Boolean(relativeToRoot)
+        && !relativeToRoot.startsWith('..')
+        && !path.isAbsolute(relativeToRoot)
+        && fs.existsSync(absolutePath)
+        && fs.statSync(absolutePath).isFile();
     })
-    .filter(Boolean);
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, 1500);
 }
 
 async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
@@ -1778,6 +1883,7 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
       { label: '内容产品', description: '围绕内容生产、发布、分发和反馈持续运转', value: 'content' },
       { label: '试验研究', description: '验证想法或学习技术，重点是获得结论', value: 'experiment' },
       { label: '工具脚手架', description: '减少重复工作，供自己或多个项目复用', value: 'tool' },
+      { label: '日常工作处理', description: '承接持续发生的事务、支持、运营、排障和日常推进', value: 'daily_work' },
       { label: '归档维护', description: '已上线或稳定项目，重点是健康检查和维护', value: 'archive' }
     ], {
       placeHolder: '这个项目更像哪一类？'
@@ -2281,6 +2387,12 @@ function sendNodesToWebview() {
   }
   if (sidebarProvider) {
     sidebarProvider.sendNodesToWebview();
+  }
+}
+
+function refreshSidebarProjectCards(): void {
+  if (sidebarProvider) {
+    sidebarProvider.sendLocalProjects();
   }
 }
 
@@ -6516,6 +6628,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   recordLocalUsageEvent(context, 'agentRun');
   syncEngine.updateNode(nodeId, { status: 'Running' });
   sendNodesToWebview();
+  refreshSidebarProjectCards();
 
   // Command execution with sentinel file generation on success or fail
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
@@ -6892,6 +7005,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         status: nextStatus,
         completedAt,
       });
+      refreshSidebarProjectCards();
     }
     let nativeSessionSummary = '';
     if (workspaceRoot && sessionFilePath && fs.existsSync(sessionFilePath)) {
@@ -7073,6 +7187,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     sendNodesToWebview();
+    refreshSidebarProjectCards();
     postNodeConversations(nodeId);
     if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
@@ -9000,21 +9115,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-enhancement-toggles">Harness Enhancements</label>
+      <label class="settings-lbl-title" id="label-enhancement-toggles">执行增强</label>
       <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Enable curated external enhancements. SoloMap installs managed runtime support and falls back to the original path when evidence matters.
+        启用后 SoloMap 会安装和配置受管增强运行环境；关键证据场景仍回退原始路径。
       </div>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-command-output-optimizer" style="margin-top:2px;">
-        <span><span id="label-enhancement-command-output-optimizer">Command Output Optimizer</span><br><span id="help-enhancement-command-output-optimizer" style="font-size:9px; color:var(--text-muted);">Reduce long terminal output when raw logs are not needed.</span></span>
+        <span><span id="label-enhancement-command-output-optimizer">命令输出优化</span><br><span id="help-enhancement-command-output-optimizer" style="font-size:9px; color:var(--text-muted);">在不需要完整原始日志时减少长命令输出占用。</span></span>
       </label>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-code-structure-assistant" style="margin-top:2px;">
-        <span><span id="label-enhancement-code-structure-assistant">Code Structure Assistant</span><br><span id="help-enhancement-code-structure-assistant" style="font-size:9px; color:var(--text-muted);">Use code graph lookup to narrow source reading and impact checks.</span></span>
+        <span><span id="label-enhancement-code-structure-assistant">代码结构辅助</span><br><span id="help-enhancement-code-structure-assistant" style="font-size:9px; color:var(--text-muted);">用代码图谱辅助缩小源码阅读和影响面检查范围。</span></span>
       </label>
       <label style="display:flex; gap:8px; align-items:flex-start; margin-top:8px;">
         <input type="checkbox" id="setting-enhancement-mcp-description-compressor" style="margin-top:2px;">
-        <span><span id="label-enhancement-mcp-description-compressor">MCP Description Compressor</span><br><span id="help-enhancement-mcp-description-compressor" style="font-size:9px; color:var(--text-muted);">Compress MCP metadata descriptions while keeping tool calls unchanged.</span></span>
+        <span><span id="label-enhancement-mcp-description-compressor">MCP 描述压缩</span><br><span id="help-enhancement-mcp-description-compressor" style="font-size:9px; color:var(--text-muted);">压缩 MCP 元数据描述，但不改变实际工具调用。</span></span>
       </label>
     </div>
     </div>
@@ -9141,7 +9256,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
-        enhancementToggles: 'Harness 增强',
+        enhancementToggles: '执行增强',
         enhancementTogglesHelp: '启用后 SoloMap 会安装和配置受管增强运行环境；关键证据场景仍回退原始路径。',
         enhancementCommandOutputOptimizer: '命令输出优化',
         enhancementCommandOutputOptimizerHelp: '在不需要完整原始日志时减少长命令输出占用。',
@@ -10053,6 +10168,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         { value: 'content', label: '内容产品' },
         { value: 'experiment', label: '试验研究' },
         { value: 'tool', label: '工具脚手架' },
+        { value: 'daily_work', label: '日常工作处理' },
         { value: 'archive', label: '归档维护' }
       ];
     }
