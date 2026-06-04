@@ -7,6 +7,16 @@
     "nodejs_compat"
   ],
   "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "solomap.app",
+      "custom_domain": true
+    },
+    {
+      "pattern": "www.solomap.app",
+      "custom_domain": true
+    }
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
