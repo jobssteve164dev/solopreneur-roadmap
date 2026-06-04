@@ -7,4 +7,5 @@ out/
 *.vsix
 *.log
 log
+website/.wrangler/
 .DS_Store
