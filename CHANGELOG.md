@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.151 - 2026-06-04
+
+### Changed
+- Add enhancement safety controls (a39170b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.150 - 2026-06-04
 
 ### Changed
