@@ -751,7 +751,8 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /setEnhancementEnabled/);
   assert.match(script, /uninstallEnhancement/);
   assert.match(script, /enhancementInstallResult/);
-  assert.match(html, /实验性功能。安装后不会自动启用/);
+  assert.match(html, /实验性外部增强/);
+  assert.match(html, /外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -778,6 +779,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /retryConversation/);
   assert.match(script, /continueNativeConversation/);
   assert.match(script, /data-continue-native-conversation-id/);
+  assert.match(script, /data-continue-native-node-id/);
   assert.match(script, /showAgentTerminal/);
   assert.match(script, /stopAgentRun/);
   assert.match(script, /formatConversationDuration/);
@@ -935,7 +937,8 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /setEnhancementEnabled/);
   assert.match(html, /uninstallEnhancement/);
   assert.match(html, /enhancementInstallResult/);
-  assert.match(html, /实验性功能。安装后不会自动启用/);
+  assert.match(html, /实验性外部增强/);
+  assert.match(html, /外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出/);
   assert.match(html, /\.onboarding-panel\s*\{/);
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);

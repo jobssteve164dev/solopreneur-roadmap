@@ -9698,7 +9698,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-enhancement-toggles">执行增强</label>
       <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        实验性功能。安装后不会自动启用；启用后可能影响 Agent 启动和命令执行，异常时可在这里禁用或卸载。
+        实验性外部增强。它们可能节省上下文或补充分析能力，也可能因外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出；安装后不会自动启用，异常时可在这里禁用或卸载。
       </div>
       <div class="enhancement-list" id="enhancement-list"></div>
       <div class="cli-badge" id="enhancement-install-badge" style="display:none;"></div>
@@ -9827,7 +9827,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
         enhancementToggles: '执行增强',
-        enhancementTogglesHelp: '安装后自动用于合适任务；关键证据仍回看原始文件、日志和测试。',
+        enhancementTogglesHelp: '实验性外部增强。它们可能节省上下文或补充分析能力，也可能因外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出；安装后不会自动启用，异常时可在这里禁用或卸载。',
         installingEnhancement: '正在启动安装...',
         installEnhancement: '安装',
         repairEnhancement: '修复',
@@ -9973,7 +9973,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
         enhancementToggles: 'Harness Enhancements',
-        enhancementTogglesHelp: 'Installed enhancements are used automatically for suitable tasks; critical evidence still uses raw files, logs, and tests.',
+        enhancementTogglesHelp: 'Experimental external enhancements. They may save context or add analysis, but external project issues can slow startup, hang commands, change configs, or produce wrong output. Installation does not enable them automatically; disable or uninstall them here if anything feels off.',
         installingEnhancement: 'Starting install...',
         installEnhancement: 'Install',
         repairEnhancement: 'Repair',
@@ -11211,7 +11211,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             event.stopPropagation();
             vscode.postMessage({
               command: 'continueNativeConversation',
-              nodeId: node.id,
+              nodeId: item.getAttribute('data-continue-native-node-id') || node.id,
               conversationId: item.getAttribute('data-continue-native-conversation-id')
             });
           });
@@ -11447,12 +11447,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       container.querySelectorAll('[data-continue-native-conversation-id]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
-          vscode.postMessage({
-            command: 'continueNativeConversation',
-            nodeId,
-            conversationId: item.getAttribute('data-continue-native-conversation-id')
+            vscode.postMessage({
+              command: 'continueNativeConversation',
+              nodeId: item.getAttribute('data-continue-native-node-id') || nodeId,
+              conversationId: item.getAttribute('data-continue-native-conversation-id')
+            });
           });
-        });
       });
       container.querySelectorAll('[data-stop-agent-run]').forEach(item => {
         item.addEventListener('click', (event) => {
@@ -11493,7 +11493,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
           : '';
         const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
-          ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
+          ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
           : '';
         const runningButtons = conversation.status === 'Running'
           ? \`
