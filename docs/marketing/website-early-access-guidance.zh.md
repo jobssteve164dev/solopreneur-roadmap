@@ -1,7 +1,7 @@
 # SoloMap 官网与 Early Access 承接指导
 
 **日期**: 2026-06-03  
-**适用范围**: SoloMap 官网首版、Pro Early Access、金字塔战略驾驶舱展示、后续 SZLK Passport 承接  
+**适用范围**: SoloMap 官网首版、`solomap.app`、Pro Early Access、金字塔战略驾驶舱展示、后续 SZLK Passport 承接  
 **文档性质**: 长期营销与转化边界，不是一次性网页草稿  
 
 ---
@@ -9,6 +9,8 @@
 ## 1. 结论
 
 SoloMap 应该设计自己的官网，但首版不应做完整公司官网或复杂营销站。
+
+`solomap.app` 是 SoloMap 的正式产品主域名。`solomap.szlk.ai` 可作为公司体系、Passport 授权或过渡入口，但不应替代 `solomap.app` 的对外品牌位置。
 
 首版官网定位：
 

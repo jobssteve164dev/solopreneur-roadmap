@@ -1,0 +1,389 @@
+# SoloMap 官网设计文档
+
+**日期**: 2026-06-04  
+**主域名**: `solomap.app`  
+**适用范围**: SoloMap 官网首版、Pro Early Access、金字塔战略驾驶舱展示、下载与反馈承接  
+**文档性质**: 官网长期设计基准，不是一次性页面草稿  
+
+---
+
+## 1. 结论
+
+`solomap.app` 应作为 SoloMap 的正式产品主域名。官网首版不是公司官网，也不是大型营销站，而是一个面向独立开发者的产品验证页。
+
+首版官网只服务四个用户动作：
+
+1. 看懂 SoloMap 是什么。
+2. 安装 VS Code 插件。
+3. 理解 Free 与 Pro Early Access 的区别。
+4. 提交反馈或表达 Early Access 兴趣。
+
+官网第一版的目标不是把所有能力讲完，而是让用户快速形成一句话理解：
+
+> SoloMap 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。
+
+---
+
+## 2. 域名与品牌入口
+
+| 入口 | 用途 | 说明 |
+| --- | --- | --- |
+| `solomap.app` | 正式官网主域名 | 对外传播、下载、Early Access、文档入口 |
+| `solomap.szlk.ai` | 公司体系入口 / 过渡入口 | 可用于 SZLK 产品矩阵、Passport 跳转或内部测试 |
+| GitHub 仓库 | 开源与反馈入口 | 代码、Issue、Release、可信度 |
+| VS Code Marketplace | 主下载入口 | VS Code 用户默认安装路径 |
+| Open VSX | 补充分发入口 | code-server、VSCodium、部分 VS Code forks 用户 |
+
+官网所有公开文案应优先使用 `solomap.app`。`solomap.szlk.ai` 只作为公司体系和授权系统的辅助入口，不作为对外主品牌。
+
+---
+
+## 3. 首页信息架构
+
+首版只做一个长页面，不做复杂导航。推荐结构：
+
+1. Hero 首屏
+2. Problem / Why SoloMap
+3. Product Workflow
+4. Local-first Trust
+5. Pro Early Access
+6. Install / Feedback
+7. Footer
+
+顶部导航只保留：
+
+- Product
+- Pro
+- Docs
+- GitHub
+- Install
+
+不做：
+
+- Blog
+- Enterprise
+- Templates
+- Login
+- Dashboard
+- Marketplace
+
+这些入口会让首版官网变成维护负担，也会稀释当前最重要的下载和 Early Access 验证。
+
+---
+
+## 4. Hero 首屏
+
+### 4.1 首屏目标
+
+首屏必须在 10 秒内回答：
+
+- 这是给谁用的。
+- 解决什么问题。
+- 现在可以怎么开始。
+
+### 4.2 推荐主标题
+
+英文：
+
+> Keep your AI-built projects moving.
+
+中文辅助心智：
+
+> 让 AI Agent 负责执行，让 SoloMap 负责不丢方向。
+
+### 4.3 推荐副标题
+
+英文：
+
+> SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.
+
+中文：
+
+> SoloMap 把产品想法、路线图、Agent 执行历史和下一步动作放回你的本地工作区，帮助独立开发者持续推进项目，而不是迷失在零散 AI 对话里。
+
+### 4.4 首屏 CTA
+
+主 CTA：
+
+- `Install from VS Code Marketplace`
+
+次 CTA：
+
+- `Get it on Open VSX`
+- `View on GitHub`
+
+Pro CTA 只作为轻量入口：
+
+- `Join Pro Early Access`
+
+不要把 Pro CTA 放在唯一主按钮位置。首版应先让用户安装并体验 Free 主路径。
+
+### 4.5 首屏视觉
+
+首屏必须使用真实产品截图或短动图，不使用抽象插画。优先展示：
+
+- 侧边栏今日安排 + 项目卡片
+- 单项目路线图大图
+- Agent 执行卡片或终端运行状态
+
+截图应该让用户直接看到：
+
+- SoloMap 在 VS Code 里工作。
+- 它不是独立 SaaS 后台。
+- 它帮助项目从路线图进入执行。
+
+---
+
+## 5. Problem / Why SoloMap
+
+该区块回答为什么用户需要 SoloMap，而不是再买一个 AI 编码工具。
+
+推荐标题：
+
+> AI can write code. It does not keep your product on track.
+
+中文心智：
+
+> AI 能写代码，但不会自动帮你经营项目方向。
+
+内容应围绕三个真实痛点：
+
+1. **上下文散落**  
+   项目计划、AI 对话、终端输出、TODO 和代码修改分散在不同地方。
+
+2. **下一步不清楚**  
+   几天后重新打开项目，需要重新读聊天、读代码、猜测上次进度。
+
+3. **项目偏向只 Build**  
+   AI 很容易让用户一直改代码，却忽略 Sell、Learn、Improve 和真实反馈。
+
+对应 SoloMap 承诺：
+
+- 把想法变成路线图。
+- 从路线图环节运行本地 Agent。
+- 记录执行历史和项目状态。
+- 用今日安排帮助用户知道当前优先处理什么。
+- 用金字塔战略驾驶舱帮助用户看见多项目经营结构。
+
+---
+
+## 6. Product Workflow
+
+该区块用 4 步说明用户路径，不解释底层实现。
+
+推荐标题：
+
+> From idea to shipped progress, without losing the thread.
+
+四步：
+
+1. **Add your local project**  
+   选择本地项目文件夹。
+
+2. **Create a roadmap**  
+   输入项目目标，让 SoloMap 生成可执行路线图。
+
+3. **Run your AI agent from a step**  
+   在路线图环节里启动用户已有的本地 Agent CLI。
+
+4. **Come back and continue**  
+   下次打开时，看到今日安排、项目状态和历史推进记录。
+
+注意：这里不要展示内部文件名、数据库、同步引擎或 Agent prompt 细节。用户只需要理解动作，不需要理解实现。
+
+---
+
+## 7. Local-first Trust
+
+该区块建立信任，但不能变成工程说明书。
+
+推荐标题：
+
+> Local-first by default.
+
+可以说：
+
+- Your roadmap and project memory stay in your workspace.
+- Bring your own AI agent CLI.
+- No hosted backend is required for the core workflow.
+- GitHub Issues and release signals are pulled only when you connect or refresh them.
+
+中文表达：
+
+> SoloMap 的主路径不要求你把项目数据托管到我们的服务器。路线图、执行历史和项目记忆优先保存在本地工作区。
+
+避免说：
+
+- SQLite/WASM
+- File sentinel
+- CSV sync engine
+- Agent prompt 注入
+- 任何内部对象名作为主要卖点
+
+---
+
+## 8. Pro Early Access
+
+该区块承接金字塔战略驾驶舱。
+
+### 8.1 定位
+
+Free 的价值：
+
+> Move one project forward.
+
+Pro 的价值：
+
+> Run your one-person company.
+
+中文：
+
+> Free 帮你推进一个项目；Pro 帮你经营一人公司。
+
+### 8.2 展示内容
+
+Pro Early Access 应展示：
+
+- 金字塔战略驾驶舱。
+- 多项目战略评分。
+- 项目组合健康度。
+- 能力复利分析。
+- 市场、收入、交付结构诊断。
+- 未来 SZLK Passport 订阅授权。
+
+当前不应承诺：
+
+- 云端托管 Agent。
+- 多设备同步。
+- 团队工作区。
+- 自动云端 AI 战略诊断。
+
+这些能力一旦加入，会改变成本结构和定价模型。
+
+### 8.3 价格口径
+
+首版展示：
+
+> Pro Early Access: $29/year
+
+说明：
+
+- Early access to the strategy cockpit.
+- Help shape the Pro roadmap.
+- Free core workflow stays available.
+
+不要现在展示复杂价格表。正式价格 `$5/月 或 $49/年` 可作为后续正式 Pro 的目标，不必在首版首屏强展示。
+
+### 8.4 CTA
+
+推荐：
+
+- `Join Pro Early Access`
+- `Tell us you want Pro`
+- `Get early access updates`
+
+如果支付入口尚未完成，CTA 可以进入：
+
+- waitlist
+- GitHub Issue feedback
+- SZLK Passport 预留登录
+- 邮件或表单
+
+---
+
+## 9. Install / Feedback
+
+该区块提供明确行动，不要让用户到处找入口。
+
+必须包含：
+
+- VS Code Marketplace 安装按钮。
+- Open VSX 安装按钮。
+- GitHub 仓库按钮。
+- GitHub Issue 反馈按钮。
+- 隐私 / 本地优先说明链接。
+
+推荐文案：
+
+> Try SoloMap with one project first. If it helps you keep momentum, tell us what the strategy cockpit should show next.
+
+中文：
+
+> 先用一个项目试试 SoloMap。如果它帮你保持推进，请告诉我们金字塔战略驾驶舱下一步应该看见什么。
+
+---
+
+## 10. Footer
+
+Footer 只保留必要信息：
+
+- SoloMap
+- GitHub
+- VS Code Marketplace
+- Open VSX
+- Feedback
+- Privacy / Local-first note
+- SZLK
+
+不要在首版 footer 放大量产品矩阵、企业销售或复杂法律页面入口。后续接入 Passport 和支付后，再补 Terms / Privacy / Billing。
+
+---
+
+## 11. 视觉方向
+
+官网视觉应匹配开发者工具和战略驾驶舱，不做消费级花哨落地页。
+
+建议：
+
+- 深色或中性背景，但避免全站过暗导致截图不可读。
+- 使用真实 VS Code / SoloMap 截图作为第一视觉。
+- 色彩可沿用 SoloMap 当前红色品牌资产，但保持克制。
+- 卡片圆角不超过 8px。
+- 文案密度适中，避免大段工程描述。
+- CTA 清晰，按钮数量少。
+- 移动端优先保证首屏标题、截图和安装入口不互相挤压。
+
+禁止：
+
+- 抽象渐变球、装饰性光斑、无意义 3D 物体。
+- 用维护者口吻解释内部实现。
+- 用大段功能列表替代用户动作。
+- 没有截图的“AI 工具通用模板页”。
+
+---
+
+## 12. 首版验收标准
+
+官网首版上线前必须通过以下检查：
+
+1. 首屏 10 秒内能看懂 SoloMap 是什么。
+2. 页面第一视觉是真实产品截图或动图。
+3. 主 CTA 指向安装。
+4. Pro Early Access 是清晰但不压迫的次级路径。
+5. 没有把 Free 主路径描述成残缺试用。
+6. 没有暴露内部实现细节作为用户必须理解的概念。
+7. 移动端不出现标题、截图、按钮重叠。
+8. 至少有一个反馈入口。
+9. `solomap.app` 是页面公开主域名。
+10. `solomap.szlk.ai` 只作为公司体系或授权辅助入口。
+
+---
+
+## 13. 后续版本
+
+第二版官网可以加入：
+
+- 金字塔战略驾驶舱截图。
+- Early Access 用户反馈。
+- 更明确的 Free / Pro 对比。
+- ROI 例子。
+- 安装后 5 分钟上手视频。
+
+第三版官网可以加入：
+
+- SZLK Passport 登录。
+- 正式支付。
+- Billing / Terms / Privacy。
+- Pro 用户权益说明。
+
+在第二版前，不要投入博客、SEO 内容矩阵或复杂官网后台。
