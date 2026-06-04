@@ -1,5 +1,17 @@
 # 微观层面执行可见性设计
 
+## 当前定位
+
+这份文档保留为早期微观可见性背景材料，重点是模块设计、实现总结、设计对标、拓扑和健康报告等工件体系。
+
+后续正式方向已收敛为“微观执行循环”和“执行轨迹面板”：工件不再是前台主语，而是支撑微观循环中判断、动作、证据和归因的底层材料。
+
+正式方法论与落地边界见：
+
+- `docs/methodology/micro-execution-loop-methodology.zh.md`
+- `docs/architecture/micro-execution-loop-flow.zh.md`
+- `docs/ui/execution-trace-panel-guidelines.zh.md`
+
 ## 问题陈述
 
 目前 SoloMap 在项目生命周期层面实现了很好的**宏观可见性**：
