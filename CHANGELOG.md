@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.148 - 2026-06-04
+
+### Added
+- add Chinese website localization (f69383c)
+- add Cloudflare Worker website (c84caeb)
+
+### Changed
+- Fix sidebar run status and attachment picker (4152f70)
+- bind website worker domains (7adc24c)
+- Add SoloMap website design baseline (3d6f062)
+- Document Pro early access launch timing (77b14e4)
+- Add ROI pricing guidance report (9e8c496)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.147 - 2026-06-03
 
 ### Changed
