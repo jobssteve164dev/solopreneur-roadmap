@@ -248,7 +248,48 @@ abandoned
 }
 ```
 
-第一版可以把它保存为项目本地 JSON 或 JSONL；后续再纳入 SQLite/Execution Graph。
+第一版应把它保存为项目本地 JSON 或 JSONL；后续再纳入 SQLite/Execution Graph。
+
+## 数据持久化形态
+
+微观循环是项目事实账本，第一版的 source of truth 应是项目目录内的 JSON/JSONL，而不是插件私有数据库。
+
+推荐结构：
+
+```text
+.solopreneur/execution-traces/
+  traces.jsonl
+  traces/
+    <traceId>.json
+```
+
+职责划分：
+
+| 载体 | 职责 |
+| --- | --- |
+| `traces.jsonl` | 轻量索引流，每个微观循环一行，便于追加、扫描和 Git diff |
+| `traces/<traceId>.json` | 单个微观循环完整详情，保存六阶段、证据、结果和归因 |
+| SQLite | 查询索引、聚合缓存、面板加速层，可由 JSON/JSONL 重建 |
+| HTML 导出 | 归档、分享或审计视图，不作为主交互状态源 |
+
+推荐原则：
+
+```text
+JSON/JSONL = 项目内事实账本
+SQLite = 索引 / 缓存 / 查询加速
+Webview State = 当前界面状态
+HTML = 导出产物
+```
+
+这样做的原因：
+
+- Git 可追踪，用户和 Agent 都能读。
+- 项目可跨机器迁移，不依赖插件内部状态。
+- 数据损坏时容易人工审计和修复。
+- 数据库可以删除后重建，不会丢失微观循环事实。
+- 符合 SoloMap 项目数据保留在 `.solopreneur/` 下的本地优先边界。
+
+禁止把 SQLite 作为唯一事实源。数据库适合做筛选、聚合、排序和面板查询缓存，但不能成为微观循环账本的唯一载体。
 
 ## 执行流程
 
