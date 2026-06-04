@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.150 - 2026-06-04
+
+### Changed
+- Preserve enhancement install version evidence (1ebdfb8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.149 - 2026-06-04
 
 ### Changed
