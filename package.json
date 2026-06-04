@@ -2,7 +2,7 @@
   "name": "solopreneur-roadmap",
   "displayName": "SoloMap: AI Roadmap & Agent Task Flow",
   "description": "Stop losing momentum in scattered AI chats. SoloMap turns your projects into a local execution cockpit for roadmaps, agents, feedback, and learning. / 别让项目迷失在零散 AI 对话里。SoloMap 把路线图、Agent 执行、反馈与学习收进 VS Code 本地推进驾驶舱。",
-  "version": "0.0.151",
+  "version": "0.0.152",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
   "repository": {

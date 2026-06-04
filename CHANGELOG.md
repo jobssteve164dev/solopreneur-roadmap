@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.152 - 2026-06-04
+
+### Changed
+- Improve conversation resume and enhancement risk copy (1816696)
+- 建立反馈记录与支持循环 + 微观执行可见性框架 (5c96241)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.151 - 2026-06-04
 
 ### Changed
