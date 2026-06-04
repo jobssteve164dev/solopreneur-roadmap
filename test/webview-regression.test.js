@@ -736,6 +736,10 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /openFeedbackIssue/);
   assert.match(html, /id="setting-mcp-input"/);
   assert.match(html, /id="btn-install-mcp"/);
+  assert.match(html, /id="label-skill-install">安装技能</);
+  assert.match(html, /id="text-install-skill">安装技能</);
+  assert.match(html, /id="label-mcp-install">安装连接器</);
+  assert.match(html, /id="text-install-mcp">安装连接器</);
   assert.match(script, /installMcp/);
   assert.match(script, /mcpInstallResult/);
   assert.match(html, /id="enhancement-list"/);
@@ -910,6 +914,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /agentImpactLoaded/);
   assert.match(html, /id="setting-mcp-input"/);
   assert.match(html, /id="btn-install-mcp"/);
+  assert.match(html, /id="label-skill-install">安装技能</);
+  assert.match(html, /id="text-install-skill">安装技能</);
+  assert.match(html, /id="label-mcp-install">安装连接器</);
+  assert.match(html, /id="text-install-mcp">安装连接器</);
   assert.match(html, /installMcp/);
   assert.match(html, /mcpInstallResult/);
   assert.match(html, /id="enhancement-list"/);
@@ -2117,6 +2125,61 @@ test('agent command builder uses non-interactive task runs and native continuati
   const codeGraphStatus = enhancementStatuses.find((item) => item.id === 'code-structure-assistant');
   assert.equal(codeGraphStatus.installed, true);
   assert.equal(codeGraphStatus.version, '1.2.3');
+
+  const mcpEnhancementRoot = path.join(validationEnhancementStore.installedRoot, 'mcp-description-compressor');
+  fs.mkdirSync(mcpEnhancementRoot, { recursive: true });
+  fs.writeFileSync(path.join(mcpEnhancementRoot, 'solomap.enhancement.json'), JSON.stringify({
+    id: 'mcp-description-compressor',
+    title: 'MCP Description Compressor',
+    description: 'Shrink MCP tool descriptions.',
+    status: 'installed',
+    version: '0.1.0',
+    source: { package: 'caveman-shrink' },
+    health: { ok: true, version: '0.1.0', message: 'Ready' }
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(mcpEnhancementRoot, 'health.json'), JSON.stringify({
+    ok: true,
+    version: '0.1.0',
+    message: 'Ready',
+    commandChecks: [{ command: 'npm list -g caveman-shrink', ok: true, version: '0.1.0' }]
+  }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(mcpEnhancementRoot, 'source.lock.json'), JSON.stringify({
+    source: { package: 'caveman-shrink' },
+    packages: [{ name: 'caveman-shrink', version: '0.1.0' }],
+    installerCommandSummary: 'npm install -g caveman-installer caveman-shrink'
+  }, null, 2), 'utf8');
+  extensionModule.__writeSolomapEnhancementRegistry('/workspace/app', enhancementRuntimeRoot, {
+    ...extensionModule.__readSolomapEnhancementRegistry('/workspace/app', enhancementRuntimeRoot),
+    enhancements: [{
+      id: 'mcp-description-compressor',
+      title: 'MCP Description Compressor',
+      status: 'installed',
+      version: '0.1.0',
+      health: { ok: true, version: '0.1.0', message: 'Ready' },
+      installedPath: 'installed/mcp-description-compressor',
+      configPath: 'installed/mcp-description-compressor/solomap.enhancement.json'
+    }]
+  });
+  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-fake-caveman-'));
+  const fakeCaveman = path.join(fakeBin, 'caveman');
+  fs.writeFileSync(fakeCaveman, '#!/usr/bin/env bash\nexit 0\n', 'utf8');
+  fs.chmodSync(fakeCaveman, 0o755);
+  const fakeCheckWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-enhancement-check-workspace-'));
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  try {
+    const recheck = extensionModule.__checkAndRegisterEnhancement(fakeCheckWorkspace, enhancementRuntimeRoot, 'mcp-description-compressor');
+    assert.equal(recheck.ok, true);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  const mcpStatus = extensionModule.__getSolomapEnhancementStatusSummaries(fakeCheckWorkspace, enhancementRuntimeRoot).find((item) => item.id === 'mcp-description-compressor');
+  assert.equal(mcpStatus.installed, true);
+  assert.equal(mcpStatus.version, '0.1.0');
+  const preservedMcpHealth = JSON.parse(fs.readFileSync(path.join(mcpEnhancementRoot, 'health.json'), 'utf8'));
+  const preservedMcpSourceLock = JSON.parse(fs.readFileSync(path.join(mcpEnhancementRoot, 'source.lock.json'), 'utf8'));
+  assert.equal(preservedMcpHealth.version, '0.1.0');
+  assert.equal(preservedMcpSourceLock.packages[0].version, '0.1.0');
 
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',

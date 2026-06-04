@@ -349,8 +349,12 @@ Use this skill only when SoloMap asks you to install, repair, update, or verify 
    - \`source.lock.json\`: source, package/version/commit if known, installer command summary, and updatedAt.
    - \`health.json\`: ok, version, command checks, config files touched, warnings, and lastCheckedAt.
    - the prompt-specified \`result.json\`.
-6. If a step partially succeeds, keep the installed files and report status as \`failed\` or \`needs_repair\` with a clear repair hint. Do not hide partial failures behind a successful result.
-7. Never delete existing files or clear directories. If cleanup is needed, report it in result.json instead of doing it.
+6. Treat \`health.version\` as the canonical installed version. If the primary command has no useful \`--version\`, derive the version from the package manager, package metadata, source lock, smoke-tested executable package, or upstream commit.
+7. Do not replace a previously known top-level version with \`版本未知\`, an empty string, or a weaker check result. Put weaker command output under \`health.commandChecks\` with the reason.
+8. Preserve existing \`source.lock.json\`, \`solomap.enhancement.json\`, and \`health.json\` fields unless the new run has stronger evidence. During repair or recheck, never overwrite source provenance with a reduced placeholder.
+9. Do not write Agent private config unless the enhancement cannot work without it and the prompt explicitly permits it. If any installer touches Agent config, record \`configFilesTouched\` exactly in health and result.
+10. If a step partially succeeds, keep the installed files and report status as \`failed\` or \`needs_repair\` with a clear repair hint. Do not hide partial failures behind a successful result.
+11. Never delete existing files or clear directories. If cleanup is needed, report it in result.json instead of doing it.
 
 ## Result JSON
 
@@ -378,7 +382,7 @@ Failed install:
 
 ## Validation Bar
 
-- A claimed success must include a command/version check or an explicit reason version is unavailable.
+- A claimed success must include a command/version check. If any package or source version is known, top-level \`version\` and \`health.version\` must use that known value rather than \`版本未知\`.
 - Critical installation logs belong in the run output, not in long-term docs.
 - The plugin is the final validator; write enough structured evidence for it to decide whether the enhancement can be used.
 `
@@ -5025,6 +5029,31 @@ function getSolomapEnhancementStatusSummaries(workspaceRoot: string, globalDataP
   }).filter((summary) => BUILTIN_SOLOMAP_ENHANCEMENTS.some((builtin) => builtin.id === summary.id));
 }
 
+function readJsonFileIfExists(filePath: string): any {
+  try {
+    if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      return null;
+    }
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function isKnownEnhancementVersion(value: unknown): boolean {
+  const normalized = String(value || '').trim().toLowerCase();
+  return Boolean(normalized && !['版本未知', 'unknown', 'unknown version', 'version unknown', '未安装'].includes(normalized));
+}
+
+function chooseEnhancementVersion(...values: unknown[]): string {
+  for (const value of values) {
+    if (isKnownEnhancementVersion(value)) {
+      return String(value).trim();
+    }
+  }
+  return '';
+}
+
 function buildRtkCommandWrapper(commandName: string): string {
   return [
     '#!/usr/bin/env bash',
@@ -5328,7 +5357,9 @@ function buildEnhancementInstallPrompt(enhancementId: string, workspaceRoot: str
     '- 只安装或修复本次请求的增强。',
     '- 不要删除已有文件、不要清空目录、不要重写无关 Agent 配置。',
     '- 如果安装器会修改 Agent 配置，必须在 health.json/result.json 里列出 touched config files 和风险提示。',
-    '- 安装完成后必须做本机可用性检测并写入版本；无法获得版本时写“版本未知”及原因。',
+    '- 安装完成后必须做本机可用性检测并写入版本；如果命令本身不输出版本，要从包管理器、包元数据、source lock、可用性检测对应包或上游 commit 推导版本。',
+    '- `health.version` 是设置页显示的准确信息；只要包或来源能确认版本，就不要把顶层版本写成“版本未知”。',
+    '- 修复或重新检测时保留已有 manifest、source lock 和已知版本；只有更强的新证据才能覆盖旧值。',
     '- 如果出现部分成功、中途失败或配置失败，result.json 必须如实写 ok=false 或 health.ok=false。',
     '',
     '完成后正常退出 CLI。'
@@ -5425,7 +5456,17 @@ function runEnhancementCheckCommand(enhancementId: string, workspaceRoot: string
   const commands: Record<string, string> = {
     'command-output-optimizer': 'command -v rtk >/dev/null 2>&1 && (rtk --version 2>/dev/null || rtk gain 2>/dev/null | head -n 1)',
     'code-structure-assistant': 'command -v codegraph >/dev/null 2>&1 && (codegraph --version 2>/dev/null || codegraph status . 2>/dev/null | head -n 1)',
-    'mcp-description-compressor': 'command -v caveman >/dev/null 2>&1 && (caveman --version 2>/dev/null | head -n 1 || true)'
+    'mcp-description-compressor': [
+      'if command -v caveman-shrink >/dev/null 2>&1; then',
+      '  (npm list -g caveman-shrink --depth=0 2>/dev/null | sed -n "s/.*caveman-shrink@//p" | head -n 1) || caveman-shrink --version 2>/dev/null | head -n 1 || true;',
+      'elif npm list -g caveman-shrink --depth=0 >/dev/null 2>&1; then',
+      '  npm list -g caveman-shrink --depth=0 2>/dev/null | sed -n "s/.*caveman-shrink@//p" | head -n 1;',
+      'elif command -v caveman >/dev/null 2>&1; then',
+      '  caveman --version 2>/dev/null | head -n 1 || true;',
+      'else',
+      '  exit 1;',
+      'fi'
+    ].join(' ')
   };
   const command = commands[enhancementId];
   if (!command) {
@@ -5459,25 +5500,70 @@ function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPath: stri
   const check = runEnhancementCheckCommand(enhancementId, workspaceRoot);
   const now = new Date().toISOString();
   const { enhancementsRoot, installedRoot } = ensureSolomapEnhancementStore(workspaceRoot, globalDataPath);
+  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const existingEntry = registry.enhancements.find((enhancement) => enhancement.id === enhancementId);
   const installedPath = path.join(installedRoot, enhancementId);
   fs.mkdirSync(installedPath, { recursive: true });
+  const manifestPath = path.join(installedPath, 'solomap.enhancement.json');
+  const healthPath = path.join(installedPath, 'health.json');
+  const sourceLockPath = path.join(installedPath, 'source.lock.json');
+  const existingManifest = readJsonFileIfExists(manifestPath) || {};
+  const existingHealth = readJsonFileIfExists(healthPath) || {};
+  const existingSourceLock = readJsonFileIfExists(sourceLockPath) || {};
+  const version = chooseEnhancementVersion(
+    check.version,
+    existingHealth.version,
+    existingManifest.health?.version,
+    existingManifest.version,
+    existingEntry?.health?.version,
+    existingEntry?.version,
+    existingSourceLock.version,
+    existingSourceLock.metadata?.version,
+    ...(Array.isArray(existingSourceLock.packages) ? existingSourceLock.packages.map((pkg: any) => pkg?.version) : [])
+  );
+  const nextHealth = {
+    ...existingHealth,
+    ok: check.ok,
+    version,
+    message: check.message || existingHealth.message || (check.ok ? '检测通过。' : '未检测到可用安装。'),
+    lastCheckedAt: now,
+    lastProbe: {
+      ok: check.ok,
+      version: check.version,
+      message: check.message,
+      checkedAt: now
+    }
+  };
   const entry: SolomapEnhancementRegistryEntry = {
     ...builtin,
+    ...existingEntry,
+    ...existingManifest,
+    id: enhancementId,
+    title: String(existingManifest.title || existingEntry?.title || builtin.title),
+    description: String(existingManifest.description || existingEntry?.description || builtin.description),
     status: check.ok ? 'installed' : 'unavailable',
-    version: check.version,
+    version,
+    source: existingManifest.source || existingEntry?.source || builtin.source || {},
     installedPath: path.relative(enhancementsRoot, installedPath).replace(/\\/g, '/'),
-    configPath: path.relative(enhancementsRoot, path.join(installedPath, 'solomap.enhancement.json')).replace(/\\/g, '/'),
+    configPath: path.relative(enhancementsRoot, manifestPath).replace(/\\/g, '/'),
+    adapter: { ...(builtin.adapter || {}), ...(existingEntry?.adapter || {}), ...(existingManifest.adapter || {}) },
+    activation: { ...(builtin.activation || {}), ...(existingEntry?.activation || {}), ...(existingManifest.activation || {}) },
+    risk: { ...(builtin.risk || {}), ...(existingEntry?.risk || {}), ...(existingManifest.risk || {}) },
+    evidencePolicy: { ...(builtin.evidencePolicy || {}), ...(existingEntry?.evidencePolicy || {}), ...(existingManifest.evidencePolicy || {}) },
+    installedAt: String(existingManifest.installedAt || existingEntry?.installedAt || now),
     updatedAt: now,
     lastCheckedAt: now,
-    health: { ok: check.ok, version: check.version, message: check.message }
+    health: nextHealth
   };
-  fs.writeFileSync(path.join(installedPath, 'health.json'), JSON.stringify({ ok: check.ok, version: check.version, message: check.message, lastCheckedAt: now }, null, 2) + '\n', 'utf8');
-  fs.writeFileSync(path.join(installedPath, 'solomap.enhancement.json'), JSON.stringify(entry, null, 2) + '\n', 'utf8');
-  fs.writeFileSync(path.join(installedPath, 'source.lock.json'), JSON.stringify({ source: builtin.source || {}, checkedAt: now }, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(healthPath, JSON.stringify(nextHealth, null, 2) + '\n', 'utf8');
+  fs.writeFileSync(manifestPath, JSON.stringify(entry, null, 2) + '\n', 'utf8');
+  if (!fs.existsSync(sourceLockPath)) {
+    fs.writeFileSync(sourceLockPath, JSON.stringify({ source: builtin.source || {}, checkedAt: now }, null, 2) + '\n', 'utf8');
+  }
   upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, entry);
   return {
     ok: check.ok,
-    message: check.ok ? `执行增强可用：${builtin.title}（${check.version || '版本未知'}）` : `执行增强检测失败：${builtin.title}。${check.message}`,
+    message: check.ok ? `执行增强可用：${builtin.title}（${version || '版本未知'}）` : `执行增强检测失败：${builtin.title}。${check.message}`,
     enhancementId
   };
 }
@@ -9456,7 +9542,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-extensions"></span><span id="settings-section-abilities">Abilities</span></div>
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-skill-install">Install Skill</label>
+      <label class="settings-lbl-title" id="label-skill-install">安装技能</label>
       <input
         type="text"
         class="settings-input"
@@ -9466,12 +9552,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div id="help-skill-install" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
         Paste a skills.sh or GitHub skill link. SoloMap will install it into the global skill library.
       </div>
-      <button class="settings-action-btn test-btn" id="btn-install-skill" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-cloud-download"></span><span id="text-install-skill">Install Skill</span></button>
+      <button class="settings-action-btn test-btn" id="btn-install-skill" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-cloud-download"></span><span id="text-install-skill">安装技能</span></button>
       <div class="cli-badge" id="skill-install-badge" style="display:none;"></div>
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-mcp-install">Install Connector</label>
+      <label class="settings-lbl-title" id="label-mcp-install">安装连接器</label>
       <input
         type="text"
         class="settings-input"
@@ -9481,7 +9567,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div id="help-mcp-install" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
         Paste an MCP connector source. SoloMap will register it as a global ability connector.
       </div>
-      <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">Install Connector</span></button>
+      <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">安装连接器</span></button>
       <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
     </div>
 

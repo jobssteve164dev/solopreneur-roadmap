@@ -364,7 +364,7 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 
 第一步：把设置页从“启用开关”改成“内置增强能力安装/检测状态卡”。
 第二步：新增增强安装 skill，并让 Agent CLI 负责复杂安装与配置。
-第三步：插件复验 result、manifest、source lock、health 和版本后写入 registry。
+第三步：插件复验 result、manifest、source lock、health 和版本后写入 registry；复验只能用更强的新证据更新已知版本和来源，不能把空版本、版本未知或简化来源写回覆盖安装 Agent 已确认的信息。
 第四步：先实现只读/低副作用能力：
 
 1. MCP 工具描述压缩 profile 生成。
@@ -382,6 +382,7 @@ CodeGraph 可以作为受管 MCP 连接器，也可以作为代码上下文预�
 - 禁止把供应方名称当作设置页主语。
 - 禁止由插件直接执行复杂安装命令；复杂安装、配置和修复必须交给 Agent CLI 的受控安装任务，插件只做复验与登记。
 - 禁止默认写入 Agent 私有配置、全局 shell hook、IDE rule file 或 OpenClaw workspace；若上游安装器确实修改配置，Agent 必须在 health/result 中列出改动。
+- 禁止在修复或重新检测时用弱证据覆盖强证据：已知版本、source lock、command checks 和配置改动清单必须保留，除非新检测拿到了更明确的版本或来源。
 - 禁止让增强能力替代当前文件、命令输出、测试和日志。
 - 禁止让增强失败阻断主任务。
 - 禁止自动压缩长期文档或用户可见内容。

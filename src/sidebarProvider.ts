@@ -5379,7 +5379,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-extensions"></span><span id="settings-section-abilities">Abilities</span></div>
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-skill-install">Install Skill</label>
+      <label class="settings-lbl-title" id="label-skill-install">安装技能</label>
       <input
         type="text"
         class="settings-input"
@@ -5389,12 +5389,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       <div id="help-skill-install" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
         Paste a skills.sh or GitHub skill link. SoloMap will install it into the global skill library.
       </div>
-      <button class="settings-action-btn test-btn" id="btn-install-skill" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-cloud-download"></span><span id="text-install-skill">Install Skill</span></button>
+      <button class="settings-action-btn test-btn" id="btn-install-skill" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-cloud-download"></span><span id="text-install-skill">安装技能</span></button>
       <div class="cli-badge" id="skill-install-badge" style="display:none;"></div>
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-mcp-install">Install Connector</label>
+      <label class="settings-lbl-title" id="label-mcp-install">安装连接器</label>
       <input
         type="text"
         class="settings-input"
@@ -5404,7 +5404,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       <div id="help-mcp-install" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
         Paste an MCP connector source. SoloMap will register it as a global ability connector.
       </div>
-      <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">Install Connector</span></button>
+      <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">安装连接器</span></button>
       <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
     </div>
 
