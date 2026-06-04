@@ -2164,6 +2164,22 @@ test('agent command builder uses non-interactive task runs and native continuati
   const uninstalledCodeGraph = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
   assert.equal(uninstalledCodeGraph.installed, false);
   assert.equal(uninstalledCodeGraph.enabled, false);
+  const fakeCodegraphBin = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-fake-codegraph-'));
+  const fakeCodegraph = path.join(fakeCodegraphBin, 'codegraph');
+  fs.writeFileSync(fakeCodegraph, '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "codegraph 1.2.3"; else echo "ready"; fi\n', 'utf8');
+  fs.chmodSync(fakeCodegraph, 0o755);
+  const oldCodegraphPath = process.env.PATH;
+  process.env.PATH = `${fakeCodegraphBin}:/usr/bin:/bin`;
+  try {
+    const recheckUninstalledCodeGraph = extensionModule.__checkAndRegisterEnhancement('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant');
+    assert.equal(recheckUninstalledCodeGraph.ok, false);
+  } finally {
+    process.env.PATH = oldCodegraphPath;
+  }
+  const stillUninstalledCodeGraph = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
+  assert.equal(stillUninstalledCodeGraph.installed, false);
+  assert.equal(stillUninstalledCodeGraph.enabled, false);
+  assert.equal(stillUninstalledCodeGraph.status, 'uninstalled');
 
   const mcpEnhancementRoot = path.join(validationEnhancementStore.installedRoot, 'mcp-description-compressor');
   fs.mkdirSync(mcpEnhancementRoot, { recursive: true });

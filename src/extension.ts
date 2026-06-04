@@ -483,6 +483,13 @@ interface SolomapEnhancementRegistryEntry {
     ok?: boolean;
     message?: string;
     version?: string;
+    lastProbe?: {
+      ok?: boolean;
+      version?: string;
+      message?: string;
+      checkedAt?: string;
+    };
+    commandChecks?: any[];
   };
 }
 
@@ -5544,6 +5551,35 @@ function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPath: stri
   const { enhancementsRoot, installedRoot } = ensureSolomapEnhancementStore(workspaceRoot, globalDataPath);
   const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   const existingEntry = registry.enhancements.find((enhancement) => enhancement.id === enhancementId);
+  const uninstalledEntry = String(existingEntry?.status || '').toLowerCase() === 'uninstalled' ? existingEntry : undefined;
+  if (uninstalledEntry) {
+    upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+      ...builtin,
+      ...uninstalledEntry,
+      id: enhancementId,
+      status: 'uninstalled',
+      enabled: false,
+      updatedAt: now,
+      lastCheckedAt: now,
+      health: {
+        ...(uninstalledEntry.health || {}),
+        ok: false,
+        message: '已卸载；重新检测不会重新启用或重新登记。需要恢复时请点击安装或修复。',
+        version: uninstalledEntry.health?.version || uninstalledEntry.version || '',
+        lastProbe: {
+          ok: check.ok,
+          version: check.version,
+          message: check.message,
+          checkedAt: now
+        }
+      }
+    });
+    return {
+      ok: false,
+      message: `执行增强已卸载：${builtin.title}。需要恢复时请点击安装或修复。`,
+      enhancementId
+    };
+  }
   const installedPath = path.join(installedRoot, enhancementId);
   fs.mkdirSync(installedPath, { recursive: true });
   const manifestPath = path.join(installedPath, 'solomap.enhancement.json');
