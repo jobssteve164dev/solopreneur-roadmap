@@ -437,6 +437,7 @@ interface SolomapEnhancementRegistryEntry {
   title?: string;
   description?: string;
   status?: string;
+  enabled?: boolean;
   version?: string;
   source?: any;
   capability?: string;
@@ -505,6 +506,7 @@ interface SolomapEnhancementStatusSummary {
   statusLabel: string;
   version: string;
   installed: boolean;
+  enabled: boolean;
   action: string;
   message: string;
   updatedAt: string;
@@ -770,7 +772,26 @@ export async function activate(context: vscode.ExtensionContext) {
     async (enhancementId) => {
       await handleCheckSolomapEnhancement(context, enhancementId);
     },
-    () => buildFeedbackUsageSummary(context)
+    async (enhancementId, enabled) => {
+      await handleSetSolomapEnhancementEnabled(context, enhancementId, enabled);
+    },
+    async (enhancementId) => {
+      await handleUninstallSolomapEnhancement(context, enhancementId);
+    },
+    () => buildFeedbackUsageSummary(context),
+    async (projectPath, nodeId, conversationId) => {
+      if (!getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+        return;
+      }
+      if (getSelectedProjectPath(context) !== projectPath) {
+        await selectProject(context, projectPath);
+      }
+      const ready = await ensureSyncEngine(context);
+      if (ready && activeProjectRoot === projectPath) {
+        await stopAgentRun(String(nodeId || ''), Number(conversationId || 0));
+      }
+    }
   );
 
   context.subscriptions.push(
@@ -800,7 +821,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   };
   return {
     ...baseSettings,
-    enabledEnhancements: getInstalledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
+    enabledEnhancements: getEnabledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
     enhancementStatuses: getSolomapEnhancementStatusSummaries(settingsWorkspaceRoot, baseSettings.globalDataPath)
   };
 }
@@ -836,7 +857,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     taskPermissionMode: 'auto',
     reviewerCliPath: String(settings.reviewerCliPath ?? currentSettings.reviewerCliPath ?? '').trim(),
     collaborationReviewMode: normalizeCollaborationReviewMode(settings.collaborationReviewMode ?? currentSettings.collaborationReviewMode),
-    enabledEnhancements: getInstalledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim())
+    enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim())
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -2380,6 +2401,14 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'checkEnhancement':
           await handleCheckSolomapEnhancement(context, message.enhancementId || '');
+          break;
+
+        case 'setEnhancementEnabled':
+          await handleSetSolomapEnhancementEnabled(context, message.enhancementId || '', Boolean(message.enabled));
+          break;
+
+        case 'uninstallEnhancement':
+          await handleUninstallSolomapEnhancement(context, message.enhancementId || '');
           break;
 
         case 'openFeedbackIssue':
@@ -4982,29 +5011,36 @@ function isEnhancementUsable(enhancement: SolomapEnhancementRegistryEntry | unde
   return true;
 }
 
+function isEnhancementEnabled(enhancement: SolomapEnhancementRegistryEntry | undefined): boolean {
+  return Boolean(enhancement?.enabled) && isEnhancementUsable(enhancement);
+}
+
 function enabledEnhancementIds(enabledEnhancements: Record<string, boolean> = {}): string[] {
   return BUILTIN_SOLOMAP_ENHANCEMENTS
     .map((enhancement) => enhancement.id)
     .filter((id) => Boolean(enabledEnhancements[id]));
 }
 
-function getInstalledEnhancementMap(workspaceRoot: string, globalDataPath = ''): Record<string, boolean> {
+function getEnabledEnhancementMap(workspaceRoot: string, globalDataPath = ''): Record<string, boolean> {
   const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   return mergeBuiltinSolomapEnhancements(registry.enhancements)
     .filter((enhancement) => BUILTIN_SOLOMAP_ENHANCEMENTS.some((builtin) => builtin.id === enhancement.id))
     .reduce<Record<string, boolean>>((acc, enhancement) => {
-      acc[enhancement.id] = isEnhancementUsable(enhancement);
+      acc[enhancement.id] = isEnhancementEnabled(enhancement);
       return acc;
     }, {});
 }
 
-function statusLabelForEnhancement(status: string, installed: boolean): string {
+function statusLabelForEnhancement(status: string, installed: boolean, enabled = false): string {
   const normalized = String(status || '').toLowerCase();
+  if (enabled) return '已启用';
   if (installed) return '已安装';
   if (normalized === 'installing') return '安装中';
   if (normalized === 'failed') return '需要修复';
   if (normalized === 'checking') return '检测中';
   if (normalized === 'unavailable') return '检测失败';
+  if (normalized === 'disabled') return '已禁用';
+  if (normalized === 'uninstalled') return '未安装';
   return '未安装';
 }
 
@@ -5012,6 +5048,7 @@ function getSolomapEnhancementStatusSummaries(workspaceRoot: string, globalDataP
   const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   return mergeBuiltinSolomapEnhancements(registry.enhancements).map((enhancement) => {
     const installed = isEnhancementUsable(enhancement);
+    const enabled = isEnhancementEnabled(enhancement);
     const status = String(enhancement.status || (installed ? 'installed' : 'not_installed'));
     const version = String(enhancement.health?.version || enhancement.version || enhancement.source?.version || enhancement.source?.commit || '').trim();
     return {
@@ -5019,9 +5056,10 @@ function getSolomapEnhancementStatusSummaries(workspaceRoot: string, globalDataP
       title: enhancement.title || enhancement.id,
       description: enhancement.description || enhancement.benefit || '',
       status,
-      statusLabel: statusLabelForEnhancement(status, installed),
+      statusLabel: statusLabelForEnhancement(status, installed, enabled),
       version: version || (installed ? '版本未知' : '未安装'),
       installed,
+      enabled,
       action: installed ? 'check' : 'install',
       message: String(enhancement.health?.message || enhancement.benefit || ''),
       updatedAt: String(enhancement.lastCheckedAt || enhancement.updatedAt || enhancement.installedAt || '')
@@ -5110,7 +5148,6 @@ function ensureSolomapEnhancementRuntime(
     preflightLines.push([
       'if command -v codegraph >/dev/null 2>&1; then',
       '  if [ -d .git ]; then mkdir -p .git/info; grep -qxF ".codegraph/" .git/info/exclude 2>/dev/null || printf "\\n.codegraph/\\n" >> .git/info/exclude; fi',
-      `  if [ ! -d ${shellQuote(path.join(workspaceRoot, '.codegraph'))} ]; then codegraph init -i >> ${shellQuote(path.join(runtimeRoot, 'codegraph-init.log'))} 2>&1 || true; fi`,
       'fi'
     ].join('\n'));
   }
@@ -5153,21 +5190,22 @@ function buildSolomapEnhancementContextPreflight(
     ].join('\n'),
     enabledEnhancements['code-structure-assistant'] ? [
       '  echo "## CodeGraph"',
+      '  solomap_enhancement_timeout() { if command -v timeout >/dev/null 2>&1; then timeout 6s "$@"; else "$@"; fi; }',
       '  if command -v codegraph >/dev/null 2>&1; then',
       '    echo "### Status"',
-      '    codegraph status . 2>&1 | head -n 80 || true',
+      '    solomap_enhancement_timeout codegraph status . 2>&1 | head -n 80 || true',
       '    echo ""',
       contextSearch ? [
         '    echo "### Task Search"',
-        `    codegraph query ${shellQuote(contextSearch)} --limit 8 2>&1 | head -n 120 || true`,
+        `    solomap_enhancement_timeout codegraph query ${shellQuote(contextSearch)} --limit 8 2>&1 | head -n 120 || true`,
         '    echo ""'
       ].join('\n') : '',
       '    echo "### Indexed Files"',
-      '    codegraph files . --format tree --max-depth 3 2>&1 | head -n 120 || true',
+      '    solomap_enhancement_timeout codegraph files . --format tree --max-depth 3 2>&1 | head -n 120 || true',
       '    echo ""',
       '    if [ -d .git ]; then',
       '      echo "### Affected Tests From Current Diff"',
-      '      SOLOMAP_RTK_BYPASS=1 git diff --name-only HEAD 2>/dev/null | codegraph affected --stdin --quiet 2>&1 | head -n 80 || true',
+      '      SOLOMAP_RTK_BYPASS=1 git diff --name-only HEAD 2>/dev/null | solomap_enhancement_timeout codegraph affected --stdin --quiet 2>&1 | head -n 80 || true',
       '      echo ""',
       '    fi',
       '  else',
@@ -5284,6 +5322,7 @@ function selectSolomapEnhancementCandidates(
 ): Array<{ enhancement: SolomapEnhancementRegistryEntry; reasons: string[] }> {
   const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   return mergeBuiltinSolomapEnhancements(registry.enhancements, enabledEnhancements)
+    .filter((enhancement) => Boolean(enabledEnhancements[enhancement.id]))
     .map((enhancement) => ({ enhancement, ...scoreSolomapEnhancement(enhancement, contextText) }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.enhancement.id.localeCompare(b.enhancement.id))
@@ -5417,6 +5456,8 @@ function validateAndRegisterEnhancementInstall(workspaceRoot: string, globalData
   }
   const version = String(health.version || enhancementJson.version || result.health?.version || result.metadata?.version || '').trim();
   const now = new Date().toISOString();
+  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const existingEntry = registry.enhancements.find((enhancement) => enhancement.id === enhancementId);
   const entry: SolomapEnhancementRegistryEntry = {
     ...builtin,
     ...enhancementJson,
@@ -5424,6 +5465,7 @@ function validateAndRegisterEnhancementInstall(workspaceRoot: string, globalData
     title: String(enhancementJson.title || builtin.title),
     description: String(enhancementJson.description || builtin.description),
     status: health.ok === false ? 'failed' : 'installed',
+    enabled: Boolean(existingEntry?.enabled) && health.ok !== false,
     version,
     source: enhancementJson.source || result.source || builtin.source || {},
     installedPath: path.relative(enhancementsRoot, installedPath).replace(/\\/g, '/'),
@@ -5542,6 +5584,7 @@ function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPath: stri
     title: String(existingManifest.title || existingEntry?.title || builtin.title),
     description: String(existingManifest.description || existingEntry?.description || builtin.description),
     status: check.ok ? 'installed' : 'unavailable',
+    enabled: Boolean(existingEntry?.enabled) && check.ok,
     version,
     source: existingManifest.source || existingEntry?.source || builtin.source || {},
     installedPath: path.relative(enhancementsRoot, installedPath).replace(/\\/g, '/'),
@@ -5566,6 +5609,60 @@ function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPath: stri
     message: check.ok ? `执行增强可用：${builtin.title}（${version || '版本未知'}）` : `执行增强检测失败：${builtin.title}。${check.message}`,
     enhancementId
   };
+}
+
+function setSolomapEnhancementEnabled(workspaceRoot: string, globalDataPath: string, enhancementId: string, enabled: boolean): { ok: boolean; message: string; enhancementId?: string } {
+  const builtin = getBuiltinEnhancementDefinition(enhancementId);
+  if (!builtin) {
+    return { ok: false, message: '未知执行增强。' };
+  }
+  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const current = mergeBuiltinSolomapEnhancements(registry.enhancements).find((enhancement) => enhancement.id === enhancementId);
+  if (enabled && !isEnhancementUsable(current)) {
+    return { ok: false, message: `执行增强尚不可用：${builtin.title}。请先安装或修复。`, enhancementId };
+  }
+  const now = new Date().toISOString();
+  upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+    ...builtin,
+    ...(current || {}),
+    id: enhancementId,
+    status: current?.status || (enabled ? 'installed' : 'disabled'),
+    enabled,
+    updatedAt: now,
+    lastCheckedAt: current?.lastCheckedAt || now,
+    health: current?.health || { ok: enabled, message: enabled ? '已启用。' : '已禁用。' }
+  });
+  return {
+    ok: true,
+    message: enabled ? `已启用执行增强：${builtin.title}` : `已禁用执行增强：${builtin.title}`,
+    enhancementId
+  };
+}
+
+function uninstallSolomapEnhancement(workspaceRoot: string, globalDataPath: string, enhancementId: string): { ok: boolean; message: string; enhancementId?: string } {
+  const builtin = getBuiltinEnhancementDefinition(enhancementId);
+  if (!builtin) {
+    return { ok: false, message: '未知执行增强。' };
+  }
+  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const current = mergeBuiltinSolomapEnhancements(registry.enhancements).find((enhancement) => enhancement.id === enhancementId);
+  const now = new Date().toISOString();
+  upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+    ...builtin,
+    ...(current || {}),
+    id: enhancementId,
+    status: 'uninstalled',
+    enabled: false,
+    updatedAt: now,
+    lastCheckedAt: now,
+    health: {
+      ...(current?.health || {}),
+      ok: false,
+      message: '已从运行路径移除；安装产物保留用于审计和后续修复。',
+      version: current?.health?.version || current?.version || ''
+    }
+  });
+  return { ok: true, message: `已卸载执行增强：${builtin.title}`, enhancementId };
 }
 
 function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = ''): string {
@@ -6550,6 +6647,7 @@ async function handleInstallSolomapEnhancement(context: vscode.ExtensionContext,
   upsertEnhancementRegistryEntry(workspaceRoot, settings.globalDataPath, {
     ...builtin,
     status: 'installing',
+    enabled: false,
     updatedAt: new Date().toISOString(),
     health: { ok: false, message: '安装中' }
   });
@@ -6583,6 +6681,32 @@ async function handleCheckSolomapEnhancement(context: vscode.ExtensionContext, r
   const workspaceRoot = getSkillInstallWorkspaceRoot(context);
   const settings = getPersistedSettings(context);
   const result = checkAndRegisterEnhancement(workspaceRoot, settings.globalDataPath, enhancementId);
+  postEnhancementInstallResult(context, result.ok, result.message);
+  if (result.ok) {
+    vscode.window.showInformationMessage(result.message);
+  } else {
+    vscode.window.showWarningMessage(result.message);
+  }
+}
+
+async function handleSetSolomapEnhancementEnabled(context: vscode.ExtensionContext, rawEnhancementId: string, enabled: boolean): Promise<void> {
+  const enhancementId = sanitizeAttachmentScope(String(rawEnhancementId || '').trim().toLowerCase());
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const settings = getPersistedSettings(context);
+  const result = setSolomapEnhancementEnabled(workspaceRoot, settings.globalDataPath, enhancementId, enabled);
+  postEnhancementInstallResult(context, result.ok, result.message);
+  if (result.ok) {
+    vscode.window.showInformationMessage(result.message);
+  } else {
+    vscode.window.showWarningMessage(result.message);
+  }
+}
+
+async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContext, rawEnhancementId: string): Promise<void> {
+  const enhancementId = sanitizeAttachmentScope(String(rawEnhancementId || '').trim().toLowerCase());
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const settings = getPersistedSettings(context);
+  const result = uninstallSolomapEnhancement(workspaceRoot, settings.globalDataPath, enhancementId);
   postEnhancementInstallResult(context, result.ok, result.message);
   if (result.ok) {
     vscode.window.showInformationMessage(result.message);
@@ -9574,7 +9698,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-enhancement-toggles">执行增强</label>
       <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        安装后自动用于合适任务；关键证据仍回看原始文件、日志和测试。
+        实验性功能。安装后不会自动启用；启用后可能影响 Agent 启动和命令执行，异常时可在这里禁用或卸载。
       </div>
       <div class="enhancement-list" id="enhancement-list"></div>
       <div class="cli-badge" id="enhancement-install-badge" style="display:none;"></div>
@@ -9707,8 +9831,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installingEnhancement: '正在启动安装...',
         installEnhancement: '安装',
         repairEnhancement: '修复',
+        enableEnhancement: '启用',
+        disableEnhancement: '禁用',
+        uninstallEnhancement: '卸载',
         checkEnhancement: '重新检测',
         enhancementVersion: '版本',
+        enhancementStateEnabled: '已启用',
+        enhancementStateDisabled: '未启用',
         feedback: '建议反馈',
         feedbackNotWorking: '没跑通',
         feedbackNextStep: '不懂下一步',
@@ -9848,8 +9977,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installingEnhancement: 'Starting install...',
         installEnhancement: 'Install',
         repairEnhancement: 'Repair',
+        enableEnhancement: 'Enable',
+        disableEnhancement: 'Disable',
+        uninstallEnhancement: 'Uninstall',
         checkEnhancement: 'Check',
         enhancementVersion: 'Version',
+        enhancementStateEnabled: 'Enabled',
+        enhancementStateDisabled: 'Disabled',
         feedback: 'Feedback',
         feedbackNotWorking: 'Not working',
         feedbackNextStep: 'Next step unclear',
@@ -10244,14 +10378,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const items = Array.isArray(statuses) ? statuses : [];
       enhancementList.innerHTML = items.map(item => {
         const actionText = item.installed ? t('repairEnhancement') : t('installEnhancement');
+        const toggleText = item.enabled ? t('disableEnhancement') : t('enableEnhancement');
         return '<div class="enhancement-card" data-enhancement-card="' + escapeHtml(item.id) + '">'
           + '<div class="enhancement-card-head"><div><div class="enhancement-title">' + escapeHtml(item.title || item.id) + '</div>'
           + '<div class="enhancement-desc">' + escapeHtml(item.description || '') + '</div></div>'
           + '<span class="enhancement-status ' + escapeHtml(item.status || '') + '">' + escapeHtml(item.statusLabel || '') + '</span></div>'
           + '<div class="enhancement-meta">' + escapeHtml(t('enhancementVersion')) + '：' + escapeHtml(item.version || '') + '</div>'
+          + '<div class="enhancement-meta">' + escapeHtml(item.enabled ? t('enhancementStateEnabled') : t('enhancementStateDisabled')) + '</div>'
           + '<div class="enhancement-actions">'
           + '<button class="settings-action-btn test-btn" data-install-enhancement="' + escapeHtml(item.id) + '"><span class="codicon codicon-cloud-download"></span><span>' + escapeHtml(actionText) + '</span></button>'
           + '<button class="settings-action-btn test-btn" data-check-enhancement="' + escapeHtml(item.id) + '"><span class="codicon codicon-search"></span><span>' + escapeHtml(t('checkEnhancement')) + '</span></button>'
+          + '<button class="settings-action-btn test-btn" data-toggle-enhancement="' + escapeHtml(item.id) + '" data-enhancement-enabled="' + (item.enabled ? 'false' : 'true') + '" ' + (!item.installed ? 'disabled' : '') + '><span class="codicon codicon-debug-start"></span><span>' + escapeHtml(toggleText) + '</span></button>'
+          + '<button class="settings-action-btn test-btn" data-uninstall-enhancement="' + escapeHtml(item.id) + '" ' + (!item.installed ? 'disabled' : '') + '><span class="codicon codicon-trash"></span><span>' + escapeHtml(t('uninstallEnhancement')) + '</span></button>'
           + '</div></div>';
       }).join('');
       enhancementList.querySelectorAll('[data-install-enhancement]').forEach(button => {
@@ -10271,6 +10409,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         button.addEventListener('click', () => {
           const enhancementId = button.getAttribute('data-check-enhancement') || '';
           vscode.postMessage({ command: 'checkEnhancement', enhancementId });
+        });
+      });
+      enhancementList.querySelectorAll('[data-toggle-enhancement]').forEach(button => {
+        button.addEventListener('click', () => {
+          const enhancementId = button.getAttribute('data-toggle-enhancement') || '';
+          const enabled = button.getAttribute('data-enhancement-enabled') === 'true';
+          vscode.postMessage({ command: 'setEnhancementEnabled', enhancementId, enabled });
+        });
+      });
+      enhancementList.querySelectorAll('[data-uninstall-enhancement]').forEach(button => {
+        button.addEventListener('click', () => {
+          const enhancementId = button.getAttribute('data-uninstall-enhancement') || '';
+          vscode.postMessage({ command: 'uninstallEnhancement', enhancementId });
         });
       });
     }

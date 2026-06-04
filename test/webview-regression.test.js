@@ -748,7 +748,10 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
   assert.match(script, /installEnhancement/);
   assert.match(script, /checkEnhancement/);
+  assert.match(script, /setEnhancementEnabled/);
+  assert.match(script, /uninstallEnhancement/);
   assert.match(script, /enhancementInstallResult/);
+  assert.match(html, /实验性功能。安装后不会自动启用/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -867,6 +870,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /renderSidebarStepHistoryContent/);
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
+  assert.match(html, /data-stop-sidebar-solo-id/);
+  assert.match(html, /data-stop-sidebar-step-id/);
+  assert.match(html, /stopConversation/);
   assert.match(html, /\.portfolio-compose-row\s*\{[\s\S]*?align-items:\s*stretch/);
   assert.match(html, /\.portfolio-compose-input\s*\{[\s\S]*?min-height:\s*44px/);
   assert.match(html, /\.portfolio-action-zone\s*\{[\s\S]*?margin-top:\s*4px[\s\S]*?padding-top:\s*0/);
@@ -926,7 +932,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
   assert.match(html, /installEnhancement/);
   assert.match(html, /checkEnhancement/);
+  assert.match(html, /setEnhancementEnabled/);
+  assert.match(html, /uninstallEnhancement/);
   assert.match(html, /enhancementInstallResult/);
+  assert.match(html, /实验性功能。安装后不会自动启用/);
   assert.match(html, /\.onboarding-panel\s*\{/);
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);
@@ -1433,6 +1442,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__validateAndRegisterEnhancementInstall = validateAndRegisterEnhancementInstall;',
       'module.exports.__getSolomapEnhancementStatusSummaries = getSolomapEnhancementStatusSummaries;',
       'module.exports.__checkAndRegisterEnhancement = checkAndRegisterEnhancement;',
+      'module.exports.__setSolomapEnhancementEnabled = setSolomapEnhancementEnabled;',
+      'module.exports.__uninstallSolomapEnhancement = uninstallSolomapEnhancement;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__buildRoadmapValidationScript = buildRoadmapValidationScript;',
       'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
@@ -2020,18 +2031,21 @@ test('agent command builder uses non-interactive task runs and native continuati
       id: 'command-output-optimizer',
       title: 'Command Output Optimizer',
       status: 'installed',
+      enabled: true,
       version: '1.0.0',
       health: { ok: true, version: '1.0.0', message: 'Ready' }
     }, {
       id: 'code-structure-assistant',
       title: 'Code Structure Assistant',
       status: 'installed',
+      enabled: true,
       version: '2.0.0',
       health: { ok: true, version: '2.0.0', message: 'Ready' }
     }, {
       id: 'mcp-description-compressor',
       title: 'MCP Description Compressor',
       status: 'installed',
+      enabled: true,
       version: '3.0.0',
       health: { ok: true, version: '3.0.0', message: 'Ready' }
     }])
@@ -2040,7 +2054,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   const enabledBuiltinInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
     '/workspace/app',
     enhancementStoreRoot,
-    '需要减少命令输出 token，同时保留失败日志'
+    '需要减少命令输出 token，同时保留失败日志',
+    { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true }
   );
   assert.match(enabledBuiltinInstructions, /Command Output Optimizer/);
   assert.match(enabledBuiltinInstructions, /command_rewrite/);
@@ -2049,7 +2064,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   const codeGraphInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
     '/workspace/app',
     enhancementStoreRoot,
-    '重构前需要检查函数引用和调用影响面'
+    '重构前需要检查函数引用和调用影响面',
+    { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true }
   );
   assert.match(codeGraphInstructions, /Code Structure Assistant/);
   assert.match(codeGraphInstructions, /mcp/);
@@ -2057,13 +2073,14 @@ test('agent command builder uses non-interactive task runs and native continuati
   const mcpShrinkInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
     '/workspace/app',
     enhancementStoreRoot,
-    'MCP tool description 和 schema 占用太多上下文'
+    'MCP tool description 和 schema 占用太多上下文',
+    { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true }
   );
   assert.match(mcpShrinkInstructions, /MCP Description Compressor/);
   assert.match(mcpShrinkInstructions, /external_mcp_proxy/);
 
-  const enhancementInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions('/workspace/app', enhancementStoreRoot, '需要减少命令输出 token，同时保留失败日志');
-  assert.match(enhancementInstructions, /rtk Output Filter/);
+  const enhancementInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions('/workspace/app', enhancementStoreRoot, '需要减少命令输出 token，同时保留失败日志', { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true });
+  assert.match(enhancementInstructions, /Command Output Optimizer/);
   assert.match(enhancementInstructions, /command_rewrite/);
   assert.match(enhancementInstructions, /原始证据要求/);
   assert.doesNotMatch(enhancementInstructions, /Agent Config Writer/);
@@ -2078,7 +2095,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(fs.readFileSync(path.join(runtime.binRoot, 'git'), 'utf8'), /exec rtk "\$cmd" "\$@"/);
   assert.match(fs.readFileSync(path.join(runtime.binRoot, 'git'), 'utf8'), /SOLOMAP_RTK_BYPASS/);
   assert.match(runtime.envLines.join('\n'), /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
-  assert.match(runtime.preflightLines.join('\n'), /codegraph init -i/);
+  assert.doesNotMatch(runtime.preflightLines.join('\n'), /codegraph init -i/);
 
   const enhancementInstallPrompt = extensionModule.__buildEnhancementInstallPrompt(
     'code-structure-assistant',
@@ -2124,7 +2141,26 @@ test('agent command builder uses non-interactive task runs and native continuati
   const enhancementStatuses = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot);
   const codeGraphStatus = enhancementStatuses.find((item) => item.id === 'code-structure-assistant');
   assert.equal(codeGraphStatus.installed, true);
+  assert.equal(codeGraphStatus.enabled, false);
   assert.equal(codeGraphStatus.version, '1.2.3');
+
+  const disabledAfterInstallInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
+    '/workspace/app',
+    enhancementRuntimeRoot,
+    '重构前需要检查函数引用和调用影响面'
+  );
+  assert.doesNotMatch(disabledAfterInstallInstructions, /Code Structure Assistant/);
+  const enableCodeGraph = extensionModule.__setSolomapEnhancementEnabled('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant', true);
+  assert.equal(enableCodeGraph.ok, true);
+  const enabledCodeGraphStatus = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
+  assert.equal(enabledCodeGraphStatus.enabled, true);
+  const disableCodeGraph = extensionModule.__setSolomapEnhancementEnabled('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant', false);
+  assert.equal(disableCodeGraph.ok, true);
+  const uninstallCodeGraph = extensionModule.__uninstallSolomapEnhancement('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant');
+  assert.equal(uninstallCodeGraph.ok, true);
+  const uninstalledCodeGraph = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
+  assert.equal(uninstalledCodeGraph.installed, false);
+  assert.equal(uninstalledCodeGraph.enabled, false);
 
   const mcpEnhancementRoot = path.join(validationEnhancementStore.installedRoot, 'mcp-description-compressor');
   fs.mkdirSync(mcpEnhancementRoot, { recursive: true });
@@ -2220,8 +2256,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   const enhancedPrompt = fs.readFileSync(enhancedShellScript.promptFilePath, 'utf8');
   assert.match(enhancedRunScript, /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
   assert.match(enhancedRunScript, /export PATH=.*enhancements\/runtime\/bin/);
-  assert.match(enhancedRunScript, /codegraph init -i/);
+  assert.doesNotMatch(enhancedRunScript, /codegraph init -i/);
   assert.match(enhancedRunScript, /harness-enhancements\.md/);
+  assert.match(enhancedRunScript, /timeout 6s/);
   assert.match(enhancedRunScript, /codegraph status/);
   assert.match(enhancedRunScript, /codegraph query/);
   assert.match(enhancedRunScript, /codegraph affected --stdin --quiet/);

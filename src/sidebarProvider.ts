@@ -25,6 +25,7 @@ interface SolopreneurSettings {
     statusLabel: string;
     version: string;
     installed: boolean;
+    enabled: boolean;
     action: string;
     message: string;
     updatedAt: string;
@@ -2633,7 +2634,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _installMcp?: (mcpInput: string) => Promise<void>,
     private readonly _installEnhancement?: (enhancementId: string) => Promise<void>,
     private readonly _checkEnhancement?: (enhancementId: string) => Promise<void>,
-    private readonly _getFeedbackUsageSummary?: () => string
+    private readonly _setEnhancementEnabled?: (enhancementId: string, enabled: boolean) => Promise<void>,
+    private readonly _uninstallEnhancement?: (enhancementId: string) => Promise<void>,
+    private readonly _getFeedbackUsageSummary?: () => string,
+    private readonly _stopConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -2703,6 +2707,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               await this._continueStepConversation(data.projectPath || '', data.nodeId || '', Number(data.conversationId || 0));
             }
             break;
+          case 'stopConversation':
+            if (this._stopConversation) {
+              await this._stopConversation(data.projectPath || '', data.nodeId || '', Number(data.conversationId || 0));
+              await this.sendProjectConversationHistory(data.projectPath || '');
+              await this.sendSoloConversationHistory(data.projectPath || '');
+              if (data.nodeId) {
+                await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
+              }
+            }
+            break;
           case 'toggleProjectPinned':
             if (this._toggleProjectPinned) {
               await this._toggleProjectPinned(data.projectPath || '');
@@ -2748,6 +2762,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           case 'checkEnhancement':
             if (this._checkEnhancement) {
               await this._checkEnhancement(data.enhancementId || '');
+            }
+            break;
+          case 'setEnhancementEnabled':
+            if (this._setEnhancementEnabled) {
+              await this._setEnhancementEnabled(data.enhancementId || '', Boolean(data.enabled));
+            }
+            break;
+          case 'uninstallEnhancement':
+            if (this._uninstallEnhancement) {
+              await this._uninstallEnhancement(data.enhancementId || '');
             }
             break;
           case 'testCli':
@@ -5411,7 +5435,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-enhancement-toggles">执行增强</label>
       <div id="help-enhancement-toggles" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        安装后自动用于合适任务；关键证据仍回看原始文件、日志和测试。
+        实验性功能。安装后不会自动启用；启用后可能影响 Agent 启动和命令执行，异常时可在这里禁用或卸载。
       </div>
       <div class="enhancement-list" id="enhancement-list"></div>
       <div class="cli-badge" id="enhancement-install-badge" style="display:none;"></div>
@@ -5618,8 +5642,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installingEnhancement: '正在启动安装...',
         installEnhancement: '安装',
         repairEnhancement: '修复',
+        enableEnhancement: '启用',
+        disableEnhancement: '禁用',
+        uninstallEnhancement: '卸载',
         checkEnhancement: '重新检测',
         enhancementVersion: '版本',
+        enhancementStateEnabled: '已启用',
+        enhancementStateDisabled: '未启用',
+        stopRun: '停止',
         feedback: '建议反馈',
         feedbackNotWorking: '没跑通',
         feedbackNextStep: '不懂下一步',
@@ -5818,8 +5848,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installingEnhancement: 'Starting install...',
         installEnhancement: 'Install',
         repairEnhancement: 'Repair',
+        enableEnhancement: 'Enable',
+        disableEnhancement: 'Disable',
+        uninstallEnhancement: 'Uninstall',
         checkEnhancement: 'Check',
         enhancementVersion: 'Version',
+        enhancementStateEnabled: 'Enabled',
+        enhancementStateDisabled: 'Disabled',
+        stopRun: 'Stop',
         feedback: 'Feedback',
         feedbackNotWorking: 'Not working',
         feedbackNextStep: 'Next step unclear',
@@ -6187,14 +6223,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const items = Array.isArray(statuses) ? statuses : [];
       enhancementList.innerHTML = items.map(item => {
         const actionText = item.installed ? t('repairEnhancement') : t('installEnhancement');
+        const toggleText = item.enabled ? t('disableEnhancement') : t('enableEnhancement');
         return '<div class="enhancement-card" data-enhancement-card="' + escapeHtml(item.id) + '">'
           + '<div class="enhancement-card-head"><div><div class="enhancement-title">' + escapeHtml(item.title || item.id) + '</div>'
           + '<div class="enhancement-desc">' + escapeHtml(item.description || '') + '</div></div>'
           + '<span class="enhancement-status ' + escapeHtml(item.status || '') + '">' + escapeHtml(item.statusLabel || '') + '</span></div>'
           + '<div class="enhancement-meta">' + escapeHtml(t('enhancementVersion')) + '：' + escapeHtml(item.version || '') + '</div>'
+          + '<div class="enhancement-meta">' + escapeHtml(item.enabled ? t('enhancementStateEnabled') : t('enhancementStateDisabled')) + '</div>'
           + '<div class="enhancement-actions">'
           + '<button class="settings-action-btn test-btn" data-install-enhancement="' + escapeHtml(item.id) + '"><span class="codicon codicon-cloud-download"></span><span>' + escapeHtml(actionText) + '</span></button>'
           + '<button class="settings-action-btn test-btn" data-check-enhancement="' + escapeHtml(item.id) + '"><span class="codicon codicon-search"></span><span>' + escapeHtml(t('checkEnhancement')) + '</span></button>'
+          + '<button class="settings-action-btn test-btn" data-toggle-enhancement="' + escapeHtml(item.id) + '" data-enhancement-enabled="' + (item.enabled ? 'false' : 'true') + '" ' + (!item.installed ? 'disabled' : '') + '><span class="codicon codicon-debug-start"></span><span>' + escapeHtml(toggleText) + '</span></button>'
+          + '<button class="settings-action-btn test-btn" data-uninstall-enhancement="' + escapeHtml(item.id) + '" ' + (!item.installed ? 'disabled' : '') + '><span class="codicon codicon-trash"></span><span>' + escapeHtml(t('uninstallEnhancement')) + '</span></button>'
           + '</div></div>';
       }).join('');
       enhancementList.querySelectorAll('[data-install-enhancement]').forEach(button => {
@@ -6214,6 +6254,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         button.addEventListener('click', () => {
           const enhancementId = button.getAttribute('data-check-enhancement') || '';
           vscode.postMessage({ command: 'checkEnhancement', enhancementId });
+        });
+      });
+      enhancementList.querySelectorAll('[data-toggle-enhancement]').forEach(button => {
+        button.addEventListener('click', () => {
+          const enhancementId = button.getAttribute('data-toggle-enhancement') || '';
+          const enabled = button.getAttribute('data-enhancement-enabled') === 'true';
+          vscode.postMessage({ command: 'setEnhancementEnabled', enhancementId, enabled });
+        });
+      });
+      enhancementList.querySelectorAll('[data-uninstall-enhancement]').forEach(button => {
+        button.addEventListener('click', () => {
+          const enhancementId = button.getAttribute('data-uninstall-enhancement') || '';
+          vscode.postMessage({ command: 'uninstallEnhancement', enhancementId });
         });
       });
     }
@@ -6806,6 +6859,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
         ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-solo-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
         : '';
+      const stopButton = conversation.status === 'Running'
+        ? \`<button class="sidebar-conversation-continue" data-stop-sidebar-solo-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${escapeHtml(t('stopRun'))}</button>\`
+        : '';
       return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('soloHistory'))}</div>
         <div class="sidebar-conversation" data-sidebar-solo-conversation>
@@ -6830,7 +6886,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <pre>\${escapeHtml(conversation.output || '')}</pre>
             </div>
           \` : ''}
-          \${continueButton ? \`<div class="sidebar-conversation-footer">\${continueButton}</div>\` : ''}
+          \${continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${continueButton}</div>\` : ''}
         </div>
       \`;
     }
@@ -6853,6 +6909,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const conversationNodeId = String(conversation.nodeId || node?.id || '');
       const continueButton = conversation.status !== 'Running' && conversationNodeId && extractNativeSessionId(conversation.output)
         ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-step-id="\${escapeHtml(conversation.id)}" data-continue-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
+        : '';
+      const stopButton = conversation.status === 'Running' && conversationNodeId
+        ? \`<button class="sidebar-conversation-continue" data-stop-sidebar-step-id="\${escapeHtml(conversation.id)}" data-stop-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="\${escapeHtml(t('stopRun'))}">\${escapeHtml(t('stopRun'))}</button>\`
         : '';
       return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('continueHistory'))}</div>
@@ -6878,7 +6937,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <pre>\${escapeHtml(conversation.output || '')}</pre>
             </div>
           \` : ''}
-          \${continueButton ? \`<div class="sidebar-conversation-footer">\${continueButton}</div>\` : ''}
+          \${continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${continueButton}</div>\` : ''}
         </div>
       \`;
     }
@@ -6898,6 +6957,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             command: 'continueSoloConversation',
             projectPath,
             conversationId: item.getAttribute('data-continue-sidebar-solo-id')
+          });
+        });
+      });
+      container.querySelectorAll('[data-stop-sidebar-solo-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'stopConversation',
+            projectPath,
+            nodeId: '__solo__',
+            conversationId: item.getAttribute('data-stop-sidebar-solo-id')
           });
         });
       });
@@ -6926,6 +6996,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             projectPath,
             nodeId: item.getAttribute('data-continue-sidebar-step-node-id'),
             conversationId: item.getAttribute('data-continue-sidebar-step-id')
+          });
+        });
+      });
+      container.querySelectorAll('[data-stop-sidebar-step-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'stopConversation',
+            projectPath,
+            nodeId: item.getAttribute('data-stop-sidebar-step-node-id'),
+            conversationId: item.getAttribute('data-stop-sidebar-step-id')
           });
         });
       });
