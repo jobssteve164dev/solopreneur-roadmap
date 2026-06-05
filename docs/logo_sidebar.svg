@@ -1,0 +1,45 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>SoloMap sidebar icon</title>
+  <defs>
+    <linearGradient id="sidebar-body" x1="61" y1="190" x2="189" y2="45" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6C3BFF"/>
+      <stop offset="0.42" stop-color="#4ADAF0"/>
+      <stop offset="0.72" stop-color="#6638F2"/>
+      <stop offset="1" stop-color="#9B5CFF"/>
+    </linearGradient>
+    <linearGradient id="sidebar-route" x1="76" y1="176" x2="170" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9B6CFF"/>
+      <stop offset="0.46" stop-color="#48F2E8"/>
+      <stop offset="1" stop-color="#65F6F2"/>
+    </linearGradient>
+    <radialGradient id="sidebar-node" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(172 72) rotate(130) scale(34)">
+      <stop offset="0" stop-color="#74FFF1"/>
+      <stop offset="0.56" stop-color="#52DFF4"/>
+      <stop offset="1" stop-color="#8B55FF"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="44" fill="#050507"/>
+  <path
+    d="M167 64C148 47 109 49 93 71C78 90 87 112 115 122L140 131C165 141 171 163 155 183C137 207 95 205 76 177"
+    stroke="url(#sidebar-body)"
+    stroke-width="42"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+  <path
+    d="M157 61C132 57 104 66 98 89C92 111 110 124 132 133C152 141 159 160 148 177C135 195 100 196 81 174"
+    stroke="#111116"
+    stroke-width="22"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+  <path
+    d="M157 61C132 57 104 66 98 89C92 111 110 124 132 133C152 141 159 160 148 177C135 195 100 196 81 174"
+    stroke="url(#sidebar-route)"
+    stroke-width="8"
+    stroke-linecap="round"
+    stroke-linejoin="round"/>
+  <circle cx="172" cy="72" r="22" fill="url(#sidebar-node)"/>
+  <circle cx="172" cy="72" r="10" fill="#050507"/>
+  <circle cx="78" cy="173" r="22" fill="url(#sidebar-node)"/>
+  <circle cx="78" cy="173" r="10" fill="#050507"/>
+</svg>

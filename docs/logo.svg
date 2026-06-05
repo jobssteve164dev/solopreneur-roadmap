@@ -1,42 +1,55 @@
-<svg width="200" height="200" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Dark Rich Background -->
-  <rect width="100" height="100" rx="20" fill="#000000"/>
-  
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>SoloMap logo mark</title>
   <defs>
-    <!-- Smooth Cyber Gradient -->
-    <linearGradient id="soloGradient" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#7C3AED" /> <!-- Deep Violet -->
-      <stop offset="40%" stop-color="#2563EB" /> <!-- Aurora Blue -->
-      <stop offset="85%" stop-color="#06B6D4" /> <!-- Glowing Cyan -->
-      <stop offset="100%" stop-color="#22D3EE" /> <!-- Cyber Cyan Highlight -->
+    <linearGradient id="solomap-body" x1="255" y1="760" x2="735" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6C3BFF"/>
+      <stop offset="0.42" stop-color="#4ADAF0"/>
+      <stop offset="0.72" stop-color="#6638F2"/>
+      <stop offset="1" stop-color="#9B5CFF"/>
     </linearGradient>
-
-    <!-- Multi-stage Glowing Neon Effect -->
-    <filter id="neonGlow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="3.5" result="blur1" />
-      <feGaussianBlur stdDeviation="1" result="blur2" />
-      <feMerge>
-        <feMergeNode in="blur1" />
-        <feMergeNode in="blur2" />
-        <feMergeNode in="SourceGraphic" />
-      </feMerge>
+    <linearGradient id="solomap-route" x1="304" y1="705" x2="676" y2="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9B6CFF"/>
+      <stop offset="0.42" stop-color="#48F2E8"/>
+      <stop offset="1" stop-color="#65F6F2"/>
+    </linearGradient>
+    <radialGradient id="solomap-node" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(688 284) rotate(130) scale(112)">
+      <stop offset="0" stop-color="#74FFF1"/>
+      <stop offset="0.52" stop-color="#52DFF4"/>
+      <stop offset="1" stop-color="#8B55FF"/>
+    </radialGradient>
+    <filter id="soft-glow" x="130" y="118" width="754" height="780" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="16" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.34 0 0 0 0 0.84 0 0 0 0 1 0 0 0 0.38 0"/>
+      <feBlend in="SourceGraphic" mode="screen"/>
     </filter>
   </defs>
+  <rect width="1024" height="1024" fill="#050507"/>
 
-  <!-- 1. Drop Shadow/Silhouette for 3D depth -->
-  <path d="M 30 65 C 30 42, 70 58, 70 35" stroke="#12131A" stroke-width="16" stroke-linecap="round"/>
+  <g filter="url(#soft-glow)">
+    <path
+      d="M669 257C595 188 437 199 371 284C314 358 348 446 458 487L558 524C659 562 685 653 622 733C548 826 380 820 304 706"
+      stroke="url(#solomap-body)"
+      stroke-width="132"
+      stroke-linecap="round"
+      stroke-linejoin="round"/>
 
-  <!-- 2. Main Outer Glowing Tube (Matches the thick gradient in PNG) -->
-  <path d="M 30 65 C 30 42, 70 58, 70 35" stroke="url(#soloGradient)" stroke-width="12" stroke-linecap="round" filter="url(#neonGlow)" opacity="0.95"/>
+    <path
+      d="M626 245C526 226 413 264 389 356C367 443 440 494 529 531C608 564 637 638 590 708C541 781 401 785 324 696"
+      stroke="#19151C"
+      stroke-width="64"
+      stroke-linecap="round"
+      stroke-linejoin="round"/>
 
-  <!-- 3. Inner Bright Core Filament (Gives the neon-tube 3D shine) -->
-  <path d="M 30 65 C 30 42, 70 58, 70 35" stroke="#E0F7FA" stroke-width="2.5" stroke-linecap="round" opacity="0.9"/>
+    <path
+      d="M626 245C526 226 413 264 389 356C367 443 440 494 529 531C608 564 637 638 590 708C541 781 401 785 324 696"
+      stroke="url(#solomap-route)"
+      stroke-width="24"
+      stroke-linecap="round"
+      stroke-linejoin="round"/>
 
-  <!-- Bottom-Left Node Ring (Double layered for depth) -->
-  <circle cx="30" cy="65" r="10" stroke="url(#soloGradient)" stroke-width="5" fill="#000000" filter="url(#neonGlow)"/>
-  <circle cx="30" cy="65" r="10" stroke="#E0F7FA" stroke-width="1" fill="none" opacity="0.8"/>
-
-  <!-- Top-Right Node Ring (Double layered for depth) -->
-  <circle cx="70" cy="35" r="10" stroke="url(#soloGradient)" stroke-width="5" fill="#000000" filter="url(#neonGlow)"/>
-  <circle cx="70" cy="35" r="10" stroke="#E0F7FA" stroke-width="1" fill="none" opacity="0.8"/>
+    <circle cx="686" cy="285" r="72" fill="url(#solomap-node)"/>
+    <circle cx="686" cy="285" r="35" fill="#050507"/>
+    <circle cx="312" cy="690" r="72" fill="url(#solomap-node)"/>
+    <circle cx="312" cy="690" r="35" fill="#050507"/>
+  </g>
 </svg>
