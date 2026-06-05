@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo_with_text.png" width="300" height="105" alt="SoloMap Logo" />
+  <img src="https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo_with_text.png" width="320" alt="SoloMap Logo" />
 </p>
 
 <h1 align="center">SoloMap: AI Roadmap & Agent Task Flow</h1>

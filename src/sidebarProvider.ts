@@ -3397,7 +3397,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .brand-wordmark {
-      width: 116px;
+      width: 120px;
       height: auto;
       flex-shrink: 0;
     }
@@ -5226,7 +5226,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="header-container">
-    <h2 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="116" height="41" alt="SoloMap"></h2>
+    <h2 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="120" height="31" alt="SoloMap"></h2>
     <div class="header-actions">
       <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
       <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>

@@ -8186,7 +8186,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     .brand-wordmark {
-      width: 124px;
+      width: 132px;
       height: auto;
       flex-shrink: 0;
     }
@@ -9538,7 +9538,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 <body>
   <div class="app-container">
     <header>
-      <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="124" height="43" alt="SoloMap"></h1>
+      <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap"></h1>
       <div class="controls">
         <div class="solo-select project-select" id="project-select" data-solo-select data-value="">
           <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
