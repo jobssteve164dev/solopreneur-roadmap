@@ -1,34 +1,42 @@
 <svg width="200" height="200" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- App Icon Background -->
-  <rect width="100" height="100" rx="20" fill="#0B0C10"/>
+  <!-- Dark Rich Background -->
+  <rect width="100" height="100" rx="20" fill="#000000"/>
   
   <defs>
-    <!-- Premium Gradient -->
+    <!-- Smooth Cyber Gradient -->
     <linearGradient id="soloGradient" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#8B5CF6" /> <!-- Electric Violet -->
-      <stop offset="50%" stop-color="#3B82F6" /> <!-- Neon Blue -->
-      <stop offset="100%" stop-color="#06B6D4" /> <!-- Cyber Cyan -->
+      <stop offset="0%" stop-color="#7C3AED" /> <!-- Deep Violet -->
+      <stop offset="40%" stop-color="#2563EB" /> <!-- Aurora Blue -->
+      <stop offset="85%" stop-color="#06B6D4" /> <!-- Glowing Cyan -->
+      <stop offset="100%" stop-color="#22D3EE" /> <!-- Cyber Cyan Highlight -->
     </linearGradient>
-    
-    <!-- Glow Effect Filter -->
-    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="2.5" result="blur" />
+
+    <!-- Multi-stage Glowing Neon Effect -->
+    <filter id="neonGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3.5" result="blur1" />
+      <feGaussianBlur stdDeviation="1" result="blur2" />
       <feMerge>
-        <feMergeNode in="blur" />
+        <feMergeNode in="blur1" />
+        <feMergeNode in="blur2" />
         <feMergeNode in="SourceGraphic" />
       </feMerge>
     </filter>
   </defs>
 
-  <!-- Dark Track Silhouette -->
-  <path d="M 35 65 Q 25 50, 50 50 T 65 35" stroke="#1F2029" stroke-width="10" stroke-linecap="round"/>
+  <!-- 1. Drop Shadow/Silhouette for 3D depth -->
+  <path d="M 30 65 C 30 42, 70 58, 70 35" stroke="#12131A" stroke-width="16" stroke-linecap="round"/>
 
-  <!-- Glowing S-Curve Roadmap Path -->
-  <path d="M 35 65 Q 25 50, 50 50 T 65 35" stroke="url(#soloGradient)" stroke-width="6" stroke-linecap="round" filter="url(#glow)"/>
+  <!-- 2. Main Outer Glowing Tube (Matches the thick gradient in PNG) -->
+  <path d="M 30 65 C 30 42, 70 58, 70 35" stroke="url(#soloGradient)" stroke-width="12" stroke-linecap="round" filter="url(#neonGlow)" opacity="0.95"/>
 
-  <!-- Bottom-Left Node Circle -->
-  <circle cx="35" cy="65" r="8" stroke="url(#soloGradient)" stroke-width="4" fill="#0B0C10" filter="url(#glow)"/>
+  <!-- 3. Inner Bright Core Filament (Gives the neon-tube 3D shine) -->
+  <path d="M 30 65 C 30 42, 70 58, 70 35" stroke="#E0F7FA" stroke-width="2.5" stroke-linecap="round" opacity="0.9"/>
 
-  <!-- Top-Right Node Circle -->
-  <circle cx="65" cy="35" r="8" stroke="url(#soloGradient)" stroke-width="4" fill="#0B0C10" filter="url(#glow)"/>
+  <!-- Bottom-Left Node Ring (Double layered for depth) -->
+  <circle cx="30" cy="65" r="10" stroke="url(#soloGradient)" stroke-width="5" fill="#000000" filter="url(#neonGlow)"/>
+  <circle cx="30" cy="65" r="10" stroke="#E0F7FA" stroke-width="1" fill="none" opacity="0.8"/>
+
+  <!-- Top-Right Node Ring (Double layered for depth) -->
+  <circle cx="70" cy="35" r="10" stroke="url(#soloGradient)" stroke-width="5" fill="#000000" filter="url(#neonGlow)"/>
+  <circle cx="70" cy="35" r="10" stroke="#E0F7FA" stroke-width="1" fill="none" opacity="0.8"/>
 </svg>
