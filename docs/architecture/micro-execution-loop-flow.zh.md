@@ -16,6 +16,8 @@
 
 它不是为了展示更多运行信息，而是为了让路线图自动滚动具备事实基础。
 
+第一版落地入口以 Flow 模式承接。Flow 与 Solo、路线图推进并列：Solo 用于开放对话，路线图推进用于宏观环节任务，Flow 用于用户给出目标后由插件规划并滚动多个微观循环。详见 `docs/architecture/flow-mode-execution-design.zh.md`。
+
 ## 职责分工
 
 一次可靠微观循环至少需要四类职责：
@@ -316,6 +318,8 @@ HTML = 导出产物
 
 禁止把 SQLite 作为唯一事实源。数据库适合做筛选、聚合、排序和面板查询缓存，但不能成为微观循环账本的唯一载体。
 
+第一版不兼容旧 Agent run 数据，也不把旧 run digest 回填为微观循环。Run Digest 属于全局学习机制，微观循环属于 Flow 执行事实账本；二者可以通过 trace 引用和学习候选链路连接，但不在第一版做迁移。
+
 ## 索引与召回
 
 微观循环不能只是写入后归档。它必须成为下一轮 Planner、Builder、Verifier 和 Plugin 的输入。
@@ -510,17 +514,18 @@ trace 写入
 
 ## 执行流程
 
-### 1. 路线图环节启动
+### 1. Flow 或路线图环节启动
 
 插件读取：
 
 - 当前路线图环节。
+- Flow 用户目标。
 - 环节完成标准。
 - 用户本轮输入。
 - 相关执行经验。
 - 相关 Issue、文档或历史循环。
 
-插件创建第一个微观循环，状态为 `created`。
+插件创建 Flow，并由 Planner 规划需要多少个微观循环达到目标。随后插件创建第一个微观循环，状态为 `created`。
 
 ### 2. Planner 形成计划
 
@@ -532,7 +537,7 @@ Planner 输出：
 - 影响范围。
 - 验证计划。
 
-插件检查计划是否包含必要字段。缺失时不能进入 Builder。
+Planner 不能只依赖提示词契约。第一版应配套 Planner skill 和 JSON validator，要求 Agent 先自检，再由插件复检。插件检查计划是否包含必要字段。缺失时不能进入 Builder。
 
 ### 3. Builder 实施
 
@@ -543,7 +548,7 @@ Builder 按计划执行：
 - 记录已知风险。
 - 遇到新问题时标明是否需要新循环。
 
-Builder 结束后，插件不直接相信其结论，而是进入事实采集。
+Builder 默认非交互式执行，并应使用 tee 或等价命令包装捕获输出。Builder 结束后，插件不直接相信其结论，而是进入事实采集。
 
 ### 4. 插件采集证据
 
@@ -553,6 +558,9 @@ Builder 结束后，插件不直接相信其结论，而是进入事实采集。
 - diff 摘要。
 - touched files。
 - 运行命令和退出状态。
+- tee 捕获的命令输出。
+- 命令哨兵记录。
+- 文件哨兵记录。
 - 测试、构建、lint、typecheck 结果。
 - Agent 输出中的明确完成判断。
 - completion decision。
@@ -570,7 +578,7 @@ Verifier 只读审查：
 - 是否产生偏离、部分完成或下一轮问题。
 - 是否可以命中路线图完成标准。
 
-Verifier 输出建议状态，但不直接写最终状态。
+Verifier 同样应通过 Verifier skill 输出结构化 checks 与 H/I/J，并先经过 validator 自检。Verifier 输出建议状态，但不直接写最终状态。
 
 ### 6. 插件执行闸门
 
@@ -611,20 +619,29 @@ Verifier 输出建议状态，但不直接写最终状态。
 
 ## 自动推进规则
 
-允许自动继续：
+Flow 中的默认策略是自动继续。微观循环不是审批节点，而是把障碍转化成下一轮行动的机制。
+
+默认自动化解：
 
 - 缺少验证但验证命令明确、安全、低成本。
 - 验证失败且修复范围仍在本环节内。
 - 部分完成且剩余工作属于原意图范围。
 - 需要补充事实采集或设计对标。
+- 计划不完整，需要 Planner 补齐五看三定。
+- JSON 输出不合法，需要 Agent 通过 validator 修正。
+- 没有动作证据，需要重新实施或重新规划。
+- 偏离原意，需要重新规划和纠偏。
+- 无法归因到路线图，需要重定归因或重定目标。
+- 工程判断不足，需要方案重评估。
 
-必须停下确认：
+需要用户确认的场景应收窄为用户授权不可替代的动作：
 
 - 发布、部署、上架。
 - 删除、不可逆写入或外部消息发送。
 - 权限、凭证、支付、生产数据。
-- 路线图结构或产品方向变化。
-- Agent 判断冲突且证据不能解决。
+- 用户明确停止 Flow。
+
+路线图结构、产品方向变化、Agent 判断冲突等问题，默认先由 Planner / Verifier 通过重规划、方案比较、H/I/J 反证和风险标注化解；只有当继续推进会改变用户承诺、真实外部结果或需要用户价值判断时才停下。
 
 ## 与现有执行经验层的关系
 
@@ -638,7 +655,20 @@ Micro Execution Trace 记录一个意图如何被规划、实施、验证、归�
 一个 run digest 也可能只支撑某个微观循环的一部分证据
 ```
 
-第一版可以从 run digest 反推微观循环；更稳定的形态是先创建微观循环，再让 run digest 作为证据进入循环。
+第一版不从 run digest 反推微观循环，也不兼容旧历史。更稳定的形态是先创建微观循环，再让新产生的 run digest 作为可选证据进入循环。后续稳定后，可以提供 best-effort 转换工具，但不能让旧数据迁移污染第一版 Flow 主路径。
+
+## 灾难恢复
+
+微观循环增强可靠性，但不能阻碍用户目标完成。
+
+原则：
+
+- JSON/JSONL 是事实源，SQLite 索引损坏时重建。
+- trace 写入失败时，保留可恢复草稿并继续主任务。
+- trace 损坏时，隔离损坏 trace，不阻断新 Flow。
+- validator 失败时，优先打回 Agent 修结构化输出；必要时降级为 `implemented_unverified`，但不让任务停死。
+- 证据不足时不能 `closed`，但应生成下一微循环补证据。
+- 最坏情况下允许丢失增强记录，也不能让用户目标无法继续推进。
 
 ## 禁止项
 
@@ -651,10 +681,12 @@ Micro Execution Trace 记录一个意图如何被规划、实施、验证、归�
 - 禁止把插件事实账本做成用户手工表单。
 - 禁止把失败更早中止当成可靠闭环；失败必须生成可继续推进的下一步。
 - 禁止让 Agent 主观评分替代插件硬闸门。
+- 禁止为了保护 trace、索引、validator 或审计机制而阻断用户目标继续推进。
 
 ## 相关入口
 
 - `docs/methodology/micro-execution-loop-methodology.zh.md`
+- `docs/architecture/flow-mode-execution-design.zh.md`
 - `docs/architecture/micro-execution-loop-scoring-gates.zh.md`
 - `docs/ui/execution-trace-panel-guidelines.zh.md`
 - `docs/architecture/agent-collaboration-boundary.zh.md`
