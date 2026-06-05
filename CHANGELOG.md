@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.160 - 2026-06-05
+
+### Changed
+- Gate strategy pyramid behind Pro access (4a11884)
+- Document Flow mode execution decisions (8bfb45c)
+- Document trace indexing and visibility boundaries (9122a0e)
+- Document objective planning and evaluation gates (5321e4a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.159 - 2026-06-05
 
 ### Changed
