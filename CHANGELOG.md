@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.0.154 - 2026-06-05
+
+### Changed
+- Align sidebar icon with VS Code activity bar (fc2852e)
+- Add redesigned SoloMap logo SVGs (4881011)
+- Expand website docs and native hero (5b3b64d)
+- Load Cloudflare env for website deploy (b1c42a6)
+- Improve website GEO content (a26e16e)
+- Document execution trace pricing boundary (9570c1f)
+- Refine execution trace panel as control surface (abed1f8)
+- Document micro loop scoring gates (5dba9a7)
+- Document execution trace storage and panel form (1c1a63c)
+- Clarify micro loop session strategy (cf0b400)
+- Document micro execution trace methodology (bf2caa1)
+
+### Docs
+- improve SVG logo to match PNG styling (2d6bb5d)
+- add new minimalist SVG logo (7727fbe)
+- add new logo lockup with text option (52afae5)
+- add new simplified logo proposal (679edbd)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.153 - 2026-06-04
 
 ### Changed
