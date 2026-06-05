@@ -253,6 +253,21 @@ abandoned
     "riskChanges": [],
     "nextTraceIds": []
   },
+  "lessons": [
+    {
+      "type": "verification_pattern | boundary_rule | planning_rule | risk_pattern | implementation_pattern",
+      "summary": "",
+      "evidence": ["trace:"],
+      "promotion": "none | project_candidate | project_memory | cross_project_candidate"
+    }
+  ],
+  "followups": [
+    {
+      "reason": "",
+      "suggestedIntent": "",
+      "targetStatus": "created"
+    }
+  ],
   "createdAt": "",
   "updatedAt": ""
 }
@@ -300,6 +315,198 @@ HTML = 导出产物
 - 符合 SoloMap 项目数据保留在 `.solopreneur/` 下的本地优先边界。
 
 禁止把 SQLite 作为唯一事实源。数据库适合做筛选、聚合、排序和面板查询缓存，但不能成为微观循环账本的唯一载体。
+
+## 索引与召回
+
+微观循环不能只是写入后归档。它必须成为下一轮 Planner、Builder、Verifier 和 Plugin 的输入。
+
+`traces.jsonl` 第一版应保留下一轮最常用的检索字段：
+
+```json
+{
+  "traceId": "",
+  "roadmapStepId": "",
+  "status": "closed",
+  "goal": "",
+  "files": [],
+  "modules": [],
+  "criteriaHit": [],
+  "failedGates": [],
+  "riskFlags": [],
+  "hij": {
+    "H": "pass",
+    "I": "pass",
+    "J": "pass"
+  },
+  "plannerDecision": "",
+  "rejectedOptions": [],
+  "followupTraceIds": [],
+  "lessonCandidateIds": [],
+  "createdAt": "",
+  "updatedAt": ""
+}
+```
+
+第一版索引维度：
+
+- `roadmapStepId`：同一路线图环节的未闭环循环。
+- `status`：待验证、失败、偏离、需要确认等状态。
+- `criteriaHit`：完成标准覆盖。
+- `files/modules`：同文件、同模块历史。
+- `failedGates`：反复失败的闸门。
+- `riskFlags`：权限、发布、数据、用户体验、边界风险。
+- `hij`：H/I/J 失败或不确定项。
+- `plannerDecision/rejectedOptions`：过去选过或拒绝过的路径。
+- `followupTraceIds`：下一轮微循环关系。
+- `lessonCandidateIds`：可沉淀经验候选。
+
+后续 SQLite 可以扩展成查询表：
+
+```text
+traces
+trace_files
+trace_modules
+trace_criteria
+trace_gates
+trace_risks
+trace_hij
+trace_followups
+trace_lessons
+```
+
+但这些表必须能从 JSON/JSONL 重建。
+
+## 四分工如何消化 trace
+
+四分工不应读取同一大段原始日志。插件应按角色生成最小上下文包。
+
+### Planner 消化
+
+Planner 读取：
+
+- 同路线图环节未闭环 trace。
+- 同模块或同文件历史 trace。
+- 上轮 followups。
+- 常见 failed gates。
+- 历史 rejectedOptions。
+- 已确认 lessons。
+
+Planner 用这些回答：
+
+- 这轮意图从哪里来。
+- 哪些路过去走过、为什么被拒绝。
+- 哪些边界不能破。
+- 哪些验证必须提前规划。
+
+### Builder 消化
+
+Builder 读取：
+
+- 当前 Planner 计划。
+- 相关历史 actions。
+- 相关 touched files。
+- 上次失败的验证命令。
+- knownGaps。
+- 不能破的边界。
+
+Builder 用这些执行，不重新规划目标。
+
+### Verifier 消化
+
+Verifier 读取：
+
+- 当前 evidence。
+- 当前 scoring gates。
+- Planner 五看三定。
+- 历史 H/I/J 失败项。
+- 同类任务曾经漏掉的验证。
+- 之前的偏离记录。
+
+Verifier 用这些判断是否真的闭环，不复述 Builder 自述。
+
+### Plugin 消化
+
+Plugin 读取：
+
+- `traces.jsonl`。
+- 当前 trace 详情。
+- scoring gates。
+- attribution。
+- completion criteria coverage。
+- followup trace links。
+
+Plugin 用这些决定：
+
+- 是否推进路线图。
+- 是否生成下一轮微循环。
+- 是否沉淀项目经验候选。
+- 是否上提跨项目经验候选。
+
+## 经验沉淀链路
+
+微观循环是经验生产线的原子事实。
+
+```text
+trace 写入
+  -> traces.jsonl 索引
+  -> 下一轮四分工按职责召回
+  -> 多次命中生成 lesson candidate
+  -> 项目经验沉淀
+  -> 跨项目经验审核
+  -> patterns / decisions / operating-rules / skills
+```
+
+不是每个 trace 都沉淀。只有以下情况生成项目经验候选：
+
+- 同一 failed gate 多次出现。
+- 同一模块或用户路径反复返工。
+- 某个验证命令多次证明有效。
+- 某个边界多次防止偏航。
+- 某个 rejected option 被多次拒绝。
+- 某个 H/I/J 问题反复出现。
+- 某条 Planner 决策被后续闭环证明有效。
+
+项目内候选可以写入：
+
+```text
+.solopreneur/execution-traces/lessons.jsonl
+```
+
+推荐字段：
+
+```json
+{
+  "lessonId": "",
+  "sourceTraceIds": [],
+  "type": "verification_pattern | boundary_rule | planning_rule | risk_pattern | implementation_pattern",
+  "summary": "",
+  "evidence": ["trace:"],
+  "status": "candidate | promoted_project | promoted_cross_project",
+  "createdAt": ""
+}
+```
+
+项目稳定经验应进入项目记忆或正式项目文档：
+
+- 项目稳定事实：`.solomap-global/memory/projects/<project>.md`
+- 项目边界：`docs/architecture/`
+- 项目方法论：`docs/methodology/`
+- UI 长期约束：`docs/ui/`
+
+跨项目经验必须更严格：
+
+- 至少 2 个项目命中同类 lesson。
+- 或用户明确确认这是通用规则。
+- 或失败模式具有明显跨项目复发风险。
+- 且不包含项目私有路径、接口名、供应方细节或敏感信息。
+
+跨项目目标位置：
+
+- `memory/patterns/`：可复用做法。
+- `memory/operating-rules.md`：通用执行硬规则。
+- `memory/decisions/`：已确认长期决策。
+- `memory/domains/`：领域知识。
+- `skills/`：稳定到可自动执行的流程。
 
 ## 执行流程
 
