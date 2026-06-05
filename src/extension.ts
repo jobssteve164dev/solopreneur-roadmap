@@ -7795,6 +7795,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   // In MVP, we embed a fully functional React + CSS app direct inside the iframe
   // which uses modern styling guidelines (glassmorphism, glowing connections, inter font).
   const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
+  const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo.svg'));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8094,6 +8095,47 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       box-shadow: 0 0 10px rgba(0, 229, 255, 0.25);
     }
 
+    input[type="range"] {
+      width: 100%;
+      height: 18px;
+      margin: 0;
+      appearance: none;
+      -webkit-appearance: none;
+      background: transparent;
+      accent-color: #38bdf8;
+    }
+
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.22);
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      width: 14px;
+      height: 14px;
+      margin-top: -5px;
+      border: 2px solid var(--vscode-editor-background, #0f111a);
+      border-radius: 999px;
+      background: #cbd5e1;
+      -webkit-appearance: none;
+    }
+
+    input[type="range"]::-moz-range-track {
+      height: 4px;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.22);
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--vscode-editor-background, #0f111a);
+      border-radius: 999px;
+      background: #cbd5e1;
+    }
+
     button {
       background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
       color: #000;
@@ -8115,6 +8157,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: inline-flex;
       align-items: center;
       gap: 8px;
+    }
+
+    .brand-logo {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      flex-shrink: 0;
     }
 
     button:hover {
@@ -9464,7 +9513,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 <body>
   <div class="app-container">
     <header>
-      <h1 class="brand-title"><span class="codicon codicon-map"></span><span id="app-title">SoloMap</span></h1>
+      <h1 class="brand-title"><img class="brand-logo" src="${logoUri}" width="24" height="24" alt=""><span id="app-title">SoloMap</span></h1>
       <div class="controls">
         <div class="solo-select project-select" id="project-select" data-solo-select data-value="">
           <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">

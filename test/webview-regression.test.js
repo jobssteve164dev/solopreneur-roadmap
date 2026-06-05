@@ -261,10 +261,10 @@ test('extension manifest uses SoloMap visible branding', () => {
   assert.equal(manifest.contributes.configuration.properties['solopreneur.taskPermissionMode'], undefined);
 });
 
-test('readme uses bilingual marketplace copy and stable remote logo', () => {
+test('readme uses bilingual marketplace copy and official remote svg logo', () => {
   const readme = fs.readFileSync(path.join(projectRoot, 'README.md'), 'utf8');
 
-  assert.match(readme, /raw\.githubusercontent\.com\/jobssteve164dev\/solopreneur-roadmap\/main\/resources\/logo\.png/);
+  assert.match(readme, /raw\.githubusercontent\.com\/jobssteve164dev\/solopreneur-roadmap\/main\/resources\/logo\.svg/);
   assert.match(readme, /Why SoloMap\? \/ 为什么选择 SoloMap？/);
   assert.match(readme, /Core Capabilities \/ 核心能力/);
   assert.match(readme, /Quick Start \/ 快速开始/);

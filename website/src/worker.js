@@ -4,7 +4,7 @@ const OPEN_VSX_URL = "https://open-vsx.org/extension/SZLK/solopreneur-roadmap";
 const GITHUB_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap";
 const FEEDBACK_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml";
 const SCREENSHOT_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/docs/assets/solomap_red_terminal.png";
-const LOGO_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo.png";
+const LOGO_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo.svg";
 
 const securityHeaders = {
   "content-security-policy": [
@@ -123,6 +123,10 @@ const content = {
       lead: "If it helps you keep momentum, tell us what the strategy cockpit should show next.",
       marketplace: "VS Code Marketplace",
       openVsx: "Open VSX",
+      ios: "iOS app",
+      android: "Android app",
+      webWorkspace: "Web workspace",
+      comingSoon: "Coming soon",
       github: "GitHub repository",
       feedback: "Send feedback"
     },
@@ -251,6 +255,10 @@ const content = {
       lead: "如果它帮你保持推进，请告诉我们金字塔战略驾驶舱下一步应该看见什么。",
       marketplace: "VS Code Marketplace",
       openVsx: "Open VSX",
+      ios: "iOS 应用",
+      android: "安卓应用",
+      webWorkspace: "网页版工作台",
+      comingSoon: "即将推出",
       github: "GitHub 仓库",
       feedback: "提交反馈"
     },
@@ -505,6 +513,42 @@ function buildStyles() {
     }
     a { color: inherit; text-decoration: none; }
     img { display: block; max-width: 100%; }
+    input[type="range"] {
+      width: 100%;
+      height: 18px;
+      margin: 0;
+      appearance: none;
+      -webkit-appearance: none;
+      background: transparent;
+      accent-color: var(--cyan);
+    }
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(246, 240, 232, 0.16);
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      width: 14px;
+      height: 14px;
+      margin-top: -5px;
+      border: 2px solid #11100e;
+      border-radius: 999px;
+      background: var(--soft);
+      -webkit-appearance: none;
+    }
+    input[type="range"]::-moz-range-track {
+      height: 4px;
+      border: 0;
+      border-radius: 999px;
+      background: rgba(246, 240, 232, 0.16);
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 12px;
+      height: 12px;
+      border: 2px solid #11100e;
+      border-radius: 999px;
+      background: var(--soft);
+    }
     .shell { width: min(1160px, calc(100% - 40px)); margin: 0 auto; }
     .topbar {
       position: sticky;
@@ -602,17 +646,34 @@ function buildStyles() {
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      gap: 8px;
       min-height: 46px;
       border-radius: 8px;
       padding: 0 18px;
       font-weight: 760;
       border: 1px solid var(--line);
       text-align: center;
+      font: inherit;
     }
     .button.primary { background: var(--red); border-color: var(--red); color: white; }
     .button.secondary { color: #11100e !important; background: #f6f0e8; }
     .button.ghost { color: var(--soft); }
+    .button.soon {
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.035);
+      cursor: default;
+    }
+    .button:disabled {
+      opacity: 1;
+      pointer-events: none;
+    }
     .button:hover { transform: translateY(-1px); }
+    .button:disabled:hover { transform: none; }
+    .soon-tag {
+      color: var(--cyan);
+      font-size: 12px;
+      font-weight: 760;
+    }
     .proof {
       display: flex;
       flex-wrap: wrap;
@@ -1003,7 +1064,7 @@ function buildStyles() {
     }
     .install-actions {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
     }
     footer {
@@ -1502,6 +1563,9 @@ function buildPage(locale, origin) {
         <div class="install-actions">
           <a class="button primary" href="${MARKETPLACE_URL}">${escapeHtml(t.install.marketplace)}</a>
           <a class="button secondary" href="${OPEN_VSX_URL}">${escapeHtml(t.install.openVsx)}</a>
+          <button class="button soon" type="button" disabled>${escapeHtml(t.install.ios)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
+          <button class="button soon" type="button" disabled>${escapeHtml(t.install.android)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
+          <button class="button soon" type="button" disabled>${escapeHtml(t.install.webWorkspace)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
           <a class="button ghost" href="${GITHUB_URL}">${escapeHtml(t.install.github)}</a>
           <a class="button ghost" href="${FEEDBACK_URL}">${escapeHtml(t.install.feedback)}</a>
         </div>
