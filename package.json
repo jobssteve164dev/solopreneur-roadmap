@@ -40,7 +40,8 @@
   ],
   "activationEvents": [
     "onView:solopreneur.sidebar",
-    "onCommand:solopreneur.showRoadmap"
+    "onCommand:solopreneur.showRoadmap",
+    "onCommand:solopreneur.showStrategyPyramid"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -48,6 +49,11 @@
       {
         "command": "solopreneur.showRoadmap",
         "title": "SoloMap: Show AI Roadmap",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.showStrategyPyramid",
+        "title": "SoloMap: Show Strategy Pyramid",
         "category": "SoloMap"
       }
     ],

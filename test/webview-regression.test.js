@@ -365,7 +365,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /openFeedbackIssue/);
   assert.match(html, /id="btn-toggle-feedback"/);
   assert.match(html, /id="feedback-panel"/);
-  assert.match(html, /id="strategy-pyramid-panel"/);
+  assert.match(html, /id="btn-open-strategy-pyramid"/);
+  assert.doesNotMatch(html, /id="btn-open-full"/);
+  assert.doesNotMatch(html, /id="strategy-pyramid-panel"/);
+  assert.doesNotMatch(html, /data-open-pro-upgrade/);
   assert.doesNotMatch(html, /id="label-feedback"/);
   assert.match(script, /renderProjectIssuePanel/);
   assert.match(script, /createIssue/);
@@ -384,11 +387,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'tasks-list',
     'progress-bar',
     'progress-text',
-    'btn-open-full',
+    'btn-open-strategy-pyramid',
     'project-select',
     'btn-add-project',
     'global-focus-panel',
-    'strategy-pyramid-panel',
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
@@ -425,6 +427,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'dependency-github-message',
     'cli-test-badge'
   ]);
+
+  elements['btn-open-strategy-pyramid'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'showStrategyPyramid'));
+  postedMessages.length = 0;
 
   elements['btn-toggle-settings'].listeners.click();
   assert.equal(elements['settings-panel'].style.display, 'block');
@@ -509,9 +515,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
-  assert.match(elements['strategy-pyramid-panel'].innerHTML, /解锁一人公司视角|Unlock the company view/);
-  assert.match(elements['strategy-pyramid-panel'].innerHTML, /data-open-pro-upgrade/);
-  assert.doesNotMatch(elements['strategy-pyramid-panel'].innerHTML, /Passport|CloudMCP|entitlement|strategy_pyramid/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-open-pro-upgrade|了解 Pro|Unlock Pro/);
   dispatchMessage({
     command: 'settingsLoaded',
     settings: {
@@ -522,9 +526,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       proEntitlements: { strategy_pyramid: true }
     }
   });
-  assert.match(elements['strategy-pyramid-panel'].innerHTML, /战略金字塔/);
-  assert.match(elements['strategy-pyramid-panel'].innerHTML, /该推进/);
-  assert.doesNotMatch(elements['strategy-pyramid-panel'].innerHTML, /data-open-pro-upgrade/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-open-pro-upgrade|了解 Pro|Unlock Pro/);
   dispatchMessage({
     command: 'nodesUpdated',
     projectPath: '/workspace/second',
@@ -1158,6 +1160,63 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { pro: true } }, 'strategyPyramid'), true);
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: {} }, 'strategyPyramid'), false);
+});
+
+test('strategy pyramid webview renders gated free state and unlocked project actions', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__getStrategyPyramidWebviewHtml = getStrategyPyramidWebviewHtml;',
+      'module.exports.__hasProEntitlement = hasProEntitlement;'
+    ].join('\n')
+  );
+  const context = {
+    extensionUri: createUri(projectRoot),
+    extensionPath: projectRoot
+  };
+  const snapshot = {
+    generatedAt: '2026-06-05T00:00:00.000Z',
+    totalProjects: 1,
+    buildCount: 2,
+    sellCount: 1,
+    learnCount: 1,
+    improveCount: 1,
+    risks: ['存在失败环节，应先收口再继续加码。'],
+    projects: [{
+      name: 'SoloMap',
+      path: '/workspace/solomap',
+      type: 'core_product',
+      role: '核心产品',
+      action: '继续当前推进',
+      risk: '',
+      completedNodes: 2,
+      failedNodes: 0,
+      runningNodes: 1,
+      inProgressNodes: 0,
+      pendingNodes: 2,
+      totalNodes: 5,
+      progressPercent: 40,
+      nodes: []
+    }]
+  };
+
+  const freeHtml = extensionModule.__getStrategyPyramidWebviewHtml(createWebviewStub(), context, snapshot, false);
+  assert.match(freeHtml, /战略金字塔/);
+  assert.match(freeHtml, /解锁战略金字塔/);
+  assert.match(freeHtml, /升级 Pro/);
+  assert.doesNotMatch(freeHtml, /GitHub|Passport|CloudMCP|entitlement|strategy_pyramid/);
+  assert.doesNotThrow(() => new vm.Script(extractLastScript(freeHtml)));
+
+  const proHtml = extensionModule.__getStrategyPyramidWebviewHtml(createWebviewStub(), context, snapshot, true);
+  assert.match(proHtml, /Build/);
+  assert.match(proHtml, /Sell/);
+  assert.match(proHtml, /Learn/);
+  assert.match(proHtml, /Improve/);
+  assert.match(proHtml, /查看项目/);
+  assert.match(proHtml, /data-open-project="\/workspace\/solomap"/);
+  assert.doesNotMatch(proHtml, /解锁战略金字塔|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid/);
+  assert.doesNotThrow(() => new vm.Script(extractLastScript(proHtml)));
+  assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
 });
 
 test('global engineering store writes git-friendly portfolio files', () => {

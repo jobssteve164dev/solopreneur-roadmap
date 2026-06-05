@@ -12,6 +12,7 @@ import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocu
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
+let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
@@ -79,6 +80,43 @@ interface LocalUsageStats {
     latestAgentRunAt: string;
   };
 }
+
+interface StrategyPyramidNodeSummary {
+  id: string;
+  title: string;
+  stage: string;
+  status: string;
+}
+
+interface StrategyPyramidProjectSummary {
+  name: string;
+  path: string;
+  type: string;
+  role: string;
+  action: string;
+  risk: string;
+  completedNodes: number;
+  failedNodes: number;
+  runningNodes: number;
+  inProgressNodes: number;
+  pendingNodes: number;
+  totalNodes: number;
+  progressPercent: number;
+  nodes: StrategyPyramidNodeSummary[];
+}
+
+interface StrategyPyramidSnapshot {
+  generatedAt: string;
+  totalProjects: number;
+  buildCount: number;
+  sellCount: number;
+  learnCount: number;
+  improveCount: number;
+  risks: string[];
+  projects: StrategyPyramidProjectSummary[];
+}
+
+type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
 
 interface AgentStepSession {
   agentCli: string;
@@ -653,6 +691,14 @@ export async function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(showRoadmapDisposable);
 
+  const showStrategyPyramidDisposable = vscode.commands.registerCommand(
+    'solopreneur.showStrategyPyramid',
+    async () => {
+      await openStrategyPyramidPanel(context);
+    }
+  );
+  context.subscriptions.push(showStrategyPyramidDisposable);
+
   // Register settings saved broadcast command to keep Sidebar and Webview synced
   const settingsSavedDisposable = vscode.commands.registerCommand(
     'solopreneur.settingsSavedBroadcast',
@@ -848,7 +894,8 @@ function readLocalProEntitlements(): Record<string, boolean> {
 
 function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, featureKey: string): boolean {
   const entitlements = settings?.proEntitlements || {};
-  return Boolean(entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
+  const normalizedFeature = featureKey === 'strategyPyramid' ? 'strategy_pyramid' : featureKey;
+  return Boolean(entitlements[normalizedFeature] || entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
 }
 
 function getSettingsEnhancementWorkspaceRoot(): string {
@@ -2532,6 +2579,451 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
     null,
     context.subscriptions
   );
+}
+
+async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {
+  if (activeStrategyPyramidPanel) {
+    activeStrategyPyramidPanel.reveal(vscode.ViewColumn.One);
+    return;
+  }
+
+  activeStrategyPyramidPanel = vscode.window.createWebviewPanel(
+    'solopreneurStrategyPyramid',
+    'SoloMap: Strategy Pyramid',
+    vscode.ViewColumn.One,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.file(context.extensionPath)]
+    }
+  );
+
+  const refresh = () => {
+    if (!activeStrategyPyramidPanel) {
+      return;
+    }
+    activeStrategyPyramidPanel.webview.html = getStrategyPyramidWebviewHtml(
+      activeStrategyPyramidPanel.webview,
+      context,
+      buildStrategyPyramidSnapshot(context),
+      hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')
+    );
+  };
+
+  refresh();
+
+  activeStrategyPyramidPanel.webview.onDidReceiveMessage(
+    async (message) => {
+      switch (message.command) {
+        case 'refreshStrategyPyramid':
+          refresh();
+          break;
+        case 'openProjectRoadmap':
+          if (message.projectPath) {
+            await selectProject(context, String(message.projectPath));
+            await openRoadmapPanel(context);
+          }
+          break;
+        case 'openStrategyUpgrade':
+          vscode.env.openExternal(vscode.Uri.parse('https://solomap.app/pro'));
+          break;
+      }
+    },
+    undefined,
+    context.subscriptions
+  );
+
+  activeStrategyPyramidPanel.onDidDispose(
+    () => {
+      activeStrategyPyramidPanel = null;
+    },
+    null,
+    context.subscriptions
+  );
+}
+
+function readStrategyRoadmapNodes(projectPath: string): StrategyPyramidNodeSummary[] {
+  const csvPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
+  if (!fs.existsSync(csvPath)) {
+    return [];
+  }
+  try {
+    const csv = fs.readFileSync(csvPath, 'utf8');
+    const parsed = Papa.parse<Record<string, string>>(csv, { header: true, skipEmptyLines: true });
+    return (parsed.data || [])
+      .filter((row) => row && (row.id || row.title))
+      .map((row) => ({
+        id: String(row.id || row.title || ''),
+        title: String(row.title || row.id || ''),
+        stage: String(row.stage || ''),
+        status: String(row.status || 'Pending')
+      }));
+  } catch (error) {
+    console.warn(`Failed to read strategy pyramid roadmap for ${projectPath}:`, error);
+    return [];
+  }
+}
+
+function classifyStrategyLoop(node: StrategyPyramidNodeSummary): MethodologyStageKey {
+  const text = `${node.stage} ${node.title}`.toLowerCase();
+  if (/sell|sale|sales|market|marketing|growth|launch|revenue|pricing|收费|销售|营销|增长|发布|收入|定价/.test(text)) {
+    return 'sell';
+  }
+  if (/learn|feedback|signal|interview|review|measure|复盘|反馈|学习|访谈|信号|数据|验证/.test(text)) {
+    return 'learn';
+  }
+  if (/improve|iterate|polish|optimi[sz]e|fix|scale|改进|迭代|优化|修复|规模/.test(text)) {
+    return 'improve';
+  }
+  return 'build';
+}
+
+function inferStrategyRole(project: SolopreneurProject, nodes: StrategyPyramidNodeSummary[]): string {
+  const type = String(project.type || '').trim();
+  const stages = nodes.map((node) => node.stage).join(' ');
+  if (type === 'core_product') return '核心产品';
+  if (type === 'content') return '内容资产';
+  if (type === 'infrastructure' || /基础|架构|infra|cloud|平台/i.test(`${project.name} ${stages}`)) return '能力底座';
+  if (type === 'maintenance' || /维护|归档|稳定|修复/i.test(`${project.name} ${stages}`)) return '稳定维护';
+  if (type === 'experiment' || /实验|试验|研究|验证/i.test(`${project.name} ${stages}`)) return '机会验证';
+  return '推进项目';
+}
+
+function inferStrategyAction(summary: Omit<StrategyPyramidProjectSummary, 'action' | 'risk'>): string {
+  if (summary.failedNodes > 0) return '先收口失败点';
+  if (summary.runningNodes > 0 || summary.inProgressNodes > 0) return '继续当前推进';
+  if (summary.progressPercent >= 80) return '复盘价值，决定加码或收缩';
+  if (!summary.nodes.some((node) => classifyStrategyLoop(node) === 'sell' || classifyStrategyLoop(node) === 'learn')) {
+    return '补一个销售或学习信号';
+  }
+  return '推进下一个可验证切片';
+}
+
+function inferStrategyRisk(summary: Omit<StrategyPyramidProjectSummary, 'action' | 'risk'>): string {
+  if (summary.failedNodes > 0) return '交付阻塞';
+  if (!summary.nodes.some((node) => classifyStrategyLoop(node) === 'sell')) return '缺少销售动作';
+  if (!summary.nodes.some((node) => classifyStrategyLoop(node) === 'learn')) return '缺少学习信号';
+  if (summary.progressPercent >= 80) return '需要投入决策';
+  return '';
+}
+
+function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): StrategyPyramidSnapshot {
+  const projects = getProjects(context)
+    .filter((project) => project && project.path)
+    .map((project) => {
+      const nodes = readStrategyRoadmapNodes(project.path);
+      const totalNodes = nodes.length;
+      const completedNodes = nodes.filter((node) => node.status === 'Completed').length;
+      const failedNodes = nodes.filter((node) => node.status === 'Failed').length;
+      const runningNodes = nodes.filter((node) => node.status === 'Running').length;
+      const inProgressNodes = nodes.filter((node) => node.status === 'In Progress').length;
+      const pendingNodes = nodes.filter((node) => node.status === 'Pending').length;
+      const progressPercent = totalNodes ? Math.round((completedNodes / totalNodes) * 100) : 0;
+      const base = {
+        name: project.name,
+        path: project.path,
+        type: project.type || '',
+        role: inferStrategyRole(project, nodes),
+        completedNodes,
+        failedNodes,
+        runningNodes,
+        inProgressNodes,
+        pendingNodes,
+        totalNodes,
+        progressPercent,
+        nodes
+      };
+      return {
+        ...base,
+        action: inferStrategyAction(base),
+        risk: inferStrategyRisk(base)
+      };
+    })
+    .sort((a, b) => (
+      b.failedNodes - a.failedNodes ||
+      b.runningNodes - a.runningNodes ||
+      b.inProgressNodes - a.inProgressNodes ||
+      b.pendingNodes - a.pendingNodes ||
+      a.name.localeCompare(b.name)
+    ));
+
+  const allNodes = projects.flatMap((project) => project.nodes);
+  const countLoop = (key: MethodologyStageKey) => allNodes.filter((node) => classifyStrategyLoop(node) === key).length;
+  const sellCount = countLoop('sell');
+  const learnCount = countLoop('learn');
+  const risks: string[] = [];
+  if (projects.length > 0 && sellCount === 0) risks.push('组合缺少 Sell 信号，容易只 Build 不卖。');
+  if (projects.length > 0 && learnCount === 0) risks.push('组合缺少 Learn 信号，下一轮改进依据不足。');
+  if (projects.some((project) => project.failedNodes > 0)) risks.push('存在失败环节，应先收口再继续加码。');
+  if (projects.length > 1 && !projects.some((project) => project.type === 'core_product')) risks.push('组合缺少明确核心产品。');
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totalProjects: projects.length,
+    buildCount: countLoop('build'),
+    sellCount,
+    learnCount,
+    improveCount: countLoop('improve'),
+    risks,
+    projects
+  };
+}
+
+function strategyEscapeHtml(value: string | number): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getStrategyPyramidWebviewHtml(
+  webview: vscode.Webview,
+  context: vscode.ExtensionContext,
+  snapshot: StrategyPyramidSnapshot,
+  proUnlocked = false
+): string {
+  const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
+  const loopCards = [
+    { key: 'build', label: 'Build', title: '产品与能力', count: snapshot.buildCount },
+    { key: 'sell', label: 'Sell', title: '收入与市场', count: snapshot.sellCount },
+    { key: 'learn', label: 'Learn', title: '学习与反馈', count: snapshot.learnCount },
+    { key: 'improve', label: 'Improve', title: '下一次改进', count: snapshot.improveCount }
+  ];
+  const topProjects = snapshot.projects.slice(0, 12);
+  const riskItems = snapshot.risks.length ? snapshot.risks : ['当前组合没有明显阻塞，选择一个项目继续推进。'];
+  const projectRows = topProjects.map((project) => `
+    <article class="project-row">
+      <div class="project-main">
+        <div class="project-title">${strategyEscapeHtml(project.name)}</div>
+        <div class="project-meta">${strategyEscapeHtml(project.role)} · ${strategyEscapeHtml(project.action)}</div>
+      </div>
+      <div class="project-progress" aria-label="${strategyEscapeHtml(project.progressPercent)}%">
+        <span style="width:${Math.max(0, Math.min(100, project.progressPercent))}%"></span>
+      </div>
+      <div class="project-risk">${project.risk ? strategyEscapeHtml(project.risk) : '可继续推进'}</div>
+      <button type="button" data-open-project="${strategyEscapeHtml(project.path)}"><span class="codicon codicon-graph"></span>查看项目</button>
+    </article>
+  `).join('');
+
+  const lockedBody = `
+    <section class="locked-panel">
+      <div>
+        <div class="locked-eyebrow">Pro</div>
+        <h2>解锁战略金字塔</h2>
+        <p>用一个视图判断所有项目在 Build、Sell、Learn、Improve 中的位置，并直接进入下一步。</p>
+      </div>
+      <button type="button" id="btn-open-upgrade"><span class="codicon codicon-sparkle"></span>升级 Pro</button>
+    </section>
+  `;
+
+  const unlockedBody = `
+    <section class="pyramid-band">
+      ${loopCards.map((card, index) => `
+        <div class="pyramid-layer layer-${strategyEscapeHtml(card.key)}" style="--layer:${index + 1}">
+          <div>
+            <div class="layer-label">${strategyEscapeHtml(card.label)}</div>
+            <div class="layer-title">${strategyEscapeHtml(card.title)}</div>
+          </div>
+          <strong>${card.count}</strong>
+        </div>
+      `).join('')}
+    </section>
+    <section class="workbench">
+      <div class="risk-panel">
+        <div class="section-title">先看风险</div>
+        ${riskItems.map((risk) => `<div class="risk-item"><span class="codicon codicon-warning"></span>${strategyEscapeHtml(risk)}</div>`).join('')}
+      </div>
+      <div class="project-panel">
+        <div class="section-title">下一步动作</div>
+        ${projectRows || '<div class="empty-state">还没有已登记项目。先在侧边栏添加项目。</div>'}
+      </div>
+    </section>
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="${codiconsUri}" rel="stylesheet">
+  <title>战略金字塔</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: var(--vscode-editor-background);
+      --fg: var(--vscode-editor-foreground);
+      --muted: var(--vscode-descriptionForeground);
+      --panel: var(--vscode-sideBar-background);
+      --border: var(--vscode-panel-border);
+      --accent: var(--vscode-button-background);
+      --accent-fg: var(--vscode-button-foreground);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--vscode-font-family);
+    }
+    .shell { min-height: 100vh; padding: 28px; }
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+    h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: 0; }
+    .sub { margin-top: 8px; color: var(--muted); font-size: 13px; }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      padding: 8px 12px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font: inherit;
+      white-space: nowrap;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(110px, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .stat {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel);
+    }
+    .stat span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .stat strong { font-size: 22px; }
+    .locked-panel {
+      min-height: 380px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 22px;
+      padding: 32px;
+    }
+    .locked-eyebrow { color: var(--muted); font-size: 12px; text-transform: uppercase; margin-bottom: 8px; }
+    .locked-panel h2 { margin: 0 0 10px; font-size: 24px; }
+    .locked-panel p { margin: 0; max-width: 560px; color: var(--muted); line-height: 1.6; }
+    .pyramid-band {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+    .pyramid-layer {
+      min-height: 72px;
+      width: calc(100% - (4 - var(--layer)) * 7%);
+      margin: 0 auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 18px;
+      background: var(--panel);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .layer-label { color: var(--muted); font-size: 12px; }
+    .layer-title { margin-top: 4px; font-size: 16px; font-weight: 650; }
+    .pyramid-layer strong { font-size: 26px; }
+    .workbench {
+      display: grid;
+      grid-template-columns: minmax(220px, 0.8fr) minmax(420px, 1.8fr);
+      gap: 14px;
+    }
+    .risk-panel, .project-panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+    }
+    .section-title { font-weight: 650; margin-bottom: 12px; }
+    .risk-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px 0;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      line-height: 1.45;
+    }
+    .risk-item:first-of-type { border-top: 0; }
+    .project-row {
+      display: grid;
+      grid-template-columns: minmax(180px, 1.4fr) minmax(100px, 0.8fr) minmax(110px, 0.8fr) auto;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+    .project-row:first-of-type { border-top: 0; }
+    .project-title { font-weight: 650; margin-bottom: 4px; }
+    .project-meta, .project-risk, .empty-state { color: var(--muted); font-size: 12px; }
+    .project-progress {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--vscode-progressBar-background, rgba(127,127,127,.25));
+      overflow: hidden;
+    }
+    .project-progress span {
+      display: block;
+      height: 100%;
+      background: var(--accent);
+    }
+    @media (max-width: 760px) {
+      .shell { padding: 18px; }
+      header, .locked-panel { align-items: stretch; flex-direction: column; }
+      .stats { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .workbench { grid-template-columns: 1fr; }
+      .project-row { grid-template-columns: 1fr; }
+      .pyramid-layer { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>战略金字塔</h1>
+        <div class="sub">从项目组合判断现在该推进、收口、学习还是改进。</div>
+      </div>
+      <button type="button" id="btn-refresh"><span class="codicon codicon-refresh"></span>刷新</button>
+    </header>
+    <section class="stats" aria-label="组合状态">
+      <div class="stat"><span>项目</span><strong>${snapshot.totalProjects}</strong></div>
+      ${loopCards.map((card) => `<div class="stat"><span>${strategyEscapeHtml(card.label)}</span><strong>${card.count}</strong></div>`).join('')}
+    </section>
+    ${proUnlocked ? unlockedBody : lockedBody}
+  </main>
+  <script>
+    const vscode = acquireVsCodeApi();
+    document.getElementById('btn-refresh')?.addEventListener('click', () => {
+      vscode.postMessage({ command: 'refreshStrategyPyramid' });
+    });
+    document.getElementById('btn-open-upgrade')?.addEventListener('click', () => {
+      vscode.postMessage({ command: 'openStrategyUpgrade' });
+    });
+    document.querySelectorAll('[data-open-project]').forEach((button) => {
+      button.addEventListener('click', () => {
+        vscode.postMessage({ command: 'openProjectRoadmap', projectPath: button.getAttribute('data-open-project') || '' });
+      });
+    });
+  </script>
+</body>
+</html>`;
 }
 
 /**
