@@ -28,6 +28,7 @@ interface SolopreneurSettings {
   taskPermissionMode?: string;
   reviewerCliPath?: string;
   collaborationReviewMode?: string;
+  proEntitlements?: Record<string, boolean>;
   enabledEnhancements?: Record<string, boolean>;
   enhancementStatuses?: SolomapEnhancementStatusSummary[];
 }
@@ -824,6 +825,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     taskPermissionMode: 'auto',
     reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
     collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
+    proEntitlements: readLocalProEntitlements(),
     enabledEnhancements: {}
   };
   return {
@@ -831,6 +833,22 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     enabledEnhancements: getEnabledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
     enhancementStatuses: getSolomapEnhancementStatusSummaries(settingsWorkspaceRoot, baseSettings.globalDataPath)
   };
+}
+
+function readLocalProEntitlements(): Record<string, boolean> {
+  const value = String(process.env.SOLOMAP_PRO || '').trim().toLowerCase();
+  if (!['1', 'true', 'yes', 'pro'].includes(value)) {
+    return {};
+  }
+  return {
+    pro: true,
+    strategy_pyramid: true
+  };
+}
+
+function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, featureKey: string): boolean {
+  const entitlements = settings?.proEntitlements || {};
+  return Boolean(entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
 }
 
 function getSettingsEnhancementWorkspaceRoot(): string {

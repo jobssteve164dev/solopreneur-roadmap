@@ -365,6 +365,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /openFeedbackIssue/);
   assert.match(html, /id="btn-toggle-feedback"/);
   assert.match(html, /id="feedback-panel"/);
+  assert.match(html, /id="strategy-pyramid-panel"/);
   assert.doesNotMatch(html, /id="label-feedback"/);
   assert.match(script, /renderProjectIssuePanel/);
   assert.match(script, /createIssue/);
@@ -386,6 +387,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-open-full',
     'project-select',
     'btn-add-project',
+    'global-focus-panel',
+    'strategy-pyramid-panel',
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
@@ -506,6 +509,22 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
+  assert.match(elements['strategy-pyramid-panel'].innerHTML, /解锁一人公司视角|Unlock the company view/);
+  assert.match(elements['strategy-pyramid-panel'].innerHTML, /data-open-pro-upgrade/);
+  assert.doesNotMatch(elements['strategy-pyramid-panel'].innerHTML, /Passport|CloudMCP|entitlement|strategy_pyramid/);
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: {
+      cliPath: '/workspace/.solomap-global/agent-cli/agy',
+      language: 'zh',
+      globalPrompt: '',
+      globalDataPath: '/workspace/.solomap-global',
+      proEntitlements: { strategy_pyramid: true }
+    }
+  });
+  assert.match(elements['strategy-pyramid-panel'].innerHTML, /战略金字塔/);
+  assert.match(elements['strategy-pyramid-panel'].innerHTML, /该推进/);
+  assert.doesNotMatch(elements['strategy-pyramid-panel'].innerHTML, /data-open-pro-upgrade/);
   dispatchMessage({
     command: 'nodesUpdated',
     projectPath: '/workspace/second',
@@ -1091,7 +1110,8 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     'out/sidebarProvider.js',
     [
       'module.exports.__buildProjectPortfolioSummaries = buildProjectPortfolioSummaries;',
-      'module.exports.__getRecommendedNode = getRecommendedNode;'
+      'module.exports.__getRecommendedNode = getRecommendedNode;',
+      'module.exports.__hasProEntitlement = hasProEntitlement;'
     ].join('\n')
   );
 
@@ -1135,6 +1155,9 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     { id: '1', title: 'Failed step', status: 'Failed', stage: '产品与 MVP', dependencies: '' },
     { id: '2', title: 'Running step', status: 'Running', stage: '产品与 MVP', dependencies: '' }
   ]).title, 'Running step');
+  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
+  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { pro: true } }, 'strategyPyramid'), true);
+  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: {} }, 'strategyPyramid'), false);
 });
 
 test('global engineering store writes git-friendly portfolio files', () => {
@@ -1469,6 +1492,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__resolveExecutablePath = resolveExecutablePath;',
       'module.exports.__commandExists = commandExists;',
       'module.exports.__getAgentProvider = getAgentProvider;',
+      'module.exports.__hasProEntitlement = hasProEntitlement;',
       'module.exports.__getStepSessionFilePath = getStepSessionFilePath;',
       'module.exports.__readStepSessionState = readStepSessionState;',
       'module.exports.__getStoredAgentSession = getStoredAgentSession;',
@@ -1490,6 +1514,8 @@ test('agent command builder uses non-interactive task runs and native continuati
     extensionModule.__buildAgentCommand('codex', 'Ship the MVP', '/workspace/app'),
     "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Ship the MVP'"
   );
+  assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategy_pyramid'), true);
+  assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: {} }, 'strategy_pyramid'), false);
   assert.equal(
     extensionModule.__buildAgentCommand('codex-cli', "Don't skip tests", '/workspace/app'),
     "'codex-cli' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Don'\\''t skip tests'"

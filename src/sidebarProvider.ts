@@ -16,6 +16,7 @@ interface SolopreneurSettings {
   taskPermissionMode?: string;
   reviewerCliPath?: string;
   collaborationReviewMode?: string;
+  proEntitlements?: Record<string, boolean>;
   enabledEnhancements?: Record<string, boolean>;
   enhancementStatuses?: Array<{
     id: string;
@@ -196,6 +197,7 @@ interface RoadmapNodeLike {
 }
 
 type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
+type ProFeatureKey = 'strategyPyramid';
 
 const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
   { key: 'build', label: 'Build' },
@@ -203,6 +205,9 @@ const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
   { key: 'learn', label: 'Learn' },
   { key: 'improve', label: 'Improve' }
 ];
+const PRO_FEATURES: Record<ProFeatureKey, string> = {
+  strategyPyramid: 'strategy_pyramid'
+};
 const DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT = 3;
 const DELIVERY_WORKFLOW_RUN_FETCH_LIMIT = 20;
 const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
@@ -2135,6 +2140,11 @@ function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
     || anyPending
     || nodes.find((node) => node.status !== 'Completed')
     || nodes[0];
+}
+
+function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, feature: ProFeatureKey): boolean {
+  const entitlements = settings?.proEntitlements || {};
+  return Boolean(entitlements[PRO_FEATURES[feature]] || entitlements[feature] || entitlements.pro || entitlements.solomap_pro);
 }
 
 function getProjectRecentActivityAt(projectPath: string): string {
@@ -4421,6 +4431,89 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       padding-bottom: 8px;
     }
 
+    .strategy-pyramid-panel {
+      margin-bottom: 10px;
+    }
+
+    .strategy-pyramid-card {
+      border: 1px solid rgba(255, 209, 102, 0.2);
+      border-radius: 6px;
+      background: rgba(255, 209, 102, 0.06);
+      padding: 9px;
+      box-sizing: border-box;
+    }
+
+    .strategy-pyramid-head,
+    .strategy-pyramid-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .strategy-pyramid-title {
+      color: var(--text-main);
+      font-size: 11px;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .strategy-pyramid-copy {
+      margin-top: 6px;
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .strategy-pyramid-action {
+      flex-shrink: 0;
+      border: 1px solid rgba(255, 209, 102, 0.32);
+      border-radius: 5px;
+      background: rgba(255, 209, 102, 0.1);
+      color: #ffddad;
+      padding: 4px 7px;
+      font-size: 10px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .strategy-pyramid-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .strategy-pyramid-row {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 5px;
+      background: rgba(0, 0, 0, 0.12);
+      padding: 7px;
+    }
+
+    .strategy-pyramid-label {
+      color: #ffddad;
+      font-size: 9px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .strategy-pyramid-project {
+      color: var(--text-main);
+      font-size: 10.5px;
+      font-weight: 700;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+
     .empty-portfolio {
       color: var(--text-muted);
       font-size: 11px;
@@ -5272,6 +5365,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="portfolio-header">
       <div class="portfolio-title" id="portfolio-title">项目总览</div>
     </div>
+    <div class="strategy-pyramid-panel" id="strategy-pyramid-panel"></div>
     <div class="portfolio-filters" id="portfolio-filters"></div>
     <div class="portfolio-list" id="portfolio-list"></div>
   </div>
@@ -5536,6 +5630,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnAddProject = document.getElementById('btn-add-project');
     const globalFocusPanel = document.getElementById('global-focus-panel');
     const portfolioList = document.getElementById('portfolio-list');
+    const strategyPyramidPanel = document.getElementById('strategy-pyramid-panel');
     const portfolioFilters = document.getElementById('portfolio-filters');
 
     // Settings elements
@@ -5598,6 +5693,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
     let currentCliPath = 'agy';
+    let currentSettings = {};
     const projectConversationModes = {};
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
@@ -5609,6 +5705,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       zh: {
         title: 'SoloMap',
         portfolioTitle: '项目总览',
+        strategyPyramidTitle: '战略金字塔',
+        strategyPyramidLockedTitle: '解锁一人公司视角',
+        strategyPyramidLockedCopy: '看见哪些项目该加码、哪些该收口、下一步优先投在哪里。',
+        strategyPyramidUpgrade: '了解 Pro',
+        strategyPyramidFocus: '该推进',
+        strategyPyramidClose: '该收口',
+        strategyPyramidWatch: '该观察',
+        strategyPyramidEmpty: '添加两个以上项目后，SoloMap 会给出组合判断。',
         globalFocusTitle: '今日安排',
         globalFocusEmpty: '今天还没有明确安排，先添加或选择一个项目。',
         todaySlotUrgent: '先处理',
@@ -5815,6 +5919,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       en: {
         title: 'SoloMap',
         portfolioTitle: 'Project Portfolio',
+        strategyPyramidTitle: 'Strategy Pyramid',
+        strategyPyramidLockedTitle: 'Unlock the company view',
+        strategyPyramidLockedCopy: 'See what to double down on, what to close, and where the next hour should go.',
+        strategyPyramidUpgrade: 'Explore Pro',
+        strategyPyramidFocus: 'Push',
+        strategyPyramidClose: 'Close',
+        strategyPyramidWatch: 'Watch',
+        strategyPyramidEmpty: 'Add at least two projects and SoloMap will show the portfolio call.',
         globalFocusTitle: 'Today',
         globalFocusEmpty: 'No clear plan yet. Add or choose a project first.',
         todaySlotUrgent: 'Handle',
@@ -6123,6 +6235,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('text-open-full', t('openFull'));
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderPortfolioFilters();
+      renderStrategyPyramid(currentProjects.portfolio);
       renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderSidebar(currentNodes);
@@ -6324,6 +6437,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'settingsLoaded':
+          currentSettings = message.settings || {};
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
@@ -6351,6 +6465,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           currentProjects.portfolio = message.projects.portfolio || [];
           currentProjects.globalStore = message.projects.globalStore || null;
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
+          renderStrategyPyramid(currentProjects.portfolio);
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolio(message.projects.portfolio || [], message.projects.selectedProjectPath || '');
           break;
@@ -7572,6 +7687,98 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (rhythm === 'monthEnd' && hasCloseoutValue(project)) score += 55;
       if (rhythm === 'monthEnd' && (project.globalPriority === 'P0' || project.blocker)) score += 20;
       return score;
+    }
+
+    function hasProAccess(feature) {
+      const entitlements = currentSettings && currentSettings.proEntitlements || {};
+      return Boolean(entitlements[feature] || entitlements.strategyPyramid || entitlements.pro || entitlements.solomap_pro);
+    }
+
+    function strategicScore(project) {
+      let score = todayPlanScore(project);
+      if (project.projectType === 'core_product') score += 18;
+      if (project.projectType === 'content') score += 8;
+      if (Number(project.progressPercent || 0) >= 60 && Number(project.failedNodes || 0) <= 0) score += 12;
+      return score;
+    }
+
+    function pickStrategicProject(projects, predicate, scoreFn) {
+      return (projects || [])
+        .filter(predicate)
+        .map((project, index) => ({ project, index, score: scoreFn(project) }))
+        .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.project || null;
+    }
+
+    function buildStrategyPyramidItems(portfolio) {
+      const projects = portfolio || [];
+      const focus = pickStrategicProject(
+        projects,
+        project => Number(project.runningNodes || 0) > 0 || Number(project.inProgressNodes || 0) > 0 || project.globalPriority === 'P0' || project.globalPriority === 'P1',
+        strategicScore
+      ) || pickStrategicProject(projects, () => true, strategicScore);
+      const close = pickStrategicProject(
+        projects,
+        project => Number(project.failedNodes || 0) > 0 || project.overallStatus === 'Completed' || Number(project.progressPercent || 0) >= 80,
+        project => Number(project.failedNodes || 0) * 120 + Number(project.progressPercent || 0)
+      );
+      const watch = pickStrategicProject(
+        projects,
+        project => project !== focus && project !== close && (project.globalPriority === 'P2' || Number(project.pendingNodes || 0) > 0),
+        project => Number(project.pendingNodes || 0) * 10 + (project.projectType === 'experiment' ? 12 : 0)
+      );
+      return [
+        { label: t('strategyPyramidFocus'), project: focus },
+        { label: t('strategyPyramidClose'), project: close },
+        { label: t('strategyPyramidWatch'), project: watch }
+      ];
+    }
+
+    function renderStrategyPyramid(portfolio) {
+      if (!strategyPyramidPanel) return;
+      if (!portfolio || !portfolio.length) {
+        strategyPyramidPanel.innerHTML = '';
+        return;
+      }
+      if (!hasProAccess('strategy_pyramid')) {
+        strategyPyramidPanel.innerHTML = \`
+          <div class="strategy-pyramid-card is-locked">
+            <div class="strategy-pyramid-head">
+              <span class="strategy-pyramid-title"><span class="codicon codicon-type-hierarchy-sub"></span>\${escapeHtml(t('strategyPyramidLockedTitle'))}</span>
+              <button class="strategy-pyramid-action" data-open-pro-upgrade><span class="codicon codicon-sparkle"></span>\${escapeHtml(t('strategyPyramidUpgrade'))}</button>
+            </div>
+            <div class="strategy-pyramid-copy">\${escapeHtml(t('strategyPyramidLockedCopy'))}</div>
+          </div>
+        \`;
+        strategyPyramidPanel.querySelectorAll('[data-open-pro-upgrade]').forEach(button => {
+          button.addEventListener('click', event => {
+            event.stopPropagation();
+            vscode.postMessage({
+              command: 'openFeedbackIssue',
+              title: currentLanguage === 'zh' ? '想了解 SoloMap Pro' : 'Interested in SoloMap Pro',
+              body: currentLanguage === 'zh'
+                ? '我想了解战略金字塔和一人公司视角。'
+                : 'I want to learn more about the strategy pyramid and company view.',
+              category: 'feature_request'
+            });
+          });
+        });
+        return;
+      }
+      const items = buildStrategyPyramidItems(portfolio);
+      const rows = items.map(item => \`
+        <div class="strategy-pyramid-row">
+          <span class="strategy-pyramid-label">\${escapeHtml(item.label)}</span>
+          <span class="strategy-pyramid-project">\${escapeHtml(item.project ? (item.project.name + ' · ' + (item.project.globalNextAction || item.project.recommendedNodeTitle || item.project.overallStatus || '')) : t('strategyPyramidEmpty'))}</span>
+        </div>
+      \`).join('');
+      strategyPyramidPanel.innerHTML = \`
+        <div class="strategy-pyramid-card">
+          <div class="strategy-pyramid-head">
+            <span class="strategy-pyramid-title"><span class="codicon codicon-type-hierarchy-sub"></span>\${escapeHtml(t('strategyPyramidTitle'))}</span>
+          </div>
+          <div class="strategy-pyramid-grid">\${rows}</div>
+        </div>
+      \`;
     }
 
     function todayPlanReason(project) {
