@@ -3,7 +3,6 @@ const MARKETPLACE_URL = "https://marketplace.visualstudio.com/items?itemName=SZL
 const OPEN_VSX_URL = "https://open-vsx.org/extension/SZLK/solopreneur-roadmap";
 const GITHUB_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap";
 const FEEDBACK_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml";
-const DOCS_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap#readme";
 const SCREENSHOT_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/docs/assets/solomap_red_terminal.png";
 const LOGO_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo.png";
 
@@ -29,9 +28,11 @@ const content = {
     lang: "en",
     pathPrefix: "",
     homePath: "/",
+    docsPath: "/docs",
     privacyPath: "/privacy-local-first",
     alternateLabel: "中文",
     alternateHomePath: "/zh",
+    alternateDocsPath: "/zh/docs",
     alternatePrivacyPath: "/zh/privacy-local-first",
     nav: {
       product: "Product",
@@ -155,9 +156,11 @@ const content = {
     lang: "zh-Hans",
     pathPrefix: "/zh",
     homePath: "/zh",
+    docsPath: "/zh/docs",
     privacyPath: "/zh/privacy-local-first",
     alternateLabel: "English",
     alternateHomePath: "/",
+    alternateDocsPath: "/docs",
     alternatePrivacyPath: "/privacy-local-first",
     nav: {
       product: "产品",
@@ -275,6 +278,139 @@ const content = {
         "GitHub 数据只在你连接或刷新相关信号时使用。",
         "反馈只会在你主动打开或提交反馈 Issue 时发送。"
       ]
+    }
+  }
+};
+
+const docsContent = {
+  en: {
+    index: {
+      title: "SoloMap Docs",
+      description: "Methods for using SoloMap to keep AI-built projects moving from idea to shipped progress.",
+      heading: "Methods for keeping AI-built projects moving.",
+      lead: "SoloMap is built around a simple operating model: turn ideas into roadmaps, turn roadmap steps into agent work, and turn evidence back into the next decision.",
+      cards: [
+        ["solomap-method", "SoloMap Method", "Build, sell, learn, and improve as one loop instead of treating coding as the finish line."],
+        ["portfolio-method", "Portfolio Method", "Coordinate multiple solo projects through reusable capability, priority, and learning loops."],
+        ["micro-execution-loop", "Micro Execution Loop", "Make agent work observable by tracking intent, judgment, action, evidence, result, and attribution."]
+      ]
+    },
+    pages: {
+      "solomap-method": {
+        title: "SoloMap Method",
+        description: "The SoloMap method turns AI-built project ideas into roadmaps, agent execution, market contact, and feedback loops.",
+        heading: "The SoloMap method",
+        lead: "SoloMap treats a solo project as a living loop: find a real problem, build a usable product, reach customers, learn from evidence, and improve the next roadmap step.",
+        sections: [
+          ["Find the real problem", "Start with a problem worth exploring, the people who can validate it, and one action that creates momentum."],
+          ["Build a product system", "A prototype is not enough. A deliverable product needs requirements, architecture, data, tests, design, deployment, and maintenance evidence."],
+          ["Reach customers", "A project is not done when the code runs. It also needs a brand, website, distribution path, sales signal, and feedback channel."],
+          ["Loop through improvement", "Build, Sell, Learn, and Improve stay visible in the roadmap so the product can absorb feedback instead of drifting into endless coding."]
+        ],
+        faq: [
+          ["What is the SoloMap method?", "The SoloMap method is a project loop for solo builders: turn an idea into a roadmap, run focused AI agent work from each step, verify evidence, and update the roadmap from real feedback."],
+          ["Why does SoloMap include selling and learning?", "AI agents make it easy to keep coding, but a product only becomes real when users can discover it, trust it, try it, and send feedback."]
+        ]
+      },
+      "portfolio-method": {
+        title: "Portfolio Method",
+        description: "The SoloMap portfolio method helps solo founders coordinate multiple AI-built projects through reusable learning and priority loops.",
+        heading: "The portfolio method",
+        lead: "Solo builders often manage more than one product, experiment, infrastructure project, or content system. SoloMap treats that portfolio as an operating system, not as a pile of disconnected projects.",
+        sections: [
+          ["Classify projects by execution mode", "Core products, infrastructure, content products, experiments, tools, and maintenance projects need different roadmap shapes."],
+          ["Reuse capability", "Patterns learned in one project should reduce work in the next project instead of being rediscovered every time."],
+          ["Coordinate priority", "The next action should consider revenue potential, blocked surface area, learning value, and execution cost."],
+          ["Compound learning", "Completed work feeds a shared operating memory so future projects can start with better defaults."]
+        ],
+        faq: [
+          ["What is a solo founder portfolio method?", "It is a way to coordinate multiple projects by execution mode, priority, reusable capabilities, and learning feedback instead of managing every project as an isolated todo list."],
+          ["Why does portfolio context matter for AI-built projects?", "AI can accelerate individual tasks, but the solo founder still needs a system for deciding which project and which action deserves attention next."]
+        ]
+      },
+      "micro-execution-loop": {
+        title: "Micro Execution Loop",
+        description: "The Micro Execution Loop makes AI agent work visible through intent, judgment, action, evidence, result, and attribution.",
+        heading: "The micro execution loop",
+        lead: "A roadmap step is only trustworthy when the small agent loops underneath it are observable. SoloMap uses a six-part loop to turn agent activity into project facts.",
+        sections: [
+          ["Intent", "Capture what the user wanted and what this loop is supposed to change."],
+          ["Judgment", "Record the chosen path, affected files, tradeoffs, boundaries, and expected validation."],
+          ["Action", "Track what actually changed in the project, not just what the agent claimed."],
+          ["Evidence", "Verify with tests, rendered output, logs, diffs, screenshots, or concrete files."],
+          ["Result", "Classify the loop as closed, partial, failed, unverified, deviated, or follow-up required."],
+          ["Attribution", "Connect the evidence back to a roadmap step, user capability, product boundary, or risk."]
+        ],
+        faq: [
+          ["What is a micro execution loop?", "A micro execution loop is the smallest reliable unit of AI-assisted project progress: intent, judgment, action, evidence, result, and attribution."],
+          ["Why is evidence part of the loop?", "Without evidence, agent output is only a claim. Evidence turns a run into something that can safely move a roadmap forward."]
+        ]
+      }
+    }
+  },
+  zh: {
+    index: {
+      title: "SoloMap 文档",
+      description: "SoloMap 如何帮助 AI Agent 项目从想法推进到真实交付的方法论。",
+      heading: "让 AI 项目持续推进的方法。",
+      lead: "SoloMap 的核心不是再做一个聊天框，而是把想法变成路线图，把路线图环节变成 Agent 执行，再把证据带回下一步判断。",
+      cards: [
+        ["solomap-method", "SoloMap 方法", "把 Build、Sell、Learn、Improve 放进同一个循环，而不是把写完代码当作终点。"],
+        ["portfolio-method", "项目组合方法", "用可复用能力、优先级和学习循环协调多个独立项目。"],
+        ["micro-execution-loop", "微观执行循环", "用意图、判断、动作、证据、结果和归因，让 Agent 执行不再是黑箱。"]
+      ]
+    },
+    pages: {
+      "solomap-method": {
+        title: "SoloMap 方法",
+        description: "SoloMap 方法把 AI Agent 项目从想法推进到路线图、执行、市场接触和反馈循环。",
+        heading: "SoloMap 方法",
+        lead: "SoloMap 把一个独立项目看成持续循环：找到真实问题，打造可交付产品，触达客户，从证据中学习，并把下一步重新带回路线图。",
+        sections: [
+          ["找到真实问题", "先确认一个值得解决的问题、可以验证的人群，以及能立刻带来动能的第一个动作。"],
+          ["打造产品系统", "原型只是开始。可交付产品需要需求、架构、数据、测试、设计、部署和维护证据。"],
+          ["卖给客户", "代码跑通不是终点。产品还需要品牌、官网、分发路径、销售信号和反馈渠道。"],
+          ["通过循环改进", "Build、Sell、Learn、Improve 持续留在路线图里，让产品吸收反馈，而不是陷入无尽改代码。"]
+        ],
+        faq: [
+          ["SoloMap 方法是什么？", "SoloMap 方法是给独立开发者的项目推进循环：把想法变成路线图，从环节启动聚焦 Agent 执行，用证据验证结果，再根据真实反馈更新路线图。"],
+          ["为什么 SoloMap 要包含销售和学习？", "AI Agent 很容易让人一直写代码，但产品只有被用户发现、信任、试用并反馈后，才真正进入市场。"]
+        ]
+      },
+      "portfolio-method": {
+        title: "项目组合方法",
+        description: "SoloMap 项目组合方法帮助独立开发者用可复用学习和优先级循环协调多个 AI 项目。",
+        heading: "项目组合方法",
+        lead: "独立开发者常常同时管理多个产品、实验、基础设施和内容系统。SoloMap 把这看作一个操作系统，而不是一堆互不相干的待办事项。",
+        sections: [
+          ["按执行模式分类", "核心产品、基础设施、内容产品、实验、工具和维护项目，需要不同的路线图形态。"],
+          ["复用能力", "一个项目里学到的模式，应该降低下一个项目的工作量，而不是每次重新发现。"],
+          ["协调优先级", "下一步该做什么，需要同时看收入潜力、阻断面、学习价值和执行成本。"],
+          ["沉淀复利", "已完成的工作进入共享经验，让未来项目从更好的默认值开始。"]
+        ],
+        faq: [
+          ["什么是独立开发者项目组合方法？", "它是一种按执行模式、优先级、可复用能力和学习反馈来协调多个项目的方法，而不是把每个项目都当作孤立 todo list。"],
+          ["为什么 AI 项目需要项目组合视角？", "AI 能加速单个任务，但独立开发者仍然需要判断哪个项目、哪个动作现在最值得投入。"]
+        ]
+      },
+      "micro-execution-loop": {
+        title: "微观执行循环",
+        description: "微观执行循环用意图、判断、动作、证据、结果和归因，让 AI Agent 工作变得可观察。",
+        heading: "微观执行循环",
+        lead: "一个路线图环节是否可信，取决于它下面的 Agent 小循环是否可观察。SoloMap 用六段结构把 Agent 活动变成项目事实。",
+        sections: [
+          ["意图", "记录用户想要什么，以及本轮循环要改变什么。"],
+          ["判断", "记录选择的路径、影响文件、取舍、边界和预期验证。"],
+          ["动作", "追踪项目真实发生了什么变化，而不是只看 Agent 自称做了什么。"],
+          ["证据", "用测试、渲染结果、日志、diff、截图或具体文件验证。"],
+          ["结果", "把循环归类为已闭环、部分完成、失败、未验证、偏航或需要后续。"],
+          ["归因", "把证据连接回路线图环节、用户能力、产品边界或风险。"]
+        ],
+        faq: [
+          ["什么是微观执行循环？", "微观执行循环是 AI 辅助项目推进的最小可靠单元：意图、判断、动作、证据、结果和归因。"],
+          ["为什么证据是循环的一部分？", "没有证据，Agent 输出只是声明；有证据，才能安全推动路线图继续前进。"]
+        ]
+      }
     }
   }
 };
@@ -491,17 +627,165 @@ function buildStyles() {
       padding: 7px 10px;
       background: rgba(255, 255, 255, 0.035);
     }
-    .screenshot-wrap {
+    .product-preview {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #080807;
+      background: #0b0d0f;
       box-shadow: 0 28px 80px var(--shadow);
       overflow: hidden;
+      min-height: 560px;
+      position: relative;
     }
-    .screenshot-wrap img {
-      width: 100%;
-      aspect-ratio: 1 / 1;
-      object-fit: cover;
+    .preview-titlebar {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 14px;
+      color: #aeb8c2;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      background: #171b20;
+      font-size: 13px;
+    }
+    .preview-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #ef3e46;
+      box-shadow: 18px 0 0 #f0c46b, 36px 0 0 #77c979;
+      margin-right: 42px;
+    }
+    .preview-body {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      min-height: 518px;
+    }
+    .preview-side {
+      border-right: 1px solid rgba(255, 255, 255, 0.1);
+      background: #121417;
+      padding: 16px 12px;
+    }
+    .preview-side strong,
+    .preview-main strong,
+    .terminal strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      margin-bottom: 10px;
+    }
+    .project-chip {
+      border: 1px solid rgba(73, 214, 208, 0.28);
+      border-radius: 8px;
+      padding: 10px;
+      color: var(--soft);
+      background: rgba(73, 214, 208, 0.06);
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+    .preview-main {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+    .roadmap-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .roadmap-step {
+      min-width: 0;
+      min-height: 118px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 12px;
+      background: #171411;
+      position: relative;
+      overflow: hidden;
+    }
+    .roadmap-step::after {
+      content: "";
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+    }
+    .roadmap-step.active {
+      border-color: rgba(239, 62, 70, 0.7);
+      background: rgba(239, 62, 70, 0.1);
+      animation: pulseStep 3.6s ease-in-out infinite;
+    }
+    .roadmap-step.active::after { background: var(--red); }
+    .roadmap-step span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 8px;
+    }
+    .roadmap-step b {
+      display: block;
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 1.25;
+      white-space: nowrap;
+    }
+    .terminal {
+      border: 1px solid rgba(73, 214, 208, 0.24);
+      border-radius: 8px;
+      background: #090b0d;
+      padding: 14px;
+      min-height: 176px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #b8c7d9;
+      overflow: hidden;
+    }
+    .terminal-line {
+      display: block;
+      margin-top: 6px;
+      white-space: nowrap;
+      opacity: 1;
+      transform: translateY(0);
+      animation: focusLine 8s ease-in-out infinite;
+    }
+    .terminal-line:nth-child(3) { animation-delay: 1.2s; }
+    .terminal-line:nth-child(4) { animation-delay: 2.4s; }
+    .terminal-line:nth-child(5) { animation-delay: 3.6s; }
+    .terminal-line:nth-child(6) { animation-delay: 4.8s; }
+    .ok { color: var(--green); }
+    .warn { color: #f0c46b; }
+    .info { color: var(--cyan); }
+    .next-actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .next-actions div {
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--soft);
+      background: rgba(255, 255, 255, 0.035);
+      font-size: 13px;
+    }
+    @keyframes focusLine {
+      0%, 100% { color: #b8c7d9; }
+      45%, 55% { color: #f6f0e8; }
+    }
+    @keyframes pulseStep {
+      0%, 100% { box-shadow: 0 0 0 rgba(239, 62, 70, 0); }
+      50% { box-shadow: 0 0 34px rgba(239, 62, 70, 0.18); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .terminal-line,
+      .roadmap-step.active {
+        animation: none;
+        opacity: 1;
+        transform: none;
+      }
     }
     .section {
       padding: 78px 0;
@@ -740,7 +1024,7 @@ function buildStyles() {
       gap: 16px;
     }
     .privacy-page {
-      width: min(760px, calc(100% - 40px));
+      width: min(860px, calc(100% - 40px));
       margin: 0 auto;
       padding: 72px 0;
     }
@@ -756,6 +1040,83 @@ function buildStyles() {
     .privacy-page p,
     .privacy-page li { color: var(--soft); font-size: 18px; }
     .privacy-page ul { padding-left: 22px; }
+    .docs-page {
+      width: min(1040px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 72px 0 86px;
+    }
+    .docs-hero {
+      margin-bottom: 30px;
+    }
+    .docs-hero h1,
+    .privacy-page h1 {
+      font-size: clamp(38px, 6vw, 68px);
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+    .docs-hero p {
+      margin: 18px 0 0;
+      max-width: 760px;
+      color: var(--soft);
+      font-size: 19px;
+    }
+    .docs-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .docs-card {
+      min-height: 210px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 20px;
+    }
+    .docs-card h2 {
+      font-size: 24px;
+      line-height: 1.08;
+    }
+    .docs-card p,
+    .docs-section p {
+      color: var(--muted);
+      margin: 10px 0 0;
+    }
+    .docs-card span {
+      color: var(--cyan);
+      font-weight: 760;
+    }
+    .docs-body {
+      display: grid;
+      grid-template-columns: minmax(0, 0.66fr) minmax(280px, 0.34fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .docs-sections,
+    .docs-aside {
+      display: grid;
+      gap: 14px;
+    }
+    .docs-section,
+    .docs-aside article {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      background: var(--panel);
+    }
+    .docs-section h2,
+    .docs-aside h2 {
+      font-size: 24px;
+      line-height: 1.1;
+    }
+    .docs-aside article p {
+      color: var(--muted);
+      margin: 10px 0 0;
+      font-size: 15px;
+    }
     @media (max-width: 920px) {
       .links a:not(.install-link):not(.language-link) { display: none; }
       .hero { min-height: auto; padding-top: 44px; }
@@ -769,11 +1130,15 @@ function buildStyles() {
       }
       .grid-3,
       .grid-4,
+      .docs-grid,
+      .docs-body,
       .faq-list,
       .feature-list {
         grid-template-columns: 1fr;
       }
-      .screenshot-wrap img { aspect-ratio: 4 / 3; }
+      .product-preview { min-height: 520px; }
+      .preview-body { grid-template-columns: 1fr; }
+      .preview-side { display: none; }
     }
     @media (max-width: 560px) {
       .shell { width: min(100% - 28px, 1160px); }
@@ -786,6 +1151,11 @@ function buildStyles() {
       .button { width: 100%; }
       .install-actions { grid-template-columns: 1fr; }
       .section { padding: 58px 0; }
+      .product-preview { min-height: 500px; }
+      .preview-main { padding: 14px; }
+      .roadmap-strip,
+      .next-actions { grid-template-columns: 1fr; }
+      .roadmap-step { min-height: 86px; }
     }
   </style>`;
 }
@@ -823,11 +1193,99 @@ function renderModules(modules) {
           </div>`).join("");
 }
 
+function renderDocCards(t, docs, locale) {
+  return docs.index.cards.map(([slug, title, copy]) => {
+    const href = `${t.docsPath}/${slug}`;
+    return `<a class="docs-card" href="${href}">
+            <div>
+              <h2>${escapeHtml(title)}</h2>
+              <p>${escapeHtml(copy)}</p>
+            </div>
+            <span>${locale === "zh" ? "阅读方法" : "Read method"}</span>
+          </a>`;
+  }).join("");
+}
+
+function renderDocSections(sections) {
+  return sections.map(([title, copy]) => `<article class="docs-section">
+            <h2>${escapeHtml(title)}</h2>
+            <p>${escapeHtml(copy)}</p>
+          </article>`).join("");
+}
+
+function renderDocFaq(items) {
+  return items.map(([question, answer]) => `<article>
+            <h2>${escapeHtml(question)}</h2>
+            <p>${escapeHtml(answer)}</p>
+          </article>`).join("");
+}
+
 function renderFaqItems(items) {
   return items.map(([question, answer]) => `<details>
             <summary>${escapeHtml(question)}</summary>
             <p>${escapeHtml(answer)}</p>
           </details>`).join("");
+}
+
+function renderHeroPreview(locale) {
+  const labels = locale === "zh"
+    ? {
+        title: "SoloMap 工作区",
+        side: "项目",
+        activeProject: "SoloMap 官网",
+        build: "打造",
+        sell: "触达",
+        learn: "学习",
+        improve: "改进",
+        terminal: "Agent 执行",
+        next: ["发布官网更新", "检查 AI 引用", "收集用户反馈"]
+      }
+    : {
+        title: "SoloMap workspace",
+        side: "Projects",
+        activeProject: "SoloMap website",
+        build: "Build",
+        sell: "Sell",
+        learn: "Learn",
+        improve: "Improve",
+        terminal: "Agent run",
+        next: ["Ship website update", "Check AI citations", "Collect user feedback"]
+      };
+
+  return `<figure class="product-preview" aria-label="${escapeHtml(labels.title)}">
+          <div class="preview-titlebar">
+            <span class="preview-dot" aria-hidden="true"></span>
+            <span>${escapeHtml(labels.title)}</span>
+          </div>
+          <div class="preview-body">
+            <aside class="preview-side">
+              <strong>${escapeHtml(labels.side)}</strong>
+              <div class="project-chip">${escapeHtml(labels.activeProject)}</div>
+              <div class="project-chip">Cloudapi</div>
+              <div class="project-chip">Content Factory</div>
+            </aside>
+            <div class="preview-main">
+              <strong>Roadmap</strong>
+              <div class="roadmap-strip">
+                <div class="roadmap-step active"><span>01</span><b>${escapeHtml(labels.build)}</b></div>
+                <div class="roadmap-step"><span>02</span><b>${escapeHtml(labels.sell)}</b></div>
+                <div class="roadmap-step"><span>03</span><b>${escapeHtml(labels.learn)}</b></div>
+                <div class="roadmap-step"><span>04</span><b>${escapeHtml(labels.improve)}</b></div>
+              </div>
+              <div class="terminal">
+                <strong>${escapeHtml(labels.terminal)}</strong>
+                <span class="terminal-line"><span class="info">[intent]</span> improve homepage GEO surface</span>
+                <span class="terminal-line"><span class="ok">[action]</span> add native product preview</span>
+                <span class="terminal-line"><span class="ok">[evidence]</span> schema and docs pages verified</span>
+                <span class="terminal-line"><span class="warn">[next]</span> publish and measure citations</span>
+                <span class="terminal-line"><span class="ok">[closed]</span> roadmap step updated</span>
+              </div>
+              <div class="next-actions">
+                ${renderListItems(labels.next, "div")}
+              </div>
+            </div>
+          </div>
+        </figure>`;
 }
 
 function buildStructuredData(t, origin, pagePath) {
@@ -866,6 +1324,54 @@ function buildStructuredData(t, origin, pagePath) {
   <script type="application/ld+json">${JSON.stringify(faq)}</script>`;
 }
 
+function buildHeader(t, locale, currentPath) {
+  const productHref = currentPath === t.homePath ? "#product" : `${t.homePath}#product`;
+  const proHref = currentPath === t.homePath ? "#pro" : `${t.homePath}#pro`;
+  const installHref = currentPath === t.homePath ? "#install" : `${t.homePath}#install`;
+  return `<header class="topbar">
+    <nav class="shell nav" aria-label="Primary">
+      <a class="brand" href="${t.homePath}" aria-label="SoloMap home">
+        <img src="${LOGO_URL}" width="34" height="34" alt="">
+        <span>SoloMap</span>
+      </a>
+      <div class="links">
+        <a href="${productHref}">${escapeHtml(t.nav.product)}</a>
+        <a href="${proHref}">${escapeHtml(t.nav.pro)}</a>
+        <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
+        <a href="${GITHUB_URL}">${escapeHtml(t.nav.github)}</a>
+        <a class="language-link" href="${alternatePathFor(currentPath, locale)}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
+        <a class="install-link" href="${installHref}">${escapeHtml(t.nav.install)}</a>
+      </div>
+    </nav>
+  </header>`;
+}
+
+function buildFooter(t) {
+  return `<footer>
+    <div class="shell footer-row">
+      <div>SoloMap · solomap.app · SZLK</div>
+      <div class="footer-links">
+        <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
+        <a href="${GITHUB_URL}">GitHub</a>
+        <a href="${MARKETPLACE_URL}">VS Code Marketplace</a>
+        <a href="${OPEN_VSX_URL}">Open VSX</a>
+        <a href="${FEEDBACK_URL}">${escapeHtml(t.footer.feedback)}</a>
+        <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
+      </div>
+    </div>
+  </footer>`;
+}
+
+function alternatePathFor(pathname, locale) {
+  if (pathname === "/docs") return "/zh/docs";
+  if (pathname === "/zh/docs") return "/docs";
+  if (pathname.startsWith("/docs/")) return `/zh${pathname}`;
+  if (pathname.startsWith("/zh/docs/")) return pathname.slice(3);
+  if (pathname === "/privacy-local-first") return "/zh/privacy-local-first";
+  if (pathname === "/zh/privacy-local-first") return "/privacy-local-first";
+  return locale === "en" ? "/zh" : "/";
+}
+
 function buildPage(locale, origin) {
   const t = content[locale];
   return `<!doctype html>
@@ -876,22 +1382,7 @@ function buildPage(locale, origin) {
   ${buildStyles()}
 </head>
 <body>
-  <header class="topbar">
-    <nav class="shell nav" aria-label="Primary">
-      <a class="brand" href="${t.homePath}" aria-label="SoloMap home">
-        <img src="${LOGO_URL}" width="34" height="34" alt="">
-        <span>SoloMap</span>
-      </a>
-      <div class="links">
-        <a href="#product">${escapeHtml(t.nav.product)}</a>
-        <a href="#pro">${escapeHtml(t.nav.pro)}</a>
-        <a href="${DOCS_URL}">${escapeHtml(t.nav.docs)}</a>
-        <a href="${GITHUB_URL}">${escapeHtml(t.nav.github)}</a>
-        <a class="language-link" href="${t.alternateHomePath}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
-        <a class="install-link" href="${MARKETPLACE_URL}">${escapeHtml(t.nav.install)}</a>
-      </div>
-    </nav>
-  </header>
+  ${buildHeader(t, locale, t.homePath)}
 
   <main>
     <section class="hero">
@@ -910,9 +1401,7 @@ function buildPage(locale, origin) {
             ${renderListItems(t.hero.proof, "span")}
           </div>
         </div>
-        <figure class="screenshot-wrap" aria-label="${escapeHtml(t.hero.screenshotLabel)}">
-          <img src="${SCREENSHOT_URL}" width="1024" height="1024" alt="${escapeHtml(t.hero.screenshotAlt)}">
-        </figure>
+        ${renderHeroPreview(locale)}
       </div>
     </section>
 
@@ -1020,18 +1509,7 @@ function buildPage(locale, origin) {
     </section>
   </main>
 
-  <footer>
-    <div class="shell footer-row">
-      <div>SoloMap · solomap.app · SZLK</div>
-      <div class="footer-links">
-        <a href="${GITHUB_URL}">GitHub</a>
-        <a href="${MARKETPLACE_URL}">VS Code Marketplace</a>
-        <a href="${OPEN_VSX_URL}">Open VSX</a>
-        <a href="${FEEDBACK_URL}">${escapeHtml(t.footer.feedback)}</a>
-        <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
-      </div>
-    </div>
-  </footer>
+  ${buildFooter(t)}
 </body>
 </html>`;
 }
@@ -1050,17 +1528,102 @@ function buildLocalFirstPage(locale, origin) {
   ${buildStyles()}
 </head>
 <body>
+  ${buildHeader(t, locale, t.privacyPath)}
   <main class="privacy-page">
-    <div class="privacy-nav">
-      <a href="${t.homePath}">${escapeHtml(t.privacy.back)}</a>
-      <a class="language-link" href="${t.alternatePrivacyPath}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
-    </div>
     <h1>${escapeHtml(t.privacy.heading)}</h1>
     <p>${escapeHtml(t.privacy.copy)}</p>
     <ul>
       ${renderListItems(t.privacy.items, "li")}
     </ul>
   </main>
+  ${buildFooter(t)}
+</body>
+</html>`;
+}
+
+function buildDocIndexPage(locale, origin) {
+  const t = content[locale];
+  const docs = docsContent[locale];
+  const meta = {
+    title: docs.index.title,
+    description: docs.index.description,
+    ogDescription: docs.index.description
+  };
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead({ ...t, meta }, origin, t.docsPath)}
+  ${buildStyles()}
+</head>
+<body>
+  ${buildHeader(t, locale, t.docsPath)}
+  <main class="docs-page">
+    <div class="docs-hero">
+      <h1>${escapeHtml(docs.index.heading)}</h1>
+      <p>${escapeHtml(docs.index.lead)}</p>
+    </div>
+    <div class="docs-grid">
+      ${renderDocCards(t, docs, locale)}
+    </div>
+  </main>
+  ${buildFooter(t)}
+</body>
+</html>`;
+}
+
+function buildDocPage(locale, slug, origin) {
+  const t = content[locale];
+  const doc = docsContent[locale].pages[slug];
+  const pagePath = `${t.docsPath}/${slug}`;
+  const meta = {
+    title: `${doc.title} - SoloMap`,
+    description: doc.description,
+    ogDescription: doc.description
+  };
+  const articleStructuredData = {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    headline: doc.title,
+    description: doc.description,
+    url: absoluteUrl(pagePath, origin),
+    publisher: {
+      "@type": "Organization",
+      name: "SoloMap",
+      url: origin
+    },
+    mainEntity: doc.faq.map(([question, answer]) => ({
+      "@type": "Question",
+      name: question,
+      acceptedAnswer: {
+        "@type": "Answer",
+        text: answer
+      }
+    }))
+  };
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead({ ...t, meta }, origin, pagePath)}
+  <script type="application/ld+json">${JSON.stringify(articleStructuredData)}</script>
+  ${buildStyles()}
+</head>
+<body>
+  ${buildHeader(t, locale, pagePath)}
+  <main class="docs-page">
+    <div class="docs-hero">
+      <h1>${escapeHtml(doc.heading)}</h1>
+      <p>${escapeHtml(doc.lead)}</p>
+    </div>
+    <div class="docs-body">
+      <div class="docs-sections">
+        ${renderDocSections(doc.sections)}
+      </div>
+      <aside class="docs-aside" aria-label="${locale === "zh" ? "常见问题" : "Questions"}">
+        ${renderDocFaq(doc.faq)}
+      </aside>
+    </div>
+  </main>
+  ${buildFooter(t)}
 </body>
 </html>`;
 }
@@ -1072,6 +1635,20 @@ function resolveRoute(pathname) {
   if (pathname === "/zh" || pathname === "/zh/") {
     return { type: "home", locale: "zh", status: 200 };
   }
+  if (pathname === "/docs" || pathname === "/docs/") {
+    return { type: "docs-index", locale: "en", status: 200 };
+  }
+  if (pathname === "/zh/docs" || pathname === "/zh/docs/") {
+    return { type: "docs-index", locale: "zh", status: 200 };
+  }
+  const englishDocMatch = pathname.match(/^\/docs\/([^/]+)$/);
+  if (englishDocMatch && docsContent.en.pages[englishDocMatch[1]]) {
+    return { type: "doc", locale: "en", slug: englishDocMatch[1], status: 200 };
+  }
+  const chineseDocMatch = pathname.match(/^\/zh\/docs\/([^/]+)$/);
+  if (chineseDocMatch && docsContent.zh.pages[chineseDocMatch[1]]) {
+    return { type: "doc", locale: "zh", slug: chineseDocMatch[1], status: 200 };
+  }
   if (pathname === "/privacy-local-first") {
     return { type: "privacy", locale: "en", status: 200 };
   }
@@ -1082,6 +1659,16 @@ function resolveRoute(pathname) {
 }
 
 function buildSitemap(origin) {
+  const docUrls = Object.keys(docsContent.en.pages).map((slug) => `  <url>
+    <loc>${origin}/docs/${slug}</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs/${slug}" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs/${slug}" />
+  </url>
+  <url>
+    <loc>${origin}/zh/docs/${slug}</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs/${slug}" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs/${slug}" />
+  </url>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
@@ -1095,6 +1682,17 @@ function buildSitemap(origin) {
     <xhtml:link rel="alternate" hreflang="en" href="${origin}/" />
     <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh" />
   </url>
+  <url>
+    <loc>${origin}/docs</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs" />
+  </url>
+  <url>
+    <loc>${origin}/zh/docs</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs" />
+  </url>
+${docUrls}
   <url>
     <loc>${origin}/privacy-local-first</loc>
     <xhtml:link rel="alternate" hreflang="en" href="${origin}/privacy-local-first" />
@@ -1144,6 +1742,10 @@ SoloMap is a local-first roadmap and strategy cockpit for AI-built projects in V
 
 - Website: ${origin}/
 - Chinese website: ${origin}/zh
+- Docs: ${origin}/docs
+- SoloMap method: ${origin}/docs/solomap-method
+- Portfolio method: ${origin}/docs/portfolio-method
+- Micro execution loop: ${origin}/docs/micro-execution-loop
 - Local-first note: ${origin}/privacy-local-first
 - VS Code Marketplace: ${MARKETPLACE_URL}
 - Open VSX: ${OPEN_VSX_URL}
@@ -1178,6 +1780,12 @@ Sitemap: ${origin}/sitemap.xml
     const route = resolveRoute(url.pathname);
     if (route.type === "privacy") {
       return htmlResponse(buildLocalFirstPage(route.locale, origin), route.status);
+    }
+    if (route.type === "docs-index") {
+      return htmlResponse(buildDocIndexPage(route.locale, origin), route.status);
+    }
+    if (route.type === "doc") {
+      return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status);
     }
 
     return htmlResponse(buildPage(route.locale, origin), route.status);
