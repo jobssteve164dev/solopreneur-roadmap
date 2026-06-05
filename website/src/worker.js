@@ -77,6 +77,22 @@ const content = {
         ["Come back and continue", "See today's priorities, project status, and recent progress when you reopen VS Code."]
       ]
     },
+    answer: {
+      title: "What is SoloMap?",
+      lead: "SoloMap is a local-first VS Code extension that helps indie developers turn AI-built projects into clear roadmaps, executable agent runs, and visible next actions. It does not replace coding agents; it gives them a product direction layer so solo builders can keep building, selling, learning, and improving without losing context.",
+      comparisonTitle: "SoloMap vs. AI coding tools",
+      comparison: [
+        ["What it manages", "Project direction, roadmap steps, AI run context, progress memory", "Code generation, edits, chat, review, and terminal execution"],
+        ["Where it works", "Inside the user's existing VS Code workspace", "Usually inside an IDE, terminal, hosted chat, or agent runtime"],
+        ["Best use", "Knowing what to do next and keeping a solo product moving", "Completing a specific coding or editing task"],
+        ["Data posture", "Core workflow is local-first by default", "Depends on the selected AI provider and tool"]
+      ],
+      modules: [
+        ["Choose SoloMap if", "you already use AI agents but keep losing the product thread between plans, chats, code changes, and follow-up work."],
+        ["Choose a coding agent if", "your immediate need is to write, modify, review, or explain code inside one task."],
+        ["Use both when", "you want the agent to execute while SoloMap keeps the project roadmap, memory, and next step visible."]
+      ]
+    },
     trust: {
       title: "Local-first by default.",
       copy: "SoloMap's core workflow does not require a hosted backend. Roadmaps, task records, and project memory stay in your workspace first.",
@@ -108,6 +124,16 @@ const content = {
       openVsx: "Open VSX",
       github: "GitHub repository",
       feedback: "Send feedback"
+    },
+    faq: {
+      title: "SoloMap FAQ",
+      items: [
+        ["Is SoloMap an AI coding agent?", "No. SoloMap is the roadmap and strategy layer around the coding agents you already use."],
+        ["Does SoloMap require a hosted backend?", "No. The core workflow keeps roadmap state, task records, and project memory in the local workspace by default."],
+        ["Who should use SoloMap?", "SoloMap is for indie developers and solo founders building products with AI agents inside VS Code."],
+        ["What problem does SoloMap solve?", "It keeps project direction, next actions, and AI execution history visible so solo builders do not lose momentum between coding sessions."],
+        ["Can SoloMap work with different agent CLIs?", "Yes. SoloMap is designed around bringing your own local Agent CLI rather than forcing one hosted coding agent."]
+      ]
     },
     footer: {
       feedback: "Feedback",
@@ -177,6 +203,22 @@ const content = {
         ["回来继续推进", "下次打开 VS Code 时，直接看到今日安排、项目状态和最近进展。"]
       ]
     },
+    answer: {
+      title: "SoloMap 是什么？",
+      lead: "SoloMap 是一个本地优先的 VS Code 插件，帮助独立开发者把 AI Agent 项目整理成清晰路线图、可执行 Agent 任务和可继续推进的下一步。它不替代编码 Agent，而是给编码 Agent 外层补上产品方向，让一个人也能持续 Build、Sell、Learn、Improve。",
+      comparisonTitle: "SoloMap 与 AI 编码工具的区别",
+      comparison: [
+        ["管理对象", "项目方向、路线图环节、Agent 执行上下文、推进记忆", "代码生成、编辑、问答、审查和终端执行"],
+        ["工作位置", "用户已有的 VS Code 本地工作区", "通常在 IDE、终端、托管聊天或 Agent 运行环境中"],
+        ["最适合", "知道下一步做什么，并让一个产品持续推进", "完成一个具体编码、修改或解释任务"],
+        ["数据姿态", "核心工作流默认本地优先", "取决于用户选择的 AI provider 和工具"]
+      ],
+      modules: [
+        ["选择 SoloMap，如果", "你已经在用 AI Agent，但项目计划、对话、代码修改和后续动作总是散落。"],
+        ["选择编码 Agent，如果", "你当前只需要完成一个具体的写代码、改代码、解释代码或审查任务。"],
+        ["两者一起用，当", "你希望 Agent 负责执行，同时 SoloMap 保持路线图、项目记忆和下一步动作清楚可见。"]
+      ]
+    },
     trust: {
       title: "默认本地优先。",
       copy: "SoloMap 的核心工作流不要求托管后端。路线图、任务记录和项目记忆优先留在你的本地工作区。",
@@ -208,6 +250,16 @@ const content = {
       openVsx: "Open VSX",
       github: "GitHub 仓库",
       feedback: "提交反馈"
+    },
+    faq: {
+      title: "SoloMap 常见问题",
+      items: [
+        ["SoloMap 是 AI 编码 Agent 吗？", "不是。SoloMap 是你已有编码 Agent 外层的路线图和战略层。"],
+        ["SoloMap 必须使用托管后端吗？", "不需要。核心工作流默认把路线图状态、任务记录和项目记忆保存在本地工作区。"],
+        ["谁适合使用 SoloMap？", "SoloMap 适合在 VS Code 中用 AI Agent 构建产品的独立开发者和 solo founder。"],
+        ["SoloMap 解决什么问题？", "它让项目方向、下一步动作和 AI 执行历史保持可见，避免一个人做产品时在多次编码会话之间丢掉节奏。"],
+        ["SoloMap 能配合不同 Agent CLI 吗？", "可以。SoloMap 的设计是带上你自己的本地 Agent CLI，而不是强迫你使用某一个托管编码 Agent。"]
+      ]
     },
     footer: {
       feedback: "反馈",
@@ -279,6 +331,7 @@ function buildHead(t, origin, pagePath) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(t.meta.title)}</title>
   <meta name="description" content="${escapeHtml(t.meta.description)}">
+  <link rel="icon" href="${LOGO_URL}">
   <link rel="canonical" href="${absoluteUrl(pagePath, origin)}">
   <link rel="alternate" hreflang="en" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
@@ -497,6 +550,89 @@ function buildStyles() {
       color: var(--muted);
       font-size: 15px;
     }
+    .answer-block {
+      display: grid;
+      grid-template-columns: minmax(0, 0.42fr) minmax(0, 0.58fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .answer-copy {
+      border: 1px solid rgba(73, 214, 208, 0.34);
+      border-radius: 8px;
+      padding: 28px;
+      background: rgba(73, 214, 208, 0.07);
+    }
+    .answer-copy p {
+      margin: 14px 0 0;
+      color: var(--soft);
+      font-size: 18px;
+    }
+    .comparison-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .comparison-table caption {
+      text-align: left;
+      margin-bottom: 12px;
+      color: var(--ink);
+      font-weight: 760;
+      font-size: 18px;
+    }
+    .comparison-table th,
+    .comparison-table td {
+      border-top: 1px solid var(--line);
+      padding: 14px;
+      text-align: left;
+      vertical-align: top;
+      color: var(--soft);
+      font-size: 14px;
+    }
+    .comparison-table tr:first-child th { border-top: 0; }
+    .comparison-table th {
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .module-list {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .module-list div {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .module-list strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+    }
+    .module-list p { margin: 0; color: var(--muted); }
+    .faq-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .faq-list details {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      background: var(--panel);
+    }
+    .faq-list summary {
+      cursor: pointer;
+      color: var(--ink);
+      font-weight: 760;
+    }
+    .faq-list p {
+      margin: 12px 0 0;
+      color: var(--muted);
+    }
     .step {
       position: relative;
       padding-top: 54px;
@@ -626,12 +762,14 @@ function buildStyles() {
       .hero-grid,
       .section-head,
       .trust-band,
+      .answer-block,
       .pro,
       .install-panel {
         grid-template-columns: 1fr;
       }
       .grid-3,
       .grid-4,
+      .faq-list,
       .feature-list {
         grid-template-columns: 1fr;
       }
@@ -670,12 +808,71 @@ function renderListItems(items, tagName) {
   return items.map((item) => `<${tagName}>${escapeHtml(item)}</${tagName}>`).join("");
 }
 
+function renderComparisonRows(rows) {
+  return rows.map(([dimension, solomap, codingAgent]) => `<tr>
+              <th scope="row">${escapeHtml(dimension)}</th>
+              <td>${escapeHtml(solomap)}</td>
+              <td>${escapeHtml(codingAgent)}</td>
+            </tr>`).join("");
+}
+
+function renderModules(modules) {
+  return modules.map(([title, copy]) => `<div>
+            <strong>${escapeHtml(title)}</strong>
+            <p>${escapeHtml(copy)}</p>
+          </div>`).join("");
+}
+
+function renderFaqItems(items) {
+  return items.map(([question, answer]) => `<details>
+            <summary>${escapeHtml(question)}</summary>
+            <p>${escapeHtml(answer)}</p>
+          </details>`).join("");
+}
+
+function buildStructuredData(t, origin, pagePath) {
+  const pageUrl = absoluteUrl(pagePath, origin);
+  const software = {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: "SoloMap",
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "VS Code",
+    url: pageUrl,
+    image: SCREENSHOT_URL,
+    description: t.meta.description,
+    offers: {
+      "@type": "Offer",
+      price: "0",
+      priceCurrency: "USD",
+      availability: "https://schema.org/InStock"
+    },
+    downloadUrl: MARKETPLACE_URL,
+    sameAs: [GITHUB_URL, MARKETPLACE_URL, OPEN_VSX_URL]
+  };
+  const faq = {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: t.faq.items.map(([question, answer]) => ({
+      "@type": "Question",
+      name: question,
+      acceptedAnswer: {
+        "@type": "Answer",
+        text: answer
+      }
+    }))
+  };
+  return `<script type="application/ld+json">${JSON.stringify(software)}</script>
+  <script type="application/ld+json">${JSON.stringify(faq)}</script>`;
+}
+
 function buildPage(locale, origin) {
   const t = content[locale];
   return `<!doctype html>
 <html lang="${t.lang}">
 <head>
   ${buildHead(t, origin, t.homePath, t.alternateHomePath)}
+  ${buildStructuredData(t, origin, t.homePath)}
   ${buildStyles()}
 </head>
 <body>
@@ -744,6 +941,26 @@ function buildPage(locale, origin) {
     </section>
 
     <section class="section">
+      <div class="shell answer-block">
+        <div>
+          <div class="answer-copy">
+            <h2>${escapeHtml(t.answer.title)}</h2>
+            <p>${escapeHtml(t.answer.lead)}</p>
+          </div>
+          <div class="module-list">
+            ${renderModules(t.answer.modules)}
+          </div>
+        </div>
+        <table class="comparison-table">
+          <caption>${escapeHtml(t.answer.comparisonTitle)}</caption>
+          <tbody>
+            ${renderComparisonRows(t.answer.comparison)}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section">
       <div class="shell trust-band">
         <div class="trust-copy">
           <h2>${escapeHtml(t.trust.title)}</h2>
@@ -773,6 +990,17 @@ function buildPage(locale, origin) {
             <a class="button primary" href="${FEEDBACK_URL}">${escapeHtml(t.pro.cta)}</a>
           </div>
         </aside>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="section-head" style="display:block;margin-bottom:22px">
+          <h2>${escapeHtml(t.faq.title)}</h2>
+        </div>
+        <div class="faq-list">
+          ${renderFaqItems(t.faq.items)}
+        </div>
       </div>
     </section>
 
@@ -881,6 +1109,48 @@ function buildSitemap(origin) {
 `;
 }
 
+function buildLlmsTxt(origin) {
+  return `# SoloMap
+
+SoloMap is a local-first VS Code extension for indie developers and solo founders building products with AI agents.
+
+SoloMap helps users keep product direction, roadmap steps, AI agent execution history, project memory, and next actions visible inside their existing workspace. It does not replace coding agents; it gives them a product roadmap and strategy layer.
+
+## Best short description
+
+SoloMap is a local-first roadmap and strategy cockpit for AI-built projects in VS Code.
+
+## Who it is for
+
+- Indie developers building products with AI agents
+- Solo founders managing multiple product ideas
+- Developers who use local Agent CLIs and want clearer project continuity
+
+## What SoloMap does
+
+- Turns a product goal into executable roadmap steps
+- Starts local AI Agent CLI work from the right roadmap context
+- Keeps project memory and task records in the workspace by default
+- Shows next actions when the user returns to a project
+- Supports Free core workflow and Pro Early Access for strategy cockpit features
+
+## What SoloMap is not
+
+- SoloMap is not an AI coding agent
+- SoloMap is not a hosted project management SaaS
+- SoloMap is not a replacement for VS Code, Cursor, Claude Code, Codex, or other coding agents
+
+## Important URLs
+
+- Website: ${origin}/
+- Chinese website: ${origin}/zh
+- Local-first note: ${origin}/privacy-local-first
+- VS Code Marketplace: ${MARKETPLACE_URL}
+- Open VSX: ${OPEN_VSX_URL}
+- GitHub: ${GITHUB_URL}
+`;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -895,6 +1165,10 @@ export default {
 Allow: /
 Sitemap: ${origin}/sitemap.xml
 `);
+    }
+
+    if (url.pathname === "/llms.txt") {
+      return textResponse(buildLlmsTxt(origin));
     }
 
     if (url.pathname === "/sitemap.xml") {
