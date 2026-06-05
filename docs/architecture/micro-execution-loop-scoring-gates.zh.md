@@ -37,6 +37,30 @@
 
 Planner 必须输出结构化计划，不能只输出自然语言方案。
 
+Planner 的质量不是“方案看起来合理”，而是它能不能证明：为什么在千万条可行路径里选择这一条。第一版采用“五看三定”作为 Planner 的客观质量依据。
+
+### Planner 五看三定
+
+五看用于收集路径选择依据：
+
+| 五看 | 要回答的问题 | 证据来源 |
+| --- | --- | --- |
+| 看目标 | 用户原始目标是什么？路线图环节要达成什么？这轮微循环服务哪个完成标准？ | 用户输入、路线图环节、完成标准 |
+| 看现状 | 当前代码、文档、测试、运行状态和历史执行轨迹是什么？ | 文件、代码、测试、run digest、微循环历史 |
+| 看边界 | 哪些用户心智、产品边界、架构边界、数据边界不能破？哪些事本轮不做？ | 边界文档、项目记忆、用户明确约束 |
+| 看路径 | 至少有哪些可行方案？各自对用户体验、复杂度、风险、验证成本有什么影响？ | 方案比较、代码事实、实现成本判断 |
+| 看风险 | 哪些地方可能假完成、偏航、越界、不可验证、需要用户确认？ | 风险规则、权限/发布/数据边界、历史失败 |
+
+三定用于把依据收敛成执行计划：
+
+| 三定 | 要产出的结论 | 插件可检查字段 |
+| --- | --- | --- |
+| 定方案 | 选择哪条路径，为什么不是其他路径 | `decision.selectedOption`、`decision.rejectedOptions` |
+| 定范围 | 本轮改什么、不改什么，预计触碰哪些模块、文件或用户路径 | `scope`、`impact` |
+| 定验证 | 用什么证据证明完成 | `verificationPlan` |
+
+Planner 必须把关键判断绑定到依据来源。没有依据的 claim 只能算主观意见，不能作为高质量计划。
+
 推荐最小结构：
 
 ```json
@@ -67,6 +91,44 @@ Planner 必须输出结构化计划，不能只输出自然语言方案。
   "risk": {
     "requiresUserConfirmation": false,
     "riskReasons": []
+  },
+  "planningBasis": {
+    "lookGoal": {
+      "summary": "",
+      "refs": ["user_input", "roadmap_step", "completion_criteria"]
+    },
+    "lookCurrentState": {
+      "summary": "",
+      "refs": ["file:", "test:", "run_digest:", "trace:"]
+    },
+    "lookBoundary": {
+      "summary": "",
+      "refs": ["doc:", "memory:", "user_constraint"]
+    },
+    "lookPaths": [
+      {
+        "option": "",
+        "pros": [],
+        "cons": [],
+        "verificationCost": "low | medium | high",
+        "riskLevel": "low | medium | high"
+      }
+    ],
+    "lookRisk": {
+      "summary": "",
+      "requiresConfirmation": false,
+      "riskReasons": []
+    }
+  },
+  "decision": {
+    "selectedOption": "",
+    "whySelected": "",
+    "rejectedOptions": [
+      {
+        "option": "",
+        "whyRejected": ""
+      }
+    ]
   }
 }
 ```
@@ -83,8 +145,12 @@ Planner 必须输出结构化计划，不能只输出自然语言方案。
 | 影响范围明确 | `expectedFiles` 或 `expectedModules` 至少一个非空 | 1 |
 | 有验证计划 | `verificationPlan` 至少 1 条 | 2 |
 | 高风险声明存在 | `requiresUserConfirmation` 必填 | 1 |
+| 五看完整 | `planningBasis.lookGoal/lookCurrentState/lookBoundary/lookPaths/lookRisk` 都存在 | 5 |
+| 三定完整 | `decision.selectedOption`、`scope`、`verificationPlan` 都存在 | 3 |
+| 方案比较充分 | `lookPaths` 至少 2 个 option，或插件判定任务足够简单并记录豁免原因 | 2 |
+| 放弃路径有理由 | `rejectedOptions` 每项都有 `whyRejected` | 1 |
 
-Planner 满分 9 分。
+Planner 满分 20 分。
 
 ### Planner 硬闸门
 
@@ -94,6 +160,9 @@ Planner 满分 9 分。
 | `intent.successCriteria` 非空 | `planning_incomplete` |
 | `verificationPlan` 非空，除非插件判定为纯讨论或无需验证的文档判断 | `planning_incomplete` |
 | `requiresUserConfirmation=false`，或用户已确认 | `needs_user_confirmation` |
+| 五看中“看目标、看边界、看风险”存在 | `planning_incomplete` |
+| 三定中“定方案、定范围、定验证”存在 | `planning_incomplete` |
+| 高风险任务必须有至少 2 个可行路径比较 | `planning_incomplete` |
 
 Planner 分数低不一定阻断，但硬闸门不通过不能进入 Builder。
 
@@ -156,6 +225,41 @@ Builder 的自述不能替代插件采集到的事实。
 
 Verifier 只读复核，输出结构化检查结果。它可以建议状态，但不能写最终状态。
 
+Verifier 的质量不是“评论是否详细”，而是它能不能证明：为什么这次实现结果是对的。第一版采用 H/I/J 作为 Evaluator 的客观检查依据。
+
+### Verifier H/I/J
+
+| 规则 | 含义 | 要回答的问题 | 失败影响 |
+| --- | --- | --- | --- |
+| H：Hard Evidence | 硬事实检查 | 这件事是否真的发生了？ | H 不通过，不能 `closed` |
+| I：Intent / Invariant | 意图与边界一致性检查 | 这次实现是否仍然对齐原始意图和项目边界？ | I 不通过，进入 `deviated` 或 `partial` |
+| J：Judgment / Justification | 工程判断检查 | 这条实现路径为什么是合理的？ | J 严重不足时进入 `needs_review` 或生成风险 followup |
+
+H 检查：
+
+- 是否有真实 diff / touched files。
+- 是否触达计划中的关键文件或模块。
+- 是否运行了验证命令。
+- 测试、构建、lint 或人工检查是否通过。
+- evidence 引用是否真实存在。
+
+I 检查：
+
+- 是否满足用户原始目标。
+- 是否命中路线图完成标准。
+- 是否遵守 Planner 范围。
+- 是否破坏既有用户心智。
+- 是否绕开项目边界、架构边界或数据边界。
+- 是否把内部复杂度转嫁给用户。
+
+J 检查：
+
+- 是否兑现 Planner 的选路理由。
+- 是否存在更简单、更符合目标的路径被忽略。
+- 是否控制了复杂度和风险。
+- 是否避免为了快而制造长期债务。
+- 是否在未闭环时留下可继续推进的下一步。
+
 推荐最小结构：
 
 ```json
@@ -172,6 +276,24 @@ Verifier 只读复核，输出结构化检查结果。它可以建议状态，�
       "reason": ""
     }
   ],
+  "hij": {
+    "H": {
+      "status": "pass | fail | partial | unclear",
+      "evidence": ["file:", "command:", "test:", "commit:"],
+      "reason": ""
+    },
+    "I": {
+      "status": "pass | fail | partial | unclear",
+      "evidence": ["criterion:", "doc:", "user_goal:", "trace:"],
+      "reason": ""
+    },
+    "J": {
+      "status": "pass | fail | partial | unclear",
+      "evidence": ["planner_decision:", "alternative:", "risk:"],
+      "reason": "",
+      "riskFlags": []
+    }
+  },
   "recommendedStatus": "closed | implemented_unverified | verified_failed | partial | deviated | needs_user_confirmation",
   "requiredFollowups": []
 }
@@ -186,8 +308,12 @@ Verifier 只读复核，输出结构化检查结果。它可以建议状态，�
 | evidence 引用真实存在 | 文件、命令、测试、commit、人工确认可解析 | 2 |
 | `recommendedStatus` 合法 | 枚举值匹配允许状态 | 1 |
 | fail/partial 时有 followup | `requiredFollowups` 非空且可执行 | 2 |
+| H/I/J 都存在 | `hij.H/I/J` 字段存在 | 3 |
+| H 证据真实 | H 中 evidence 至少 1 条且可解析 | 3 |
+| I 对照目标与边界 | I 中引用用户目标、完成标准或边界依据 | 3 |
+| J 对照方案判断 | J 中引用 Planner 决策或替代方案取舍 | 2 |
 
-Verifier 满分 11 分。
+Verifier 满分 22 分。
 
 ### Verifier 硬闸门
 
@@ -197,6 +323,10 @@ Verifier 满分 11 分。
 | evidence 引用不存在 | 该 check 无效 |
 | successCriteria 未全部覆盖 | 不能 `closed` |
 | Verifier 建议 `closed` 但插件硬证据不足 | 插件覆盖为 `implemented_unverified`、`verified_failed`、`partial` 或 `deviated` |
+| H 为 `fail` 或 `unclear` | 不能 `closed` |
+| I 为 `fail` | `deviated` |
+| I 为 `partial` | `partial` |
+| J 为 `fail` 且风险严重 | `needs_review` 或 `spawned_followup` |
 
 Verifier 的作用是发现缺口和给出候选裁决，不是替插件裁判。
 
@@ -217,7 +347,12 @@ Verifier 的作用是发现缺口和给出候选裁决，不是替插件裁判�
     "criteriaCovered": true,
     "scopeRespected": true,
     "roadmapAttributionValid": true,
-    "userConfirmationRequired": false
+    "userConfirmationRequired": false,
+    "plannerBasisComplete": true,
+    "plannerDecisionJustified": true,
+    "hijHardEvidencePassed": true,
+    "hijIntentAligned": true,
+    "hijJudgmentAcceptable": true
   }
 }
 ```
@@ -229,12 +364,16 @@ Verifier 的作用是发现缺口和给出候选裁决，不是替插件裁判�
 ```text
 if userConfirmationRequired -> needs_user_confirmation
 else if !intentDefined or !planComplete -> planning_incomplete
+else if !plannerBasisComplete or !plannerDecisionJustified -> planning_incomplete
 else if !actionsObserved -> no_effect
 else if !verificationExecuted -> implemented_unverified
 else if !verificationPassed -> verified_failed
 else if !criteriaCovered -> partial
 else if !scopeRespected -> deviated
 else if !roadmapAttributionValid -> unassigned
+else if !hijHardEvidencePassed -> implemented_unverified
+else if !hijIntentAligned -> deviated
+else if !hijJudgmentAcceptable -> needs_review
 else -> closed
 ```
 
@@ -274,7 +413,12 @@ else -> closed
       "criteriaCovered": false,
       "scopeRespected": true,
       "roadmapAttributionValid": true,
-      "userConfirmationRequired": false
+      "userConfirmationRequired": false,
+      "plannerBasisComplete": true,
+      "plannerDecisionJustified": true,
+      "hijHardEvidencePassed": false,
+      "hijIntentAligned": true,
+      "hijJudgmentAcceptable": true
     },
     "finalStatus": "implemented_unverified",
     "statusReason": "计划要求运行验证命令，但本轮没有可采信的验证记录。"

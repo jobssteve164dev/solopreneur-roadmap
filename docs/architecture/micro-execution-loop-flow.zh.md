@@ -160,11 +160,15 @@ created
 
 ```text
 needs_user_confirmation
+planning_incomplete
+no_effect
 implemented_unverified
 verified_failed
 partial
 deviated
+needs_review
 spawned_followup
+unassigned
 abandoned
 ```
 
@@ -179,11 +183,15 @@ abandoned
 | `verifying` | Verifier 正在审查证据是否支撑闭环 |
 | `closed` | 证据足以支撑本轮闭环 |
 | `needs_user_confirmation` | 涉及方向、授权、成本、发布或不可逆动作 |
+| `planning_incomplete` | 意图、五看三定、范围或验证计划不足，不能进入实施或完成 |
+| `no_effect` | 本轮没有产生可观察动作证据，且任务不属于纯分析或纯讨论 |
 | `implemented_unverified` | 有实施动作，但验证不足 |
 | `verified_failed` | 验证明确失败 |
 | `partial` | 部分目标完成 |
 | `deviated` | 实际结果偏离意图 |
+| `needs_review` | 工程判断依据不足或风险较高，需要复核或生成下一循环 |
 | `spawned_followup` | 已生成下一轮微观循环 |
+| `unassigned` | 结果无法归因到路线图完成标准，不能推动宏观进度 |
 | `abandoned` | 明确放弃 |
 
 ## 最小数据模型
