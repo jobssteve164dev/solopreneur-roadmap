@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.157 - 2026-06-05
+
+### Changed
+- Polish brand marks and scrollbars (a861d34)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.156 - 2026-06-05
 
 ### Changed
