@@ -218,6 +218,37 @@ HTML 可以作为后续导出能力：
 
 用户不应自己从日志里推断为什么卡住。
 
+## 评分与闸门展示
+
+评分制度服务于状态解释，不应成为主界面的负担。
+
+主界面只显示：
+
+- 当前状态。
+- 阻断原因。
+- 下一步动作。
+- 是否可以推进路线图。
+
+示例：
+
+```text
+状态：已实施，待验证
+原因：计划要求运行 webview regression test，但本轮没有验证记录。
+下一步：补充验证
+```
+
+下钻层才显示评分细节：
+
+```text
+Planner 8/9
+Builder 6/12
+Verifier 9/11
+硬闸门：verificationExecuted = false
+最终状态：implemented_unverified
+```
+
+主界面禁止显示抽象总分，例如“微循环健康度 85”。如果硬闸门失败，总分不能掩盖不能推进的事实。
+
 ## 人在回路的关键介入点
 
 面板应把六阶段中最容易偏航的位置显性化：
@@ -275,5 +306,6 @@ HTML 可以作为后续导出能力：
 
 - `docs/methodology/micro-execution-loop-methodology.zh.md`
 - `docs/architecture/micro-execution-loop-flow.zh.md`
+- `docs/architecture/micro-execution-loop-scoring-gates.zh.md`
 - `docs/ui/four-stage-view-guidelines.zh.md`
 - `docs/architecture/microscopic-execution-visibility.zh.md`

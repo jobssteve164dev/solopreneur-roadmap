@@ -141,6 +141,8 @@ Verifier session
 - 路线图完成标准命中。
 - 是否开启下一轮循环或下一路线图环节。
 
+插件裁判必须按结构化评分与硬闸门执行，不能把 Verifier Agent 的自然语言意见直接当成最终结论。评分制度见 `docs/architecture/micro-execution-loop-scoring-gates.zh.md`。
+
 ## 微观循环状态机
 
 推荐状态：
@@ -367,6 +369,8 @@ Verifier 输出建议状态，但不直接写最终状态。
 - 需要人决定：`needs_user_confirmation`。
 - 生成下一轮：`spawned_followup`。
 
+状态计算必须优先执行硬闸门，再参考 Planner、Builder、Verifier 的计分项。硬闸门决定能不能推进，分数只解释 Planner / Builder / Verifier 哪个环节薄弱。
+
 ### 7. 归并路线图
 
 插件聚合同一环节下所有微观循环，判断完成标准：
@@ -431,10 +435,12 @@ Micro Execution Trace 记录一个意图如何被规划、实施、验证、归�
 - 禁止把四分工误实现成默认四个独立 Agent 进程。
 - 禁止把插件事实账本做成用户手工表单。
 - 禁止把失败更早中止当成可靠闭环；失败必须生成可继续推进的下一步。
+- 禁止让 Agent 主观评分替代插件硬闸门。
 
 ## 相关入口
 
 - `docs/methodology/micro-execution-loop-methodology.zh.md`
+- `docs/architecture/micro-execution-loop-scoring-gates.zh.md`
 - `docs/ui/execution-trace-panel-guidelines.zh.md`
 - `docs/architecture/agent-collaboration-boundary.zh.md`
 - `docs/architecture/execution-experience-layer.zh.md`
