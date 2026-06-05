@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.156 - 2026-06-05
+
+### Changed
+- Fix marketplace logo reference for packaging (ae0f64b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.155 - 2026-06-05
 
 ### Changed
