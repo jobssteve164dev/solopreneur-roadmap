@@ -1,0 +1,34 @@
+<svg width="200" height="200" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- App Icon Background -->
+  <rect width="100" height="100" rx="20" fill="#0B0C10"/>
+  
+  <defs>
+    <!-- Premium Gradient -->
+    <linearGradient id="soloGradient" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#8B5CF6" /> <!-- Electric Violet -->
+      <stop offset="50%" stop-color="#3B82F6" /> <!-- Neon Blue -->
+      <stop offset="100%" stop-color="#06B6D4" /> <!-- Cyber Cyan -->
+    </linearGradient>
+    
+    <!-- Glow Effect Filter -->
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Dark Track Silhouette -->
+  <path d="M 35 65 Q 25 50, 50 50 T 65 35" stroke="#1F2029" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- Glowing S-Curve Roadmap Path -->
+  <path d="M 35 65 Q 25 50, 50 50 T 65 35" stroke="url(#soloGradient)" stroke-width="6" stroke-linecap="round" filter="url(#glow)"/>
+
+  <!-- Bottom-Left Node Circle -->
+  <circle cx="35" cy="65" r="8" stroke="url(#soloGradient)" stroke-width="4" fill="#0B0C10" filter="url(#glow)"/>
+
+  <!-- Top-Right Node Circle -->
+  <circle cx="65" cy="35" r="8" stroke="url(#soloGradient)" stroke-width="4" fill="#0B0C10" filter="url(#glow)"/>
+</svg>
