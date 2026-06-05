@@ -3288,6 +3288,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
   private _getHtmlForWebview(webview: vscode.Webview): string {
     const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
+    const wordmarkUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'resources', 'logo_with_text.svg'));
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3312,6 +3313,32 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       --glow-green: rgba(0, 230, 118, 0.8);
       --text-main: #e2e8f0;
       --text-muted: #94a3b8;
+    }
+
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+    }
+
+    *::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    *::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    *::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.26);
+      background-clip: content-box;
+    }
+
+    *::-webkit-scrollbar-thumb:hover {
+      background: rgba(148, 163, 184, 0.42);
+      background-clip: content-box;
     }
 
     body {
@@ -3367,6 +3394,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: inline-flex;
       align-items: center;
       gap: 7px;
+    }
+
+    .brand-wordmark {
+      width: 116px;
+      height: auto;
+      flex-shrink: 0;
     }
 
     .btn-gear:hover {
@@ -5193,7 +5226,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="header-container">
-    <h2 class="brand-title"><span class="codicon codicon-map"></span><span id="sidebar-title">SoloMap</span></h2>
+    <h2 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="116" height="41" alt="SoloMap"></h2>
     <div class="header-actions">
       <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
       <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>

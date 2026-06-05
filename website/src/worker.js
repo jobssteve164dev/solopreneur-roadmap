@@ -125,7 +125,7 @@ const content = {
       openVsx: "Open VSX",
       ios: "iOS app",
       android: "Android app",
-      webWorkspace: "Web workspace",
+      webWorkspace: "Workbench",
       comingSoon: "Coming soon",
       github: "GitHub repository",
       feedback: "Send feedback"
@@ -257,7 +257,7 @@ const content = {
       openVsx: "Open VSX",
       ios: "iOS 应用",
       android: "安卓应用",
-      webWorkspace: "网页版工作台",
+      webWorkspace: "工作台",
       comingSoon: "即将推出",
       github: "GitHub 仓库",
       feedback: "提交反馈"
@@ -504,6 +504,27 @@ function buildStyles() {
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(222, 212, 200, 0.28) transparent;
+    }
+    *::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    *::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    *::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background: rgba(222, 212, 200, 0.26);
+      background-clip: content-box;
+    }
+    *::-webkit-scrollbar-thumb:hover {
+      background: rgba(222, 212, 200, 0.42);
+      background-clip: content-box;
+    }
     body {
       margin: 0;
       background: var(--bg);

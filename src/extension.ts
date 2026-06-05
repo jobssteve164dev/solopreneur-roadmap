@@ -7795,7 +7795,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   // In MVP, we embed a fully functional React + CSS app direct inside the iframe
   // which uses modern styling guidelines (glassmorphism, glowing connections, inter font).
   const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
-  const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo.svg'));
+  const wordmarkUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo_with_text.svg'));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7825,6 +7825,32 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     * {
       box-sizing: border-box;
+    }
+
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+    }
+
+    *::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    *::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    *::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.26);
+      background-clip: content-box;
+    }
+
+    *::-webkit-scrollbar-thumb:hover {
+      background: rgba(148, 163, 184, 0.42);
+      background-clip: content-box;
     }
 
     body {
@@ -8159,10 +8185,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       gap: 8px;
     }
 
-    .brand-logo {
-      width: 24px;
-      height: 24px;
-      border-radius: 6px;
+    .brand-wordmark {
+      width: 124px;
+      height: auto;
       flex-shrink: 0;
     }
 
@@ -9513,7 +9538,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 <body>
   <div class="app-container">
     <header>
-      <h1 class="brand-title"><img class="brand-logo" src="${logoUri}" width="24" height="24" alt=""><span id="app-title">SoloMap</span></h1>
+      <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="124" height="43" alt="SoloMap"></h1>
       <div class="controls">
         <div class="solo-select project-select" id="project-select" data-solo-select data-value="">
           <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
