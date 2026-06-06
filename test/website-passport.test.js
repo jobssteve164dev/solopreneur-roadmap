@@ -126,6 +126,79 @@ test('Passport OIDC callback signs an extension grant after upstream access chec
   }
 });
 
+test('Passport OIDC callback redirects unpaid extension users to Pro checkout', async () => {
+  const worker = await loadWebsiteWorker();
+  const originalFetch = global.fetch;
+  let checkoutPayload = null;
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/oidc/token') {
+      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
+      return new Response(JSON.stringify({ sub: 'passport-user-free', email: 'free@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          allowed: false,
+          reason: 'not_entitled',
+          email: 'free@solomap.app',
+          userId: 'passport-user-free',
+          entitlements: []
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/billing/checkout-link') {
+      assert.equal(init.method, 'POST');
+      assert.equal(init.headers['x-szlk-product'], 'solomap');
+      assert.equal(init.headers['x-szlk-secret'], 'test-product-secret');
+      checkoutPayload = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          checkout: {
+            url: 'https://checkout.stripe.com/c/pay/cs_solomap_pro'
+          }
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const env = {
+      SITE_ORIGIN: 'https://solomap.app',
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+      SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
+    };
+    const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
+    const start = await worker.default.fetch(
+      new Request(`https://solomap.app/api/passport/start?callback=${encodeURIComponent(callback)}`),
+      env
+    );
+    const state = new URL(start.headers.get('location') || '').searchParams.get('state');
+    const response = await worker.default.fetch(
+      new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
+      env
+    );
+
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_solomap_pro');
+    assert.equal(checkoutPayload.product, 'solomap');
+    assert.equal(checkoutPayload.planId, 'solomap_pro_early_access_yearly');
+    assert.equal(checkoutPayload.customerEmail, 'free@solomap.app');
+    assert.equal(checkoutPayload.userId, 'passport-user-free');
+    assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/start\?/);
+    const successUrl = new URL(checkoutPayload.successUrl);
+    assert.equal(successUrl.searchParams.get('feature'), 'strategy_pyramid');
+    assert.equal(successUrl.searchParams.get('callback'), callback);
+    assert.equal(checkoutPayload.cancelUrl, 'https://solomap.app/#pro');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('Passport device auth returns a browser login URL and verifies the pasted grant', async () => {
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;
@@ -184,6 +257,7 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
 
     assert.equal(start.status, 200);
     assert.equal(startBody.ok, true);
+    assert.equal(startBody.expiresIn, 1800);
     assert.match(startBody.loginUrl, /^https:\/\/solomap\.app\/api\/passport\/device\/authorize\?device=/);
     assert.equal(authorize.status, 302);
     assert.equal(authorizeLocation.origin, 'https://passport.szlk.ai');
@@ -193,6 +267,71 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     assert.equal(verify.status, 200);
     assert.equal(verifyBody.allowed, true);
     assert.deepEqual(verifyBody.entitlements, ['strategy_pyramid']);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('Passport device auth redirects unpaid users to Pro checkout and resumes device authorization', async () => {
+  const worker = await loadWebsiteWorker();
+  const originalFetch = global.fetch;
+  let checkoutPayload = null;
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/oidc/token') {
+      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
+      return new Response(JSON.stringify({ sub: 'passport-user-free', email: 'free@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          allowed: false,
+          reason: 'not_entitled',
+          email: 'free@solomap.app',
+          userId: 'passport-user-free',
+          entitlements: []
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/billing/checkout-link') {
+      checkoutPayload = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          checkout: {
+            url: 'https://checkout.stripe.com/c/pay/cs_solomap_device'
+          }
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const env = {
+      SITE_ORIGIN: 'https://solomap.app',
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+      SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
+    };
+    const start = await worker.default.fetch(
+      new Request('https://solomap.app/api/passport/device/start', { method: 'POST' }),
+      env
+    );
+    const startBody = await start.json();
+    const authorize = await worker.default.fetch(new Request(startBody.loginUrl), env);
+    const state = new URL(authorize.headers.get('location') || '').searchParams.get('state');
+    const response = await worker.default.fetch(
+      new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
+      env
+    );
+
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_solomap_device');
+    assert.equal(checkoutPayload.planId, 'solomap_pro_early_access_yearly');
+    assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/device\/authorize\?device=/);
+    assert.equal(new URL(checkoutPayload.successUrl).searchParams.get('device'), startBody.deviceCode);
   } finally {
     global.fetch = originalFetch;
   }

@@ -17,7 +17,9 @@ const PASSPORT_OIDC_AUTHORIZE_URL = `${PASSPORT_ISSUER}/api/oidc/authorize`;
 const PASSPORT_OIDC_TOKEN_URL = `${PASSPORT_ISSUER}/api/oidc/token`;
 const PASSPORT_OIDC_USERINFO_URL = `${PASSPORT_ISSUER}/api/oidc/userinfo`;
 const PASSPORT_ACCESS_CHECK_URL = `${PASSPORT_ISSUER}/api/v1/entitlements/access-check`;
+const PASSPORT_CHECKOUT_LINK_URL = `${PASSPORT_ISSUER}/api/v1/billing/checkout-link`;
 const SOLOMAP_OIDC_CLIENT_ID = "solomap-vscode";
+const SOLOMAP_PRO_PLAN_ID = "solomap_pro_early_access_yearly";
 
 const securityHeaders = {
   "content-security-policy": [
@@ -531,6 +533,21 @@ function getDeviceAuthorizeUrl(requestUrl, deviceCode) {
   return url.toString();
 }
 
+function getProPlanId(env) {
+  return String(env.SOLOMAP_PRO_PLAN_ID || SOLOMAP_PRO_PLAN_ID);
+}
+
+function getPassportResumeUrl(requestUrl, state) {
+  if (state.mode === "device") {
+    return getDeviceAuthorizeUrl(requestUrl, String(state.deviceCode || ""));
+  }
+  const url = new URL("/api/passport/start", requestUrl.origin);
+  url.searchParams.set("product", SOLOMAP_PRODUCT);
+  url.searchParams.set("feature", STRATEGY_PYRAMID_FEATURE);
+  url.searchParams.set("callback", String(state.callback || ""));
+  return url.toString();
+}
+
 async function signState(env, payload) {
   if (!env.SOLOMAP_PASSPORT_PRODUCT_SECRET) {
     throw new Error("missing_product_secret");
@@ -566,7 +583,7 @@ async function createDeviceCode(env) {
     mode: "device",
     nonce: randomString(24),
     issuedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
   });
 }
 
@@ -733,6 +750,31 @@ function buildPassportFallbackPage(callback) {
 </html>`;
 }
 
+function buildPassportUpgradeUnavailablePage() {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoloMap Pro</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #11100e; color: #f6f0e8; }
+    main { width: min(680px, calc(100vw - 32px)); }
+    h1 { font-size: 30px; margin: 0 0 12px; }
+    p { color: #ded4c8; line-height: 1.6; }
+    a { color: #fde68a; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>暂时无法打开 Pro 订阅</h1>
+    <p>请稍后从 SoloMap 重新尝试升级。你的本地项目数据不会被上传，Free 核心功能仍可继续使用。</p>
+    <p><a href="/">返回 SoloMap</a></p>
+  </main>
+</body>
+</html>`;
+}
+
 function buildDeviceGrantPage(grant) {
   const escapedGrant = escapeHtml(grant);
   return `<!doctype html>
@@ -765,6 +807,43 @@ function buildDeviceGrantPage(grant) {
   </script>
 </body>
 </html>`;
+}
+
+async function createPassportCheckoutRedirect(request, env, state, userinfo, access) {
+  const requestUrl = new URL(request.url);
+  const checkoutUrl = env.SOLOMAP_PASSPORT_CHECKOUT_URL || PASSPORT_CHECKOUT_LINK_URL;
+  const successUrl = getPassportResumeUrl(requestUrl, state);
+  const cancelUrl = `${requestUrl.origin}/#pro`;
+  const customerEmail = String(access.email || userinfo.email || "").trim();
+  const userId = String(access.userId || userinfo.sub || userinfo.userId || "").trim();
+  const response = await fetch(checkoutUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-szlk-product": SOLOMAP_PRODUCT,
+      "x-szlk-secret": env.SOLOMAP_PASSPORT_PRODUCT_SECRET || ""
+    },
+    body: JSON.stringify({
+      product: SOLOMAP_PRODUCT,
+      planId: getProPlanId(env),
+      successUrl,
+      cancelUrl,
+      customerEmail,
+      userId,
+      clientReferenceId: userId || customerEmail,
+      metadata: {
+        feature: STRATEGY_PYRAMID_FEATURE,
+        source: "solomap_pro_upgrade"
+      }
+    })
+  });
+  const body = await response.json().catch(() => ({}));
+  const data = body && typeof body === "object" && body.ok === true && body.data ? body.data : body;
+  const redirectUrl = data?.checkout?.url || data?.url || data?.checkoutUrl;
+  if (!response.ok || !redirectUrl) {
+    return htmlResponse(buildPassportUpgradeUnavailablePage(), 502);
+  }
+  return Response.redirect(String(redirectUrl), 302);
 }
 
 async function buildPassportAuthorizeRedirect(request, env, payload) {
@@ -823,7 +902,7 @@ async function handlePassportDeviceStart(request, env) {
     ok: true,
     deviceCode,
     loginUrl: getDeviceAuthorizeUrl(url, deviceCode),
-    expiresIn: 600
+    expiresIn: 1800
   });
 }
 
@@ -874,9 +953,7 @@ async function handlePassportOidcCallback(request, env) {
   const userinfo = await userinfoResponse.json();
   const access = await checkPassportAccessForUser(env, userinfo);
   if (!access.allowed) {
-    const upgradeUrl = new URL(state.callback);
-    upgradeUrl.searchParams.set("error", access.reason || "not_entitled");
-    return Response.redirect(upgradeUrl.toString(), 302);
+    return createPassportCheckoutRedirect(request, env, state, userinfo, access);
   }
   const grant = await issueSoloMapGrant(env, String(access.email || userinfo.email || "pro@solomap.app"), {
     userId: String(access.userId || userinfo.sub || ""),
