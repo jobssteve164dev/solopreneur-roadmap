@@ -36,14 +36,15 @@ test('Pro subscription page carries signed upgrade state into Passport start', a
   const location = new URL(start.headers.get('location') || '');
 
   assert.equal(response.status, 200);
-  assert.match(html, /Stop treating every project like the same next task/);
+  assert.match(html, /Know which project deserves your next month/);
   assert.match(html, /Free vs Pro/);
   assert.match(html, /Strategy Pyramid/);
-  assert.match(html, /Execution trace/);
-  assert.match(html, /Flow/);
+  assert.match(html, /Reliable progress history/);
+  assert.match(html, /Goal-driven autopilot/);
   assert.match(html, /VS Code Marketplace/);
   assert.match(html, /Privacy \/ Local-first note/);
-  assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP/);
+  assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP|Planner|Builder|Verifier|scoring|micro execution|exchange code/);
+  assert.doesNotMatch(html.replace(/<script[\s\S]*?<\/script>/g, ''), /framed as|configuration work|planned Pro outcomes|component purpose/);
   assert.ok(href);
   assert.equal(start.status, 302);
   assert.equal(location.origin, 'https://passport.szlk.ai');
@@ -68,11 +69,12 @@ test('Chinese Pro subscription page stays inside the website frame and explains 
   assert.match(html, /<footer>/);
   assert.match(html, /Free 与 Pro 的区别/);
   assert.match(html, /战略金字塔/);
-  assert.match(html, /执行轨迹/);
-  assert.match(html, /Flow/);
+  assert.match(html, /可靠推进历史/);
+  assert.match(html, /目标自动推进/);
   assert.match(html, /仍然本地优先/);
   assert.match(html, /href="\/pro" hreflang="en"/);
-  assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP/);
+  assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP|Planner|Builder|Verifier|scoring|微观|证据链|exchange code/);
+  assert.doesNotMatch(html.replace(/<script[\s\S]*?<\/script>/g, ''), /页面只表达|内部配置|功能规划|功能方向|不要求用户理解/);
   assert.ok(href);
 });
 
@@ -88,6 +90,27 @@ test('Pro subscription page remains readable when signing is unavailable', async
   assert.match(html, /Free 与 Pro 的区别/);
   assert.match(html, /href="\/api\/passport\/start"/);
   assert.doesNotMatch(html, /missing_product_secret|Passport|CloudMCP/);
+});
+
+test('sitemap exposes indexable canonical URLs with hreflang and freshness signals', async () => {
+  const worker = await loadWebsiteWorker();
+  const response = await worker.default.fetch(
+    new Request('https://solomap.app/sitemap.xml'),
+    { SITE_ORIGIN: 'https://solomap.app' }
+  );
+  const xml = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'application/xml; charset=utf-8');
+  assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
+  assert.match(xml, /<urlset xmlns="http:\/\/www\.sitemaps\.org\/schemas\/sitemap\/0\.9"/);
+  assert.match(xml, /<loc>https:\/\/solomap\.app\/pro<\/loc>/);
+  assert.match(xml, /<loc>https:\/\/solomap\.app\/zh\/pro<\/loc>/);
+  assert.match(xml, /<lastmod>2026-06-06<\/lastmod>/);
+  assert.match(xml, /<changefreq>weekly<\/changefreq>/);
+  assert.match(xml, /<priority>0\.9<\/priority>/);
+  assert.match(xml, /hreflang="x-default" href="https:\/\/solomap\.app\/pro"/);
+  assert.doesNotMatch(xml, /upgrade_state|auth_nonce|callback|\/api\/passport/);
 });
 
 test('Passport start rejects non-extension callbacks', async () => {

@@ -20,6 +20,7 @@ const PASSPORT_ACCESS_CHECK_URL = `${PASSPORT_ISSUER}/api/v1/entitlements/access
 const PASSPORT_CHECKOUT_LINK_URL = `${PASSPORT_ISSUER}/api/v1/billing/checkout-link`;
 const SOLOMAP_OIDC_CLIENT_ID = "solomap-vscode";
 const SOLOMAP_PRO_PLAN_ID = "solomap_pro_early_access_yearly";
+const SITEMAP_LASTMOD = "2026-06-06";
 
 const securityHeaders = {
   "content-security-policy": [
@@ -130,7 +131,7 @@ const content = {
       title: "Free moves one project forward. Pro helps run your one-person company.",
       features: [
         "Strategy cockpit",
-        "Multi-project scoring",
+        "Portfolio tradeoff view",
         "Portfolio health",
         "Ability compounding",
         "Market and delivery diagnosis",
@@ -262,7 +263,7 @@ const content = {
       title: "Free 帮你推进一个项目；Pro 帮你经营一人公司。",
       features: [
         "战略驾驶舱",
-        "多项目战略评分",
+        "多项目取舍判断",
         "项目组合健康度",
         "能力复利分析",
         "市场与交付结构诊断",
@@ -849,9 +850,9 @@ function buildPassportFallbackPage(callback) {
 </head>
 <body>
   <main>
-    <h1>SoloMap Pro 授权入口</h1>
-    <p>这里会连接 Passport 完成登录、订阅和授权验证。授权只用于解锁 Pro 功能，不上传你的项目路线图、Agent 记录或本地经验库。</p>
-    ${callback ? `<p>完成后会回到 SoloMap 插件。</p>` : `<p>请从 SoloMap 插件里的“升级 Pro”入口打开授权。</p>`}
+    <h1>继续完成 SoloMap Pro</h1>
+    <p>这一步只用于确认你的 Pro 使用权，不会上传你的项目计划、推进历史或本地经验。</p>
+    ${callback ? `<p>完成后会回到 SoloMap 插件。</p>` : `<p>请从 SoloMap 插件里的“升级 Pro”入口重新打开。</p>`}
     <p><a href="/">返回 SoloMap</a></p>
   </main>
 </body>
@@ -921,24 +922,24 @@ function getProPageCopy(locale) {
   if (locale === "en") {
     return {
       metaTitle: "SoloMap Pro - Strategy cockpit for solo founders",
-      metaDescription: "SoloMap Pro Early Access unlocks the strategy cockpit for indie developers running multiple AI-built projects.",
+      metaDescription: "SoloMap Pro helps indie developers decide which projects to double down on, pause, or turn into a stronger one-person business.",
       eyebrow: "Pro Early Access for indie builders",
-      title: "Stop treating every project like the same next task.",
-      lead: "SoloMap Pro is for the moment your AI-built projects stop being a folder list and start becoming a one-person company. See where your time, products, capabilities, revenue, and market trust are compounding.",
+      title: "Know which project deserves your next month.",
+      lead: "SoloMap Pro is for solo founders who have more ideas than time. It helps you decide what to double down on, what to pause, and where your work is starting to compound into a real business.",
       primaryCta: "Join Pro Early Access",
       secondaryCta: "Install Free first",
       bullets: [
-        ["Make sharper tradeoffs", "Spot which projects deserve more time, which should pause, and which are only creating maintenance drag."],
-        ["Turn execution into evidence", "Move beyond whether an agent run ended and see whether the work is becoming reliable progress."],
-        ["Build a compounding system", "Connect product work, distribution, learning, reusable capability, and revenue into one operating view."]
+        ["Choose with confidence", "Stop spreading attention across every unfinished idea and see which bet has the strongest reason to continue."],
+        ["Avoid expensive drift", "Catch when a project is absorbing time without improving reach, learning, revenue, or reusable capability."],
+        ["Build a stronger portfolio", "Connect product work, distribution, learning, skill leverage, and revenue into one operating view."]
       ],
       offerLabel: "Early Access",
       price: "$29",
       priceSuffix: "/ year",
-      offerCopy: "Lock in the first Pro price while the strategy cockpit is being shaped with early users.",
-      offerNote: "Free keeps the local roadmap, today plan, Agent runs, and basic history. Pro unlocks the company-level cockpit.",
+      offerCopy: "Lock in the first Pro price while the one-person-company cockpit is shaped with early users.",
+      offerNote: "Free keeps project movement available. Pro unlocks the business-level view for serious solo builders.",
       previewTitle: "What Pro unlocks now",
-      previewLead: "The first paid gate is the Strategy Pyramid: a company-level view for solo founders, not another task dashboard.",
+      previewLead: "The first paid view is the Strategy Pyramid: a business cockpit for solo founders, not another task dashboard.",
       pyramid: [
         ["Freedom & brand", "Are you gaining optionality?"],
         ["Compounding revenue", "Are income sources getting healthier?"],
@@ -950,48 +951,48 @@ function getProPageCopy(locale) {
       comparisonLead: "Free keeps the core SoloMap habit. Pro is for people who need operating judgment across projects.",
       planHeader: ["Capability", "Free", "Pro Early Access"],
       plans: [
-        ["Project movement", "Single-project roadmap, today plan, local Agent runs, basic execution history.", "Everything in Free, plus company-level project portfolio context."],
+        ["Project movement", "Single-project roadmap, today plan, and basic progress history.", "Everything in Free, plus company-level project portfolio context."],
         ["Strategic view", "Know what to do next inside one project.", "See whether projects, capabilities, market trust, and revenue reinforce each other."],
-        ["Execution confidence", "Know whether the latest run ended, failed, or needs manual continuation.", "Upcoming execution trace and Flow: evidence-backed loops that reduce false completion risk."],
-        ["Portfolio decisions", "Manual project switching and local project summaries.", "Multi-project scoring, portfolio health, ability compounding, and structural risk signals."],
+        ["Decision confidence", "Know whether the latest push moved a project forward.", "Understand where progress is real, where proof is thin, and where the next focused push should go."],
+        ["Portfolio decisions", "Manual project switching and local project summaries.", "Project tradeoffs, portfolio health, ability compounding, and structural risk signals."],
         ["Roadmap influence", "Use the public Free workflow and send feedback.", "Help shape the Pro roadmap while keeping the early access price."]
       ],
       roadmapTitle: "What Pro is growing into",
-      roadmapLead: "These are the planned Pro directions from the SoloMap roadmap. They are shown as product direction, not as hidden configuration users must manage.",
+      roadmapLead: "Start with the strategy cockpit, then get clearer progress history and fewer manual restarts as Pro matures.",
       roadmap: [
-        ["Available first", "Strategy Pyramid", "A one-person-company cockpit for portfolio structure, capability compounding, market trust, and strategic tradeoffs."],
-        ["Next Pro pillar", "Execution trace", "A readable account of what the agent tried, what evidence exists, and where completion is still weak."],
-        ["Flagship Pro mode", "Flow", "Give SoloMap a goal and let it plan, execute, verify, and roll forward through multiple evidence-backed loops."]
+        ["Available first", "Strategy Pyramid", "A one-person-company cockpit for portfolio structure, capability leverage, market trust, and strategic tradeoffs."],
+        ["Next Pro pillar", "Reliable progress history", "A clearer account of what changed, what still needs attention, and which projects are becoming easier to maintain."],
+        ["Flagship direction", "Goal-driven autopilot", "Give SoloMap a concrete outcome and let it keep pushing the work forward with fewer manual restarts."]
       ],
       trustTitle: "Still local-first.",
-      trustCopy: "Your project roadmap, Agent records, and local memory stay in your workspace. Pro only checks whether you can unlock paid capabilities.",
+      trustCopy: "Your project plans, work history, and local memory stay in your workspace. Pro only unlocks paid product capabilities.",
       trustItems: [
         "No hosted SoloMap project database is required for the core workflow.",
-        "You keep using the Agent CLI and workspace you already trust.",
+        "You keep using the workspace and tools you already trust.",
         "Free remains useful; Pro is for sharper operating judgment and more reliable execution."
       ],
       finalTitle: "If SoloMap already helps you reopen a project without losing the thread, Pro is the next step.",
-      finalLead: "Early Access is intentionally simple: one annual price, one clear paid capability today, and a roadmap shaped around serious solo builders."
+      finalLead: "Join early, lock in the first annual price, and help shape the operating cockpit you will use to make better project bets."
     };
   }
   return {
     metaTitle: "SoloMap Pro - 一人公司的战略驾驶舱",
-    metaDescription: "SoloMap Pro Early Access 为使用 AI Agent 做产品的独立开发者解锁战略金字塔、一人公司经营判断和后续 Flow 能力。",
+    metaDescription: "SoloMap Pro 帮独立开发者判断哪些项目该加码、暂停或收缩，把多个项目经营成更清晰的一人公司系统。",
     eyebrow: "给独立开发者的 Pro Early Access",
-    title: "别再把每个项目都当成同一个下一步任务。",
-    lead: "当你不只是在推进一个项目，而是在经营多个 AI Agent 项目时，SoloMap Pro 帮你看清时间、项目、能力、收入和市场信誉是否正在形成一套可复利系统。",
+    title: "看清下个月最值得投入的项目。",
+    lead: "当你的想法、项目和机会越来越多时，真正稀缺的不是任务列表，而是取舍判断。SoloMap Pro 帮你判断该加码什么、暂停什么，以及哪些投入正在形成一人公司的复利。",
     primaryCta: "加入 Pro Early Access",
     secondaryCta: "先安装 Free",
     bullets: [
-      ["更果断地取舍", "看清哪些项目该加码，哪些该暂停，哪些只是在制造维护负担。"],
-      ["让执行变成证据", "不只看 Agent 是否跑完，而是看这次工作是否真的支撑路线图继续推进。"],
-      ["经营一套复利系统", "把产品、分发、学习、可复用能力和收入结构放到同一个判断面里。"]
+      ["更果断地取舍", "不再平均分配注意力，而是看清哪个项目最值得继续押注。"],
+      ["避免昂贵漂移", "及时发现哪些项目只是在消耗时间，却没有带来触达、学习、收入或能力积累。"],
+      ["经营复利组合", "把产品、分发、学习、能力杠杆和收入结构放到同一个判断面里。"]
     ],
     offerLabel: "Early Access",
     price: "$29",
     priceSuffix: "/ 年",
-    offerCopy: "用首批价格解锁战略驾驶舱，并参与塑造 SoloMap Pro 的后续能力。",
-    offerNote: "Free 保留本地路线图、今日安排、Agent 推进和基础历史。Pro 解锁一人公司层面的经营判断。",
+    offerCopy: "用首批价格解锁一人公司驾驶舱，并参与塑造 SoloMap Pro 的后续能力。",
+    offerNote: "Free 保留项目推进主路径。Pro 解锁面向认真独立开发者的经营判断。",
     previewTitle: "现在 Pro 解锁什么",
     previewLead: "首个付费验收石是战略金字塔：它不是任务看板，而是一人公司的战略驾驶舱。",
     pyramid: [
@@ -1005,28 +1006,28 @@ function getProPageCopy(locale) {
     comparisonLead: "Free 让你形成 SoloMap 使用习惯；Pro 面向已经需要跨项目经营判断的人。",
     planHeader: ["能力", "Free", "Pro Early Access"],
     plans: [
-      ["项目推进", "单项目路线图、今日安排、本地 Agent 推进、基础执行历史。", "包含 Free 全部能力，并增加一人公司层面的项目组合上下文。"],
+      ["项目推进", "单项目路线图、今日安排、基础推进历史。", "包含 Free 全部能力，并增加一人公司层面的项目组合上下文。"],
       ["战略视图", "知道一个项目里下一步该做什么。", "判断项目、能力、市场信誉和收入结构是否彼此增强。"],
-      ["执行可信度", "知道最近一次运行是否结束、失败，是否需要手动继续。", "后续解锁执行轨迹与 Flow：用证据链降低 Agent 假完成风险。"],
-      ["组合决策", "手动切换项目，查看本地项目摘要。", "多项目战略评分、项目组合健康度、能力复利和结构性风险信号。"],
+      ["判断可信度", "知道最近一次推进是否让项目往前走。", "看清哪里进展真实、哪里判断还薄弱，以及下一轮应该集中推进什么。"],
+      ["组合决策", "手动切换项目，查看本地项目摘要。", "项目取舍判断、项目组合健康度、能力复利和结构性风险信号。"],
       ["路线图共创", "使用公开 Free 主路径并提交反馈。", "参与塑造 Pro 路线图，同时锁定 Early Access 价格。"]
     ],
     roadmapTitle: "Pro 接下来会长成什么",
-    roadmapLead: "这些来自 SoloMap 已确认的功能规划。页面只表达用户能获得的结果，不要求用户理解内部配置。",
+    roadmapLead: "先解锁战略驾驶舱，随后获得更清楚的推进历史和更少的手工重启成本。",
     roadmap: [
         ["已优先开放", "战略金字塔", "面向一人公司的经营驾驶舱，覆盖项目组合、能力复利、市场信誉和战略取舍。"],
-        ["下一根支柱", "执行轨迹", "让你看懂 Agent 做了什么、证据在哪里、哪里还不够支撑完成判断。"],
-        ["旗舰 Pro 模式", "Flow", "给 SoloMap 一个目标，让它规划、执行、复核并基于证据滚动多个执行循环。"]
+        ["下一根支柱", "可靠推进历史", "让你更容易看懂项目哪里真的变好了，哪里还会继续制造返工。"],
+        ["旗舰方向", "目标自动推进", "给 SoloMap 一个具体结果，让它减少手工重启和反复追问，把工作持续推向完成。"]
     ],
     trustTitle: "仍然本地优先。",
-    trustCopy: "你的项目路线图、Agent 记录和本地经验库仍留在工作区。Pro 只验证你是否可以解锁付费能力。",
+    trustCopy: "你的项目计划、推进历史和本地经验仍留在工作区。Pro 只解锁付费产品能力。",
     trustItems: [
       "核心工作流不需要托管的 SoloMap 项目数据库。",
-      "你继续使用自己信任的 Agent CLI 和本地工作区。",
+      "你继续使用自己信任的工具和本地工作区。",
       "Free 仍然可用；Pro 解决更清晰的经营判断和更可靠的执行。"
     ],
     finalTitle: "如果 SoloMap 已经帮你重新打开项目时不丢线索，Pro 就是下一步。",
-    finalLead: "Early Access 只保留一个年付价格、一个当前明确解锁的能力，以及一条面向认真独立开发者的 Pro 路线图。"
+    finalLead: "现在加入，锁定首批年付价格，并参与塑造你未来每天都会用来做项目取舍的经营驾驶舱。"
   };
 }
 
@@ -1101,6 +1102,7 @@ async function buildProSubscriptionPage(request, env) {
     pagePath,
     alternatePath
   )}
+  ${buildProStructuredData(copy, origin, pagePath)}
   ${buildStyles()}
 </head>
 <body>
@@ -1526,11 +1528,14 @@ function buildHead(t, origin, pagePath) {
   <link rel="alternate" hreflang="en" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="x-default" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
-  <meta property="og:title" content="SoloMap">
+  <meta property="og:title" content="${escapeHtml(t.meta.title)}">
   <meta property="og:description" content="${escapeHtml(t.meta.ogDescription)}">
   <meta property="og:image" content="${SCREENSHOT_URL}">
   <meta property="og:url" content="${absoluteUrl(pagePath, origin)}">
-  <meta name="twitter:card" content="summary_large_image">`;
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${escapeHtml(t.meta.title)}">
+  <meta name="twitter:description" content="${escapeHtml(t.meta.description)}">`;
 }
 
 function buildStyles() {
@@ -2644,9 +2649,73 @@ function buildStructuredData(t, origin, pagePath) {
   <script type="application/ld+json">${JSON.stringify(faq)}</script>`;
 }
 
+function buildProStructuredData(copy, origin, pagePath) {
+  const pageUrl = absoluteUrl(pagePath, origin);
+  const product = {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    name: "SoloMap Pro Early Access",
+    description: copy.metaDescription,
+    brand: {
+      "@type": "Brand",
+      name: "SoloMap"
+    },
+    url: pageUrl,
+    image: SCREENSHOT_URL,
+    offers: {
+      "@type": "Offer",
+      price: "29",
+      priceCurrency: "USD",
+      availability: "https://schema.org/InStock",
+      url: pageUrl
+    }
+  };
+  const webpage = {
+    "@context": "https://schema.org",
+    "@type": "WebPage",
+    name: copy.metaTitle,
+    description: copy.metaDescription,
+    url: pageUrl,
+    isPartOf: {
+      "@type": "WebSite",
+      name: "SoloMap",
+      url: origin
+    },
+    about: {
+      "@type": "SoftwareApplication",
+      name: "SoloMap",
+      applicationCategory: "DeveloperApplication",
+      operatingSystem: "VS Code"
+    }
+  };
+  const breadcrumb = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      {
+        "@type": "ListItem",
+        position: 1,
+        name: "SoloMap",
+        item: origin
+      },
+      {
+        "@type": "ListItem",
+        position: 2,
+        name: "Pro",
+        item: pageUrl
+      }
+    ]
+  };
+  return `<script type="application/ld+json">${JSON.stringify(product)}</script>
+  <script type="application/ld+json">${JSON.stringify(webpage)}</script>
+  <script type="application/ld+json">${JSON.stringify(breadcrumb)}</script>`;
+}
+
 function buildHeader(t, locale, currentPath) {
   const productHref = currentPath === t.homePath ? "#product" : `${t.homePath}#product`;
-  const proHref = currentPath === t.homePath ? "#pro" : `${t.homePath}#pro`;
+  const proHref = currentPath === "/pro" || currentPath === "/zh/pro"
+    ? currentPath
+    : (currentPath === t.homePath ? "#pro" : `${t.homePath}#pro`);
   const installHref = currentPath === t.homePath ? "#install" : `${t.homePath}#install`;
   return `<header class="topbar">
     <nav class="shell nav" aria-label="Primary">
@@ -2984,60 +3053,35 @@ function resolveRoute(pathname) {
 }
 
 function buildSitemap(origin) {
-  const docUrls = Object.keys(docsContent.en.pages).map((slug) => `  <url>
-    <loc>${origin}/docs/${slug}</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs/${slug}" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs/${slug}" />
-  </url>
-  <url>
-    <loc>${origin}/zh/docs/${slug}</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs/${slug}" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs/${slug}" />
-  </url>`).join("\n");
+  const pairs = [
+    { en: "/", zh: "/zh", priority: "1.0", changefreq: "weekly" },
+    { en: "/pro", zh: "/zh/pro", priority: "0.9", changefreq: "weekly" },
+    { en: "/docs", zh: "/zh/docs", priority: "0.7", changefreq: "monthly" },
+    ...Object.keys(docsContent.en.pages).map((slug) => ({
+      en: `/docs/${slug}`,
+      zh: `/zh/docs/${slug}`,
+      priority: "0.6",
+      changefreq: "monthly"
+    })),
+    { en: "/privacy-local-first", zh: "/zh/privacy-local-first", priority: "0.4", changefreq: "yearly" }
+  ];
+  const renderUrl = (loc, pair) => `  <url>
+    <loc>${escapeHtml(absoluteUrl(loc, origin))}</loc>
+    <lastmod>${SITEMAP_LASTMOD}</lastmod>
+    <changefreq>${pair.changefreq}</changefreq>
+    <priority>${pair.priority}</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
+    <xhtml:link rel="alternate" hreflang="x-default" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
+  </url>`;
+  const urls = pairs.flatMap((pair) => [
+    renderUrl(pair.en, pair),
+    renderUrl(pair.zh, pair)
+  ]).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
-  <url>
-    <loc>${origin}/</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh" />
-  </url>
-  <url>
-    <loc>${origin}/zh</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh" />
-  </url>
-  <url>
-    <loc>${origin}/pro</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/pro" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/pro" />
-  </url>
-  <url>
-    <loc>${origin}/zh/pro</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/pro" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/pro" />
-  </url>
-  <url>
-    <loc>${origin}/docs</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs" />
-  </url>
-  <url>
-    <loc>${origin}/zh/docs</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/docs" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/docs" />
-  </url>
-${docUrls}
-  <url>
-    <loc>${origin}/privacy-local-first</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/privacy-local-first" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/privacy-local-first" />
-  </url>
-  <url>
-    <loc>${origin}/zh/privacy-local-first</loc>
-    <xhtml:link rel="alternate" hreflang="en" href="${origin}/privacy-local-first" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/privacy-local-first" />
-  </url>
+${urls}
 </urlset>
 `;
 }
