@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.175 - 2026-06-06
+
+### Changed
+- Optimize website landing styles, replace cheap emojis with glassmorphic design system, upgrade multiline structured footer, rewrite sequential pure-CSS agent timeline preview animation, and add complete Privacy Policy and Terms of Service endpoints (75fe7d7)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.174 - 2026-06-06
 
 ### Changed
