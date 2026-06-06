@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.177 - 2026-06-06
+
+### Changed
+- Fix conversation status and strategy pyramid UI (931d531)
+- Refine Chinese hero slogan copy (replace hacker with entrepreneur) (f405c19)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.176 - 2026-06-06
 
 ### Changed
