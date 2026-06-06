@@ -73,8 +73,8 @@ const content = {
     },
     hero: {
       eyebrow: "Local-first VS Code extension",
-      title: "Keep your AI-built projects moving.",
-      copy: "SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.",
+      title: "Let AI Agents Code. Let SoloMap Steer.",
+      copy: "The local-first strategy cockpit for solo developers building with AI. Turn chaos into structured roadmaps and keep your agents on track.",
       support: "Let AI agents execute. Let SoloMap keep the direction clear.",
       primaryCta: "Install from VS Code Marketplace",
       secondaryCta: "Get it on Open VSX",
@@ -207,8 +207,8 @@ const content = {
     },
     hero: {
       eyebrow: "本地优先的 VS Code 插件",
-      title: "让 AI 项目持续往前走。",
-      copy: "SoloMap 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。",
+      title: "AI 负责编写代码，SoloMap 负责掌控方向。",
+      copy: "为独立开发者与个人黑客打造的本地优先战略驾驶舱。把想法变成路线图，让 Agent 奔跑在正确的道路上。",
       support: "把产品想法、路线图、Agent 执行历史和下一步动作放回你的本地工作区。",
       primaryCta: "从 VS Code Marketplace 安装",
       secondaryCta: "在 Open VSX 获取",
@@ -1733,6 +1733,11 @@ function buildStyles() {
       padding: 6px 12px;
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
       background: rgba(255, 255, 255, 0.02);
+      white-space: nowrap;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .language-link:hover {
       border-color: var(--cyan);
@@ -1747,6 +1752,11 @@ function buildStyles() {
       font-weight: 720;
       box-shadow: 0 4px 14px rgba(246, 240, 232, 0.15);
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      white-space: nowrap;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .install-link:hover {
       transform: translateY(-1px);
@@ -2924,6 +2934,13 @@ function buildStyles() {
       .next-actions { grid-template-columns: 1fr; }
       .roadmap-step { min-height: 86px; }
     }
+    @media (min-width: 1440px) {
+      .shell { width: min(1280px, calc(100% - 64px)); }
+      h1 { font-size: clamp(52px, 6.5vw, 92px); }
+      .hero-copy { font-size: 21px; max-width: 700px; }
+      .hero-grid { gap: 64px; }
+      .section { padding: 96px 0; }
+    }
   </style>`;
 }function renderCards(cards) {
   return cards.map(([title, copy]) => `<article class="card">
@@ -3202,7 +3219,7 @@ function buildHeader(t, locale, currentPath) {
         <a href="${proHref}">${escapeHtml(t.nav.pro)}</a>
         <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
         <a href="${GITHUB_URL}">${escapeHtml(t.nav.github)}</a>
-        <a class="language-link" href="${alternatePathFor(currentPath, locale)}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
+        <a class="language-link" href="${alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
         <a class="install-link" href="${installHref}">${escapeHtml(t.nav.install)}</a>
       </div>
     </nav>
@@ -3253,7 +3270,10 @@ function buildFooter(t) {
         </div>
       </div>
       <div class="footer-bottom">
-        <div>&copy; 2026 SZLK. solomap.app. All rights reserved.</div>
+        <div>
+          &copy; 2026 <a href="https://szlk.ai" target="_blank" rel="noopener" style="text-decoration: underline; color: var(--ink);">SZLK LTD</a> 
+          ${isZh ? "· 公司编号 16843016 · 英国 伦敦" : " (Company No. 16843016), London, UK"}. All rights reserved.
+        </div>
         <div class="footer-legal-links">
           <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
           <a href="${t.pathPrefix}/privacy-policy">${isZh ? "隐私政策" : "Privacy Policy"}</a>
@@ -3320,7 +3340,7 @@ function buildPrivacyPolicyPage(locale, origin) {
   const contentHtml = isZh ? `
     <h1>隐私政策</h1>
     <p>更新日期：2026年6月6日</p>
-    <p>我们非常重视您的隐私。本隐私政策适用于 SoloMap 插件、官方网站（solomap.app）及相关服务。请在使用我们的产品前仔细阅读以下条款：</p>
+    <p>我们非常重视您的隐私。本隐私政策适用于由 SZLK LTD（运营方，注册于英国伦敦，公司编号 16843016）提供服务的 SoloMap 插件、官方网站（solomap.app）及相关授权同步服务。请在使用我们的产品前仔细阅读以下条款：</p>
     
     <h2>1. 核心本地优先（Local-First）数据架构</h2>
     <p>SoloMap 的核心功能基于“本地优先”架构设计：</p>
@@ -3330,34 +3350,44 @@ function buildPrivacyPolicyPage(locale, origin) {
       <li>数据的完全控制权在您手中，您可以通过清理本地工作区的相应目录，或者卸载插件彻底移除所有数据。</li>
     </ul>
 
-    <h2>2. 信息收集与合法处理</h2>
-    <p>当您与我们的服务进行交互时，我们会收集并处理以下必要的信息：</p>
+    <h2>2. 信息收集类型与合法处理目的</h2>
+    <p>当您与我们的服务进行交互时，我们仅会基于合法的商业目的收集以下必要的信息：</p>
     <ul>
-      <li><strong>账户与订阅激活</strong>：为了支持您使用 SoloMap Pro，我们会使用 OIDC 流程通过 SZLK Passport 安全登录以激活您的授权。我们只拉取您的加密用户 ID 和邮箱地址作为判定订阅状态的唯一凭证，我们不拉取也不存储您的 GitHub 密码或其他账户凭证。</li>
-      <li><strong>支付处理</strong>：所有的付款和订阅账单均由 Stripe 独立且安全地进行托管处理。我们不接触、不收集、不存储您的任何信用卡号、CVV 码或敏感的交易财务数据。</li>
-      <li><strong>自愿提交的反馈</strong>：仅在您主动点击“提交反馈”并选择提交 GitHub Issue 时，会上传您同意披露的必要环境数据（如插件版本号、VS Code 版本号 and 脱敏后的错误日志）。</li>
+      <li><strong>账户与订阅激活数据</strong>：为了支持您使用 SoloMap Pro，我们会使用 OIDC 流程通过 SZLK Passport 安全登录以激活您的授权。我们只拉取您的加密用户 ID 和邮箱地址作为判定订阅状态的唯一凭证，我们不拉取也不存储您的 GitHub 密码或其他账户凭证。</li>
+      <li><strong>支付与交易数据</strong>：所有的付款和订阅账单均由 Stripe 独立且安全地进行托管处理，严格遵循 PCI-DSS 支付安全标准。我们不接触、不收集、不存储您的任何信用卡号、CVV 码或敏感的交易财务数据。</li>
+      <li><strong>自愿提交的环境与错误日志</strong>：仅在您主动点击“提交反馈”并选择提交 GitHub Issue 时，会上传您同意披露的必要环境数据（如插件版本号、VS Code 版本号和脱敏后的错误日志）。</li>
     </ul>
 
-    <h2>3. 数据的安全与第三方共享</h2>
-    <p>我们承诺：</p>
+    <h2>3. 数据的安全保障与存储期限</h2>
     <ul>
-      <li><strong>绝不出售数据</strong>：我们绝不会向任何第三方广告商或数据代理商出售或披露您的个人信息及使用习惯。</li>
-      <li><strong>服务商合规性</strong>：我们使用的基础设施提供商（如 Cloudflare Workers、Stripe）均符合全球领先的数据保护与安全标准。</li>
+      <li><strong>加密传输</strong>：本网站的所有通信均使用标准的 TLS 加密协议进行安全传输，防止数据在传输过程中被窃听或篡改。</li>
+      <li><strong>存储时长</strong>：由于我们的架构是本地优先，您的所有路线图状态数据都保留在您本地。我们的服务器不会保存您的项目运行日志。对于购买 Pro 会员而生成的授权账户记录，我们会一直保留，直至您注销账户。</li>
+      <li><strong>第三方服务合规</strong>：我们选用的基础设施服务商（如 Cloudflare Workers、Stripe）均符合全球领先的数据保护与安全标准。</li>
     </ul>
 
-    <h2>4. 适用法案与用户权利</h2>
+    <h2>4. 适用法案与您的用户权利 (GDPR, CCPA, PIPL)</h2>
     <p>我们致力于保障您的隐私权。根据您所在的司法管辖区，您可能拥有基于《通用数据保护条例》(GDPR)、《加州消费者隐私法》(CCPA) 或中国《个人信息保护法》(PIPL) 的如下权利：</p>
     <ul>
-      <li><strong>访问权与携带权</strong>：您可以随时查阅我们持有的您的账户 ID 及订阅邮箱。</li>
-      <li><strong>删除权（被遗忘权）</strong>：您可以随时请求注销您的 SZLK Passport 账户并删除与您邮箱关联的所有订阅凭证。</li>
+      <li><strong>知情权与访问权</strong>：您可以随时查阅我们持有的您的账户 ID 及订阅邮箱。</li>
+      <li><strong>数据可携权</strong>：您可以要求我们以结构化的、常用的、机器可读的格式提供您在我们的服务中登记的个人数据。</li>
+      <li><strong>删除权（被遗忘权）</strong>：您可以随时请求注销您的 SZLK Passport 账户并删除与您邮箱关联的所有订阅凭证及交易映射记录。</li>
+      <li><strong>更正权</strong>：如果您的邮箱发生变动，您可以随时通过 Stripe 账单后台或联络我们的客服进行修正。</li>
     </ul>
 
-    <h2>5. 变更与联系方式</h2>
-    <p>我们可能会根据服务升级或法律法规的要求适时更新本隐私政策。如有任何疑问或隐私保障相关的权利主张，请通过 GitHub Issue 或发信至官方支持通道与我们取得联系。</p>
+    <h2>5. Cookies 政策声明</h2>
+    <p>我们仅使用必要的、功能性的 Cookie，其有效期最长为 1 年：</p>
+    <ul>
+      <li><code>lang_pref</code>：用于记录您的偏好语言（中/英文），为您提供无缝的本地化访问体验，避免重复跳转。</li>
+      <li>SZLK Passport 登录会话：用于在您跳转至 Passport 并返回时维持安全的临时校验会话。</li>
+      <li>我们不使用任何第三方的广告追踪 Cookie，也不进行跨站行为轨迹追踪。</li>
+    </ul>
+
+    <h2>6. 变更与联系方式</h2>
+    <p>我们可能会根据服务升级或法律法规的要求适时更新本隐私政策。如有任何疑问或隐私保障相关的权利主张，请通过 GitHub Issue 或发信至官方支持通道（SZLK LTD, London, UK）与我们取得联系。</p>
   ` : `
     <h1>Privacy Policy</h1>
     <p>Last updated: June 6, 2026</p>
-    <p>We respect your privacy. This Privacy Policy applies to the SoloMap extension, the official website (solomap.app), and related services. Please read the terms below carefully:</p>
+    <p>We respect your privacy. This Privacy Policy applies to the SoloMap extension, the official website (solomap.app), and related services operated by SZLK LTD (registered in London, UK, under Company No. 16843016). Please read the terms below carefully:</p>
     
     <h2>1. Core Local-First Data Architecture</h2>
     <p>SoloMap is built around a local-first principles. Your data is your own:</p>
@@ -3367,30 +3397,38 @@ function buildPrivacyPolicyPage(locale, origin) {
       <li>You retain full ownership and control of your workspace data. You can delete it entirely at any time by deleting the local folder or uninstalling the extension.</li>
     </ul>
 
-    <h2>2. Information We Collect and Process</h2>
-    <p>We collect only the narrowest set of data necessary to provide and secure our services:</p>
+    <h2>2. Information We Collect and Processing Purposes</h2>
+    <p>We collect only the narrowest set of data necessary to provide and secure our services under legal bases:</p>
     <ul>
-      <li><strong>Account &amp; Entitlement Management</strong>: When upgrading to SoloMap Pro, we verify your subscription via OIDC using SZLK Passport. We only retrieve your unique user ID and email to associate and validate your entitlement. We never access your primary passwords.</li>
-      <li><strong>Payment and Billing</strong>: All payment transactions are securely handled by Stripe. We do not access, process, or store your credit card numbers, billing addresses, or financial credentials.</li>
+      <li><strong>Account &amp; Entitlement Management</strong>: When upgrading to SoloMap Pro, we verify your subscription via OIDC using SZLK Passport. We only retrieve your unique user ID and email to associate and validate your entitlement. We never access or store your primary passwords.</li>
+      <li><strong>Payment and Billing Information</strong>: All payment transactions are securely handled by Stripe under PCI-DSS compliance standards. We do not access, process, or store your credit card numbers, billing addresses, or financial credentials.</li>
       <li><strong>Diagnostic Data</strong>: Diagnostic information or usage logs are only transmitted if you explicitly choose to click "Send Feedback" to submit a GitHub issue.</li>
     </ul>
 
-    <h2>3. Data Sharing &amp; Third-Party Services</h2>
-    <p>We believe in absolute transparency:</p>
+    <h2>3. Data Security and Retention</h2>
     <ul>
-      <li><strong>No Data Sharing for Marketing</strong>: We do not sell, rent, or trade your personal information or account credentials to any advertisers, data brokers, or marketing firms.</li>
-      <li><strong>Trusted Partners</strong>: Our core web operations run on Cloudflare Workers and Stripe, which adhere to industry-leading security frameworks and privacy laws.</li>
+      <li><strong>Transit Encryption</strong>: All traffic to and from our website uses standard TLS protocols to secure your connection.</li>
+      <li><strong>Retention Period</strong>: Local workspace data resides indefinitely on your hard drive until you erase it. We only persist account metadata (email and user ID) on our licensing servers to facilitate subscription status checks until you request account deletion.</li>
+      <li><strong>Third-Party Processors</strong>: Our core web operations run on Cloudflare Workers and Stripe, which adhere to strict global security frameworks and privacy laws.</li>
     </ul>
 
     <h2>4. GDPR, CCPA and Global Rights Compliance</h2>
-    <p>We honor your data rights under major global frameworks, including GDPR and CCPA:</p>
+    <p>We honor your data rights under major global frameworks, including GDPR, CCPA, and PIPL:</p>
     <ul>
+      <li><strong>Right to Access &amp; Portability</strong>: You may ask for a copy of the license entitlements and records tied to your account in a structured, machine-readable format.</li>
       <li><strong>Right of Erasure</strong>: You have the right to request the permanent deletion of your SZLK Passport account and linked subscription records.</li>
-      <li><strong>Right to Rectify</strong>: You can update your payment email or details directly in the Stripe Billing Portal.</li>
+      <li><strong>Right to Rectify</strong>: You can update your payment email or details directly in the Stripe Billing Portal or by contacting support.</li>
     </ul>
 
-    <h2>5. Updates and Contact</h2>
-    <p>We may update this Privacy Policy to reflect changes in our software or legal requirements. For inquiries or data right requests, please contact us via our GitHub issues page.</p>
+    <h2>5. Cookies and Web Technologies</h2>
+    <p>We do not use any tracking or advertising cookies. The only cookies we store are valid up to 1 year:</p>
+    <ul>
+      <li><code>lang_pref</code>: To remember your localized language preference (English/Chinese) and ensure seamless redirection.</li>
+      <li>SZLK Passport session parameters: Temporary cookies required for OIDC authentication.</li>
+    </ul>
+
+    <h2>6. Updates and Contact</h2>
+    <p>We may update this Privacy Policy to reflect changes in our software or legal requirements. For inquiries or data right requests, please contact us (SZLK LTD, London, UK) via our GitHub issues page.</p>
   `;
 
   return `<!doctype html>
@@ -3418,7 +3456,6 @@ function buildPrivacyPolicyPage(locale, origin) {
 </body>
 </html>`;
 }
-
 function buildTermsOfServicePage(locale, origin) {
   const t = content[locale];
   const isZh = locale === "zh";
@@ -3514,17 +3551,24 @@ function buildTermsOfServicePage(locale, origin) {
 </html>`;
 }
 function alternatePathFor(pathname, locale) {
+  if (pathname === "/") return "/zh";
+  if (pathname === "/zh" || pathname === "/zh/") return "/";
   if (pathname === "/pro") return "/zh/pro";
   if (pathname === "/zh/pro") return "/pro";
   if (pathname === "/docs") return "/zh/docs";
   if (pathname === "/zh/docs") return "/docs";
-  if (pathname.startsWith("/docs/")) return `/zh${pathname}`;
-  if (pathname.startsWith("/zh/docs/")) return pathname.slice(3);
   if (pathname === "/privacy-local-first") return "/zh/privacy-local-first";
   if (pathname === "/zh/privacy-local-first") return "/privacy-local-first";
-  return locale === "en" ? "/zh" : "/";
+  if (pathname === "/privacy-policy") return "/zh/privacy-policy";
+  if (pathname === "/zh/privacy-policy") return "/privacy-policy";
+  if (pathname === "/terms-of-service") return "/zh/terms-of-service";
+  if (pathname === "/zh/terms-of-service") return "/terms-of-service";
+  if (pathname === "/sitemap") return "/zh/sitemap";
+  if (pathname === "/zh/sitemap") return "/sitemap";
+  if (pathname.startsWith("/docs/")) return `/zh${pathname}`;
+  if (pathname.startsWith("/zh/docs/")) return pathname.slice(3);
+  return locale === "en" ? `/zh${pathname}` : (pathname.startsWith("/zh") ? (pathname.slice(3) || "/") : pathname);
 }
-
 function buildPage(locale, origin) {
   const t = content[locale];
   return `<!doctype html>
@@ -3630,7 +3674,7 @@ function buildPage(locale, origin) {
           <strong>${escapeHtml(t.pro.price)}</strong>
           <p>${escapeHtml(t.pro.copy)}</p>
           <div class="cta-row">
-            <a class="button primary" href="/pro">${escapeHtml(t.pro.cta)}</a>
+            <a class="button primary" href="${t.pathPrefix}/pro">${escapeHtml(t.pro.cta)}</a>
           </div>
         </aside>
       </div>
@@ -4040,31 +4084,124 @@ SoloMap is a local-first roadmap and strategy cockpit for AI-built projects in V
 `;
 }
 
+// 检查并处理多语言重定向及 Cookie 同步
+function handleLocaleRedirect(request, env, origin) {
+  const url = new URL(request.url);
+  const pathname = url.pathname;
+  
+  // 排除 API、静态文件、健康检查等路由
+  if (
+    pathname.startsWith("/api/") ||
+    pathname === "/health" ||
+    pathname === "/robots.txt" ||
+    pathname === "/llms.txt" ||
+    pathname === "/sitemap.xml" ||
+    pathname === "/sitemap.xsl"
+  ) {
+    return null;
+  }
+
+  // 爬虫直接放行，不做任何 302 跳转，确保 SEO/GEO 抓取正常
+  const ua = request.headers.get("user-agent") || "";
+  const isBot = /bot|spider|crawl|slurp|tracker/i.test(ua);
+  if (isBot) {
+    return null;
+  }
+
+  const cookie = request.headers.get("cookie") || "";
+  
+  // 获取已有的偏好 Cookie
+  let langPref = "";
+  const match = cookie.match(/lang_pref=(zh|en)/);
+  if (match) {
+    langPref = match[1];
+  }
+
+  // 获取 URL 参数中的显式 lang 指定
+  const langParam = url.searchParams.get("lang");
+  
+  // 决策最终的语言偏好
+  let targetLang = "";
+  if (langParam === "zh" || langParam === "en") {
+    targetLang = langParam;
+  } else if (langPref === "zh" || langPref === "en") {
+    targetLang = langPref;
+  } else {
+    // 仅在主页根路径上，若无明确偏好 cookie，才根据 GEO/Accept-Language 判定是否重定向到中文版
+    if (pathname === "/" || pathname === "/zh" || pathname === "/zh/") {
+      const country = request.cf?.country;
+      const acceptLang = request.headers.get("accept-language") || "";
+      const isChineseRegion = ["CN", "TW", "HK", "MO"].includes(country);
+      const prefersChinese = acceptLang.toLowerCase().includes("zh");
+      targetLang = (isChineseRegion || prefersChinese) ? "zh" : "en";
+    } else {
+      // 其他具体子路径在无偏好 cookie 时，直接遵循该 URL 路径自身的 locale，不发生 302 跳转
+      targetLang = pathname.startsWith("/zh") ? "zh" : "en";
+    }
+  }
+
+  const isCurrentZh = pathname.startsWith("/zh");
+  const wantsZh = (targetLang === "zh");
+
+  // 判断是否需要进行语言间的路径跳转
+  let newPath = "";
+  if (wantsZh && !isCurrentZh) {
+    // 英文路径 -> 中文路径
+    if (pathname === "/") {
+      newPath = "/zh";
+    } else {
+      newPath = "/zh" + pathname;
+    }
+  } else if (!wantsZh && isCurrentZh) {
+    // 中文路径 -> 英文路径
+    newPath = pathname.slice(3); // 截掉 "/zh"
+    if (newPath === "") {
+      newPath = "/";
+    }
+  }
+
+  // 如果需要重定向，或者需要写入/更新 Cookie
+  const needsRedirect = (newPath !== "");
+  const needsCookieUpdate = (langPref !== targetLang);
+
+  if (needsRedirect || needsCookieUpdate) {
+    const headers = new Headers();
+    if (needsCookieUpdate) {
+      headers.set("Set-Cookie", `lang_pref=${targetLang}; Path=/; Max-Age=31536000; SameSite=Lax`);
+    }
+    
+    if (needsRedirect) {
+      const redirectUrl = new URL(newPath, url.origin);
+      // 保留原有参数（除了 lang）
+      url.searchParams.forEach((val, key) => {
+        if (key !== "lang") {
+          redirectUrl.searchParams.set(key, val);
+        }
+      });
+      headers.set("Location", redirectUrl.toString());
+      return new Response(null, { status: 302, headers });
+    } else {
+      // 仅写入 Cookie，不进行重定向
+      return { cookieHeader: `lang_pref=${targetLang}; Path=/; Max-Age=31536000; SameSite=Lax` };
+    }
+  }
+
+  return null;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const origin = env.SITE_ORIGIN || SITE_ORIGIN;
 
-    if (url.pathname === "/") {
-      const cookie = request.headers.get("cookie") || "";
-      const hasLangPref = cookie.includes("lang_pref=");
-      
-      const ua = request.headers.get("user-agent") || "";
-      const isBot = /bot|spider|crawl|slurp|tracker/i.test(ua);
-      
-      if (!isBot && !url.searchParams.has("lang") && !hasLangPref) {
-        const country = request.cf?.country;
-        const acceptLang = request.headers.get("accept-language") || "";
-        const isChineseRegion = ["CN", "TW", "HK", "MO"].includes(country);
-        const prefersChinese = acceptLang.toLowerCase().includes("zh");
-        
-        if (isChineseRegion || prefersChinese) {
-          const headers = new Headers();
-          headers.set("Location", `${origin}/zh`);
-          headers.set("Set-Cookie", "lang_pref=zh; Path=/; Max-Age=31536000; SameSite=Lax");
-          return new Response(null, { status: 302, headers });
-        }
-      }
+    const redirectRes = handleLocaleRedirect(request, env, origin);
+    if (redirectRes instanceof Response) {
+      return redirectRes;
+    }
+
+    const extraHeaders = {};
+    if (redirectRes && redirectRes.cookieHeader) {
+      extraHeaders["Set-Cookie"] = redirectRes.cookieHeader;
     }
 
     if (url.pathname === "/health") {
@@ -4127,16 +4264,6 @@ Sitemap: ${origin}/sitemap.xml
     }
 
     const route = resolveRoute(url.pathname);
-    const extraHeaders = {};
-    if (url.searchParams.get("lang") === "en") {
-      extraHeaders["Set-Cookie"] = "lang_pref=en; Path=/; Max-Age=31536000; SameSite=Lax";
-    } else if (url.searchParams.get("lang") === "zh") {
-      extraHeaders["Set-Cookie"] = "lang_pref=zh; Path=/; Max-Age=31536000; SameSite=Lax";
-    } else if (route.locale === "zh") {
-      extraHeaders["Set-Cookie"] = "lang_pref=zh; Path=/; Max-Age=31536000; SameSite=Lax";
-    } else if (route.locale === "en" && url.pathname === "/") {
-      extraHeaders["Set-Cookie"] = "lang_pref=en; Path=/; Max-Age=31536000; SameSite=Lax";
-    }
 
     if (route.type === "sitemap-html") {
       return htmlResponse(buildHtmlSitemapPage(route.locale, origin), route.status, extraHeaders);

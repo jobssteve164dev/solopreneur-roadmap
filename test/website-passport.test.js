@@ -72,7 +72,7 @@ test('Chinese Pro subscription page stays inside the website frame and explains 
   assert.match(html, /可靠推进历史/);
   assert.match(html, /目标自动推进/);
   assert.match(html, /仍然本地优先/);
-  assert.match(html, /href="\/pro" hreflang="en"/);
+  assert.match(html, /href="\/pro\?lang=en" hreflang="en"/);
   assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP|Planner|Builder|Verifier|scoring|微观|证据链|exchange code/);
   assert.doesNotMatch(html.replace(/<script[\s\S]*?<\/script>/g, ''), /页面只表达|内部配置|功能规划|功能方向|不要求用户理解/);
   assert.ok(href);
