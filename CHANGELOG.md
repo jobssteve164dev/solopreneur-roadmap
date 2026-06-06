@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.182 - 2026-06-06
+
+### Changed
+- docs & ui: fix brand translation, adjust delivery boundary link, unify roadmap webview title, and add logo to strategy pyramid header (0de71c0)
+- Remove project-scoped agent doctrine (5767fa2)
+- Add project agent action doctrine (ac319a3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.181 - 2026-06-06
 
 ### Changed
