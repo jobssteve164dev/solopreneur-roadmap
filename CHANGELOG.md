@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.168 - 2026-06-06
+
+### Changed
+- Add nonce-bound Pro subscription flow (ac54e82)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.167 - 2026-06-06
 
 ### Changed
