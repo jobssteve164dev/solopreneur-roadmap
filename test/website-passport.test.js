@@ -672,4 +672,38 @@ test('HTML structured sitemap directory and search engine crawlers bypass redire
   assert.match(xsl, /SoloMap XML Sitemap/);
 });
 
+test('Privacy Policy and Terms of Service endpoints render correct bilingual copies', async () => {
+  const worker = await loadWebsiteWorker();
+  const env = { SITE_ORIGIN: 'https://solomap.app' };
+
+  // 1. English Privacy Policy
+  const resPrivacyEn = await worker.default.fetch(new Request('https://solomap.app/privacy-policy'), env);
+  const privacyEn = await resPrivacyEn.text();
+  assert.equal(resPrivacyEn.status, 200);
+  assert.match(privacyEn, /<h1>Privacy Policy<\/h1>/);
+  assert.match(privacyEn, /Core Local-First Data Architecture/);
+
+  // 2. Chinese Privacy Policy
+  const resPrivacyZh = await worker.default.fetch(new Request('https://solomap.app/zh/privacy-policy'), env);
+  const privacyZh = await resPrivacyZh.text();
+  assert.equal(resPrivacyZh.status, 200);
+  assert.match(privacyZh, /<h1>隐私政策<\/h1>/);
+  assert.match(privacyZh, /核心本地优先（Local-First）数据架构/);
+
+  // 3. English Terms of Service
+  const resTermsEn = await worker.default.fetch(new Request('https://solomap.app/terms-of-service'), env);
+  const termsEn = await resTermsEn.text();
+  assert.equal(resTermsEn.status, 200);
+  assert.match(termsEn, /<h1>Terms of Service<\/h1>/);
+  assert.match(termsEn, /License Grant and Usage Scope/);
+
+  // 4. Chinese Terms of Service
+  const resTermsZh = await worker.default.fetch(new Request('https://solomap.app/zh/terms-of-service'), env);
+  const termsZh = await resTermsZh.text();
+  assert.equal(resTermsZh.status, 200);
+  assert.match(termsZh, /<h1>用户协议<\/h1>/);
+  assert.match(termsZh, /许可授予与使用范围/);
+});
+
+
 

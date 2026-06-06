@@ -81,7 +81,7 @@ const content = {
       githubCta: "View on GitHub",
       proofLabel: "Product highlights",
       proof: ["Works in your workspace", "Bring your own Agent CLI", "Free core workflow"],
-      trustBadge: "⚡ Loved by 1,200+ solo developers keeping momentum",
+      trustBadge: "Loved by 1,200+ solo developers keeping momentum",
       screenshotLabel: "SoloMap running in VS Code",
       screenshotAlt: "SoloMap roadmap and Agent terminal running inside Visual Studio Code"
     },
@@ -215,7 +215,7 @@ const content = {
       githubCta: "查看 GitHub",
       proofLabel: "产品亮点",
       proof: ["在你的工作区里运行", "使用你已有的 Agent CLI", "Free 主路径保持可用"],
-      trustBadge: "⚡ 超过 1,200+ 位独立开发者正在使用 SoloMap 保持推进",
+      trustBadge: "超过 1,200+ 位独立开发者正在使用 SoloMap 保持推进",
       screenshotLabel: "SoloMap 在 VS Code 中运行",
       screenshotAlt: "SoloMap 路线图和 Agent 终端在 Visual Studio Code 中运行"
     },
@@ -1663,14 +1663,16 @@ function buildStyles() {
       top: 0;
       z-index: 10;
       border-bottom: 1px solid var(--line);
-      background: rgba(17, 16, 14, 0.9);
-      backdrop-filter: blur(18px);
+      background: rgba(17, 16, 14, 0.8);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      box-shadow: 0 4px 30px rgba(0, 0, 0, 0.15);
     }
     .nav {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      min-height: 68px;
+      min-height: 72px;
       gap: 20px;
     }
     .brand {
@@ -1679,30 +1681,79 @@ function buildStyles() {
       gap: 12px;
       font-weight: 760;
       letter-spacing: 0;
+      transition: opacity 0.2s ease;
     }
-    .brand img { width: 34px; height: 34px; border-radius: 8px; }
+    .brand:hover {
+      opacity: 0.9;
+    }
+    .brand img {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      box-shadow: 0 0 15px rgba(73, 214, 208, 0.2);
+    }
     .links {
       display: flex;
       align-items: center;
-      gap: 18px;
+      gap: 24px;
       color: var(--soft);
       font-size: 14px;
     }
-    .links a:hover { color: var(--ink); }
+    .links a {
+      position: relative;
+      padding: 6px 0;
+      transition: color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .links a::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      transform: scaleX(0);
+      height: 2px;
+      bottom: 0;
+      left: 0;
+      background: linear-gradient(90deg, var(--cyan), var(--red));
+      transform-origin: bottom right;
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .links a:hover {
+      color: var(--ink);
+    }
+    .links a:hover::after {
+      transform: scaleX(1);
+      transform-origin: bottom left;
+    }
+    .links a.install-link::after,
+    .links a.language-link::after {
+      display: none;
+    }
     .language-link {
       border: 1px solid var(--line);
       border-radius: 999px;
-      padding: 7px 10px;
+      padding: 6px 12px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .language-link:hover {
+      border-color: var(--cyan);
+      background: rgba(73, 214, 208, 0.05);
+      color: var(--cyan) !important;
     }
     .install-link {
-      color: #11100e;
-      background: var(--ink);
-      padding: 9px 13px;
+      color: #11100e !important;
+      background: linear-gradient(135deg, var(--soft) 0%, var(--ink) 100%);
+      padding: 9px 16px;
       border-radius: 8px;
       font-weight: 720;
+      box-shadow: 0 4px 14px rgba(246, 240, 232, 0.15);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+    .install-link:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(246, 240, 232, 0.25);
     }
     .hero {
-      min-height: calc(100vh - 68px);
+      min-height: calc(100vh - 72px);
       display: grid;
       align-items: center;
       padding: 58px 0 36px;
@@ -1796,11 +1847,13 @@ function buildStyles() {
       padding: 7px 10px;
       background: rgba(255, 255, 255, 0.035);
     }
+    
+    /* --- CSS Agent Loop Simulator --- */
     .product-preview {
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 12px;
       background: #0b0d0f;
-      box-shadow: 0 28px 80px var(--shadow);
+      box-shadow: 0 28px 80px var(--shadow), 0 0 40px rgba(73, 214, 208, 0.03);
       overflow: hidden;
       min-height: 560px;
       position: relative;
@@ -1852,25 +1905,26 @@ function buildStyles() {
       margin-bottom: 10px;
     }
     .preview-main {
-      padding: 18px;
+      padding: 24px;
       display: grid;
-      gap: 14px;
+      gap: 16px;
       align-content: start;
     }
     .roadmap-strip {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
+      gap: 12px;
     }
     .roadmap-step {
       min-width: 0;
       min-height: 118px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 8px;
       padding: 12px;
-      background: #171411;
+      background: #141311;
       position: relative;
       overflow: hidden;
+      transition: all 0.5s ease;
     }
     .roadmap-step::after {
       content: "";
@@ -1880,14 +1934,239 @@ function buildStyles() {
       bottom: 12px;
       height: 4px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.08);
+      transition: all 0.5s ease;
     }
-    .roadmap-step.active {
-      border-color: rgba(239, 62, 70, 0.7);
-      background: rgba(239, 62, 70, 0.1);
-      animation: pulseStep 3.6s ease-in-out infinite;
+
+    /* Steps Animation Assigning */
+    .step-build {
+      animation: stepBuildAnim 18s cubic-bezier(0.4, 0, 0.2, 1) infinite;
     }
-    .roadmap-step.active::after { background: var(--red); }
+    .step-sell {
+      animation: stepSellAnim 18s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+    .step-learn {
+      animation: stepLearnAnim 18s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+    .step-improve {
+      animation: stepImproveAnim 18s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    }
+
+    @keyframes stepBuildAnim {
+      0%, 30% { /* Active */
+        border-color: rgba(239, 62, 70, 0.8);
+        background: rgba(239, 62, 70, 0.08);
+        box-shadow: 0 0 20px rgba(239, 62, 70, 0.15);
+      }
+      33.3%, 96.6% { /* Done */
+        border-color: rgba(165, 214, 109, 0.5);
+        background: rgba(165, 214, 109, 0.04);
+        box-shadow: none;
+      }
+      97% , 100% { /* Normal */
+        border-color: rgba(255, 255, 255, 0.1);
+        background: #141311;
+        box-shadow: none;
+      }
+    }
+    .step-build::after {
+      animation: stepBuildAfterAnim 18s ease infinite;
+    }
+    @keyframes stepBuildAfterAnim {
+      0%, 30% { background: var(--red); width: calc(100% - 24px); }
+      33.3%, 96.6% { background: var(--green); width: calc(100% - 24px); }
+      97%, 100% { background: rgba(255, 255, 255, 0.08); width: calc(100% - 24px); }
+    }
+
+    @keyframes stepSellAnim {
+      0%, 30% { /* Normal */
+        border-color: rgba(255, 255, 255, 0.1);
+        background: #141311;
+        box-shadow: none;
+      }
+      33.3%, 63.3% { /* Active */
+        border-color: rgba(73, 214, 208, 0.8);
+        background: rgba(73, 214, 208, 0.08);
+        box-shadow: 0 0 20px rgba(73, 214, 208, 0.15);
+      }
+      66.6%, 96.6% { /* Done */
+        border-color: rgba(165, 214, 109, 0.5);
+        background: rgba(165, 214, 109, 0.04);
+        box-shadow: none;
+      }
+      97%, 100% { /* Normal */
+        border-color: rgba(255, 255, 255, 0.1);
+        background: #141311;
+        box-shadow: none;
+      }
+    }
+    .step-sell::after {
+      animation: stepSellAfterAnim 18s ease infinite;
+    }
+    @keyframes stepSellAfterAnim {
+      0%, 30% { background: rgba(255, 255, 255, 0.08); }
+      33.3%, 63.3% { background: var(--cyan); }
+      66.6%, 96.6% { background: var(--green); }
+      97%, 100% { background: rgba(255, 255, 255, 0.08); }
+    }
+
+    @keyframes stepLearnAnim {
+      0%, 63.3% { /* Normal */
+        border-color: rgba(255, 255, 255, 0.1);
+        background: #141311;
+        box-shadow: none;
+      }
+      66.6%, 96.6% { /* Active */
+        border-color: rgba(165, 214, 109, 0.8);
+        background: rgba(165, 214, 109, 0.08);
+        box-shadow: 0 0 20px rgba(165, 214, 109, 0.15);
+      }
+      97%, 100% { /* Normal */
+        border-color: rgba(255, 255, 255, 0.1);
+        background: #141311;
+        box-shadow: none;
+      }
+    }
+    .step-learn::after {
+      animation: stepLearnAfterAnim 18s ease infinite;
+    }
+    @keyframes stepLearnAfterAnim {
+      0%, 63.3% { background: rgba(255, 255, 255, 0.08); }
+      66.6%, 96.6% { background: var(--green); }
+      97%, 100% { background: rgba(255, 255, 255, 0.08); }
+    }
+
+    @keyframes stepImproveAnim {
+      0%, 63.3% { /* Normal */
+        border-color: rgba(255, 255, 255, 0.1);
+        background: #141311;
+        box-shadow: none;
+      }
+      66.6%, 96.6% { /* Active */
+        border-color: rgba(239, 62, 70, 0.8);
+        background: rgba(239, 62, 70, 0.08);
+        box-shadow: 0 0 20px rgba(239, 62, 70, 0.15);
+      }
+      97%, 100% { /* Normal */
+        border-color: rgba(255, 255, 255, 0.1);
+        background: #141311;
+        box-shadow: none;
+      }
+    }
+    .step-improve::after {
+      animation: stepImproveAfterAnim 18s ease infinite;
+    }
+    @keyframes stepImproveAfterAnim {
+      0%, 63.3% { background: rgba(255, 255, 255, 0.08); }
+      66.6%, 96.6% { background: var(--red); }
+      97%, 100% { background: rgba(255, 255, 255, 0.08); }
+    }
+
+    /* Terminal content phase-toggle animation */
+    .terminal {
+      border: 1px solid rgba(73, 214, 208, 0.2);
+      border-radius: 8px;
+      background: #07090b;
+      padding: 16px;
+      min-height: 188px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: #b8c7d9;
+      position: relative;
+      overflow: hidden;
+    }
+    .terminal-group {
+      position: absolute;
+      top: 16px;
+      left: 16px;
+      right: 16px;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.5s ease;
+      pointer-events: none;
+    }
+    .terminal-group.phase-1 {
+      animation: termPhase1Anim 18s ease infinite;
+    }
+    .terminal-group.phase-2 {
+      animation: termPhase2Anim 18s ease infinite;
+    }
+    .terminal-group.phase-3 {
+      animation: termPhase3Anim 18s ease infinite;
+    }
+
+    @keyframes termPhase1Anim {
+      0%, 30% { opacity: 1; transform: translateY(0); pointer-events: auto; }
+      33.3%, 100% { opacity: 0; transform: translateY(-10px); pointer-events: none; }
+    }
+    @keyframes termPhase2Anim {
+      0%, 30% { opacity: 0; transform: translateY(10px); pointer-events: none; }
+      33.3%, 63.3% { opacity: 1; transform: translateY(0); pointer-events: auto; }
+      66.6%, 100% { opacity: 0; transform: translateY(-10px); pointer-events: none; }
+    }
+    @keyframes termPhase3Anim {
+      0%, 63.3% { opacity: 0; transform: translateY(10px); pointer-events: none; }
+      66.6%, 96.6% { opacity: 1; transform: translateY(0); pointer-events: auto; }
+      97%, 100% { opacity: 0; transform: translateY(-10px); pointer-events: none; }
+    }
+
+    .terminal-line {
+      display: block;
+      margin-top: 8px;
+      opacity: 0;
+      transform: translateX(-4px);
+    }
+    
+    .phase-1 .terminal-line:nth-child(2) { animation: lineAppear 18s ease infinite; animation-delay: 0.5s; }
+    .phase-1 .terminal-line:nth-child(3) { animation: lineAppear 18s ease infinite; animation-delay: 1.5s; }
+    .phase-1 .terminal-line:nth-child(4) { animation: lineAppear 18s ease infinite; animation-delay: 2.5s; }
+    .phase-1 .terminal-line:nth-child(5) { animation: lineAppear 18s ease infinite; animation-delay: 3.5s; }
+
+    .phase-2 .terminal-line:nth-child(2) { animation: lineAppear 18s ease infinite; animation-delay: 6.5s; }
+    .phase-2 .terminal-line:nth-child(3) { animation: lineAppear 18s ease infinite; animation-delay: 7.5s; }
+    .phase-2 .terminal-line:nth-child(4) { animation: lineAppear 18s ease infinite; animation-delay: 8.5s; }
+    .phase-2 .terminal-line:nth-child(5) { animation: lineAppear 18s ease infinite; animation-delay: 9.5s; }
+
+    .phase-3 .terminal-line:nth-child(2) { animation: lineAppear 18s ease infinite; animation-delay: 12.5s; }
+    .phase-3 .terminal-line:nth-child(3) { animation: lineAppear 18s ease infinite; animation-delay: 13.5s; }
+    .phase-3 .terminal-line:nth-child(4) { animation: lineAppear 18s ease infinite; animation-delay: 14.5s; }
+    .phase-3 .terminal-line:nth-child(5) { animation: lineAppear 18s ease infinite; animation-delay: 15.5s; }
+
+    @keyframes lineAppear {
+      0% { opacity: 0; transform: translateX(-4px); }
+      0.5%, 100% { opacity: 1; transform: translateX(0); }
+    }
+
+    .next-actions-container {
+      position: relative;
+      min-height: 52px;
+    }
+    .next-actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      opacity: 0;
+      transition: all 0.5s ease;
+      pointer-events: none;
+    }
+    .next-actions div {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--soft);
+      background: rgba(255, 255, 255, 0.02);
+      font-size: 13px;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+    .next-actions.phase-1 { animation: termPhase1Anim 18s ease infinite; }
+    .next-actions.phase-2 { animation: termPhase2Anim 18s ease infinite; }
+    .next-actions.phase-3 { animation: termPhase3Anim 18s ease infinite; }
+
     .roadmap-step span {
       display: block;
       color: var(--muted);
@@ -1901,48 +2180,16 @@ function buildStyles() {
       line-height: 1.25;
       white-space: nowrap;
     }
-    .terminal {
-      border: 1px solid rgba(73, 214, 208, 0.24);
-      border-radius: 8px;
-      background: #090b0d;
-      padding: 14px;
-      min-height: 176px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      color: #b8c7d9;
-      overflow: hidden;
-    }
-    .terminal-line {
-      display: block;
-      margin-top: 6px;
-      white-space: nowrap;
-      opacity: 1;
-      transform: translateY(0);
-      animation: focusLine 8s ease-in-out infinite;
-    }
-    .terminal-line:nth-child(3) { animation-delay: 1.2s; }
-    .terminal-line:nth-child(4) { animation-delay: 2.4s; }
-    .terminal-line:nth-child(5) { animation-delay: 3.6s; }
-    .terminal-line:nth-child(6) { animation-delay: 4.8s; }
     .ok { color: var(--green); }
     .warn { color: #f0c46b; }
     .info { color: var(--cyan); }
-    .next-actions {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
+    
+    .trust-badge {
+      animation: pulseText 3s ease-in-out infinite;
     }
-    .next-actions div {
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 8px;
-      padding: 12px;
-      color: var(--soft);
-      background: rgba(255, 255, 255, 0.035);
-      font-size: 13px;
-    }
-    @keyframes focusLine {
-      0%, 100% { color: #b8c7d9; }
-      45%, 55% { color: #f6f0e8; }
+    @keyframes pulseText {
+      0%, 100% { opacity: 0.85; }
+      50% { opacity: 1; filter: drop-shadow(0 0 4px rgba(73, 214, 208, 0.4)); }
     }
     @keyframes pulseStep {
       0%, 100% { box-shadow: 0 0 0 rgba(239, 62, 70, 0); }
@@ -1950,10 +2197,13 @@ function buildStyles() {
     }
     @media (prefers-reduced-motion: reduce) {
       .terminal-line,
-      .roadmap-step.active {
-        animation: none;
-        opacity: 1;
-        transform: none;
+      .roadmap-step,
+      .next-actions,
+      .terminal-group {
+        animation: none !important;
+        opacity: 1 !important;
+        transform: none !important;
+        position: static !important;
       }
     }
     .section {
@@ -2131,13 +2381,6 @@ function buildStyles() {
         opacity: 1;
         transform: translateY(0);
       }
-    }
-    .trust-badge {
-      animation: pulseText 3s ease-in-out infinite;
-    }
-    @keyframes pulseText {
-      0%, 100% { opacity: 0.85; }
-      50% { opacity: 1; filter: drop-shadow(0 0 4px rgba(73, 214, 208, 0.4)); }
     }
     .step {
       position: relative;
@@ -2432,23 +2675,91 @@ function buildStyles() {
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
     }
+    
+    /* Footer styles */
     footer {
       border-top: 1px solid var(--line);
-      padding: 30px 0;
+      padding: 60px 0 40px;
       color: var(--muted);
       font-size: 14px;
+      background: linear-gradient(to bottom, #11100e 0%, #0c0b0a 100%);
     }
-    .footer-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 24px;
-      flex-wrap: wrap;
+    .footer-grid {
+      display: grid;
+      grid-template-columns: 2fr repeat(3, 1fr);
+      gap: 48px;
+      margin-bottom: 48px;
     }
-    .footer-links {
+    .footer-brand {
       display: flex;
-      flex-wrap: wrap;
+      flex-direction: column;
       gap: 16px;
     }
+    .footer-brand-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 760;
+      color: var(--ink);
+      font-size: 18px;
+    }
+    .footer-brand-title img {
+      border-radius: 6px;
+      box-shadow: 0 0 10px rgba(73, 214, 208, 0.15);
+    }
+    .footer-brand-desc {
+      font-size: 14px;
+      color: var(--muted);
+      max-width: 320px;
+      line-height: 1.6;
+    }
+    .footer-col h4 {
+      margin: 0 0 20px;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .footer-col ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .footer-col a {
+      color: var(--soft);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      display: inline-block;
+    }
+    .footer-col a:hover {
+      color: var(--cyan);
+      transform: translateX(4px);
+    }
+    .footer-bottom {
+      border-top: 1px solid var(--line);
+      padding-top: 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .footer-legal-links {
+      display: flex;
+      gap: 24px;
+    }
+    .footer-legal-links a {
+      transition: color 0.2s ease;
+    }
+    .footer-legal-links a:hover {
+      color: var(--ink);
+    }
+    
     .privacy-page {
       width: min(860px, calc(100% - 40px));
       margin: 0 auto;
@@ -2464,8 +2775,21 @@ function buildStyles() {
     .privacy-page a { color: var(--cyan); }
     .privacy-page h1 { margin-bottom: 22px; }
     .privacy-page p,
-    .privacy-page li { color: var(--soft); font-size: 18px; }
+    .privacy-page li { color: var(--soft); font-size: 16px; line-height: 1.6; }
     .privacy-page ul { padding-left: 22px; }
+    
+    .privacy-article h2 {
+      margin-top: 36px;
+      margin-bottom: 12px;
+      font-size: 20px;
+      color: var(--ink);
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 6px;
+    }
+    .privacy-article p {
+      margin-bottom: 16px;
+    }
+    
     .docs-page {
       width: min(1040px, calc(100% - 40px));
       margin: 0 auto;
@@ -2578,6 +2902,10 @@ function buildStyles() {
       .product-preview { min-height: 520px; }
       .preview-body { grid-template-columns: 1fr; }
       .preview-side { display: none; }
+      .footer-grid {
+        grid-template-columns: 1fr;
+        gap: 32px;
+      }
     }
     @media (max-width: 560px) {
       .shell { width: min(100% - 28px, 1160px); }
@@ -2597,9 +2925,7 @@ function buildStyles() {
       .roadmap-step { min-height: 86px; }
     }
   </style>`;
-}
-
-function renderCards(cards) {
+}function renderCards(cards) {
   return cards.map(([title, copy]) => `<article class="card">
             <h3>${escapeHtml(title)}</h3>
             <p>${escapeHtml(copy)}</p>
@@ -2685,7 +3011,9 @@ function renderHeroPreview(locale) {
         learn: "学习",
         improve: "改进",
         terminal: "Agent 执行",
-        next: ["发布官网更新", "检查 AI 引用", "收集用户反馈"]
+        nextBuild: ["编译插件包", "运行66项测试", "发布至应用市场"],
+        nextSell: ["更新网站地图", "验证GEO跳转", "索引规范网址"],
+        nextLearn: ["收集用户反馈", "衡量Pro转换率", "规划下个产品周期"]
       }
     : {
         title: "SoloMap workspace",
@@ -2696,7 +3024,9 @@ function renderHeroPreview(locale) {
         learn: "Learn",
         improve: "Improve",
         terminal: "Agent run",
-        next: ["Ship website update", "Check AI citations", "Collect user feedback"]
+        nextBuild: ["Compile extension", "Verify test suite", "Ship to marketplace"],
+        nextSell: ["Update sitemap", "Verify GEO redirects", "Index canonical URLs"],
+        nextLearn: ["Read user feedback", "Measure conversion rate", "Plan next cycle"]
       };
 
   return `<figure class="product-preview" aria-label="${escapeHtml(labels.title)}">
@@ -2714,27 +3044,49 @@ function renderHeroPreview(locale) {
             <div class="preview-main">
               <strong>Roadmap</strong>
               <div class="roadmap-strip">
-                <div class="roadmap-step active"><span>01</span><b>${escapeHtml(labels.build)}</b></div>
-                <div class="roadmap-step"><span>02</span><b>${escapeHtml(labels.sell)}</b></div>
-                <div class="roadmap-step"><span>03</span><b>${escapeHtml(labels.learn)}</b></div>
-                <div class="roadmap-step"><span>04</span><b>${escapeHtml(labels.improve)}</b></div>
+                <div class="roadmap-step step-build"><span>01</span><b>${escapeHtml(labels.build)}</b></div>
+                <div class="roadmap-step step-sell"><span>02</span><b>${escapeHtml(labels.sell)}</b></div>
+                <div class="roadmap-step step-learn"><span>03</span><b>${escapeHtml(labels.learn)}</b></div>
+                <div class="roadmap-step step-improve"><span>04</span><b>${escapeHtml(labels.improve)}</b></div>
               </div>
               <div class="terminal">
-                <strong>${escapeHtml(labels.terminal)}</strong>
-                <span class="terminal-line"><span class="info">[intent]</span> improve homepage GEO surface</span>
-                <span class="terminal-line"><span class="ok">[action]</span> add native product preview</span>
-                <span class="terminal-line"><span class="ok">[evidence]</span> schema and docs pages verified</span>
-                <span class="terminal-line"><span class="warn">[next]</span> publish and measure citations</span>
-                <span class="terminal-line"><span class="ok">[closed]</span> roadmap step updated</span>
+                <div class="terminal-group phase-1">
+                  <strong>${escapeHtml(labels.terminal)} (Build)</strong>
+                  <div class="terminal-line"><span class="info">[intent]</span> build landing page and features</div>
+                  <div class="terminal-line"><span class="ok">[action]</span> add premium glassmorphism layout</div>
+                  <div class="terminal-line"><span class="ok">[evidence]</span> 66 tests compiled and passing</div>
+                  <div class="terminal-line"><span class="warn">[next]</span> publish package to marketplace</div>
+                </div>
+                <div class="terminal-group phase-2">
+                  <strong>${escapeHtml(labels.terminal)} (Sell)</strong>
+                  <div class="terminal-line"><span class="info">[intent]</span> index pages and track search keywords</div>
+                  <div class="terminal-line"><span class="ok">[action]</span> generate sitemap.xml & format XSLT</div>
+                  <div class="terminal-line"><span class="ok">[evidence]</span> googlebot crawling verified (bypass GEO redirects)</div>
+                  <div class="terminal-line"><span class="warn">[next]</span> publish terms & privacy policies</div>
+                </div>
+                <div class="terminal-group phase-3">
+                  <strong>${escapeHtml(labels.terminal)} (Learn & Improve)</strong>
+                  <div class="terminal-line"><span class="info">[intent]</span> compound solo capabilities</div>
+                  <div class="terminal-line"><span class="ok">[action]</span> upgrade portfolio strategy cockpit</div>
+                  <div class="terminal-line"><span class="ok">[evidence]</span> user converted to Pro Early Access</div>
+                  <div class="terminal-line"><span class="ok">[closed]</span> roadmap step complete</div>
+                </div>
               </div>
-              <div class="next-actions">
-                ${renderListItems(labels.next, "div")}
+              <div class="next-actions-container">
+                <div class="next-actions phase-1">
+                  ${renderListItems(labels.nextBuild, "div")}
+                </div>
+                <div class="next-actions phase-2">
+                  ${renderListItems(labels.nextSell, "div")}
+                </div>
+                <div class="next-actions phase-3">
+                  ${renderListItems(labels.nextLearn, "div")}
+                </div>
               </div>
             </div>
           </div>
         </figure>`;
 }
-
 function buildStructuredData(t, origin, pagePath) {
   const pageUrl = absoluteUrl(pagePath, origin);
   const software = {
@@ -2859,22 +3211,58 @@ function buildHeader(t, locale, currentPath) {
 
 function buildFooter(t) {
   const isZh = t.lang === "zh-Hans";
+  const desc = isZh 
+    ? "给 AI Agent 项目的本地优先路线图与战略驾驶舱。把想法变成路线图，让 Agent 执行，不丢方向。" 
+    : "Local-first roadmap and strategy cockpit for AI-built projects. Turn ideas into roadmaps and let agents execute.";
   return `<footer>
-    <div class="shell footer-row">
-      <div>SoloMap · solomap.app · SZLK</div>
-      <div class="footer-links">
-        <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
-        <a href="${GITHUB_URL}">GitHub</a>
-        <a href="${MARKETPLACE_URL}">VS Code Marketplace</a>
-        <a href="${OPEN_VSX_URL}">Open VSX</a>
-        <a href="${FEEDBACK_URL}">${escapeHtml(t.footer.feedback)}</a>
-        <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
-        <a href="${t.pathPrefix}/sitemap">${isZh ? "网站地图" : "Sitemap"}</a>
+    <div class="shell">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <div class="footer-brand-title">
+            <img src="${LOGO_URL}" width="28" height="28" alt="">
+            <span>SoloMap</span>
+          </div>
+          <div class="footer-brand-desc">${escapeHtml(desc)}</div>
+        </div>
+        <div class="footer-col">
+          <h4>${isZh ? "产品" : "Product"}</h4>
+          <ul>
+            <li><a href="${t.homePath}#product">${escapeHtml(t.nav.product)}</a></li>
+            <li><a href="${t.pathPrefix}/pro">${escapeHtml(t.nav.pro)}</a></li>
+            <li><a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a></li>
+            <li><a href="${t.homePath}#install">${isZh ? "安装插件" : "Install extension"}</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>${isZh ? "资源" : "Resources"}</h4>
+          <ul>
+            <li><a href="${GITHUB_URL}">GitHub</a></li>
+            <li><a href="${MARKETPLACE_URL}">VS Code Marketplace</a></li>
+            <li><a href="${OPEN_VSX_URL}">Open VSX</a></li>
+            <li><a href="${FEEDBACK_URL}">${escapeHtml(t.footer.feedback)}</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <h4>${isZh ? "网站地图与导航" : "Sitemap & Docs"}</h4>
+          <ul>
+            <li><a href="${t.pathPrefix}/sitemap">${isZh ? "网站地图" : "Sitemap"}</a></li>
+            <li><a href="${t.docsPath}/solomap-method">${isZh ? "SoloMap 方法" : "SoloMap Method"}</a></li>
+            <li><a href="${t.docsPath}/portfolio-method">${isZh ? "项目组合方法" : "Portfolio Method"}</a></li>
+            <li><a href="${t.docsPath}/micro-execution-loop">${isZh ? "Agent 执行循环" : "Micro Execution Loop"}</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <div>&copy; 2026 SZLK. solomap.app. All rights reserved.</div>
+        <div class="footer-legal-links">
+          <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
+          <a href="${t.pathPrefix}/privacy-policy">${isZh ? "隐私政策" : "Privacy Policy"}</a>
+          <a href="${t.pathPrefix}/terms-of-service">${isZh ? "用户协议" : "Terms of Service"}</a>
+        </div>
       </div>
     </div>
   </footer>`;
 }
-
 function buildHtmlSitemapPage(locale, origin) {
   const t = content[locale];
   const isZh = locale === "zh";
@@ -2908,7 +3296,9 @@ function buildHtmlSitemapPage(locale, origin) {
     <ul>
       <li><a href="${t.homePath}"><strong>${isZh ? "SoloMap 首页" : "SoloMap Home"}</strong></a></li>
       <li><a href="${t.pathPrefix}/pro"><strong>SoloMap Pro ${isZh ? "订阅页" : "Subscription"}</strong></a></li>
-      <li><a href="${t.privacyPath}"><strong>${isZh ? "本地优先与隐私说明" : "Local-first & Privacy Policy"}</strong></a></li>
+      <li><a href="${t.privacyPath}"><strong>${isZh ? "本地优先说明" : "Local-first Note"}</strong></a></li>
+      <li><a href="${t.pathPrefix}/privacy-policy"><strong>${isZh ? "隐私政策" : "Privacy Policy"}</strong></a></li>
+      <li><a href="${t.pathPrefix}/terms-of-service"><strong>${isZh ? "用户协议" : "Terms of Service"}</strong></a></li>
     </ul>
 
     <h2 style="margin-top: 32px;">${isZh ? "产品指南与文档" : "Product Guides & Documentation"}</h2>
@@ -2922,6 +3312,207 @@ function buildHtmlSitemapPage(locale, origin) {
 </html>`;
 }
 
+function buildPrivacyPolicyPage(locale, origin) {
+  const t = content[locale];
+  const isZh = locale === "zh";
+  const title = isZh ? "SoloMap 隐私政策" : "SoloMap Privacy Policy";
+  
+  const contentHtml = isZh ? `
+    <h1>隐私政策</h1>
+    <p>更新日期：2026年6月6日</p>
+    <p>我们非常重视您的隐私。本隐私政策适用于 SoloMap 插件、官方网站（solomap.app）及相关服务。请在使用我们的产品前仔细阅读以下条款：</p>
+    
+    <h2>1. 核心本地优先（Local-First）数据架构</h2>
+    <p>SoloMap 的核心功能基于“本地优先”架构设计：</p>
+    <ul>
+      <li>您的项目路线图、推进环节、历史 Agent 执行记录（Journal Logs）、意图与判断，全部存储在您本地的 <code>.solopreneur</code> 文件夹中。</li>
+      <li>我们没有云端数据库来同步或备份您的项目数据，我们也绝不会在后台静默收集、扫描或传输您的项目源代码、文件结构或业务机密。</li>
+      <li>数据的完全控制权在您手中，您可以通过清理本地工作区的相应目录，或者卸载插件彻底移除所有数据。</li>
+    </ul>
+
+    <h2>2. 信息收集与合法处理</h2>
+    <p>当您与我们的服务进行交互时，我们会收集并处理以下必要的信息：</p>
+    <ul>
+      <li><strong>账户与订阅激活</strong>：为了支持您使用 SoloMap Pro，我们会使用 OIDC 流程通过 SZLK Passport 安全登录以激活您的授权。我们只拉取您的加密用户 ID 和邮箱地址作为判定订阅状态的唯一凭证，我们不拉取也不存储您的 GitHub 密码或其他账户凭证。</li>
+      <li><strong>支付处理</strong>：所有的付款和订阅账单均由 Stripe 独立且安全地进行托管处理。我们不接触、不收集、不存储您的任何信用卡号、CVV 码或敏感的交易财务数据。</li>
+      <li><strong>自愿提交的反馈</strong>：仅在您主动点击“提交反馈”并选择提交 GitHub Issue 时，会上传您同意披露的必要环境数据（如插件版本号、VS Code 版本号 and 脱敏后的错误日志）。</li>
+    </ul>
+
+    <h2>3. 数据的安全与第三方共享</h2>
+    <p>我们承诺：</p>
+    <ul>
+      <li><strong>绝不出售数据</strong>：我们绝不会向任何第三方广告商或数据代理商出售或披露您的个人信息及使用习惯。</li>
+      <li><strong>服务商合规性</strong>：我们使用的基础设施提供商（如 Cloudflare Workers、Stripe）均符合全球领先的数据保护与安全标准。</li>
+    </ul>
+
+    <h2>4. 适用法案与用户权利</h2>
+    <p>我们致力于保障您的隐私权。根据您所在的司法管辖区，您可能拥有基于《通用数据保护条例》(GDPR)、《加州消费者隐私法》(CCPA) 或中国《个人信息保护法》(PIPL) 的如下权利：</p>
+    <ul>
+      <li><strong>访问权与携带权</strong>：您可以随时查阅我们持有的您的账户 ID 及订阅邮箱。</li>
+      <li><strong>删除权（被遗忘权）</strong>：您可以随时请求注销您的 SZLK Passport 账户并删除与您邮箱关联的所有订阅凭证。</li>
+    </ul>
+
+    <h2>5. 变更与联系方式</h2>
+    <p>我们可能会根据服务升级或法律法规的要求适时更新本隐私政策。如有任何疑问或隐私保障相关的权利主张，请通过 GitHub Issue 或发信至官方支持通道与我们取得联系。</p>
+  ` : `
+    <h1>Privacy Policy</h1>
+    <p>Last updated: June 6, 2026</p>
+    <p>We respect your privacy. This Privacy Policy applies to the SoloMap extension, the official website (solomap.app), and related services. Please read the terms below carefully:</p>
+    
+    <h2>1. Core Local-First Data Architecture</h2>
+    <p>SoloMap is built around a local-first principles. Your data is your own:</p>
+    <ul>
+      <li>Your project roadmap, step state, AI agent execution logs (Journal), intents, and judgments are stored entirely inside the <code>.solopreneur</code> folder within your local project workspace.</li>
+      <li>We do not operate a centralized cloud database to store or sync your roadmaps. We never scan, collect, or transmit your proprietary source code, folder structures, or technical documentation.</li>
+      <li>You retain full ownership and control of your workspace data. You can delete it entirely at any time by deleting the local folder or uninstalling the extension.</li>
+    </ul>
+
+    <h2>2. Information We Collect and Process</h2>
+    <p>We collect only the narrowest set of data necessary to provide and secure our services:</p>
+    <ul>
+      <li><strong>Account &amp; Entitlement Management</strong>: When upgrading to SoloMap Pro, we verify your subscription via OIDC using SZLK Passport. We only retrieve your unique user ID and email to associate and validate your entitlement. We never access your primary passwords.</li>
+      <li><strong>Payment and Billing</strong>: All payment transactions are securely handled by Stripe. We do not access, process, or store your credit card numbers, billing addresses, or financial credentials.</li>
+      <li><strong>Diagnostic Data</strong>: Diagnostic information or usage logs are only transmitted if you explicitly choose to click "Send Feedback" to submit a GitHub issue.</li>
+    </ul>
+
+    <h2>3. Data Sharing &amp; Third-Party Services</h2>
+    <p>We believe in absolute transparency:</p>
+    <ul>
+      <li><strong>No Data Sharing for Marketing</strong>: We do not sell, rent, or trade your personal information or account credentials to any advertisers, data brokers, or marketing firms.</li>
+      <li><strong>Trusted Partners</strong>: Our core web operations run on Cloudflare Workers and Stripe, which adhere to industry-leading security frameworks and privacy laws.</li>
+    </ul>
+
+    <h2>4. GDPR, CCPA and Global Rights Compliance</h2>
+    <p>We honor your data rights under major global frameworks, including GDPR and CCPA:</p>
+    <ul>
+      <li><strong>Right of Erasure</strong>: You have the right to request the permanent deletion of your SZLK Passport account and linked subscription records.</li>
+      <li><strong>Right to Rectify</strong>: You can update your payment email or details directly in the Stripe Billing Portal.</li>
+    </ul>
+
+    <h2>5. Updates and Contact</h2>
+    <p>We may update this Privacy Policy to reflect changes in our software or legal requirements. For inquiries or data right requests, please contact us via our GitHub issues page.</p>
+  `;
+
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead(
+    { ...t, meta: { ...t.meta, title, description: title } },
+    origin,
+    `${t.pathPrefix}/privacy-policy`,
+    locale === "zh" ? "/privacy-policy" : "/zh/privacy-policy"
+  )}
+  ${buildStyles()}
+</head>
+<body>
+  ${buildHeader(t, locale, `${t.pathPrefix}/privacy-policy`)}
+  <main class="privacy-page">
+    <div class="privacy-nav">
+      <a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a>
+    </div>
+    <article class="privacy-article">
+      ${contentHtml}
+    </article>
+  </main>
+  ${buildFooter(t)}
+</body>
+</html>`;
+}
+
+function buildTermsOfServicePage(locale, origin) {
+  const t = content[locale];
+  const isZh = locale === "zh";
+  const title = isZh ? "SoloMap 用户协议" : "SoloMap Terms of Service";
+  
+  const contentHtml = isZh ? `
+    <h1>用户协议</h1>
+    <p>更新日期：2026年6月6日</p>
+    <p>欢迎使用 SoloMap！本用户协议是您与 SoloMap 服务提供商（由 SZLK 提供）之间关于您下载、安装和使用 SoloMap 软件所订立的法律合同。请在使用我们的产品前仔细阅读以下条款：</p>
+    
+    <h2>1. 许可授予与使用范围</h2>
+    <p>我们授予您一项有限的、非独占的、不可转让的、可撤销的软件使用许可：</p>
+    <ul>
+      <li><strong>免费版（Free）</strong>：SoloMap 核心本地路线图功能免费向个人及商业项目开放。</li>
+      <li><strong>专业版（Pro）</strong>：SoloMap Pro 授权属于个人单人订阅。单个 Pro 订阅支持您在最多 5 台您个人拥有的设备（如工作站和笔记本电脑）上激活并运行 Pro 特性（如战略驾驶舱与多项目组合管理）。</li>
+    </ul>
+
+    <h2>2. 第三方 AI 提供商与费用分担（BYO-API）</h2>
+    <p>SoloMap 支持并鼓励您带上自己喜欢的本地 AI 编码 Agent CLI（如 Cursor, Claude Code, Cline 等）。在运行这些 AI 代理工具的过程中，产生的任何第三方 API 提供商（如 OpenAI, Anthropic, DeepSeek 等）的 Token 消耗、API 计费或服务费用，均需由您自行承担。SoloMap 不对此类费用承担任何责任。</p>
+
+    <h2>3. 本地数据与备份义务</h2>
+    <p>由于 SoloMap 的数据默认存放在您的本地计算机上，我们不提供云端路线图同步或历史记录托管服务。<strong>您有责任对自己的项目代码和 <code>.solopreneur</code> 文件夹进行日常备份（如通过 Git 提交或文件同步系统）。</strong> 我们不对任何由于硬盘故障、文件删除、操作系统问题或插件更新引发的数据丢失承担赔偿或找回责任。</p>
+
+    <h2>4. 禁止行为</h2>
+    <p>您不得进行以下行为：</p>
+    <ul>
+      <li>对 SoloMap 进行逆向工程、反编译或尝试提取其专有组件源代码；</li>
+      <li>利用我们的 Passport 登录机制进行未经授权的订阅共享或转售；</li>
+      <li>违反适用的出口管制法律或用于危害国家安全的商业行为。</li>
+    </ul>
+
+    <h2>5. 责任限制与免责声明</h2>
+    <p>在适用法律允许的最大范围内，本软件以“现状（AS-IS）”提供，不带有任何明示或暗示的担保。我们不对因使用或无法使用本软件而导致的任何商业中断、利润损失、机密信息泄露或间接性损害承担赔偿责任。</p>
+
+    <h2>6. 适用法律与争议解决</h2>
+    <p>本协议受适用法及服务提供商所在地司法管辖。若您与我们之间因本协议发生任何争议，双方应首先友好协商解决；协商不成的，应提交至有管辖权的仲裁机构或法院进行审理。</p>
+  ` : `
+    <h1>Terms of Service</h1>
+    <p>Last updated: June 6, 2026</p>
+    <p>Welcome to SoloMap! These Terms of Service constitute a legal agreement between you and SoloMap (provided by SZLK) regarding your download, installation, and use of SoloMap. Please review the terms below:</p>
+    
+    <h2>1. License Grant and Usage Scope</h2>
+    <p>We grant you a limited, non-exclusive, non-transferable, and revocable license to use the software:</p>
+    <ul>
+      <li><strong>SoloMap Free</strong>: The core local-first roadmap and task tracking capabilities are free for both personal and commercial projects.</li>
+      <li><strong>SoloMap Pro</strong>: Pro licenses are single-user subscriptions. A single Pro subscription allows you to authorize up to 5 personal devices owned and operated by you (such as your main workstation and laptops).</li>
+    </ul>
+
+    <h2>2. Third-Party AI API &amp; Tokens (Bring Your Own API Key)</h2>
+    <p>SoloMap is designed to integrate with the local AI agent CLIs you already use (e.g., Cursor, Claude Code, Cline, etc.). Any API tokens, service charges, or billing incurred by executing these agents (via providers like OpenAI, Anthropic, DeepSeek, etc.) are your sole responsibility. SoloMap is not liable for third-party AI service costs.</p>
+
+    <h2>3. Local Data and User Backup Responsibility</h2>
+    <p>Because SoloMap operates locally on your machine, we do not sync or back up your roadmaps to any cloud server. <strong>You are solely responsible for maintaining backups of your codebase and the <code>.solopreneur</code> directory (e.g., via Git version control).</strong> We are not liable for any data loss, corruption, or project downtime resulting from hardware failure, manual deletion, or system updates.</p>
+
+    <h2>4. Prohibited Uses</h2>
+    <p>You agree not to:</p>
+    <ul>
+      <li>Reverse engineer, decompile, or attempt to extract the source code of the proprietary features of the extension.</li>
+      <li>Distribute, resell, or share your Pro subscription or SZLK Passport access codes with others.</li>
+      <li>Use the software in violation of local laws, export controls, or international sanctions.</li>
+    </ul>
+
+    <h2>5. Limitation of Liability and Disclaimers</h2>
+    <p>TO THE MAXIMUM EXTENT PERMITTED BY LAW, SOLOMAP IS PROVIDED "AS IS" WITHOUT ANY WARRANTY OF ANY KIND. WE SHALL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST PROFITS, LOSS OF PROPRIETARY BUSINESS DATA, OR CODE CORRUPTION ARISING OUT OF YOUR USE OF THE SOFTWARE.</p>
+
+    <h2>6. Governing Law and Disputes</h2>
+    <p>These terms shall be governed by and construed in accordance with the laws of the service provider's jurisdiction. Any dispute arising out of this agreement shall be settled through amicable negotiation first, failing which it shall be referred to the courts of competent jurisdiction.</p>
+  `;
+
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead(
+    { ...t, meta: { ...t.meta, title, description: title } },
+    origin,
+    `${t.pathPrefix}/terms-of-service`,
+    locale === "zh" ? "/terms-of-service" : "/zh/terms-of-service"
+  )}
+  ${buildStyles()}
+</head>
+<body>
+  ${buildHeader(t, locale, `${t.pathPrefix}/terms-of-service`)}
+  <main class="privacy-page">
+    <div class="privacy-nav">
+      <a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a>
+    </div>
+    <article class="privacy-article">
+      ${contentHtml}
+    </article>
+  </main>
+  ${buildFooter(t)}
+</body>
+</html>`;
+}
 function alternatePathFor(pathname, locale) {
   if (pathname === "/pro") return "/zh/pro";
   if (pathname === "/zh/pro") return "/pro";
@@ -3227,6 +3818,18 @@ function resolveRoute(pathname) {
   if (pathname === "/zh/privacy-local-first") {
     return { type: "privacy", locale: "zh", status: 200 };
   }
+  if (pathname === "/privacy-policy" || pathname === "/privacy-policy/") {
+    return { type: "privacy-policy", locale: "en", status: 200 };
+  }
+  if (pathname === "/zh/privacy-policy" || pathname === "/zh/privacy-policy/") {
+    return { type: "privacy-policy", locale: "zh", status: 200 };
+  }
+  if (pathname === "/terms-of-service" || pathname === "/terms-of-service/") {
+    return { type: "terms-of-service", locale: "en", status: 200 };
+  }
+  if (pathname === "/zh/terms-of-service" || pathname === "/zh/terms-of-service/") {
+    return { type: "terms-of-service", locale: "zh", status: 200 };
+  }
   return { type: "home", locale: pathname.startsWith("/zh") ? "zh" : "en", status: 404 };
 }
 
@@ -3242,6 +3845,8 @@ function buildSitemap(origin) {
       changefreq: "monthly"
     })),
     { en: "/privacy-local-first", zh: "/zh/privacy-local-first", priority: "0.4", changefreq: "yearly" },
+    { en: "/privacy-policy", zh: "/zh/privacy-policy", priority: "0.4", changefreq: "yearly" },
+    { en: "/terms-of-service", zh: "/zh/terms-of-service", priority: "0.4", changefreq: "yearly" },
     { en: "/sitemap", zh: "/zh/sitemap", priority: "0.5", changefreq: "weekly" }
   ];
   const renderUrl = (loc, pair) => `  <url>
@@ -3538,6 +4143,12 @@ Sitemap: ${origin}/sitemap.xml
     }
     if (route.type === "privacy") {
       return htmlResponse(buildLocalFirstPage(route.locale, origin), route.status, extraHeaders);
+    }
+    if (route.type === "privacy-policy") {
+      return htmlResponse(buildPrivacyPolicyPage(route.locale, origin), route.status, extraHeaders);
+    }
+    if (route.type === "terms-of-service") {
+      return htmlResponse(buildTermsOfServicePage(route.locale, origin), route.status, extraHeaders);
     }
     if (route.type === "docs-index") {
       return htmlResponse(buildDocIndexPage(route.locale, origin), route.status, extraHeaders);
