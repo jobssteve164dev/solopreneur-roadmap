@@ -537,14 +537,18 @@ function getProPlanId(env) {
   return String(env.SOLOMAP_PRO_PLAN_ID || SOLOMAP_PRO_PLAN_ID);
 }
 
-function getPassportResumeUrl(requestUrl, state) {
-  if (state.mode === "device") {
-    return getDeviceAuthorizeUrl(requestUrl, String(state.deviceCode || ""));
-  }
-  const url = new URL("/api/passport/start", requestUrl.origin);
-  url.searchParams.set("product", SOLOMAP_PRODUCT);
-  url.searchParams.set("feature", STRATEGY_PYRAMID_FEATURE);
-  url.searchParams.set("callback", String(state.callback || ""));
+async function getPassportCheckoutSuccessUrl(env, requestUrl, state, userinfo = {}) {
+  const payload = {
+    mode: state.mode,
+    callback: state.callback || "",
+    deviceCode: state.deviceCode || "",
+    email: userinfo.email || state.email || "",
+    userId: userinfo.sub || userinfo.userId || state.userId || "",
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+  };
+  const url = new URL("/api/passport/checkout/success", requestUrl.origin);
+  url.searchParams.set("state", await signState(env, payload));
   return url.toString();
 }
 
@@ -809,10 +813,40 @@ function buildDeviceGrantPage(grant) {
 </html>`;
 }
 
+function buildPassportCheckoutPendingPage(requestUrl) {
+  const retryUrl = escapeHtml(requestUrl.toString());
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="5;url=${retryUrl}">
+  <title>SoloMap Pro 正在确认</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #11100e; color: #f6f0e8; }
+    main { width: min(680px, calc(100vw - 32px)); }
+    h1 { font-size: 30px; margin: 0 0 12px; }
+    p { color: #ded4c8; line-height: 1.6; }
+    a { color: #fde68a; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>正在确认 SoloMap Pro</h1>
+    <p>付款已经返回，订阅状态正在同步。页面会自动刷新；确认完成后会显示授权码或回到插件。</p>
+    <p><a href="${retryUrl}">立即重新检查</a></p>
+  </main>
+</body>
+</html>`;
+}
+
 async function createPassportCheckoutRedirect(request, env, state, userinfo, access) {
   const requestUrl = new URL(request.url);
   const checkoutUrl = env.SOLOMAP_PASSPORT_CHECKOUT_URL || PASSPORT_CHECKOUT_LINK_URL;
-  const successUrl = getPassportResumeUrl(requestUrl, state);
+  const successUrl = await getPassportCheckoutSuccessUrl(env, requestUrl, state, {
+    email: String(access.email || userinfo.email || "").trim(),
+    userId: String(access.userId || userinfo.sub || userinfo.userId || "").trim()
+  });
   const cancelUrl = `${requestUrl.origin}/#pro`;
   const customerEmail = String(access.email || userinfo.email || "").trim();
   const userId = String(access.userId || userinfo.sub || userinfo.userId || "").trim();
@@ -844,6 +878,33 @@ async function createPassportCheckoutRedirect(request, env, state, userinfo, acc
     return htmlResponse(buildPassportUpgradeUnavailablePage(), 502);
   }
   return Response.redirect(String(redirectUrl), 302);
+}
+
+async function handlePassportCheckoutSuccess(request, env) {
+  const url = new URL(request.url);
+  const state = await verifyState(env, String(url.searchParams.get("state") || ""));
+  if (!state || (state.mode !== "device" && !isAllowedVsCodeCallback(state.callback))) {
+    return htmlResponse(buildPassportFallbackPage(""), 400);
+  }
+  const userinfo = {
+    email: String(state.email || ""),
+    sub: String(state.userId || ""),
+    userId: String(state.userId || "")
+  };
+  const access = await checkPassportAccessForUser(env, userinfo);
+  if (!access.allowed) {
+    return htmlResponse(buildPassportCheckoutPendingPage(url), 200);
+  }
+  const grant = await issueSoloMapGrant(env, String(access.email || userinfo.email || "pro@solomap.app"), {
+    userId: String(access.userId || userinfo.sub || ""),
+    entitlements: Array.isArray(access.entitlements) && access.entitlements.length ? access.entitlements : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"]
+  });
+  if (state.mode === "device") {
+    return htmlResponse(buildDeviceGrantPage(grant), 200);
+  }
+  const callbackUrl = new URL(state.callback);
+  callbackUrl.searchParams.set("grant", grant);
+  return Response.redirect(callbackUrl.toString(), 302);
 }
 
 async function buildPassportAuthorizeRedirect(request, env, payload) {
@@ -2425,6 +2486,10 @@ export default {
 
     if (url.pathname === "/api/passport/device/authorize") {
       return handlePassportDeviceAuthorize(request, env);
+    }
+
+    if (url.pathname === "/api/passport/checkout/success") {
+      return handlePassportCheckoutSuccess(request, env);
     }
 
     if (url.pathname === "/api/passport/device/verify") {

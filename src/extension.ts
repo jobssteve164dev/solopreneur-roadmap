@@ -30,8 +30,16 @@ interface SolopreneurSettings {
   reviewerCliPath?: string;
   collaborationReviewMode?: string;
   proEntitlements?: Record<string, boolean>;
+  proAccount?: ProAccountStatus;
   enabledEnhancements?: Record<string, boolean>;
   enhancementStatuses?: SolomapEnhancementStatusSummary[];
+}
+
+interface ProAccountStatus {
+  authenticated: boolean;
+  allowed: boolean;
+  email?: string;
+  expiresAt?: string;
 }
 
 interface SolopreneurProject {
@@ -729,6 +737,14 @@ export async function activate(context: vscode.ExtensionContext) {
   );
   context.subscriptions.push(showStrategyPyramidDisposable);
 
+  const manageProAuthorizationDisposable = vscode.commands.registerCommand(
+    'solopreneur.manageProAuthorization',
+    async (action?: string) => {
+      await handleManageProAuthorization(context, action);
+    }
+  );
+  context.subscriptions.push(manageProAuthorizationDisposable);
+
   context.subscriptions.push(vscode.window.registerUriHandler({
     handleUri: async (uri) => {
       await handlePassportUri(context, uri);
@@ -881,6 +897,9 @@ export async function activate(context: vscode.ExtensionContext) {
       if (ready && activeProjectRoot === projectPath) {
         await stopAgentRun(String(nodeId || ''), Number(conversationId || 0));
       }
+    },
+    async (action) => {
+      await handleManageProAuthorization(context, action);
     }
   );
 
@@ -907,7 +926,11 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     taskPermissionMode: 'auto',
     reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
     collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
-    proEntitlements: readLocalProEntitlements(),
+    proEntitlements: {
+      ...(saved.proEntitlements || {}),
+      ...readLocalProEntitlements()
+    },
+    proAccount: normalizeProAccountStatus(saved.proAccount),
     enabledEnhancements: {}
   };
   return {
@@ -932,6 +955,43 @@ function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, f
   const entitlements = settings?.proEntitlements || {};
   const normalizedFeature = featureKey === 'strategyPyramid' ? 'strategy_pyramid' : featureKey;
   return Boolean(entitlements[normalizedFeature] || entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
+}
+
+function normalizeProAccountStatus(value: unknown): ProAccountStatus {
+  const source = (value && typeof value === 'object' ? value : {}) as Partial<ProAccountStatus>;
+  return {
+    authenticated: Boolean(source.authenticated),
+    allowed: Boolean(source.allowed),
+    email: String(source.email || ''),
+    expiresAt: String(source.expiresAt || '')
+  };
+}
+
+function buildProAccountStatus(result: PassportVerifyResult | PassportGrantCache | null | undefined): ProAccountStatus {
+  const source = (result || {}) as Partial<PassportVerifyResult & PassportGrantCache>;
+  const allowed = Boolean((source as PassportVerifyResult).allowed) || grantContainsFeature({
+    entitlements: Array.isArray(source.entitlements) ? source.entitlements : [],
+    expiresAt: String(source.expiresAt || ''),
+    checkedAt: (source as PassportGrantCache).checkedAt || new Date().toISOString()
+  });
+  return {
+    authenticated: Boolean(source.email || source.userId || allowed),
+    allowed,
+    email: String(source.email || ''),
+    expiresAt: String(source.expiresAt || '')
+  };
+}
+
+async function broadcastSettings(context: vscode.ExtensionContext): Promise<void> {
+  if (sidebarProvider) {
+    sidebarProvider.sendSettings();
+  }
+  if (activePanel) {
+    activePanel.webview.postMessage({
+      command: 'settingsLoaded',
+      settings: getPersistedSettings(context)
+    });
+  }
 }
 
 function getPassportBaseUrl(): string {
@@ -1002,6 +1062,18 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
     checkedAt: new Date().toISOString()
   };
   await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
+  const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  await context.globalState.update(settingsKey, {
+    ...saved,
+    proEntitlements: {
+      ...(saved.proEntitlements || {}),
+      pro: true,
+      solomap_pro: true,
+      [strategyPyramidFeature]: true
+    },
+    proAccount: buildProAccountStatus(result)
+  });
+  await broadcastSettings(context);
 }
 
 async function verifyPassportGrant(grant: string): Promise<PassportVerifyResult> {
@@ -1114,6 +1186,26 @@ async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext
   }
 }
 
+async function pastePassportAuthorizationCode(context: vscode.ExtensionContext): Promise<void> {
+  const code = await vscode.window.showInputBox({
+    title: 'SoloMap Pro',
+    prompt: '粘贴网页上显示的授权码。',
+    placeHolder: '授权码',
+    ignoreFocusOut: true
+  });
+  const normalizedCode = String(code || '').trim();
+  if (!normalizedCode) {
+    return;
+  }
+  const result = await verifyPassportGrant(normalizedCode);
+  if (!result.allowed) {
+    vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
+    return;
+  }
+  await writePassportGrant(context, result, normalizedCode);
+  vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
+}
+
 async function beginPassportAuthorizationFlow(context: vscode.ExtensionContext): Promise<void> {
   const isRemoteEnvironment = Boolean((vscode.env as any).remoteName);
   const callbackLabel = '浏览器回到 VS Code';
@@ -1130,6 +1222,28 @@ async function beginPassportAuthorizationFlow(context: vscode.ExtensionContext):
   }
   if (choice === callbackLabel) {
     await beginPassportAuthorization();
+  }
+}
+
+async function handleManageProAuthorization(context: vscode.ExtensionContext, action?: string): Promise<void> {
+  const normalizedAction = String(action || '').trim();
+  if (normalizedAction === 'login') {
+    await beginPassportAuthorizationFlow(context);
+    return;
+  }
+  if (normalizedAction === 'paste') {
+    await pastePassportAuthorizationCode(context);
+    return;
+  }
+  const loginLabel = '登录 / 升级 Pro';
+  const pasteLabel = '粘贴授权码';
+  const choice = await vscode.window.showInformationMessage('管理 SoloMap Pro 授权。', loginLabel, pasteLabel);
+  if (choice === loginLabel) {
+    await beginPassportAuthorizationFlow(context);
+    return;
+  }
+  if (choice === pasteLabel) {
+    await pastePassportAuthorizationCode(context);
   }
 }
 
@@ -1185,6 +1299,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     taskPermissionMode: 'auto',
     reviewerCliPath: String(settings.reviewerCliPath ?? currentSettings.reviewerCliPath ?? '').trim(),
     collaborationReviewMode: normalizeCollaborationReviewMode(settings.collaborationReviewMode ?? currentSettings.collaborationReviewMode),
+    proEntitlements: currentSettings.proEntitlements || {},
+    proAccount: currentSettings.proAccount,
     enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim())
   };
   await context.globalState.update(settingsKey, nextSettings);
@@ -2699,6 +2815,14 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
               settings: getPersistedSettings(context)
             });
           }
+          break;
+
+        case 'openProAuthorization':
+          await handleManageProAuthorization(context, 'login');
+          break;
+
+        case 'pasteProAuthorizationCode':
+          await handleManageProAuthorization(context, 'paste');
           break;
 
         case 'updateSettings':
@@ -10388,6 +10512,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-account"></span><span id="settings-section-account">SoloMap Pro</span></div>
+      <div class="settings-field">
+        <div class="dependency-panel" id="pro-account-panel"></div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px;">
+          <button class="settings-action-btn save-btn" id="btn-open-pro-authorization"><span class="codicon codicon-lock"></span><span id="text-open-pro-authorization">登录 / 升级 Pro</span></button>
+          <button class="settings-action-btn test-btn" id="btn-paste-pro-code"><span class="codicon codicon-key"></span><span id="text-paste-pro-code">粘贴授权码</span></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-robot"></span><span id="settings-section-agent">Agent Collaboration</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
@@ -10599,6 +10734,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const settingReviewerCliSelect = document.getElementById('setting-reviewer-cli-select');
     const settingReviewerCliPathCustom = document.getElementById('setting-reviewer-clipath-custom');
     const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
+    const proAccountPanel = document.getElementById('pro-account-panel');
+    const btnOpenProAuthorization = document.getElementById('btn-open-pro-authorization');
+    const btnPasteProCode = document.getElementById('btn-paste-pro-code');
     const settingSkillInput = document.getElementById('setting-skill-input');
     const btnInstallSkill = document.getElementById('btn-install-skill');
     const skillInstallBadge = document.getElementById('skill-install-badge');
@@ -10626,6 +10764,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let currentCliPath = 'agy';
     let currentFeedbackType = 'not_working';
     let activeMainView = 'roadmap';
+    let currentSettings = {};
     let currentRoadmapLoading = false;
     const roadmapRevisionId = '__roadmap_revision__';
     const soloConversationId = '__solo__';
@@ -10656,10 +10795,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
         reviewerSame: '跟随主 Agent',
         settingsSectionBasic: '基础',
+        settingsSectionAccount: '账户与 Pro',
         settingsSectionAgent: 'Agent 协作',
         settingsSectionData: '项目数据',
         settingsSectionInstructions: '默认指令',
         settingsSectionAbilities: '能力扩展',
+        proFeatureName: '战略金字塔',
+        proUnlocked: '已解锁',
+        proLocked: '未解锁',
+        proAccountAnonymous: '未登录',
+        proValidUntil: '有效期至',
+        proLogin: '登录 / 升级 Pro',
+        proPasteCode: '粘贴授权码',
+        proAccountHelp: '登录后即可打开 Pro 功能；本地项目数据仍留在你的工作区。',
         reviewHighRisk: '高风险任务',
         reviewAll: '每次任务',
         reviewOff: '关闭',
@@ -10802,10 +10950,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
         reviewerSame: 'Same as main Agent',
         settingsSectionBasic: 'Basics',
+        settingsSectionAccount: 'Account & Pro',
         settingsSectionAgent: 'Agent Collaboration',
         settingsSectionData: 'Project Data',
         settingsSectionInstructions: 'Instructions',
         settingsSectionAbilities: 'Abilities',
+        proFeatureName: 'Strategy Pyramid',
+        proUnlocked: 'Unlocked',
+        proLocked: 'Locked',
+        proAccountAnonymous: 'Not signed in',
+        proValidUntil: 'Valid until',
+        proLogin: 'Sign in / Upgrade Pro',
+        proPasteCode: 'Paste authorization code',
+        proAccountHelp: 'Sign in to open Pro features; local project data stays in your workspace.',
         reviewHighRisk: 'High-risk tasks',
         reviewAll: 'Every task',
         reviewOff: 'Off',
@@ -11012,6 +11169,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('option-reviewer-same', t('reviewerSame'));
       if (settingReviewerCliSelect) setSoloSelectValue(settingReviewerCliSelect, getSoloSelectValue(settingReviewerCliSelect));
       setText('settings-section-basic', t('settingsSectionBasic'));
+      setText('settings-section-account', t('settingsSectionAccount'));
       setText('settings-section-agent', t('settingsSectionAgent'));
       setText('settings-section-data', t('settingsSectionData'));
       setText('settings-section-instructions', t('settingsSectionInstructions'));
@@ -11025,6 +11183,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('impact-files-label', t('impactFiles'));
       setText('impact-progress-label', t('impactProgress'));
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
+      setText('text-open-pro-authorization', t('proLogin'));
+      setText('text-paste-pro-code', t('proPasteCode'));
       setText('label-skill-install', t('skillInstall'));
       if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
       setText('help-skill-install', t('skillInstallHelp'));
@@ -11044,6 +11204,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       renderRoadmap(currentNodes);
       renderSoloPanel(currentNodes);
       renderRoadmapRevisionPanel(currentNodes);
+      renderProAccount(currentSettings);
     }
 
     const currentProjects = { projects: [], selectedProjectPath: '' };
@@ -11159,6 +11320,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     });
     bindSoloSelect(settingCollaborationReviewMode, () => {});
 
+    if (btnOpenProAuthorization) {
+      btnOpenProAuthorization.addEventListener('click', () => {
+        vscode.postMessage({ command: 'openProAuthorization' });
+      });
+    }
+
+    if (btnPasteProCode) {
+      btnPasteProCode.addEventListener('click', () => {
+        vscode.postMessage({ command: 'pasteProAuthorizationCode' });
+      });
+    }
+
     function getCliPresetFromCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
       if (!raw) return 'agy';
@@ -11228,6 +11401,35 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           settingReviewerCliPathCustom.style.display = 'none';
         }
       }
+    }
+
+    function hasStrategyPyramidPro(settings) {
+      const entitlements = (settings && settings.proEntitlements) || {};
+      const account = (settings && settings.proAccount) || {};
+      return Boolean(account.allowed || entitlements.strategy_pyramid || entitlements.strategyPyramid || entitlements.pro || entitlements.solomap_pro);
+    }
+
+    function renderProAccount(settings) {
+      if (!proAccountPanel) return;
+      const account = (settings && settings.proAccount) || {};
+      const unlocked = hasStrategyPyramidPro(settings || {});
+      const email = String(account.email || '').trim();
+      const expiresAt = String(account.expiresAt || '').trim();
+      let expiresText = '';
+      if (expiresAt) {
+        const dateText = new Date(expiresAt).toLocaleDateString(currentLanguage === 'zh' ? 'zh-CN' : 'en-US');
+        expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>';
+      }
+      proAccountPanel.innerHTML =
+        '<div class="dependency-item">'
+        + '<div class="dependency-info">'
+        + '<div class="dependency-name">' + escapeHtml(t('proFeatureName')) + '</div>'
+        + '<div class="dependency-message">' + escapeHtml(email || t('proAccountAnonymous')) + '</div>'
+        + expiresText
+        + '<div class="dependency-message">' + escapeHtml(t('proAccountHelp')) + '</div>'
+        + '</div>'
+        + '<span class="dependency-status ' + (unlocked ? 'ready' : 'missing') + '">' + escapeHtml(unlocked ? t('proUnlocked') : t('proLocked')) + '</span>'
+        + '</div>';
     }
 
     function renderEnhancementStatuses(statuses) {
@@ -11327,11 +11529,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'settingsLoaded':
+          currentSettings = message.settings || {};
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          renderProAccount(currentSettings);
           renderEnhancementStatuses(message.settings.enhancementStatuses || []);
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);

@@ -437,6 +437,11 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /getProjectConversationHistory/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
+  assert.match(html, /id="pro-account-panel"/);
+  assert.match(html, /id="btn-open-pro-authorization"/);
+  assert.match(html, /id="btn-paste-pro-code"/);
+  assert.match(script, /openProAuthorization/);
+  assert.match(script, /pasteProAuthorizationCode/);
   assert.match(html, /data-issue-panel/);
   assert.match(html, /data-toggle-issue-form/);
 
@@ -466,6 +471,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'setting-clipath-custom',
     'setting-global-prompt',
     'setting-global-data-path',
+    'pro-account-panel',
+    'btn-open-pro-authorization',
+    'btn-paste-pro-code',
     'setting-feedback-title',
     'setting-feedback-body',
     'btn-open-feedback',
@@ -501,6 +509,11 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
   assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
+  postedMessages.length = 0;
+  elements['btn-open-pro-authorization'].listeners.click();
+  elements['btn-paste-pro-code'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'openProAuthorization'));
+  assert.ok(postedMessages.some((message) => message.command === 'pasteProAuthorizationCode'));
   elements['btn-check-dependencies'].listeners.click();
   elements['btn-open-agent-install'].listeners.click();
   elements['btn-prepare-agent-automation'].listeners.click();

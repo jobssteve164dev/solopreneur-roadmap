@@ -17,6 +17,7 @@ interface SolopreneurSettings {
   reviewerCliPath?: string;
   collaborationReviewMode?: string;
   proEntitlements?: Record<string, boolean>;
+  proAccount?: ProAccountStatus;
   enabledEnhancements?: Record<string, boolean>;
   enhancementStatuses?: Array<{
     id: string;
@@ -31,6 +32,13 @@ interface SolopreneurSettings {
     message: string;
     updatedAt: string;
   }>;
+}
+
+interface ProAccountStatus {
+  authenticated: boolean;
+  allowed: boolean;
+  email?: string;
+  expiresAt?: string;
 }
 
 interface SolopreneurProject {
@@ -2647,7 +2655,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _setEnhancementEnabled?: (enhancementId: string, enabled: boolean) => Promise<void>,
     private readonly _uninstallEnhancement?: (enhancementId: string) => Promise<void>,
     private readonly _getFeedbackUsageSummary?: () => string,
-    private readonly _stopConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>
+    private readonly _stopConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>,
+    private readonly _manageProAuthorization?: (action?: string) => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -2737,6 +2746,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'showFullRoadmap':
             vscode.commands.executeCommand('solopreneur.showRoadmap');
+            break;
+          case 'openProAuthorization':
+            if (this._manageProAuthorization) {
+              await this._manageProAuthorization('login');
+            } else {
+              await vscode.commands.executeCommand('solopreneur.manageProAuthorization', 'login');
+            }
+            this.sendSettings();
+            break;
+          case 'pasteProAuthorizationCode':
+            if (this._manageProAuthorization) {
+              await this._manageProAuthorization('paste');
+            } else {
+              await vscode.commands.executeCommand('solopreneur.manageProAuthorization', 'paste');
+            }
+            this.sendSettings();
             break;
           case 'getSettings':
             this.sendSettings();
@@ -5312,7 +5337,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
     </div>
-    
+
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-account"></span><span id="settings-section-account">SoloMap Pro</span></div>
+      <div class="settings-field">
+        <div class="dependency-panel" id="pro-account-panel"></div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px;">
+          <button class="settings-action-btn save-btn" id="btn-open-pro-authorization"><span class="codicon codicon-lock"></span><span id="text-open-pro-authorization">登录 / 升级 Pro</span></button>
+          <button class="settings-action-btn test-btn" id="btn-paste-pro-code"><span class="codicon codicon-key"></span><span id="text-paste-pro-code">粘贴授权码</span></button>
+        </div>
+      </div>
+    </div>
+
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-robot"></span><span id="settings-section-agent">Agent Collaboration</span></div>
     <div class="settings-field">
@@ -5566,6 +5602,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const settingReviewerCliSelect = document.getElementById('setting-reviewer-cli-select');
     const settingReviewerCliPathCustom = document.getElementById('setting-reviewer-clipath-custom');
     const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
+    const proAccountPanel = document.getElementById('pro-account-panel');
+    const btnOpenProAuthorization = document.getElementById('btn-open-pro-authorization');
+    const btnPasteProCode = document.getElementById('btn-paste-pro-code');
     const settingSkillInput = document.getElementById('setting-skill-input');
     const btnInstallSkill = document.getElementById('btn-install-skill');
     const skillInstallBadge = document.getElementById('skill-install-badge');
@@ -5667,11 +5706,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
         reviewerSame: '跟随主 Agent',
         settingsSectionBasic: '基础',
+        settingsSectionAccount: '账户与 Pro',
         settingsSectionAgent: 'Agent 协作',
         settingsSectionData: '项目数据',
         settingsSectionInstructions: '默认指令',
         settingsSectionAbilities: '能力扩展',
         settingsSectionReadiness: '本地状态',
+        proFeatureName: '战略金字塔',
+        proUnlocked: '已解锁',
+        proLocked: '未解锁',
+        proAccountAnonymous: '未登录',
+        proValidUntil: '有效期至',
+        proLogin: '登录 / 升级 Pro',
+        proPasteCode: '粘贴授权码',
+        proAccountHelp: '登录后即可打开 Pro 功能；本地项目数据仍留在你的工作区。',
         reviewHighRisk: '高风险任务',
         reviewAll: '每次任务',
         reviewOff: '关闭',
@@ -5873,11 +5921,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
         reviewerSame: 'Same as main Agent',
         settingsSectionBasic: 'Basics',
+        settingsSectionAccount: 'Account & Pro',
         settingsSectionAgent: 'Agent Collaboration',
         settingsSectionData: 'Project Data',
         settingsSectionInstructions: 'Instructions',
         settingsSectionAbilities: 'Abilities',
         settingsSectionReadiness: 'Readiness',
+        proFeatureName: 'Strategy Pyramid',
+        proUnlocked: 'Unlocked',
+        proLocked: 'Locked',
+        proAccountAnonymous: 'Not signed in',
+        proValidUntil: 'Valid until',
+        proLogin: 'Sign in / Upgrade Pro',
+        proPasteCode: 'Paste authorization code',
+        proAccountHelp: 'Sign in to open Pro features; local project data stays in your workspace.',
         reviewHighRisk: 'High-risk tasks',
         reviewAll: 'Every task',
         reviewOff: 'Off',
@@ -6095,6 +6152,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('option-reviewer-same', t('reviewerSame'));
       if (settingReviewerCliSelect) setSoloSelectValue(settingReviewerCliSelect, getSoloSelectValue(settingReviewerCliSelect));
       setText('settings-section-basic', t('settingsSectionBasic'));
+      setText('settings-section-account', t('settingsSectionAccount'));
       setText('settings-section-agent', t('settingsSectionAgent'));
       setText('settings-section-data', t('settingsSectionData'));
       setText('settings-section-instructions', t('settingsSectionInstructions'));
@@ -6109,6 +6167,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('impact-files-label', t('impactFiles'));
       setText('impact-progress-label', t('impactProgress'));
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
+      setText('text-open-pro-authorization', t('proLogin'));
+      setText('text-paste-pro-code', t('proPasteCode'));
       setText('label-skill-install', t('skillInstall'));
       if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
       setText('help-skill-install', t('skillInstallHelp'));
@@ -6139,6 +6199,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+      renderProAccount(currentSettings);
       renderSidebar(currentNodes);
     }
 
@@ -6193,6 +6254,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
     });
     bindSoloSelect(settingCollaborationReviewMode, () => {});
+
+    if (btnOpenProAuthorization) {
+      btnOpenProAuthorization.addEventListener('click', () => {
+        vscode.postMessage({ command: 'openProAuthorization' });
+      });
+    }
+
+    if (btnPasteProCode) {
+      btnPasteProCode.addEventListener('click', () => {
+        vscode.postMessage({ command: 'pasteProAuthorizationCode' });
+      });
+    }
 
     function getCliPresetFromCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
@@ -6263,6 +6336,35 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           settingReviewerCliPathCustom.style.display = 'none';
         }
       }
+    }
+
+    function hasStrategyPyramidPro(settings) {
+      const entitlements = (settings && settings.proEntitlements) || {};
+      const account = (settings && settings.proAccount) || {};
+      return Boolean(account.allowed || entitlements.strategy_pyramid || entitlements.strategyPyramid || entitlements.pro || entitlements.solomap_pro);
+    }
+
+    function renderProAccount(settings) {
+      if (!proAccountPanel) return;
+      const account = (settings && settings.proAccount) || {};
+      const unlocked = hasStrategyPyramidPro(settings || {});
+      const email = String(account.email || '').trim();
+      const expiresAt = String(account.expiresAt || '').trim();
+      let expiresText = '';
+      if (expiresAt) {
+        const dateText = new Date(expiresAt).toLocaleDateString(currentLanguage === 'zh' ? 'zh-CN' : 'en-US');
+        expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>';
+      }
+      proAccountPanel.innerHTML =
+        '<div class="dependency-item">'
+        + '<div class="dependency-info">'
+        + '<div class="dependency-name">' + escapeHtml(t('proFeatureName')) + '</div>'
+        + '<div class="dependency-message">' + escapeHtml(email || t('proAccountAnonymous')) + '</div>'
+        + expiresText
+        + '<div class="dependency-message">' + escapeHtml(t('proAccountHelp')) + '</div>'
+        + '</div>'
+        + '<span class="dependency-status ' + (unlocked ? 'ready' : 'missing') + '">' + escapeHtml(unlocked ? t('proUnlocked') : t('proLocked')) + '</span>'
+        + '</div>';
     }
 
     function renderEnhancementStatuses(statuses) {
@@ -6344,6 +6446,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          renderProAccount(currentSettings);
           renderEnhancementStatuses(message.settings.enhancementStatuses || []);
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);

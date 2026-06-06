@@ -130,6 +130,7 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;
   let checkoutPayload = null;
+  let checkoutCalls = 0;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
@@ -154,6 +155,7 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
       assert.equal(init.method, 'POST');
       assert.equal(init.headers['x-szlk-product'], 'solomap');
       assert.equal(init.headers['x-szlk-secret'], 'test-product-secret');
+      checkoutCalls += 1;
       checkoutPayload = JSON.parse(init.body);
       return new Response(JSON.stringify({
         ok: true,
@@ -189,11 +191,14 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
     assert.equal(checkoutPayload.planId, 'solomap_pro_early_access_yearly');
     assert.equal(checkoutPayload.customerEmail, 'free@solomap.app');
     assert.equal(checkoutPayload.userId, 'passport-user-free');
-    assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/start\?/);
+    assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/checkout\/success\?/);
     const successUrl = new URL(checkoutPayload.successUrl);
-    assert.equal(successUrl.searchParams.get('feature'), 'strategy_pyramid');
-    assert.equal(successUrl.searchParams.get('callback'), callback);
+    assert.ok(successUrl.searchParams.get('state'));
     assert.equal(checkoutPayload.cancelUrl, 'https://solomap.app/#pro');
+    const pending = await worker.default.fetch(new Request(checkoutPayload.successUrl), env);
+    assert.equal(pending.status, 200);
+    assert.match(await pending.text(), /正在确认 SoloMap Pro/);
+    assert.equal(checkoutCalls, 1);
   } finally {
     global.fetch = originalFetch;
   }
@@ -276,6 +281,7 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;
   let checkoutPayload = null;
+  let checkoutCalls = 0;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
@@ -297,6 +303,7 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (url === 'https://passport.szlk.ai/api/v1/billing/checkout-link') {
+      checkoutCalls += 1;
       checkoutPayload = JSON.parse(init.body);
       return new Response(JSON.stringify({
         ok: true,
@@ -330,8 +337,12 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
     assert.equal(response.status, 302);
     assert.equal(response.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_solomap_device');
     assert.equal(checkoutPayload.planId, 'solomap_pro_early_access_yearly');
-    assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/device\/authorize\?device=/);
-    assert.equal(new URL(checkoutPayload.successUrl).searchParams.get('device'), startBody.deviceCode);
+    assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/checkout\/success\?/);
+    assert.ok(new URL(checkoutPayload.successUrl).searchParams.get('state'));
+    const pending = await worker.default.fetch(new Request(checkoutPayload.successUrl), env);
+    assert.equal(pending.status, 200);
+    assert.match(await pending.text(), /正在确认 SoloMap Pro/);
+    assert.equal(checkoutCalls, 1);
   } finally {
     global.fetch = originalFetch;
   }
