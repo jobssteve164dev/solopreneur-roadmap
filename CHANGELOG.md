@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.171 - 2026-06-06
+
+### Changed
+- Optimize website SEO, GEO language redirection, sitemap regional links, interactive FAQ design, and Pro page marketing flow (c1a3728)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.170 - 2026-06-06
 
 ### Changed
