@@ -36,7 +36,10 @@ function loadCompiledModule(relativePath, exportPatch) {
     warningMessages: [],
     openedExternal: [],
     webviewPanels: [],
-    nextInformationChoice: undefined
+    uriHandlers: [],
+    secrets: new Map(),
+    nextInformationChoice: undefined,
+    fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) })
   };
   const context = {
     exports,
@@ -45,6 +48,7 @@ function loadCompiledModule(relativePath, exportPatch) {
       if (id === 'vscode') {
         return {
           Uri: {
+            parse: createUri,
             file: createUri,
             joinPath(base, ...segments) {
               return createUri(path.join(base.fsPath || base.path || String(base), ...segments));
@@ -67,6 +71,9 @@ function loadCompiledModule(relativePath, exportPatch) {
                 title,
                 webview: {
                   html: '',
+                  asWebviewUri(uri) {
+                    return String(uri && (uri.fsPath || uri.path || uri));
+                  },
                   onDidReceiveMessage() {}
                 },
                 reveal() {},
@@ -74,6 +81,10 @@ function loadCompiledModule(relativePath, exportPatch) {
               };
               vscodeTestState.webviewPanels.push(panel);
               return panel;
+            },
+            registerUriHandler(handler) {
+              vscodeTestState.uriHandlers.push(handler);
+              return { dispose() {} };
             },
             createTerminal() {
               return {
@@ -94,11 +105,13 @@ function loadCompiledModule(relativePath, exportPatch) {
             }
           },
           env: {
+            uriScheme: 'vscode',
             openExternal(uri) {
               vscodeTestState.openedExternal.push(String(uri && (uri.fsPath || uri.path || uri)));
               return Promise.resolve(true);
             }
           },
+          ViewColumn: { One: 1 },
           ThemeIcon: class ThemeIcon {},
           ThemeColor: class ThemeColor {}
         };
@@ -116,6 +129,7 @@ function loadCompiledModule(relativePath, exportPatch) {
     URL,
     URLSearchParams,
     Buffer,
+    fetch: (...args) => vscodeTestState.fetchImpl(...args),
     __dirname: path.dirname(filename),
     __filename: filename
   };
@@ -1249,12 +1263,24 @@ test('strategy pyramid webview renders only unlocked project actions', () => {
 test('strategy pyramid command blocks free users with a Pro upgrade action', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__handleOpenStrategyPyramid = handleOpenStrategyPyramid;'
+    [
+      'module.exports.__handleOpenStrategyPyramid = handleOpenStrategyPyramid;',
+      'module.exports.__buildPassportStartUrl = buildPassportStartUrl;'
+    ].join('\n')
   );
+  extensionModule.__vscodeTestState.nextInformationChoice = '升级 Pro';
   const context = {
     extensionUri: createUri(projectRoot),
     extensionPath: projectRoot,
     subscriptions: [],
+    secrets: {
+      get() {
+        return Promise.resolve(undefined);
+      },
+      store() {
+        return Promise.resolve();
+      }
+    },
     globalState: {
       get() {
         return {};
@@ -1271,6 +1297,69 @@ test('strategy pyramid command blocks free users with a Pro upgrade action', asy
   assert.equal(extensionModule.__vscodeTestState.informationMessages.length, 1);
   assert.match(extensionModule.__vscodeTestState.informationMessages[0].message, /战略金字塔是 Pro 功能/);
   assert.deepEqual(extensionModule.__vscodeTestState.informationMessages[0].items, ['升级 Pro']);
+  assert.equal(extensionModule.__vscodeTestState.openedExternal.length, 1);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /https:\/\/solomap\.app\/api\/passport\/start/);
+  assert.match(extensionModule.__buildPassportStartUrl('vscode://SZLK.solopreneur-roadmap/passport/callback'), /callback=vscode%3A%2F%2FSZLK\.solopreneur-roadmap%2Fpassport%2Fcallback/);
+});
+
+test('passport callback verifies and stores a user grant before unlocking Pro', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__handlePassportUri = handlePassportUri;'
+  );
+  extensionModule.__vscodeTestState.fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.product, 'solomap');
+    assert.equal(body.feature, 'strategy_pyramid');
+    assert.equal(body.grant, 'signed-grant');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        allowed: true,
+        email: 'pro@solomap.app',
+        userId: 'passport:user',
+        entitlements: ['strategy_pyramid'],
+        expiresAt: '2099-01-01T00:00:00.000Z'
+      })
+    };
+  };
+  const storedSecrets = new Map();
+  const context = {
+    extensionUri: createUri(projectRoot),
+    extensionPath: projectRoot,
+    subscriptions: [],
+    secrets: {
+      get(key) {
+        return Promise.resolve(storedSecrets.get(key));
+      },
+      store(key, value) {
+        storedSecrets.set(key, value);
+        return Promise.resolve();
+      }
+    },
+    globalState: {
+      get() {
+        return [];
+      },
+      update() {
+        return Promise.resolve();
+      }
+    }
+  };
+
+  await extensionModule.__handlePassportUri(context, {
+    authority: 'SZLK.solopreneur-roadmap',
+    path: '/passport/callback',
+    query: 'grant=signed-grant',
+    toString() {
+      return 'vscode://SZLK.solopreneur-roadmap/passport/callback?grant=signed-grant';
+    }
+  });
+
+  assert.equal(extensionModule.__vscodeTestState.informationMessages.length, 1);
+  assert.match(extensionModule.__vscodeTestState.informationMessages[0].message, /SoloMap Pro 已解锁/);
+  assert.ok([...storedSecrets.values()].some((value) => String(value).includes('signed-grant')));
 });
 
 test('global engineering store writes git-friendly portfolio files', () => {

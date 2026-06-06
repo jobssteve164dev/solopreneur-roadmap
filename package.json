@@ -41,7 +41,8 @@
   "activationEvents": [
     "onView:solopreneur.sidebar",
     "onCommand:solopreneur.showRoadmap",
-    "onCommand:solopreneur.showStrategyPyramid"
+    "onCommand:solopreneur.showStrategyPyramid",
+    "onUri"
   ],
   "main": "./out/extension.js",
   "contributes": {

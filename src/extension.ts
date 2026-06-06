@@ -118,6 +118,24 @@ interface StrategyPyramidSnapshot {
 
 type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
 
+interface PassportGrantCache {
+  grant: string;
+  email: string;
+  userId: string;
+  entitlements: string[];
+  expiresAt: string;
+  checkedAt: string;
+}
+
+interface PassportVerifyResult {
+  allowed: boolean;
+  reason?: string;
+  email?: string;
+  userId?: string;
+  entitlements?: string[];
+  expiresAt?: string;
+}
+
 interface AgentStepSession {
   agentCli: string;
   provider: string;
@@ -669,6 +687,10 @@ const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
+const passportGrantSecretKey = 'solopreneur.passportGrant';
+const passportProduct = 'solomap';
+const strategyPyramidFeature = 'strategy_pyramid';
+const passportGrantOfflineGraceMs = 14 * 24 * 60 * 60 * 1000;
 const projectRegistryFileName = 'projects.json';
 const usageStatsFileName = 'solomap-usage.json';
 const roadmapRevisionId = '__roadmap_revision__';
@@ -698,6 +720,12 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(showStrategyPyramidDisposable);
+
+  context.subscriptions.push(vscode.window.registerUriHandler({
+    handleUri: async (uri) => {
+      await handlePassportUri(context, uri);
+    }
+  }));
 
   // Register settings saved broadcast command to keep Sidebar and Webview synced
   const settingsSavedDisposable = vscode.commands.registerCommand(
@@ -896,6 +924,141 @@ function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, f
   const entitlements = settings?.proEntitlements || {};
   const normalizedFeature = featureKey === 'strategyPyramid' ? 'strategy_pyramid' : featureKey;
   return Boolean(entitlements[normalizedFeature] || entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
+}
+
+function getPassportBaseUrl(): string {
+  return String(process.env.SOLOMAP_PASSPORT_BASE_URL || 'https://solomap.app').replace(/\/+$/, '');
+}
+
+function buildPassportCallbackUri(): string {
+  const scheme = vscode.env.uriScheme || 'vscode';
+  return `${scheme}://SZLK.solopreneur-roadmap/passport/callback`;
+}
+
+function buildPassportStartUrl(callbackUri = buildPassportCallbackUri()): string {
+  const url = new URL('/api/passport/start', getPassportBaseUrl());
+  url.searchParams.set('product', passportProduct);
+  url.searchParams.set('feature', strategyPyramidFeature);
+  url.searchParams.set('callback', callbackUri);
+  return url.toString();
+}
+
+function buildPassportVerifyUrl(): string {
+  return new URL('/api/passport/verify', getPassportBaseUrl()).toString();
+}
+
+function grantContainsFeature(grant: Pick<PassportGrantCache, 'entitlements' | 'expiresAt' | 'checkedAt'>): boolean {
+  const entitlements = new Set((grant.entitlements || []).map((item) => String(item || '').trim()));
+  const expiresAtMs = Date.parse(grant.expiresAt || '');
+  const checkedAtMs = Date.parse(grant.checkedAt || '');
+  if (!entitlements.has(strategyPyramidFeature) && !entitlements.has('solomap_pro') && !entitlements.has('pro')) {
+    return false;
+  }
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+    return false;
+  }
+  if (!Number.isFinite(checkedAtMs) || Date.now() - checkedAtMs > passportGrantOfflineGraceMs) {
+    return false;
+  }
+  return true;
+}
+
+async function readPassportGrant(context: vscode.ExtensionContext): Promise<PassportGrantCache | null> {
+  try {
+    const raw = await context.secrets.get(passportGrantSecretKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PassportGrantCache;
+    if (!parsed || !parsed.grant) return null;
+    return parsed;
+  } catch (error) {
+    console.warn('Failed to read SoloMap Pro grant:', error);
+    return null;
+  }
+}
+
+async function writePassportGrant(context: vscode.ExtensionContext, result: PassportVerifyResult, grant: string): Promise<void> {
+  const payload: PassportGrantCache = {
+    grant,
+    email: String(result.email || ''),
+    userId: String(result.userId || ''),
+    entitlements: Array.isArray(result.entitlements) ? result.entitlements.map((item) => String(item || '')).filter(Boolean) : [],
+    expiresAt: String(result.expiresAt || new Date(Date.now() + passportGrantOfflineGraceMs).toISOString()),
+    checkedAt: new Date().toISOString()
+  };
+  await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
+}
+
+async function verifyPassportGrant(grant: string): Promise<PassportVerifyResult> {
+  if (!grant) {
+    return { allowed: false, reason: 'missing_grant' };
+  }
+  try {
+    const response = await fetch(buildPassportVerifyUrl(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        product: passportProduct,
+        feature: strategyPyramidFeature,
+        grant
+      })
+    });
+    if (!response.ok) {
+      return { allowed: false, reason: `verify_http_${response.status}` };
+    }
+    const body = await response.json() as PassportVerifyResult;
+    return {
+      allowed: Boolean(body.allowed),
+      reason: String(body.reason || ''),
+      email: String(body.email || ''),
+      userId: String(body.userId || ''),
+      entitlements: Array.isArray(body.entitlements) ? body.entitlements.map((item) => String(item || '')).filter(Boolean) : [],
+      expiresAt: String(body.expiresAt || '')
+    };
+  } catch (error) {
+    console.warn('Failed to verify SoloMap Pro grant:', error);
+    return { allowed: false, reason: 'verify_failed' };
+  }
+}
+
+async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
+  if (hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
+    return true;
+  }
+  const cached = await readPassportGrant(context);
+  if (!cached) {
+    return false;
+  }
+  const verified = await verifyPassportGrant(cached.grant);
+  if (verified.allowed) {
+    await writePassportGrant(context, verified, cached.grant);
+    return true;
+  }
+  return grantContainsFeature(cached);
+}
+
+async function beginPassportAuthorization(): Promise<void> {
+  await vscode.env.openExternal(vscode.Uri.parse(buildPassportStartUrl()));
+}
+
+async function handlePassportUri(context: vscode.ExtensionContext, uri: vscode.Uri): Promise<void> {
+  const pathValue = `${uri.authority || ''}${uri.path || ''}`;
+  if (!pathValue.includes('passport/callback')) {
+    return;
+  }
+  const params = new URLSearchParams(uri.query || '');
+  const grant = String(params.get('grant') || '').trim();
+  if (!grant) {
+    vscode.window.showWarningMessage('没有收到 SoloMap Pro 授权结果。');
+    return;
+  }
+  const result = await verifyPassportGrant(grant);
+  if (!result.allowed) {
+    vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
+    return;
+  }
+  await writePassportGrant(context, result, grant);
+  vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
+  await openStrategyPyramidPanel(context);
 }
 
 function getSettingsEnhancementWorkspaceRoot(): string {
@@ -2582,13 +2745,13 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 }
 
 async function handleOpenStrategyPyramid(context: vscode.ExtensionContext): Promise<void> {
-  if (!hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
+  if (!await hasStrategyPyramidAccess(context)) {
     const choice = await vscode.window.showInformationMessage(
       '战略金字塔是 Pro 功能。',
       '升级 Pro'
     );
     if (choice === '升级 Pro') {
-      vscode.env.openExternal(vscode.Uri.parse('https://solomap.app/pro'));
+      await beginPassportAuthorization();
     }
     return;
   }

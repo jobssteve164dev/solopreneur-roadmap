@@ -5,6 +5,12 @@ const GITHUB_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap";
 const FEEDBACK_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml";
 const SCREENSHOT_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/docs/assets/solomap_red_terminal.png";
 const LOGO_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo.svg";
+const SOLOMAP_PRODUCT = "solomap";
+const STRATEGY_PYRAMID_FEATURE = "strategy_pyramid";
+const VSCODE_CALLBACK_PREFIXES = [
+  "vscode://SZLK.solopreneur-roadmap/passport/callback",
+  "vscode-insiders://SZLK.solopreneur-roadmap/passport/callback"
+];
 
 const securityHeaders = {
   "content-security-policy": [
@@ -21,6 +27,14 @@ const securityHeaders = {
   "referrer-policy": "strict-origin-when-cross-origin",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY"
+};
+
+const apiHeaders = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "no-store",
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-allow-headers": "content-type, authorization"
 };
 
 const content = {
@@ -442,6 +456,212 @@ function textResponse(body, contentType = "text/plain; charset=utf-8") {
       "cache-control": "public, max-age=300"
     }
   });
+}
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: apiHeaders
+  });
+}
+
+function base64UrlEncode(value) {
+  const bytes = value instanceof Uint8Array ? value : new TextEncoder().encode(String(value));
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value) {
+  const padded = String(value || "").replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(String(value || "").length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function hmacSha256(secret, value) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
+}
+
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    result |= a[index] ^ b[index];
+  }
+  return result === 0;
+}
+
+function isAllowedVsCodeCallback(callback) {
+  return VSCODE_CALLBACK_PREFIXES.some((prefix) => String(callback || "").startsWith(prefix));
+}
+
+async function issueSoloMapGrant(env, email = "pro-test@solomap.app") {
+  if (!env.SOLOMAP_PASSPORT_PRODUCT_SECRET) {
+    throw new Error("missing_product_secret");
+  }
+  const payload = {
+    product: SOLOMAP_PRODUCT,
+    feature: STRATEGY_PYRAMID_FEATURE,
+    email,
+    userId: `passport:${email}`,
+    entitlements: [STRATEGY_PYRAMID_FEATURE, "solomap_pro"],
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
+  };
+  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
+  const signature = await hmacSha256(env.SOLOMAP_PASSPORT_PRODUCT_SECRET, encodedPayload);
+  return `${encodedPayload}.${base64UrlEncode(signature)}`;
+}
+
+async function verifySignedGrant(env, grant) {
+  if (!env.SOLOMAP_PASSPORT_PRODUCT_SECRET) {
+    return { allowed: false, reason: "missing_product_secret" };
+  }
+  const parts = String(grant || "").split(".");
+  if (parts.length !== 2) {
+    return { allowed: false, reason: "invalid_grant" };
+  }
+  const expected = await hmacSha256(env.SOLOMAP_PASSPORT_PRODUCT_SECRET, parts[0]);
+  const actual = base64UrlDecode(parts[1]);
+  if (!timingSafeEqual(expected, actual)) {
+    return { allowed: false, reason: "invalid_signature" };
+  }
+  let payload;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[0])));
+  } catch (error) {
+    return { allowed: false, reason: "invalid_payload" };
+  }
+  const entitlements = Array.isArray(payload.entitlements) ? payload.entitlements.map((item) => String(item || "")).filter(Boolean) : [];
+  const expiresAtMs = Date.parse(payload.expiresAt || "");
+  const allowed = payload.product === SOLOMAP_PRODUCT &&
+    entitlements.includes(STRATEGY_PYRAMID_FEATURE) &&
+    Number.isFinite(expiresAtMs) &&
+    expiresAtMs > Date.now();
+  return {
+    allowed,
+    reason: allowed ? "allowed" : "not_entitled",
+    email: String(payload.email || ""),
+    userId: String(payload.userId || ""),
+    entitlements,
+    expiresAt: String(payload.expiresAt || "")
+  };
+}
+
+async function verifyGrantWithPassport(env, grant) {
+  if (!env.SOLOMAP_PASSPORT_VERIFY_URL) {
+    return null;
+  }
+  const response = await fetch(env.SOLOMAP_PASSPORT_VERIFY_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${grant}`,
+      "x-solomap-product": SOLOMAP_PRODUCT,
+      "x-solomap-product-secret": env.SOLOMAP_PASSPORT_PRODUCT_SECRET || ""
+    },
+    body: JSON.stringify({
+      product: SOLOMAP_PRODUCT,
+      feature: STRATEGY_PYRAMID_FEATURE
+    })
+  });
+  if (!response.ok) {
+    return { allowed: false, reason: `passport_http_${response.status}` };
+  }
+  const body = await response.json();
+  return {
+    allowed: Boolean(body.allowed),
+    reason: String(body.reason || ""),
+    email: String(body.email || ""),
+    userId: String(body.userId || body.user_id || ""),
+    entitlements: Array.isArray(body.entitlements) ? body.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
+    expiresAt: String(body.expiresAt || body.expires_at || "")
+  };
+}
+
+function buildPassportFallbackPage(callback) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoloMap Pro</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; }
+    main { width: min(680px, calc(100vw - 32px)); }
+    h1 { font-size: 32px; margin: 0 0 12px; }
+    p { color: #cbd5e1; line-height: 1.6; }
+    a { color: #bfdbfe; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SoloMap Pro 授权入口</h1>
+    <p>这里会连接 Passport 完成登录、订阅和授权验证。授权只用于解锁 Pro 功能，不上传你的项目路线图、Agent 记录或本地经验库。</p>
+    ${callback ? `<p>完成后会回到 SoloMap 插件。</p>` : `<p>请从 SoloMap 插件里的“升级 Pro”入口打开授权。</p>`}
+    <p><a href="/">返回 SoloMap</a></p>
+  </main>
+</body>
+</html>`;
+}
+
+async function handlePassportStart(request, env) {
+  const url = new URL(request.url);
+  const callback = String(url.searchParams.get("callback") || "");
+  if (callback && !isAllowedVsCodeCallback(callback)) {
+    return jsonResponse({ ok: false, reason: "invalid_callback" }, 400);
+  }
+  if (env.SOLOMAP_PASSPORT_AUTH_URL) {
+    const authUrl = new URL(env.SOLOMAP_PASSPORT_AUTH_URL);
+    authUrl.searchParams.set("product", SOLOMAP_PRODUCT);
+    authUrl.searchParams.set("feature", STRATEGY_PYRAMID_FEATURE);
+    if (callback) authUrl.searchParams.set("callback", callback);
+    return Response.redirect(authUrl.toString(), 302);
+  }
+  if (callback && env.SOLOMAP_PASSPORT_DEV_GRANTS === "1") {
+    const grant = await issueSoloMapGrant(env, String(url.searchParams.get("email") || "pro-test@solomap.app"));
+    const callbackUrl = new URL(callback);
+    callbackUrl.searchParams.set("grant", grant);
+    return Response.redirect(callbackUrl.toString(), 302);
+  }
+  return htmlResponse(buildPassportFallbackPage(callback), 200);
+}
+
+async function handlePassportVerify(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: apiHeaders });
+  }
+  if (request.method !== "POST") {
+    return jsonResponse({ allowed: false, reason: "method_not_allowed" }, 405);
+  }
+  let payload = {};
+  try {
+    payload = await request.json();
+  } catch (error) {
+    return jsonResponse({ allowed: false, reason: "invalid_json" }, 400);
+  }
+  const grant = String(payload.grant || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "");
+  if (!grant) {
+    return jsonResponse({ allowed: false, reason: "missing_grant" }, 400);
+  }
+  const passportResult = await verifyGrantWithPassport(env, grant);
+  if (passportResult) {
+    return jsonResponse(passportResult);
+  }
+  return jsonResponse(await verifySignedGrant(env, grant));
 }
 
 function escapeHtml(value) {
@@ -1558,7 +1778,7 @@ function buildPage(locale, origin) {
           <strong>${escapeHtml(t.pro.price)}</strong>
           <p>${escapeHtml(t.pro.copy)}</p>
           <div class="cta-row">
-            <a class="button primary" href="${FEEDBACK_URL}">${escapeHtml(t.pro.cta)}</a>
+            <a class="button primary" href="/api/passport/start">${escapeHtml(t.pro.cta)}</a>
           </div>
         </aside>
       </div>
@@ -1845,6 +2065,14 @@ export default {
 
     if (url.pathname === "/health") {
       return textResponse("ok");
+    }
+
+    if (url.pathname === "/api/passport/start") {
+      return handlePassportStart(request, env);
+    }
+
+    if (url.pathname === "/api/passport/verify") {
+      return handlePassportVerify(request, env);
     }
 
     if (url.pathname === "/robots.txt") {
