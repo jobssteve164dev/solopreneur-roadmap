@@ -3476,6 +3476,9 @@ function getStrategyPyramidWebviewHtml(
   const layers = snapshot.layers && snapshot.layers.length ? snapshot.layers : [];
   const moves = snapshot.moves && snapshot.moves.length ? snapshot.moves : [];
   const abilities = snapshot.abilities && snapshot.abilities.length ? snapshot.abilities : [];
+  const hasStrategyLayerHealth = (items: StrategyPyramidLayerSummary[], key: string) => (
+    items.some((item) => item.key === key && item.health === 'strong')
+  );
   const projectRoleData = topProjects.map((project) => ({
     name: project.name,
     role: project.role,
@@ -3486,16 +3489,78 @@ function getStrategyPyramidWebviewHtml(
     abilities: project.abilities && project.abilities.length ? project.abilities : ['暂未识别可复用能力']
   }));
   const projectRoleJson = JSON.stringify(projectRoleData).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
-  const layerRows = layers.map((layer) => `
-    <article class="layer-card ${strategyEscapeHtml(layer.health)}">
-      <div class="layer-top">
-        <div class="layer-title">${strategyEscapeHtml(layer.title)}</div>
-        <span>${layer.health === 'strong' ? '健康' : layer.health === 'watch' ? '观察' : '风险'}</span>
-      </div>
-      <p>${strategyEscapeHtml(layer.signal)}</p>
-      <strong>${strategyEscapeHtml(layer.action)}</strong>
-    </article>
-  `).join('');
+  const layerDetails: Record<string, { focus: string; metric: string; next: string }> = {
+    'freedom-brand': {
+      focus: '判断核心产品是否正在沉淀选择权、信誉和可对外表达的专业位置。',
+      metric: hasStrategyLayerHealth(layers, 'freedom-brand') ? '核心产品信号已出现' : '核心产品信号不足',
+      next: '把用户反馈、公开表达和产品改进集中到最能代表长期方向的项目。'
+    },
+    'revenue-system': {
+      focus: '判断收入动作是否能从一次性交付走向订阅、数字资产或可重复销售。',
+      metric: `${snapshot.sellCount} 个收入或市场动作`,
+      next: '为核心产品补一条明确的付费、升级或转化路径。'
+    },
+    'market-trust': {
+      focus: '判断用户发现、反馈和市场信誉是否足以支撑下一轮取舍。',
+      metric: `${snapshot.learnCount} 个学习或反馈信号`,
+      next: '把反馈沉淀成取舍，不把新需求直接变成新功能队列。'
+    },
+    'ability-compounding': {
+      focus: '判断技术、交付和运营能力是否跨项目复用，而不是每个项目重新消耗。',
+      metric: abilities.length ? `${abilities.length} 项可复用能力` : '可复用能力仍待识别',
+      next: '把重复出现的能力沉淀成模板、流程、内容资产或产品卖点。'
+    },
+    'reality-inventory': {
+      focus: '判断当前项目库存、停滞点和投入机会是否真实，而不是被项目数量稀释。',
+      metric: `${snapshot.totalProjects} 个项目进入组合`,
+      next: '冻结低复利库存，把注意力放回最接近验证和收入的路径。'
+    }
+  };
+  const layerRows = layers.map((layer, index) => {
+    const detail = layerDetails[layer.key] || { focus: layer.signal, metric: layer.health, next: layer.action };
+    const supportingProjects = topProjects
+      .filter((project) => {
+        if (layer.key === 'revenue-system') return project.nodes.some((node) => classifyStrategyLoop(node) === 'sell');
+        if (layer.key === 'market-trust') return project.nodes.some((node) => classifyStrategyLoop(node) === 'learn');
+        if (layer.key === 'ability-compounding') return project.abilities.length > 0;
+        if (layer.key === 'freedom-brand') return project.role === '核心产品' || project.type === 'core_product';
+        return project.totalNodes > 0;
+      })
+      .slice(0, 3)
+      .map((project) => project.name);
+    return `
+      <article class="layer-card ${strategyEscapeHtml(layer.health)}">
+        <div class="layer-index">${index + 1}</div>
+        <div class="layer-main">
+          <div class="layer-top">
+            <div>
+              <div class="layer-title">${strategyEscapeHtml(layer.title)}</div>
+              <p>${strategyEscapeHtml(detail.focus)}</p>
+            </div>
+            <span>${layer.health === 'strong' ? '健康' : layer.health === 'watch' ? '观察' : '风险'}</span>
+          </div>
+          <div class="layer-analysis-grid">
+            <div>
+              <small>当前信号</small>
+              <strong>${strategyEscapeHtml(layer.signal)}</strong>
+            </div>
+            <div>
+              <small>判断指标</small>
+              <strong>${strategyEscapeHtml(detail.metric)}</strong>
+            </div>
+            <div>
+              <small>下一步</small>
+              <strong>${strategyEscapeHtml(layer.action || detail.next)}</strong>
+            </div>
+          </div>
+          <div class="layer-foot">
+            <span>${strategyEscapeHtml(supportingProjects.length ? supportingProjects.join(' / ') : '等待项目形成更清晰信号')}</span>
+            <span>${strategyEscapeHtml(detail.next)}</span>
+          </div>
+        </div>
+      </article>
+    `;
+  }).join('');
   const projectRows = topProjects.map((project, index) => `
     <article class="project-row">
       <button type="button" class="project-select" data-project-index="${index}">
@@ -3588,40 +3653,49 @@ function getStrategyPyramidWebviewHtml(
   <title>战略金字塔</title>
   <style>
     :root {
-      color-scheme: light dark;
-      --bg: var(--vscode-editor-background);
-      --fg: var(--vscode-editor-foreground);
-      --muted: var(--vscode-descriptionForeground);
-      --panel: var(--vscode-sideBar-background);
-      --border: var(--vscode-panel-border);
-      --accent: var(--vscode-button-background);
-      --accent-fg: var(--vscode-button-foreground);
-      --success: var(--vscode-testing-iconPassed, #2ea043);
-      --warn: var(--vscode-editorWarning-foreground, #d29922);
-      --danger: var(--vscode-testing-iconFailed, #f85149);
+      color-scheme: dark;
+      --bg: #0a0c16;
+      --fg: #f8fafc;
+      --muted: #94a3b8;
+      --panel: rgba(255, 255, 255, 0.055);
+      --panel-strong: rgba(15, 23, 42, 0.82);
+      --border: rgba(255, 255, 255, 0.11);
+      --accent: #00e5ff;
+      --accent-2: #7c4dff;
+      --success: #00e676;
+      --warn: #facc15;
+      --danger: #ff1744;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      background: var(--bg);
+      background: radial-gradient(circle at 50% 0%, rgba(0, 229, 255, 0.12), transparent 34%), radial-gradient(circle at 18% 16%, rgba(124, 77, 255, 0.14), transparent 28%), var(--bg);
       color: var(--fg);
-      font-family: var(--vscode-font-family);
+      font-family: var(--vscode-font-family), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    .shell { min-height: 100vh; padding: 28px; }
+    .shell { min-height: 100vh; padding: clamp(18px, 4vw, 40px); }
     header {
       display: flex;
       align-items: flex-end;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 22px;
+      margin-bottom: 18px;
     }
-    h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: 0; }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: 0;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
     .sub { margin-top: 8px; color: var(--muted); font-size: 13px; }
     button {
       border: 1px solid var(--border);
       border-radius: 6px;
-      background: var(--accent);
-      color: var(--accent-fg);
+      background: linear-gradient(135deg, var(--accent), #00b0ff);
+      color: #000;
       padding: 8px 12px;
       cursor: pointer;
       display: inline-flex;
@@ -3634,8 +3708,10 @@ function getStrategyPyramidWebviewHtml(
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 18px;
-      background: var(--panel);
+      background: var(--panel-strong);
+      backdrop-filter: blur(14px);
       margin-bottom: 14px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
     }
     .state-pill {
       display: inline-flex;
@@ -3643,9 +3719,10 @@ function getStrategyPyramidWebviewHtml(
       border: 1px solid var(--border);
       border-radius: 999px;
       padding: 4px 10px;
-      color: var(--muted);
+      color: #d8fbff;
       font-size: 12px;
       margin-bottom: 10px;
+      background: rgba(0, 229, 255, 0.08);
     }
     h2 { margin: 0; font-size: 22px; line-height: 1.35; letter-spacing: 0; }
     .decision-grid, .signal-grid, .insight-grid {
@@ -3661,6 +3738,7 @@ function getStrategyPyramidWebviewHtml(
       border-radius: 8px;
       background: var(--panel);
       padding: 14px;
+      backdrop-filter: blur(10px);
     }
     .decision-grid span, .loop-card span, .move-horizon {
       display: block;
@@ -3681,38 +3759,40 @@ function getStrategyPyramidWebviewHtml(
       font-size: 12px;
       line-height: 1.45;
     }
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(110px, 1fr));
-      gap: 10px;
-      margin-bottom: 18px;
-    }
-    .stat {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px;
-      background: var(--panel);
-    }
-    .stat span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .stat strong { font-size: 22px; }
     .pyramid-band {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(140px, 1fr));
-      gap: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
       margin-bottom: 18px;
     }
     .layer-card {
-      min-height: 142px;
+      min-height: 0;
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 14px;
+      padding: 0;
       background: var(--panel);
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      overflow: hidden;
+      backdrop-filter: blur(10px);
+    }
+    .layer-index {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #d8fbff;
+      background: linear-gradient(180deg, rgba(0, 229, 255, 0.20), rgba(124, 77, 255, 0.16));
+      font-weight: 800;
+    }
+    .layer-main {
+      min-width: 0;
+      padding: 14px;
     }
     .layer-top {
       display: flex;
       justify-content: space-between;
       gap: 10px;
-      margin-bottom: 10px;
+      margin-bottom: 12px;
     }
     .layer-top span {
       flex: 0 0 auto;
@@ -3727,7 +3807,33 @@ function getStrategyPyramidWebviewHtml(
     .layer-card.watch .layer-top span { color: var(--warn); }
     .layer-card.risk .layer-top span { color: var(--danger); }
     .layer-title { font-size: 15px; font-weight: 650; line-height: 1.35; }
-    .layer-card strong { display: block; margin-top: 10px; font-size: 12px; line-height: 1.45; }
+    .layer-analysis-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .layer-analysis-grid > div {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 7px;
+      padding: 10px;
+      background: rgba(0, 0, 0, 0.14);
+    }
+    .layer-analysis-grid small {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 6px;
+    }
+    .layer-card strong { display: block; font-size: 12px; line-height: 1.45; }
+    .layer-foot {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
     .workbench {
       display: grid;
       grid-template-columns: minmax(220px, 0.8fr) minmax(420px, 1.8fr);
@@ -3738,6 +3844,7 @@ function getStrategyPyramidWebviewHtml(
       border: 1px solid var(--border);
       border-radius: 8px;
       background: var(--panel);
+      backdrop-filter: blur(10px);
       padding: 14px;
     }
     .section-title { font-weight: 650; margin-bottom: 12px; }
@@ -3775,13 +3882,13 @@ function getStrategyPyramidWebviewHtml(
     .project-progress {
       height: 8px;
       border-radius: 999px;
-      background: var(--vscode-progressBar-background, rgba(127,127,127,.25));
+      background: rgba(148, 163, 184, 0.18);
       overflow: hidden;
     }
     .project-progress span {
       display: block;
       height: 100%;
-      background: var(--accent);
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
     }
     .insight-grid {
       grid-template-columns: minmax(220px, .8fr) minmax(300px, 1fr) minmax(280px, 1fr);
@@ -3825,8 +3932,10 @@ function getStrategyPyramidWebviewHtml(
     @media (max-width: 760px) {
       .shell { padding: 18px; }
       header { align-items: stretch; flex-direction: column; }
-      .stats { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
-      .decision-grid, .signal-grid, .pyramid-band, .insight-grid { grid-template-columns: 1fr; }
+      .decision-grid, .signal-grid, .insight-grid, .layer-analysis-grid { grid-template-columns: 1fr; }
+      .layer-card { grid-template-columns: 1fr; }
+      .layer-index { min-height: 32px; }
+      .layer-foot { flex-direction: column; }
       .workbench { grid-template-columns: 1fr; }
       .project-row { grid-template-columns: 1fr; }
     }
@@ -3841,10 +3950,6 @@ function getStrategyPyramidWebviewHtml(
       </div>
       <button type="button" id="btn-refresh"><span class="codicon codicon-refresh"></span>刷新</button>
     </header>
-    <section class="stats" aria-label="组合状态">
-      <div class="stat"><span>项目</span><strong>${snapshot.totalProjects}</strong></div>
-      ${loopCards.map((card) => `<div class="stat"><span>${strategyEscapeHtml(card.label)}</span><strong>${card.count}</strong></div>`).join('')}
-    </section>
     ${body}
   </main>
   <script>
@@ -9589,7 +9694,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     .solo-view-inner {
-      width: min(860px, 100%);
+      width: min(1280px, 100%);
       display: flex;
       flex-direction: column;
       gap: 14px;
@@ -9673,7 +9778,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     .methodology-shell {
       width: 100%;
-      max-width: min(920px, 100%);
+      max-width: min(1280px, 100%);
       position: relative;
       z-index: 3;
     }
@@ -9751,7 +9856,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       justify-content: center;
       align-items: center;
       width: 100%;
-      max-width: min(920px, 100%);
+      max-width: min(1280px, 100%);
       min-width: 0;
       z-index: 2;
     }
@@ -11593,6 +11698,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return (i18n[currentLanguage].status || {})[status] || status;
     }
 
+    function conversationStatusText(status) {
+      if (status === 'Completed') {
+        return currentLanguage === 'zh' ? '已结束' : 'Finished';
+      }
+      return statusText(status);
+    }
+
     function statusClass(status) {
       return String(status || '').replace(/[^a-zA-Z0-9]/g, '-');
     }
@@ -13074,7 +13186,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 \${runningButtons}
                 \${continueButton}
                 \${retryButton}
-                <span class="status-badge \${statusClass(conversation.status)}">\${statusText(conversation.status)}</span>
+                <span class="status-badge \${statusClass(conversation.status)}">\${conversationStatusText(conversation.status)}</span>
               </div>
             </div>
             \${open ? \`

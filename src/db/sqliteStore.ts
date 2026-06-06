@@ -159,6 +159,35 @@ export class SqliteStore {
     return existing.every((node, index) => fields.every((field) => String(node[field] || '') === String(next[index]?.[field] || '')));
   }
 
+  private normalizeConversationStatus(log: AgentConversation): AgentConversation {
+    const output = String(log.output || '');
+    if (
+      log.status === 'In Progress'
+      && /(?:Run finished at:|Sentinel captured state:|Agent output tail:)/.test(output)
+    ) {
+      return { ...log, status: 'Completed' };
+    }
+    return log;
+  }
+
+  private filterSupersededRunningLogs(logs: AgentConversation[]): AgentConversation[] {
+    const latestFinishedByNode = new Map<string, number>();
+    logs.forEach((log) => {
+      if (log.status === 'Running') {
+        return;
+      }
+      const nodeId = String(log.nodeId || '');
+      latestFinishedByNode.set(nodeId, Math.max(latestFinishedByNode.get(nodeId) || 0, Number(log.id || 0)));
+    });
+    return logs.filter((log) => {
+      if (log.status !== 'Running' || Number(log.id || 0) > (latestFinishedByNode.get(String(log.nodeId || '')) || 0)) {
+        return true;
+      }
+      const output = String(log.output || '');
+      return !/Agent conversation started|Launched command in integrated terminal/.test(output);
+    });
+  }
+
   /**
    * Retrieves all nodes from the SQLite database.
    */
@@ -264,16 +293,7 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    const latestFinishedId = logs
-      .filter((log) => log.status !== 'Running')
-      .reduce((max, log) => Math.max(max, Number(log.id || 0)), 0);
-    return logs.filter((log) => {
-      if (log.status !== 'Running' || Number(log.id || 0) > latestFinishedId) {
-        return true;
-      }
-      const output = String(log.output || '');
-      return !/Agent conversation started|Launched command in integrated terminal/.test(output);
-    });
+    return this.filterSupersededRunningLogs(logs).map((log) => this.normalizeConversationStatus(log));
   }
 
   /**
@@ -297,21 +317,7 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    const latestFinishedByNode = new Map<string, number>();
-    logs.forEach((log) => {
-      if (log.status === 'Running') {
-        return;
-      }
-      const nodeId = String(log.nodeId || '');
-      latestFinishedByNode.set(nodeId, Math.max(latestFinishedByNode.get(nodeId) || 0, Number(log.id || 0)));
-    });
-    return logs.filter((log) => {
-      if (log.status !== 'Running' || Number(log.id || 0) > (latestFinishedByNode.get(String(log.nodeId || '')) || 0)) {
-        return true;
-      }
-      const output = String(log.output || '');
-      return !/Agent conversation started|Launched command in integrated terminal/.test(output);
-    });
+    return this.filterSupersededRunningLogs(logs).map((log) => this.normalizeConversationStatus(log));
   }
 
   /**

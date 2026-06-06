@@ -5782,7 +5782,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         filterActive: '进行中',
         filterFailed: '有失败',
         filterCompleted: '已完成',
-        projectOpen: '打开',
+        projectOpen: '打开路线大图',
         projectContinue: '继续推进',
         projectReviewFailure: '处理失败',
         refreshProjectData: '刷新项目数据',
@@ -5997,7 +5997,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         filterActive: 'Active',
         filterFailed: 'Failed',
         filterCompleted: 'Done',
-        projectOpen: 'Open',
+        projectOpen: 'Open Roadmap',
         projectContinue: 'Continue',
         projectReviewFailure: 'Review Failure',
         refreshProjectData: 'Refresh project data',
@@ -6097,6 +6097,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function statusText(status) {
       return (i18n[currentLanguage].status || {})[status] || status;
+    }
+
+    function conversationStatusText(status) {
+      if (status === 'Completed') {
+        return currentLanguage === 'zh' ? '已结束' : 'Finished';
+      }
+      return statusText(status);
     }
 
     function statusClass(status) {
@@ -7024,7 +7031,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
             </div>
             <div class="sidebar-conversation-actions">
-              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(statusText(conversation.status))}</span>
+              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(conversationStatusText(conversation.status))}</span>
             </div>
           </div>
           \${sidebarSoloConversationExpanded ? \`
@@ -7075,7 +7082,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
             </div>
             <div class="sidebar-conversation-actions">
-              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(statusText(conversation.status))}</span>
+              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(conversationStatusText(conversation.status))}</span>
             </div>
           </div>
           \${sidebarStepConversationExpanded[key] ? \`

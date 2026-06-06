@@ -908,7 +908,9 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(html, /class="view-tab solo-tab"/);
   assert.match(html, /class="solo-view view-panel"/);
   assert.match(html, /\.roadmap-canvas\.view-panel:not\(\.active\),\s*\.solo-view\.view-panel:not\(\.active\)\s*\{[\s\S]*?display:\s*none/);
-  assert.match(html, /\.methodology-shell\s*\{[\s\S]*?max-width:\s*min\(920px,\s*100%\)/);
+  assert.match(html, /\.methodology-shell\s*\{[\s\S]*?max-width:\s*min\(1280px,\s*100%\)/);
+  assert.match(html, /\.node-row\s*\{[\s\S]*?max-width:\s*min\(1280px,\s*100%\)/);
+  assert.match(html, /\.solo-view-inner\s*\{[\s\S]*?width:\s*min\(1280px,\s*100%\)/);
   assert.match(html, /\.methodology-stage-card\.active/);
   assert.doesNotMatch(html, /solo-conversation-popover/);
   assert.match(script, /renderRoadmapRevisionPanel/);
@@ -4044,14 +4046,14 @@ test('agent execution log updates one conversation instead of creating a duplica
   assert.equal(updated, true);
   assert.equal(logs.length, 1);
   assert.equal(logs[0].id, logId);
-  assert.equal(logs[0].status, 'In Progress');
+  assert.equal(logs[0].status, 'Completed');
   assert.match(logs[0].output, /Done/);
 
   store.logExecution('3', 'agy', 'agy --print task', 'Launched command in integrated terminal', 'Running');
   store.logExecution('3', 'agy', 'agy --print task', 'Agent output tail:\nFinished.', 'In Progress');
   const cleanedLogs = store.getExecutionLogs('3');
   assert.equal(cleanedLogs.length, 1);
-  assert.equal(cleanedLogs[0].status, 'In Progress');
+  assert.equal(cleanedLogs[0].status, 'Completed');
   store.close();
 });
 
