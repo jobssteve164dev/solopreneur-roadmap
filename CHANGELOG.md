@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.179 - 2026-06-06
+
+### Changed
+- Optimize VS Code Marketplace SEO and marketing copy (88cc257)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.178 - 2026-06-06
 
 ### Changed
