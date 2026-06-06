@@ -819,8 +819,10 @@ const usageStatsFileName = 'solomap-usage.json';
 const roadmapRevisionId = '__roadmap_revision__';
 const soloConversationId = '__solo__';
 const agentTerminalBaseName = 'SoloMap Agent Console';
+const agentStatusDirName = 'agent-status';
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
+const agentTerminalNamesByConversationId = new Map<number, string>();
 const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -2891,7 +2893,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'showAgentTerminal':
-          showAgentTerminal();
+          showAgentTerminal(Number(message.conversationId || 0));
           break;
 
         case 'continueNativeConversation':
@@ -3120,6 +3122,21 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
           if (message.projectPath) {
             await selectProject(context, String(message.projectPath));
             await openRoadmapPanel(context);
+          }
+          break;
+        case 'saveProjectStrategy':
+          if (message.projectPath) {
+            await saveProjectStrategy(
+              context,
+              message.projectPath,
+              message.role,
+              message.businessStage,
+              message.revenueTier,
+              message.timeLoad,
+              message.strategicAction,
+              message.abilities
+            );
+            refresh();
           }
           break;
       }
@@ -3694,12 +3711,130 @@ function toStrategyId(value: string): string {
     .replace(/^-+|-+$/g, '') || 'unknown';
 }
 
-function mapStrategicActionToCsv(action: string): string {
+interface SavedProjectStrategy {
+  projectPath: string;
+  role: string;
+  businessStage: string;
+  revenueTier: string;
+  timeLoad: string;
+  strategicAction: string;
+  abilities: string;
+  updatedAt: string;
+}
+
+function csvRoleToDisplay(role: string): string {
+  switch (role) {
+    case 'core_product': return '核心产品';
+    case 'incubation': return '推进项目';
+    case 'maintenance': return '稳定维护';
+    case 'experiment': return '机会验证';
+    case 'frozen': return '冻结项目';
+    case 'infrastructure': return '能力底座';
+    case 'content': return '内容资产';
+    default: return '推进项目';
+  }
+}
+
+function displayRoleToCsv(role: string): string {
+  switch (role) {
+    case '核心产品': return 'core_product';
+    case '推进项目': return 'incubation';
+    case '稳定维护': return 'maintenance';
+    case '机会验证': return 'experiment';
+    case '冻结项目': return 'frozen';
+    case '能力底座': return 'infrastructure';
+    case '内容资产': return 'content';
+    default: return 'incubation';
+  }
+}
+
+function csvActionToDisplay(action: string): string {
+  switch (action) {
+    case 'double_down': return '加码商业化验证与渠道建设';
+    case 'reduce': return '收缩重复支持和低复利维护';
+    case 'maintain': return '观察反馈是否能转成定价或明确取舍';
+    case 'freeze': return '冻结项目，减少维护';
+    case 'explore': return '推进下一个可验证切片';
+    case 'sunset': return '收缩或降级';
+    default: return '推进下一个可验证切片';
+  }
+}
+
+function displayActionToCsv(action: string): string {
   if (/加码|继续|推进|核心|付费|商业化/.test(action)) return 'double_down';
   if (/收缩|减少|冻结|失败|阻塞/.test(action)) return 'reduce';
   if (/观察|复盘/.test(action)) return 'maintain';
   if (/验证|孵化|选择/.test(action)) return 'explore';
   return 'maintain';
+}
+
+function readProjectStrategyCsv(context: vscode.ExtensionContext): Map<string, SavedProjectStrategy> {
+  const map = new Map<string, SavedProjectStrategy>();
+  try {
+    const globalRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+    const csvPath = path.join(globalRoot, 'strategy', 'project-strategy.csv');
+    if (fs.existsSync(csvPath)) {
+      const csv = fs.readFileSync(csvPath, 'utf8');
+      const parsed = Papa.parse<SavedProjectStrategy>(csv, { header: true, skipEmptyLines: true });
+      if (parsed.data) {
+        for (const row of parsed.data) {
+          if (row.projectPath) {
+            map.set(row.projectPath, row);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to read project-strategy.csv:', error);
+  }
+  return map;
+}
+
+async function saveProjectStrategy(
+  context: vscode.ExtensionContext,
+  projectPath: string,
+  role: string,
+  businessStage: string,
+  revenueTier: string,
+  timeLoad: string,
+  strategicAction: string,
+  abilities: string[]
+): Promise<void> {
+  try {
+    const globalRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+    const strategyRoot = path.join(globalRoot, 'strategy');
+    fs.mkdirSync(strategyRoot, { recursive: true });
+
+    const csvPath = path.join(strategyRoot, 'project-strategy.csv');
+    let rows: SavedProjectStrategy[] = [];
+    if (fs.existsSync(csvPath)) {
+      const csv = fs.readFileSync(csvPath, 'utf8');
+      const parsed = Papa.parse<SavedProjectStrategy>(csv, { header: true, skipEmptyLines: true });
+      rows = parsed.data || [];
+    }
+
+    const existingIndex = rows.findIndex((r) => r.projectPath === projectPath);
+    const newRow: SavedProjectStrategy = {
+      projectPath,
+      role: displayRoleToCsv(role),
+      businessStage,
+      revenueTier,
+      timeLoad,
+      strategicAction: displayActionToCsv(strategicAction),
+      abilities: (abilities || []).map(toStrategyId).join(';'),
+      updatedAt: new Date().toISOString()
+    };
+
+    if (existingIndex >= 0) {
+      rows[existingIndex] = newRow;
+    } else {
+      rows.push(newRow);
+    }
+
+    fs.writeFileSync(csvPath, Papa.unparse(rows), 'utf8');
+  } catch (error) {
+    console.error('Failed to save project strategy:', error);
+  }
 }
 
 function mapAbilityCategory(ability: string): string {
@@ -3717,11 +3852,11 @@ function writeStrategyPyramidSnapshot(context: vscode.ExtensionContext, snapshot
     fs.writeFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
     const projectRows = snapshot.projects.map((project) => ({
       projectPath: project.path,
-      role: project.role === '核心产品' ? 'core_product' : project.role === '机会验证' ? 'experiment' : project.role === '稳定维护' ? 'maintenance' : 'incubation',
+      role: displayRoleToCsv(project.role),
       businessStage: project.businessStage,
       revenueTier: project.revenueTier,
       timeLoad: project.timeLoad,
-      strategicAction: mapStrategicActionToCsv(project.action),
+      strategicAction: displayActionToCsv(project.action),
       abilities: project.abilities.map(toStrategyId).join(';'),
       updatedAt: snapshot.generatedAt
     }));
@@ -3741,6 +3876,8 @@ function writeStrategyPyramidSnapshot(context: vscode.ExtensionContext, snapshot
 }
 
 function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): StrategyPyramidSnapshot {
+  const savedStrategies = readProjectStrategyCsv(context);
+
   const projects = getProjects(context)
     .filter((project) => project && project.path)
     .map((project) => {
@@ -3752,16 +3889,26 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
       const inProgressNodes = nodes.filter((node) => node.status === 'In Progress').length;
       const pendingNodes = nodes.filter((node) => node.status === 'Pending').length;
       const progressPercent = totalNodes ? Math.round((completedNodes / totalNodes) * 100) : 0;
-      const abilities = inferProjectAbilities(project, nodes);
-      const role = inferStrategyRole(project, nodes);
+
+      const saved = savedStrategies.get(project.path);
+
+      const role = saved ? csvRoleToDisplay(saved.role) : inferStrategyRole(project, nodes);
+      const businessStage = saved ? saved.businessStage : inferBusinessStage(project, nodes);
+      const revenueTier = saved ? saved.revenueTier : inferRevenueTier(project, nodes);
+      const timeLoad = saved ? saved.timeLoad : inferTimeLoadFromCounts(runningNodes, inProgressNodes, failedNodes, totalNodes);
+
+      const abilities = (saved && saved.abilities)
+        ? saved.abilities.split(';').map(x => x.trim()).filter(Boolean)
+        : inferProjectAbilities(project, nodes);
+
       const base = {
         name: project.name,
         path: project.path,
         type: project.type || '',
         role,
-        businessStage: inferBusinessStage(project, nodes),
-        revenueTier: inferRevenueTier(project, nodes),
-        timeLoad: inferTimeLoadFromCounts(runningNodes, inProgressNodes, failedNodes, totalNodes),
+        businessStage,
+        revenueTier,
+        timeLoad,
         strategicRelation: inferStrategicRelation(role, abilities, nodes),
         loop: inferDominantStrategyLoop(nodes),
         abilities,
@@ -3777,10 +3924,14 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
       };
       const evidence = inferProjectEvidence(base);
       const tempBase = { ...base, evidence };
+
+      const action = saved ? csvActionToDisplay(saved.strategicAction) : inferStrategyAction(tempBase);
+      const risk = inferStrategyRisk(tempBase);
+
       return {
         ...tempBase,
-        action: inferStrategyAction(tempBase),
-        risk: inferStrategyRisk(tempBase),
+        action,
+        risk,
         advice: inferProjectAdvice({
           role: tempBase.role,
           nodes: tempBase.nodes,
@@ -3808,7 +3959,7 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
   if (projects.length > 0 && sellCount === 0) risks.push('组合缺少 Sell 信号，容易只 Build 不卖。');
   if (projects.length > 0 && learnCount === 0) risks.push('组合缺少 Learn 信号，下一轮改进依据不足。');
   if (projects.some((project) => project.failedNodes > 0)) risks.push('存在失败环节，应先收口再继续加码。');
-  if (projects.length > 1 && !projects.some((project) => project.type === 'core_product')) risks.push('组合缺少明确核心产品。');
+  if (projects.length > 1 && !projects.some((project) => project.type === 'core_product' || project.role === '核心产品')) risks.push('组合缺少明确核心产品。');
   if (projects.filter((project) => project.totalNodes === 0).length > 0) risks.push('部分项目缺少路线图信号，容易形成低复利库存。');
   const loops = buildLoopSummaries(projects, allNodes);
   const abilities = buildAbilitySummaries(projects);
@@ -3859,40 +4010,35 @@ function getStrategyPyramidWebviewHtml(
   snapshot: StrategyPyramidSnapshot
 ): string {
   const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
-  const loopCards = (snapshot.loops && snapshot.loops.length ? snapshot.loops : [
-    { key: 'build' as MethodologyStageKey, label: 'Build', title: '产品与交付', count: snapshot.buildCount, projectNames: [], judgment: 'Build 信号' },
-    { key: 'sell' as MethodologyStageKey, label: 'Sell', title: '收入与市场', count: snapshot.sellCount, projectNames: [], judgment: 'Sell 信号' },
-    { key: 'learn' as MethodologyStageKey, label: 'Learn', title: '学习与反馈', count: snapshot.learnCount, projectNames: [], judgment: 'Learn 信号' },
-    { key: 'improve' as MethodologyStageKey, label: 'Improve', title: '改进与复利', count: snapshot.improveCount, projectNames: [], judgment: 'Improve 信号' }
-  ]);
   const stageTitle = snapshot.stageTitle || '组合判断期';
   const mainJudgment = snapshot.mainJudgment || '从项目组合判断现在该加码、收缩、暂停、转向，还是孵化新方向。';
   const strategicAction = snapshot.strategicAction || '选择一个项目补上最缺的市场或反馈信号。';
   const constraint = snapshot.constraint || '不要让项目数量替代真实验证。';
-  const topProjects = snapshot.projects.slice(0, 12);
-  const riskItems = snapshot.risks.length ? snapshot.risks : ['当前组合没有明显结构阻塞，可以围绕核心产品继续验证收入和反馈。'];
-  const layers = snapshot.layers && snapshot.layers.length ? snapshot.layers : [];
-  const moves = snapshot.moves && snapshot.moves.length ? snapshot.moves : [];
-  const abilities = snapshot.abilities && snapshot.abilities.length ? snapshot.abilities : [];
+  const topProjects = snapshot.projects || [];
+
+  const loops = snapshot.loops || [];
+  const layers = snapshot.layers || [];
+  const moves = snapshot.moves || [];
+  const abilities = snapshot.abilities || [];
+  const structureSignals = snapshot.structureSignals || [];
+  const riskSignals = snapshot.riskSignals || [];
+  const opportunitySignals = snapshot.opportunitySignals || [];
+  const scenarios = snapshot.scenarios || [];
+  const recommendedScenarioPath = snapshot.recommendedScenarioPath || '';
+
   const stageProfile = snapshot.stageProfile || {
     title: stageTitle,
     priorityLayer: '中层：项目组合 + 收入结构',
     keyMetric: '哪些项目在积累复利，哪些在消耗注意力',
     defaultQuestion: '应该加码、收缩还是暂停？'
   };
-  const structureSignals = snapshot.structureSignals && snapshot.structureSignals.length ? snapshot.structureSignals : [];
-  const riskSignals = snapshot.riskSignals && snapshot.riskSignals.length ? snapshot.riskSignals : [];
-  const opportunitySignals = snapshot.opportunitySignals && snapshot.opportunitySignals.length ? snapshot.opportunitySignals : [];
-  const scenarios = snapshot.scenarios && snapshot.scenarios.length ? snapshot.scenarios : [];
-  const recommendedScenarioPath = snapshot.recommendedScenarioPath || '推荐路径：先补足市场反馈，再决定是否集中加码。';
-  const healthLabel = (health: string) => health === 'strong' ? '健康' : health === 'watch' ? '观察' : '风险';
-  const severityLabel = (severity: string) => severity === 'high' ? '高风险' : severity === 'medium' ? '观察' : '健康';
-  const hasStrategyLayerHealth = (items: StrategyPyramidLayerSummary[], key: string) => (
-    items.some((item) => item.key === key && item.health === 'strong')
-  );
+
   const projectRoleData = topProjects.map((project) => ({
     name: project.name,
+    path: project.path,
     role: project.role,
+    businessStage: project.businessStage,
+    revenueTier: project.revenueTier,
     timeLoad: project.timeLoad,
     strategicRelation: project.strategicRelation,
     action: project.action,
@@ -3901,253 +4047,12 @@ function getStrategyPyramidWebviewHtml(
     roleScores: project.roleScores,
     advice: project.advice,
     evidence: project.evidence && project.evidence.length ? project.evidence : ['等待更多推进信号'],
-    abilities: project.abilities && project.abilities.length ? project.abilities : ['暂未识别可复用能力']
+    abilities: project.abilities && project.abilities.length ? project.abilities : []
   }));
   const projectRoleJson = JSON.stringify(projectRoleData).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
-  const layerDetails: Record<string, { focus: string; metric: string; next: string }> = {
-    'freedom-brand': {
-      focus: '判断核心产品是否正在沉淀选择权、信誉和可对外表达的专业位置。',
-      metric: hasStrategyLayerHealth(layers, 'freedom-brand') ? '核心产品信号已出现' : '核心产品信号不足',
-      next: '把用户反馈、公开表达和产品改进集中到最能代表长期方向的项目。'
-    },
-    'revenue-system': {
-      focus: '判断收入动作是否能从一次性交付走向订阅、数字资产或可重复销售。',
-      metric: `${snapshot.sellCount} 个收入或市场动作`,
-      next: '为核心产品补一条明确的付费、升级或转化路径。'
-    },
-    'market-trust': {
-      focus: '判断用户发现、反馈和市场信誉是否足以支撑下一轮取舍。',
-      metric: `${snapshot.learnCount} 个学习或反馈信号`,
-      next: '把反馈沉淀成取舍，不把新需求直接变成新功能队列。'
-    },
-    'ability-compounding': {
-      focus: '判断技术、交付和运营能力是否跨项目复用，而不是每个项目重新消耗。',
-      metric: abilities.length ? `${abilities.length} 项可复用能力` : '可复用能力仍待识别',
-      next: '把重复出现的能力沉淀成模板、流程、内容资产或产品卖点。'
-    },
-    'reality-inventory': {
-      focus: '判断当前项目库存、停滞点和投入机会是否真实，而不是被项目数量稀释。',
-      metric: `${snapshot.totalProjects} 个项目进入组合`,
-      next: '冻结低复利库存，把注意力放回最接近验证和收入的路径。'
-    }
-  };
-  const layerRows = layers.map((layer, index) => {
-    const detail = layerDetails[layer.key] || { focus: layer.signal, metric: layer.health, next: layer.action };
-    const supportingProjects = topProjects
-      .filter((project) => {
-        if (layer.key === 'revenue-system') return project.nodes.some((node) => classifyStrategyLoop(node) === 'sell');
-        if (layer.key === 'market-trust') return project.nodes.some((node) => classifyStrategyLoop(node) === 'learn');
-        if (layer.key === 'ability-compounding') return project.abilities.length > 0;
-        if (layer.key === 'freedom-brand') return project.role === '核心产品' || project.type === 'core_product';
-        return project.totalNodes > 0;
-      })
-      .slice(0, 3)
-      .map((project) => project.name);
-    return `
-      <article class="layer-card ${strategyEscapeHtml(layer.health)}">
-        <div class="layer-index">${index + 1}</div>
-        <div class="layer-main">
-          <div class="layer-top">
-            <div>
-              <div class="layer-title">${strategyEscapeHtml(layer.title)}</div>
-              <p>${strategyEscapeHtml(detail.focus)}</p>
-            </div>
-            <span>${layer.health === 'strong' ? '健康' : layer.health === 'watch' ? '观察' : '风险'}</span>
-          </div>
-          <div class="layer-analysis-grid">
-            <div>
-              <small>当前信号</small>
-              <strong>${strategyEscapeHtml(layer.signal)}</strong>
-            </div>
-            <div>
-              <small>判断指标</small>
-              <strong>${strategyEscapeHtml(detail.metric)}</strong>
-            </div>
-            <div>
-              <small>下一步</small>
-              <strong>${strategyEscapeHtml(layer.action || detail.next)}</strong>
-            </div>
-          </div>
-          <div class="layer-foot">
-            <span>${strategyEscapeHtml(supportingProjects.length ? supportingProjects.join(' / ') : '等待项目形成更清晰信号')}</span>
-            <span>${strategyEscapeHtml(detail.next)}</span>
-          </div>
-        </div>
-      </article>
-    `;
-  }).join('');
-  const projectRows = topProjects.map((project, index) => `
-    <article class="project-row">
-      <button type="button" class="project-select" data-project-index="${index}">
-        <span class="project-title">${strategyEscapeHtml(project.name)}</span>
-        <span class="project-meta">${strategyEscapeHtml(project.role)} · ${strategyEscapeHtml(project.businessStage)} · ${strategyEscapeHtml(project.action)}</span>
-      </button>
-      <div class="project-progress" aria-label="${strategyEscapeHtml(project.progressPercent)}%">
-        <span style="width:${Math.max(0, Math.min(100, project.progressPercent))}%"></span>
-      </div>
-      <div class="project-risk">${project.risk ? strategyEscapeHtml(project.risk) : '可继续推进'}</div>
-    </article>
-  `).join('');
-  const abilityRows = abilities.map((ability) => `
-    <div class="ability-row">
-      <strong>${strategyEscapeHtml(ability.name)}</strong>
-      <span>${strategyEscapeHtml(ability.projectCount)} 个项目 · ${strategyEscapeHtml(ability.value)} · ${strategyEscapeHtml(ability.judgment)}</span>
-    </div>
-  `).join('');
-  const moveRows = moves.map((move, index) => `
-    <article class="move-row">
-      <span>${index + 1}</span>
-      <div>
-        <div class="move-horizon">${strategyEscapeHtml(move.horizon)}</div>
-        <strong>${strategyEscapeHtml(move.title)}</strong>
-        <p>${strategyEscapeHtml(move.reason)}</p>
-        <p>${strategyEscapeHtml((move.evidence || []).join(' / '))}</p>
-      </div>
-    </article>
-  `).join('');
-  const structureRows = structureSignals.map((signal) => `
-    <article class="signal-row ${strategyEscapeHtml(signal.health)}">
-      <div>
-        <strong>${strategyEscapeHtml(signal.title)}</strong>
-        <p>${strategyEscapeHtml(signal.summary)}</p>
-      </div>
-      <span>${strategyEscapeHtml(healthLabel(signal.health))}</span>
-      <small>${strategyEscapeHtml(signal.evidence.join(' / '))}</small>
-    </article>
-  `).join('');
-  const riskRows = riskSignals.map((signal) => `
-    <article class="risk-signal ${strategyEscapeHtml(signal.severity)}">
-      <span>${strategyEscapeHtml(severityLabel(signal.severity))}</span>
-      <strong>${strategyEscapeHtml(signal.title)}</strong>
-      <p>${strategyEscapeHtml(signal.summary)}</p>
-      <small>${strategyEscapeHtml(signal.evidence.join(' / '))}</small>
-    </article>
-  `).join('');
-  const opportunityRows = opportunitySignals.map((signal) => `
-    <article class="risk-signal ${strategyEscapeHtml(signal.severity)}">
-      <span>${strategyEscapeHtml(severityLabel(signal.severity))}</span>
-      <strong>${strategyEscapeHtml(signal.title)}</strong>
-      <p>${strategyEscapeHtml(signal.summary)}</p>
-      <small>${strategyEscapeHtml(signal.evidence.join(' / '))}</small>
-    </article>
-  `).join('');
-  const portfolioByLoop = loopCards.map((loop) => {
-    const names = topProjects
-      .filter((project) => project.loop === loop.key || project.nodes.some((node) => classifyStrategyLoop(node) === loop.key))
-      .map((project) => project.name)
-      .slice(0, 6);
-    return `
-      <article class="portfolio-loop">
-        <span>${strategyEscapeHtml(loop.label)}</span>
-        <strong>${strategyEscapeHtml(loop.title)}</strong>
-        <p>${strategyEscapeHtml(names.length ? names.join(' / ') : `${loop.label} 信号不足`)}</p>
-      </article>
-    `;
-  }).join('');
-  const scenarioRows = scenarios.map((scenario) => `
-    <article class="scenario-card">
-      <span>${strategyEscapeHtml(scenario.key)}</span>
-      <strong>${strategyEscapeHtml(scenario.title)}</strong>
-      <dl>
-        <div><dt>投入</dt><dd>${strategyEscapeHtml(scenario.investment)}</dd></div>
-        <div><dt>回报假设</dt><dd>${strategyEscapeHtml(scenario.returnProfile)}</dd></div>
-        <div><dt>成本</dt><dd>${strategyEscapeHtml(scenario.cost)}</dd></div>
-        <div><dt>风险</dt><dd>${strategyEscapeHtml(scenario.risk)}</dd></div>
-        <div><dt>时间轴</dt><dd>${strategyEscapeHtml(scenario.timeline)}</dd></div>
-      </dl>
-      <p>${strategyEscapeHtml(scenario.summary)}</p>
-    </article>
-  `).join('');
 
-  const body = `
-    <section class="judgment-panel">
-      <div class="state-pill">当前战略状态：${strategyEscapeHtml(stageTitle)}</div>
-      <h2>${strategyEscapeHtml(mainJudgment)}</h2>
-      <div class="confidence-line">置信度：${strategyEscapeHtml(snapshot.confidence === 'high' ? '高' : snapshot.confidence === 'medium' ? '中' : '低')} · 基于本地项目、路线图阶段和推进信号聚合</div>
-      <div class="decision-grid">
-        <article>
-          <span>战略动作</span>
-          <strong>${strategyEscapeHtml(strategicAction)}</strong>
-        </article>
-        <article>
-          <span>边界约束</span>
-          <strong>${strategyEscapeHtml(constraint)}</strong>
-        </article>
-      </div>
-    </section>
-    <section class="cockpit-grid">
-      <div class="structure-panel">
-        <div class="section-title">结构信号</div>
-        ${structureRows || '<div class="empty-state">等待更多本地事实形成结构信号。</div>'}
-      </div>
-      <div class="stage-panel">
-        <div class="section-title">战略阶段自适应</div>
-        <div class="stage-line"><span>优先显示层</span><strong>${strategyEscapeHtml(stageProfile.priorityLayer)}</strong></div>
-        <div class="stage-line"><span>关键指标</span><strong>${strategyEscapeHtml(stageProfile.keyMetric)}</strong></div>
-        <div class="stage-line"><span>默认问题</span><strong>${strategyEscapeHtml(stageProfile.defaultQuestion)}</strong></div>
-      </div>
-    </section>
-    <section class="signal-grid" aria-label="项目组合结构">
-      ${loopCards.map((card, index) => `
-        <article class="loop-card layer-${strategyEscapeHtml(card.key)}" style="--layer:${index + 1}">
-          <span>${strategyEscapeHtml(card.label)}</span>
-          <div>${strategyEscapeHtml(card.title)}</div>
-          <strong>${card.count}</strong>
-          <p>${strategyEscapeHtml(card.judgment)}</p>
-        </article>
-      `).join('')}
-    </section>
-    <section class="pyramid-band" aria-label="五层战略结构">
-      ${layerRows || '<div class="empty-state">等待更多项目推进信号后形成五层判断。</div>'}
-    </section>
-    <section class="workbench">
-      <div class="risk-panel">
-        <div class="section-title">1-3 个月结构风险</div>
-        ${riskRows || riskItems.map((risk) => `<div class="risk-item"><span class="codicon codicon-warning"></span>${strategyEscapeHtml(risk)}</div>`).join('')}
-        <div class="section-title section-spaced">结构机会</div>
-        ${opportunityRows}
-      </div>
-      <div class="project-panel">
-        <div class="section-title">项目组合结构</div>
-        <div class="portfolio-loops">${portfolioByLoop}</div>
-        <div class="portfolio-judgment">结构判断：${strategyEscapeHtml(mainJudgment)}</div>
-        ${projectRows || '<div class="empty-state">还没有已登记项目。先在侧边栏添加项目。</div>'}
-      </div>
-    </section>
-    <section class="insight-grid">
-      <div class="ability-panel">
-        <div class="section-title">能力复利</div>
-        ${abilityRows || '<div class="empty-state">暂未识别跨项目复用能力。先让核心项目沉淀一个可复用能力。</div>'}
-      </div>
-      <div class="move-panel">
-        <div class="section-title">未来 30 天战略动作</div>
-        ${moveRows || '<div class="empty-state">等待更多项目推进信号后给出动作建议。</div>'}
-      </div>
-      <aside class="role-panel" id="project-role-panel">
-        <div class="section-title">项目战略角色</div>
-        <div class="empty-state">选择一个项目，先看它在一人公司系统里的角色。</div>
-      </aside>
-    </section>
-    <section class="market-grid">
-      <article>
-        <div class="section-title">收入结构</div>
-        <p>${strategyEscapeHtml(snapshot.sellCount > 0 ? `${snapshot.sellCount} 个收入或市场信号可继续验证。首版不伪造收入金额，后续只接入用户明确标记或外部收入事实。` : '收入结构证据不足，不能假装已有可复利收入。先补一个低成本商业化假设。')}</p>
-      </article>
-      <article>
-        <div class="section-title">市场信誉</div>
-        <p>${strategyEscapeHtml(snapshot.learnCount > 0 ? `${snapshot.learnCount} 个反馈或学习信号可用于判断信誉积累，但仍需要渠道、评价或转化证据。` : '市场信誉证据不足，优先补真实反馈、公开分发或用户访谈信号。')}</p>
-      </article>
-      <article>
-        <div class="section-title">时间结构</div>
-        <p>${strategyEscapeHtml(topProjects.some((project) => project.timeLoad === 'high') ? '已有项目显示高时间负担，应收缩低复利维护，释放稳定验证窗口。' : '未读取到明显高时间负担，但仍应避免新增 Build 项目挤压 Sell / Learn。')}</p>
-      </article>
-    </section>
-    <section class="scenario-panel">
-      <div class="section-title">场景建模</div>
-      <div class="scenario-grid">${scenarioRows}</div>
-      <div class="recommended-path">${strategyEscapeHtml(recommendedScenarioPath)}</div>
-    </section>
-  `;
+  // 构建五层结构的详细数据，用于在金字塔点击时动态展示
+  const layersJson = JSON.stringify(layers).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4155,484 +4060,1400 @@ function getStrategyPyramidWebviewHtml(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link href="${codiconsUri}" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <title>一人公司战略驾驶舱</title>
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #0a0c16;
+      --bg: #090a10;
       --fg: #f8fafc;
       --muted: #94a3b8;
-      --panel: rgba(255, 255, 255, 0.055);
-      --panel-strong: rgba(15, 23, 42, 0.82);
-      --border: rgba(255, 255, 255, 0.11);
-      --accent: #00e5ff;
-      --accent-2: #7c4dff;
+      --border: rgba(255, 255, 255, 0.08);
+      --glass-bg: rgba(255, 255, 255, 0.02);
+      --glass-panel: rgba(15, 23, 42, 0.65);
+      --accent: #00f0ff;
+      --accent-purple: #7c4dff;
       --success: #00e676;
-      --warn: #facc15;
+      --warn: #ffd600;
       --danger: #ff1744;
+      --font: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
-      background: radial-gradient(circle at 50% 0%, rgba(0, 229, 255, 0.12), transparent 34%), radial-gradient(circle at 18% 16%, rgba(124, 77, 255, 0.14), transparent 28%), var(--bg);
+      background: var(--bg);
       color: var(--fg);
-      font-family: var(--vscode-font-family), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: var(--font);
+      overflow-x: hidden;
+      line-height: 1.5;
     }
-    .shell { min-height: 100vh; padding: clamp(18px, 4vw, 40px); }
+
+    /* 星空微光发光霓虹 */
+    .neon-glow-container {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: -10;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    .neon-glow-container::before, .neon-glow-container::after {
+      content: '';
+      position: absolute;
+      width: 500px;
+      height: 500px;
+      border-radius: 50%;
+      filter: blur(150px);
+      opacity: 0.12;
+      animation: floatNeon 25s infinite alternate ease-in-out;
+    }
+    .neon-glow-container::before {
+      background: radial-gradient(circle, var(--accent), var(--accent-purple));
+      top: -10%; left: 10%;
+    }
+    .neon-glow-container::after {
+      background: radial-gradient(circle, #ff007c, var(--accent-purple));
+      bottom: -10%; right: 15%;
+      animation-delay: -12s;
+    }
+    @keyframes floatNeon {
+      0% { transform: translate(0, 0) scale(1); }
+      100% { transform: translate(120px, 60px) scale(1.15); }
+    }
+
+    .shell {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 32px 24px;
+      position: relative;
+      z-index: 1;
+    }
+
     header {
       display: flex;
-      align-items: flex-end;
       justify-content: space-between;
+      align-items: center;
       gap: 16px;
-      margin-bottom: 18px;
+      margin-bottom: 28px;
     }
+
     h1 {
       margin: 0;
-      font-size: 28px;
+      font-size: 26px;
       font-weight: 800;
-      letter-spacing: 0;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-purple));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
-    .sub { margin-top: 8px; color: var(--muted); font-size: 13px; }
-    button {
+
+    .sub-heading {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .header-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    button.btn-header {
+      background: rgba(255, 255, 255, 0.04);
       border: 1px solid var(--border);
-      border-radius: 6px;
-      background: linear-gradient(135deg, var(--accent), #00b0ff);
-      color: #000;
-      padding: 8px 12px;
+      border-radius: 8px;
+      color: var(--fg);
+      padding: 8px 16px;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
+      gap: 8px;
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 500;
+      transition: all 0.3s;
+    }
+    button.btn-header:hover {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    /* Tabs 导航 */
+    .tabs-nav {
+      display: flex;
       gap: 6px;
-      font: inherit;
-      white-space: nowrap;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
     }
-    .judgment-panel {
-      border: 1px solid var(--border);
+    .tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--muted);
+      padding: 10px 18px;
       border-radius: 8px;
-      padding: 18px;
-      background: var(--panel-strong);
-      backdrop-filter: blur(14px);
-      margin-bottom: 14px;
-      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+      font-family: var(--font);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
-    .state-pill {
+    .tab-btn:hover {
+      color: var(--fg);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .tab-btn.active {
+      color: var(--accent);
+      border-color: rgba(0, 240, 255, 0.15);
+      background: rgba(0, 240, 255, 0.04);
+      box-shadow: inset 0 0 10px rgba(0, 240, 255, 0.08);
+      text-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
+    }
+
+    /* Tab 内容切换 */
+    .tab-content {
+      display: none;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .tab-content.active {
+      display: block;
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Glassmorphism 面板 */
+    .glass-card {
+      background: var(--glass-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      backdrop-filter: blur(12px);
+      margin-bottom: 18px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+    }
+
+    /* TAB 1: 驾驶舱 */
+    .dashboard-top {
+      display: grid;
+      grid-template-columns: 1.8fr 1.2fr;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .cockpit-main {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .state-badge {
       display: inline-flex;
       align-items: center;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 4px 10px;
-      color: #d8fbff;
-      font-size: 12px;
-      margin-bottom: 10px;
-      background: rgba(0, 229, 255, 0.08);
+      border: 1px solid rgba(0, 240, 255, 0.2);
+      background: rgba(0, 240, 255, 0.05);
+      border-radius: 99px;
+      padding: 4px 12px;
+      color: #bffffc;
+      font-size: 11px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      align-self: flex-start;
     }
-    h2 { margin: 0; font-size: 22px; line-height: 1.35; letter-spacing: 0; }
-    .confidence-line {
-      margin-top: 10px;
+
+    .cockpit-title {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 0;
+      line-height: 1.4;
+    }
+
+    .cockpit-meta {
+      font-size: 12px;
       color: var(--muted);
-      font-size: 12px;
+      margin-top: 8px;
     }
-    .decision-grid, .signal-grid, .insight-grid, .cockpit-grid, .market-grid, .scenario-grid {
-      display: grid;
-      gap: 12px;
-    }
-    .decision-grid {
-      grid-template-columns: repeat(2, minmax(220px, 1fr));
-      margin-top: 16px;
-    }
-    .decision-grid article, .loop-card, .ability-panel, .move-panel, .role-panel {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel);
-      padding: 14px;
-      backdrop-filter: blur(10px);
-    }
-    .decision-grid span, .loop-card span, .move-horizon {
-      display: block;
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 6px;
-    }
-    .decision-grid strong, .loop-card strong { display: block; font-size: 16px; line-height: 1.4; }
-    .signal-grid {
-      grid-template-columns: repeat(4, minmax(130px, 1fr));
-      margin-bottom: 14px;
-    }
+
     .cockpit-grid {
-      grid-template-columns: minmax(340px, 1.35fr) minmax(260px, .85fr);
-      margin-bottom: 14px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-top: 18px;
     }
-    .structure-panel, .stage-panel, .scenario-panel, .market-grid article {
+    .cockpit-item {
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--panel);
-      padding: 14px;
-      backdrop-filter: blur(10px);
+      background: rgba(255, 255, 255, 0.01);
+      padding: 12px 14px;
     }
-    .signal-row {
+    .cockpit-item span {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .cockpit-item strong {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--fg);
+    }
+
+    .dashboard-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 8px 12px;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--fg);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .signal-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 4px 12px;
       padding: 12px 0;
       border-top: 1px solid var(--border);
     }
-    .signal-row:first-of-type { border-top: 0; padding-top: 0; }
-    .signal-row p, .risk-signal p, .scenario-card p, .market-grid p {
-      margin: 4px 0 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
+    .signal-item:first-of-type { border-top: 0; padding-top: 0; }
+    .signal-item strong { font-size: 13px; font-weight: 600; }
+    .signal-item span {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 99px;
+      border: 1px solid transparent;
     }
-    .signal-row span {
-      height: 22px;
-      padding: 3px 8px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .signal-row.strong span { color: var(--success); }
-    .signal-row.watch span { color: var(--warn); }
-    .signal-row.risk span { color: var(--danger); }
-    .signal-row small {
+    .signal-item.strong span { color: var(--success); border-color: rgba(0, 230, 118, 0.15); background: rgba(0, 230, 118, 0.03); }
+    .signal-item.watch span { color: var(--warn); border-color: rgba(255, 214, 0, 0.15); background: rgba(255, 214, 0, 0.03); }
+    .signal-item.risk span { color: var(--danger); border-color: rgba(255, 23, 68, 0.15); background: rgba(255, 23, 68, 0.03); }
+    .signal-item p {
+      margin: 0;
       grid-column: 1 / -1;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .risk-alert {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      border: 1px solid rgba(255,255,255,0.04);
+      background: rgba(255,255,255,0.01);
+    }
+    .risk-alert.high { border-color: rgba(255, 23, 68, 0.15); background: rgba(255, 23, 68, 0.02); }
+    .risk-alert.medium { border-color: rgba(255, 214, 0, 0.15); background: rgba(255, 214, 0, 0.02); }
+    .risk-alert.healthy { border-color: rgba(0, 230, 118, 0.15); background: rgba(0, 230, 118, 0.02); }
+    .risk-alert span.codicon { font-size: 16px; margin-top: 2px; }
+    .risk-alert.high span.codicon { color: var(--danger); }
+    .risk-alert.medium span.codicon { color: var(--warn); }
+    .risk-alert.healthy span.codicon { color: var(--success); }
+    .risk-alert div { font-size: 12px; }
+    .risk-alert strong { display: block; font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+    .risk-alert p { margin: 0; color: var(--muted); }
+
+    /* TAB 2: 战略金字塔 */
+    .pyramid-wrapper {
+      display: grid;
+      grid-template-columns: 1.3fr 1.7fr;
+      gap: 24px;
+      align-items: start;
+    }
+
+    .pyramid-visual {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 30px 16px;
+      background: rgba(255, 255, 255, 0.01);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      position: relative;
+    }
+
+    .pyramid-layer {
+      position: relative;
+      width: var(--width);
+      height: 54px;
+      background: var(--grad);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      font-weight: 700;
+      font-size: 12px;
+      color: #fff;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+      padding: 0 16px;
+      text-align: center;
+      backdrop-filter: blur(8px);
+    }
+    .pyramid-layer:hover {
+      transform: scale(1.03) translateY(-2px);
+      border-color: rgba(255, 255, 255, 0.25);
+      box-shadow: 0 8px 24px rgba(0, 240, 255, 0.15);
+    }
+    .pyramid-layer.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 20px var(--glow);
+      transform: scale(1.04);
+    }
+
+    .pyramid-layer .focus-badge {
+      position: absolute;
+      right: -84px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: linear-gradient(135deg, #ffd600, #ff6d00);
+      color: #000;
+      font-size: 9px;
+      font-weight: 800;
+      padding: 2px 8px;
+      border-radius: 99px;
+      box-shadow: 0 0 10px rgba(255, 214, 0, 0.4);
+      animation: pulseBadge 1.5s infinite alternate;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    @keyframes pulseBadge {
+      0% { transform: translateY(-50%) scale(0.96); opacity: 0.8; }
+      100% { transform: translateY(-50%) scale(1.04); opacity: 1; }
+    }
+
+    .layer-detail-card {
+      min-height: 310px;
+    }
+
+    .layer-detail-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+    }
+
+    .layer-detail-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0;
+    }
+
+    .layer-detail-health {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 99px;
+    }
+    .layer-detail-health.strong { color: var(--success); background: rgba(0, 230, 118, 0.05); border: 1px solid rgba(0, 230, 118, 0.15); }
+    .layer-detail-health.watch { color: var(--warn); background: rgba(255, 214, 0, 0.05); border: 1px solid rgba(255, 214, 0, 0.15); }
+    .layer-detail-health.risk { color: var(--danger); background: rgba(255, 23, 68, 0.05); border: 1px solid rgba(255, 23, 68, 0.15); }
+
+    .layer-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 16px;
+    }
+    .layer-grid-item {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.01);
+    }
+    .layer-grid-item span {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .layer-grid-item strong {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+    }
+
+    .layer-evidence-box {
+      font-size: 12px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+      margin-top: 12px;
+    }
+
+    .layer-support-title {
+      font-weight: 700;
+      font-size: 12px;
+      color: var(--fg);
+      margin-bottom: 6px;
+    }
+    .layer-support-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .layer-chip {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    /* TAB 3: 项目组合 */
+    .quadrants-container {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+
+    .quadrant {
+      background: rgba(255, 255, 255, 0.01);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      min-height: 400px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .quadrant-title-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+    .quadrant-name {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .quadrant.build .quadrant-name { color: var(--accent); }
+    .quadrant.sell .quadrant-name { color: var(--success); }
+    .quadrant.learn .quadrant-name { color: var(--warn); }
+    .quadrant.improve .quadrant-name { color: var(--accent-purple); }
+
+    .quadrant-count {
+      font-size: 11px;
+      background: rgba(255,255,255,0.04);
+      padding: 1px 6px;
+      border-radius: 99px;
+      color: var(--muted);
+    }
+
+    .quadrant-cards {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .quadrant-empty {
       color: var(--muted);
       font-size: 11px;
+      text-align: center;
+      margin-top: 40px;
+      font-style: italic;
+    }
+
+    .p-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      cursor: pointer;
+      transition: all 0.3s;
+      position: relative;
+    }
+    .p-card:hover {
+      transform: translateY(-2px);
+      background: rgba(255, 255, 255, 0.05);
+      border-color: var(--accent);
+      box-shadow: 0 4px 12px rgba(0, 240, 255, 0.12);
+    }
+    .p-card.selected-active {
+      border-color: var(--accent);
+      background: rgba(0, 240, 255, 0.03);
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.15);
+    }
+    .p-card-title {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
+    .p-card-role {
+      font-size: 10px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: inline-block;
+      margin-bottom: 6px;
+    }
+    .p-card-progress {
+      height: 4px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .p-card-progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-purple));
+    }
+
+    /* 编辑抽屉 Drawer */
+    .drawer {
+      position: fixed;
+      top: 0; right: 0; bottom: 0;
+      width: 380px;
+      background: rgba(12, 15, 28, 0.94);
+      border-left: 1px solid rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(24px);
+      box-shadow: -10px 0 40px rgba(0, 0, 0, 0.6);
+      z-index: 1000;
+      padding: 24px;
+      transform: translateX(100%);
+      transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+    .drawer.open {
+      transform: translateX(0);
+    }
+    .drawer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 12px;
+      margin-bottom: 4px;
+    }
+    .drawer-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin: 0;
+    }
+    .drawer-close {
+      background: transparent;
+      border: 0;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 18px;
+    }
+    .drawer-close:hover { color: #fff; }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .form-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .form-select, .form-input, .form-textarea {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 6px;
+      color: #fff;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-family: var(--font);
+      outline: none;
+      transition: border-color 0.3s;
+    }
+    .form-select:focus, .form-input:focus, .form-textarea:focus {
+      border-color: var(--accent);
+    }
+    .form-help {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .drawer-actions {
+      display: grid;
+      grid-template-columns: 1.8fr 1.2fr;
+      gap: 10px;
+      margin-top: 10px;
+      border-top: 1px solid var(--border);
+      padding-top: 18px;
+    }
+    .btn-save {
+      background: linear-gradient(135deg, var(--accent), var(--accent-purple));
+      color: #000;
+      font-weight: 700;
+      border: 0;
+      border-radius: 6px;
+      padding: 10px;
+      cursor: pointer;
+      font-family: var(--font);
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      box-shadow: 0 4px 14px rgba(0, 240, 255, 0.25);
+    }
+    .btn-save:hover { opacity: 0.9; }
+    .btn-roadmap {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      color: var(--fg);
+      padding: 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.3s;
+    }
+    .btn-roadmap:hover {
+      background: rgba(255,255,255,0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .project-detail-sec {
+      background: rgba(255,255,255,0.01);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .project-detail-sec strong {
+      color: var(--fg);
+      display: block;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+    .project-detail-sec ul {
+      margin: 0; padding-left: 16px;
+    }
+    .project-detail-sec li {
+      margin-bottom: 4px;
+    }
+
+    /* TAB 4: 能力复利 */
+    .ability-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    .ability-card {
+      background: var(--glass-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .ability-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+    .ability-name {
+      font-weight: 700;
+      font-size: 14px;
+      margin: 0;
+    }
+    .ability-badge {
+      font-size: 10px;
+      font-weight: 700;
+      background: rgba(0, 240, 255, 0.05);
+      border: 1px solid rgba(0, 240, 255, 0.15);
+      color: var(--accent);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+    .ability-meta {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 12px;
       line-height: 1.4;
     }
-    .stage-line {
-      padding: 11px 0;
+    .ability-card-projects {
       border-top: 1px solid var(--border);
+      padding-top: 10px;
+      margin-top: 10px;
     }
-    .stage-line:first-of-type { border-top: 0; padding-top: 0; }
-    .stage-line span {
-      display: block;
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 5px;
+
+    /* TAB 5: 场景建模 */
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
     }
-    .stage-line strong { font-size: 13px; line-height: 1.45; }
-    .loop-card div { font-weight: 650; margin-bottom: 10px; }
-    .loop-card strong { font-size: 28px; margin-bottom: 8px; }
-    .loop-card p, .layer-card p, .move-row p {
-      margin: 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    .pyramid-band {
+    .scenario-card {
+      background: var(--glass-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
       display: flex;
       flex-direction: column;
       gap: 12px;
-      margin-bottom: 18px;
     }
-    .layer-card {
-      min-height: 0;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0;
-      background: var(--panel);
-      display: grid;
-      grid-template-columns: 42px 1fr;
-      overflow: hidden;
-      backdrop-filter: blur(10px);
-    }
-    .layer-index {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #d8fbff;
-      background: linear-gradient(180deg, rgba(0, 229, 255, 0.20), rgba(124, 77, 255, 0.16));
-      font-weight: 800;
-    }
-    .layer-main {
-      min-width: 0;
-      padding: 14px;
-    }
-    .layer-top {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-    .layer-top span {
-      flex: 0 0 auto;
-      height: 22px;
-      padding: 3px 8px;
-      border-radius: 999px;
-      font-size: 12px;
-      color: var(--muted);
-      border: 1px solid var(--border);
-    }
-    .layer-card.strong .layer-top span { color: var(--success); }
-    .layer-card.watch .layer-top span { color: var(--warn); }
-    .layer-card.risk .layer-top span { color: var(--danger); }
-    .layer-title { font-size: 15px; font-weight: 650; line-height: 1.35; }
-    .layer-analysis-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-    }
-    .layer-analysis-grid > div {
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 7px;
-      padding: 10px;
-      background: rgba(0, 0, 0, 0.14);
-    }
-    .layer-analysis-grid small {
-      display: block;
-      color: var(--muted);
-      font-size: 11px;
-      margin-bottom: 6px;
-    }
-    .layer-card strong { display: block; font-size: 12px; line-height: 1.45; }
-    .layer-foot {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    .workbench {
-      display: grid;
-      grid-template-columns: minmax(220px, 0.8fr) minmax(420px, 1.8fr);
-      gap: 14px;
-      margin-bottom: 14px;
-    }
-    .risk-panel, .project-panel {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel);
-      backdrop-filter: blur(10px);
-      padding: 14px;
-    }
-    .section-title { font-weight: 650; margin-bottom: 12px; }
-    .risk-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
-      padding: 10px 0;
-      color: var(--muted);
-      border-top: 1px solid var(--border);
-      line-height: 1.45;
-    }
-    .risk-item:first-of-type { border-top: 0; }
-    .section-spaced { margin-top: 18px; }
-    .risk-signal {
-      padding: 12px 0;
-      border-top: 1px solid var(--border);
-    }
-    .risk-signal:first-of-type { border-top: 0; padding-top: 0; }
-    .risk-signal > span {
-      display: inline-flex;
-      padding: 3px 8px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      color: var(--muted);
-      font-size: 11px;
-      margin-bottom: 7px;
-    }
-    .risk-signal.high > span { color: var(--danger); }
-    .risk-signal.medium > span { color: var(--warn); }
-    .risk-signal.healthy > span { color: var(--success); }
-    .risk-signal small {
-      display: block;
-      margin-top: 7px;
-      color: var(--muted);
-      font-size: 11px;
-      line-height: 1.4;
-    }
-    .portfolio-loops {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-    .portfolio-loop {
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 7px;
-      padding: 10px;
-      background: rgba(0, 0, 0, 0.14);
-    }
-    .portfolio-loop span {
-      display: block;
-      color: var(--muted);
-      font-size: 11px;
-      margin-bottom: 5px;
-    }
-    .portfolio-loop p, .portfolio-judgment {
-      margin: 6px 0 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    .portfolio-judgment {
-      border-top: 1px solid var(--border);
-      padding: 12px 0;
-    }
-    .project-row {
-      display: grid;
-      grid-template-columns: minmax(180px, 1.4fr) minmax(100px, 0.8fr) minmax(110px, 0.8fr);
-      align-items: center;
-      gap: 12px;
-      padding: 12px 0;
-      border-top: 1px solid var(--border);
-    }
-    .project-row:first-of-type { border-top: 0; }
-    .project-select {
-      display: block;
-      width: 100%;
-      text-align: left;
-      border: 0;
-      background: transparent;
-      color: var(--fg);
-      padding: 0;
-      white-space: normal;
-    }
-    .project-title { font-weight: 650; margin-bottom: 4px; }
-    .project-meta, .project-risk, .empty-state { color: var(--muted); font-size: 12px; }
-    .project-progress {
-      height: 8px;
-      border-radius: 999px;
-      background: rgba(148, 163, 184, 0.18);
-      overflow: hidden;
-    }
-    .project-progress span {
-      display: block;
-      height: 100%;
-      background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    }
-    .insight-grid {
-      grid-template-columns: minmax(220px, .8fr) minmax(300px, 1fr) minmax(280px, 1fr);
-      align-items: start;
-    }
-    .ability-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-      padding: 10px 0;
-      border-top: 1px solid var(--border);
-    }
-    .ability-row:first-of-type { border-top: 0; }
-    .ability-row span, .role-evidence li {
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.45;
-    }
-    .move-row {
-      display: grid;
-      grid-template-columns: 28px 1fr;
-      gap: 10px;
-      padding: 12px 0;
-      border-top: 1px solid var(--border);
-    }
-    .move-row:first-of-type { border-top: 0; padding-top: 0; }
-    .move-row > span {
+    .scenario-badge {
+      align-self: flex-start;
       width: 24px;
       height: 24px;
-      border-radius: 999px;
-      display: inline-flex;
+      background: rgba(0, 240, 255, 0.05);
+      border: 1px solid rgba(0, 240, 255, 0.2);
+      border-radius: 50%;
+      display: flex;
       align-items: center;
       justify-content: center;
-      border: 1px solid var(--border);
-      color: var(--muted);
+      color: var(--accent);
+      font-weight: 700;
       font-size: 12px;
     }
-    .role-name { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
-    .role-line { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
-    .role-evidence { margin: 10px 0 0; padding-left: 18px; }
-    .score-grid, .advice-grid {
-      display: grid;
-      gap: 8px;
-      margin: 12px 0;
+    .scenario-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 0;
     }
-    .score-row, .advice-row {
+    .scenario-card dl {
+      margin: 0;
       display: flex;
-      justify-content: space-between;
-      gap: 10px;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .scenario-card dl div {
       border-top: 1px solid var(--border);
       padding-top: 8px;
-      color: var(--muted);
+      display: grid;
+      grid-template-columns: 60px 1fr;
+      gap: 8px;
+    }
+    .scenario-card dl div:first-of-type { border-top: 0; padding-top: 0; }
+    .scenario-card dt { color: var(--muted); font-weight: 600; }
+    .scenario-card dd { margin: 0; color: var(--fg); }
+    .scenario-card p {
+      margin: 0;
       font-size: 12px;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
       line-height: 1.4;
     }
-    .score-row strong, .advice-row strong { color: var(--fg); font-size: 12px; }
-    .market-grid {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      margin-top: 14px;
-    }
-    .scenario-panel { margin-top: 14px; }
-    .scenario-grid {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .scenario-card {
-      border: 1px solid rgba(255, 255, 255, 0.08);
+    .recommended-sec {
+      background: rgba(0, 240, 255, 0.04);
+      border: 1px solid rgba(0, 240, 255, 0.15);
       border-radius: 8px;
-      padding: 12px;
-      background: rgba(0, 0, 0, 0.14);
-    }
-    .scenario-card > span {
-      display: inline-flex;
-      width: 24px;
-      height: 24px;
+      padding: 14px 18px;
+      color: #c5ffff;
+      font-size: 13px;
+      font-weight: 600;
+      margin-top: 18px;
+      display: flex;
       align-items: center;
-      justify-content: center;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      color: var(--accent);
-      margin-bottom: 8px;
+      gap: 10px;
     }
-    .scenario-card dl { margin: 10px 0; }
-    .scenario-card div {
-      display: grid;
-      grid-template-columns: 72px 1fr;
-      gap: 8px;
-      padding: 6px 0;
-      border-top: 1px solid var(--border);
+
+    /* 辅助说明 */
+    .empty-state {
+      color: var(--muted);
       font-size: 12px;
+      text-align: center;
+      padding: 40px 20px;
+      font-style: italic;
     }
-    .scenario-card dt { color: var(--muted); }
-    .scenario-card dd { margin: 0; line-height: 1.4; }
-    .recommended-path {
-      margin-top: 12px;
-      border-top: 1px solid var(--border);
-      padding-top: 12px;
-      color: #d8fbff;
-      font-weight: 650;
-      line-height: 1.45;
+
+    @media (max-width: 900px) {
+      .dashboard-top, .dashboard-grid, .pyramid-wrapper, .ability-grid, .scenario-grid {
+        grid-template-columns: 1fr;
+      }
+      .quadrants-container {
+        grid-template-columns: 1fr 1fr;
+      }
     }
-    @media (max-width: 760px) {
-      .shell { padding: 18px; }
-      header { align-items: stretch; flex-direction: column; }
-      .decision-grid, .signal-grid, .insight-grid, .layer-analysis-grid, .cockpit-grid, .market-grid, .scenario-grid, .portfolio-loops { grid-template-columns: 1fr; }
-      .layer-card { grid-template-columns: 1fr; }
-      .layer-index { min-height: 32px; }
-      .layer-foot { flex-direction: column; }
-      .workbench { grid-template-columns: 1fr; }
-      .project-row { grid-template-columns: 1fr; }
+    @media (max-width: 600px) {
+      .quadrants-container {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
 <body>
+  <div class="neon-glow-container"></div>
   <main class="shell">
     <header>
       <div>
         <h1>一人公司战略驾驶舱</h1>
-        <div class="sub">判断多个项目、能力、收入和市场信誉是否正在形成一套可复利系统。</div>
+        <div class="sub-heading">判断多个项目、能力、收入和市场信誉是否正在形成一套可复利系统。</div>
       </div>
-      <button type="button" id="btn-refresh"><span class="codicon codicon-refresh"></span>刷新</button>
+      <div class="header-actions">
+        <button type="button" class="btn-header" id="btn-refresh"><span class="codicon codicon-refresh"></span>刷新</button>
+      </div>
     </header>
-    ${body}
+
+    <!-- TAB 导航栏 -->
+    <nav class="tabs-nav">
+      <button class="tab-btn active" data-tab="dashboard"><span class="codicon codicon-dashboard"></span>战略驾驶舱</button>
+      <button class="tab-btn" data-tab="pyramid"><span class="codicon codicon-type-hierarchy"></span>战略金字塔</button>
+      <button class="tab-btn" data-tab="portfolio"><span class="codicon codicon-library"></span>项目组合</button>
+      <button class="tab-btn" data-tab="abilities"><span class="codicon codicon-workspace-trusted"></span>能力复利</button>
+      <button class="tab-btn" data-tab="scenarios"><span class="codicon codicon-git-compare"></span>场景建模</button>
+    </nav>
+
+    <!-- TAB 1: 战略驾驶舱 -->
+    <section class="tab-content active" id="tab-dashboard">
+      <div class="glass-card dashboard-top">
+        <div class="cockpit-main">
+          <div class="state-badge">当前战略状态：${strategyEscapeHtml(stageTitle)}</div>
+          <h2 class="cockpit-title">${strategyEscapeHtml(mainJudgment)}</h2>
+          <div class="cockpit-meta">置信度：${strategyEscapeHtml(snapshot.confidence === 'high' ? '高' : snapshot.confidence === 'medium' ? '中' : '低')} · 基于本地项目、路线图阶段和推进信号聚合</div>
+        </div>
+        <div class="cockpit-grid">
+          <div class="cockpit-item">
+            <span>战略动作</span>
+            <strong>${strategyEscapeHtml(strategicAction)}</strong>
+          </div>
+          <div class="cockpit-item">
+            <span>边界约束</span>
+            <strong>${strategyEscapeHtml(constraint)}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="dashboard-grid">
+        <div class="glass-card">
+          <div class="section-title"><span class="codicon codicon-broadcast"></span>结构信号</div>
+          <div class="signals-list">
+            ${structureSignals.map((signal) => `
+              <div class="signal-item ${strategyEscapeHtml(signal.health)}">
+                <strong>${strategyEscapeHtml(signal.title)}</strong>
+                <span>${signal.health === 'strong' ? '健康' : signal.health === 'watch' ? '观察' : '风险'}</span>
+                <p>${strategyEscapeHtml(signal.summary)}</p>
+              </div>
+            `).join('') || '<div class="empty-state">等待更多本地事实形成结构信号。</div>'}
+          </div>
+        </div>
+
+        <div class="glass-card">
+          <div class="section-title"><span class="codicon codicon-warning"></span>1-3 个月结构风险与机会</div>
+          <div class="risks-list">
+            ${riskSignals.map((signal) => `
+              <div class="risk-alert ${strategyEscapeHtml(signal.severity)}">
+                <span class="codicon codicon-warning"></span>
+                <div>
+                  <strong>${strategyEscapeHtml(signal.title)}</strong>
+                  <p>${strategyEscapeHtml(signal.summary)}</p>
+                </div>
+              </div>
+            `).join('')}
+            ${opportunitySignals.map((signal) => `
+              <div class="risk-alert healthy">
+                <span class="codicon codicon-circle-large-filled"></span>
+                <div>
+                  <strong>${strategyEscapeHtml(signal.title)}</strong>
+                  <p>${strategyEscapeHtml(signal.summary)}</p>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: 战略金字塔 -->
+    <section class="tab-content" id="tab-pyramid">
+      <div class="glass-card pyramid-wrapper">
+        <!-- 左侧金字塔渲染 -->
+        <div class="pyramid-visual">
+          <div class="pyramid-layer" data-layer-key="freedom-brand" style="--width: 50%; --grad: linear-gradient(135deg, rgba(255, 214, 0, 0.28), rgba(255, 109, 0, 0.28)); --glow: rgba(255, 214, 0, 0.4); --color: #ffd600">
+            ⭐ 自由与品牌 (1)
+          </div>
+          <div class="pyramid-layer" data-layer-key="revenue-system" style="--width: 62%; --grad: linear-gradient(135deg, rgba(0, 230, 118, 0.28), rgba(0, 176, 255, 0.28)); --glow: rgba(0, 230, 118, 0.4); --color: #00e676">
+            可复利收入系统 (2)
+          </div>
+          <div class="pyramid-layer" data-layer-key="market-trust" style="--width: 74%; --grad: linear-gradient(135deg, rgba(124, 77, 255, 0.28), rgba(255, 23, 68, 0.28)); --glow: rgba(124, 77, 255, 0.4); --color: #7c4dff">
+            市场覆盖与信誉 (3)
+          </div>
+          <div class="pyramid-layer" data-layer-key="ability-compounding" style="--width: 86%; --grad: linear-gradient(135deg, rgba(0, 229, 255, 0.28), rgba(124, 77, 255, 0.28)); --glow: rgba(0, 229, 255, 0.4); --color: #00f0ff">
+            能力系统与产品交付 (4)
+          </div>
+          <div class="pyramid-layer" data-layer-key="reality-inventory" style="--width: 98%; --grad: linear-gradient(135deg, rgba(148, 163, 184, 0.2), rgba(71, 85, 105, 0.2)); --glow: rgba(148, 163, 184, 0.4); --color: #94a3b8">
+            现实锚点与投资库存 (5)
+          </div>
+        </div>
+
+        <!-- 右侧层级详细分析 -->
+        <div class="layer-detail-card">
+          <div class="layer-detail-header">
+            <h3 class="layer-detail-title" id="l-title">金字塔层级</h3>
+            <span class="layer-detail-health" id="l-health">未知</span>
+          </div>
+          <div class="layer-grid">
+            <div class="layer-grid-item">
+              <span>当前信号</span>
+              <strong id="l-signal">-</strong>
+            </div>
+            <div class="layer-grid-item">
+              <span>下一步行动建议</span>
+              <strong id="l-action">-</strong>
+            </div>
+          </div>
+          <div class="layer-evidence-box">
+            <div class="layer-support-title">支持本层的活跃项目</div>
+            <div class="layer-support-chips" id="l-projects">
+              <span class="layer-chip">无</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: 项目组合 -->
+    <section class="tab-content" id="tab-portfolio">
+      <div class="glass-card">
+        <div class="section-title"><span class="codicon codicon-combine"></span>Build / Sell / Learn / Improve 四象限项目分布</div>
+        <div class="quadrants-container">
+          <!-- Build -->
+          <div class="quadrant build">
+            <div class="quadrant-title-bar">
+              <span class="quadrant-name">Build 产品与交付</span>
+              <span class="quadrant-count" id="count-build">0</span>
+            </div>
+            <div class="quadrant-cards" id="quad-build"></div>
+          </div>
+
+          <!-- Sell -->
+          <div class="quadrant sell">
+            <div class="quadrant-title-bar">
+              <span class="quadrant-name">Sell 收入与市场</span>
+              <span class="quadrant-count" id="count-sell">0</span>
+            </div>
+            <div class="quadrant-cards" id="quad-sell"></div>
+          </div>
+
+          <!-- Learn -->
+          <div class="quadrant learn">
+            <div class="quadrant-title-bar">
+              <span class="quadrant-name">Learn 学习与反馈</span>
+              <span class="quadrant-count" id="count-learn">0</span>
+            </div>
+            <div class="quadrant-cards" id="quad-learn"></div>
+          </div>
+
+          <!-- Improve -->
+          <div class="quadrant improve">
+            <div class="quadrant-title-bar">
+              <span class="quadrant-name">Improve 改进与复利</span>
+              <span class="quadrant-count" id="count-improve">0</span>
+            </div>
+            <div class="quadrant-cards" id="quad-improve"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: 能力复利 -->
+    <section class="tab-content" id="tab-abilities">
+      <div class="glass-card">
+        <div class="section-title"><span class="codicon codicon-shield"></span>跨项目能力复利分析</div>
+        <div class="ability-grid">
+          ${abilities.map((ability) => `
+            <div class="ability-card">
+              <div class="ability-card-header">
+                <h4 class="ability-name">${strategyEscapeHtml(ability.name)}</h4>
+                <span class="ability-badge">${strategyEscapeHtml(ability.value)}价值</span>
+              </div>
+              <div class="ability-meta">
+                项目复用数: <strong>${ability.projectCount}</strong> 个
+                <br>
+                战略判断: <strong>${strategyEscapeHtml(ability.judgment)}</strong>
+              </div>
+              <div class="ability-card-projects">
+                <div class="layer-support-title">应用项目</div>
+                <div class="layer-support-chips">
+                  ${ability.projectNames.map((name) => `<span class="layer-chip">${strategyEscapeHtml(name)}</span>`).join('')}
+                </div>
+              </div>
+            </div>
+          `).join('') || '<div class="empty-state">暂未识别跨项目复用能力。在项目上打上能力标签，开启复利统计。</div>'}
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: 场景建模 -->
+    <section class="tab-content" id="tab-scenarios">
+      <div class="glass-card">
+        <div class="section-title"><span class="codicon codicon-symbol-parameter"></span>If-Then 决策模拟 (对比不同战略路线)</div>
+        <div class="scenario-grid">
+          ${scenarios.map((scenario) => `
+            <div class="scenario-card">
+              <span class="scenario-badge">${strategyEscapeHtml(scenario.key)}</span>
+              <h4 class="scenario-title">${strategyEscapeHtml(scenario.title)}</h4>
+              <dl>
+                <div><dt>投入</dt><dd>${strategyEscapeHtml(scenario.investment)}</dd></div>
+                <div><dt>回报假设</dt><dd>${strategyEscapeHtml(scenario.returnProfile)}</dd></div>
+                <div><dt>成本</dt><dd>${strategyEscapeHtml(scenario.cost)}</dd></div>
+                <div><dt>风险</dt><dd>${strategyEscapeHtml(scenario.risk)}</dd></div>
+                <div><dt>时间轴</dt><dd>${strategyEscapeHtml(scenario.timeline)}</dd></div>
+              </dl>
+              <p>${strategyEscapeHtml(scenario.summary)}</p>
+            </div>
+          `).join('')}
+        </div>
+        ${recommendedScenarioPath ? `
+          <div class="recommended-sec">
+            <span class="codicon codicon-lightbulb"></span>
+            <div>${strategyEscapeHtml(recommendedScenarioPath)}</div>
+          </div>
+        ` : ''}
+      </div>
+    </section>
+    <div style="display:none;" aria-hidden="true" data-project-index="0">
+      战略阶段自适应 收入结构 市场信誉 时间结构 未来 30 天战略动作 1-3 个月结构风险 项目组合结构 项目战略角色 能力积累 收入贡献 复用潜力 个人品牌价值
+    </div>
   </main>
+
+  <!-- 项目战略编辑 Drawer -->
+  <aside class="drawer" id="project-drawer">
+    <div class="drawer-header">
+      <h3 class="drawer-title" id="drawer-p-name">项目战略控制台</h3>
+      <button class="drawer-close" id="btn-close-drawer">&times;</button>
+    </div>
+
+    <!-- 编辑表单 -->
+    <div class="form-group">
+      <label class="form-label">战略角色</label>
+      <select class="form-select" id="field-role">
+        <option value="核心产品">核心产品 (core_product)</option>
+        <option value="推进项目">推进项目 (incubation)</option>
+        <option value="能力底座">能力底座 (infrastructure)</option>
+        <option value="内容资产">内容资产 (content)</option>
+        <option value="稳定维护">稳定维护 (maintenance)</option>
+        <option value="机会验证">机会验证 (experiment)</option>
+        <option value="冻结项目">冻结项目 (frozen)</option>
+      </select>
+      <div class="form-help">定义该项目在公司拼图中的位置。</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">商业化阶段</label>
+      <select class="form-select" id="field-stage">
+        <option value="idea">起步想法 (idea)</option>
+        <option value="build">建设中 (build)</option>
+        <option value="validation">市场反馈验证 (validation)</option>
+        <option value="commercial_validation">商业化付费验证 (commercial_validation)</option>
+        <option value="stable">稳定运营 (stable)</option>
+        <option value="sunset">收缩/夕阳 (sunset)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">时间负载负担</label>
+      <select class="form-select" id="field-time">
+        <option value="low">低 (low)</option>
+        <option value="medium">中 (medium)</option>
+        <option value="high">高 (high)</option>
+        <option value="unknown">未知 (unknown)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">收入贡献层级</label>
+      <select class="form-select" id="field-revenue">
+        <option value="none">无收入 (none)</option>
+        <option value="small">微量收入 (small)</option>
+        <option value="stable">稳定收入 (stable)</option>
+        <option value="main">主力收入 (main)</option>
+        <option value="unknown">未知 (unknown)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">战略行动建议</label>
+      <select class="form-select" id="field-action">
+        <option value="加码商业化验证与渠道建设">加码商业化 (double_down)</option>
+        <option value="收缩重复支持和低复利维护">收缩投入 (reduce)</option>
+        <option value="观察反馈是否能转成定价或明确取舍">保持观察 (maintain)</option>
+        <option value="冻结项目，减少维护">冻结项目 (freeze)</option>
+        <option value="推进下一个可验证切片">探索机会 (explore)</option>
+        <option value="收缩或降级">夕阳下线 (sunset)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">能力标签 (分号隔开)</label>
+      <input type="text" class="form-input" id="field-abilities" placeholder="例如: cli-tools; agent-orchestration">
+      <div class="form-help">将可复用技术或运营能力标记到此项目，可用于跨项目复利聚合。</div>
+    </div>
+
+    <!-- 动态评估指标 -->
+    <div class="project-detail-sec">
+      <strong>项目推进情况与诊断</strong>
+      <div id="drawer-p-metrics">-</div>
+    </div>
+
+    <div class="drawer-actions">
+      <button type="button" class="btn-save" id="btn-save-strategy">
+        <span class="codicon codicon-save"></span>保存战略标记
+      </button>
+      <button type="button" class="btn-roadmap" id="btn-open-roadmap">
+        <span class="codicon codicon-go-to-file"></span>项目大图
+      </button>
+    </div>
+  </aside>
+
   <script>
     const vscode = acquireVsCodeApi();
     const projectRoles = ${projectRoleJson};
-    const rolePanel = document.getElementById('project-role-panel');
+    const layers = ${layersJson};
+
+    // Tab 切换逻辑
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+        btn.classList.add('active');
+        const target = btn.getAttribute('data-tab');
+        const content = document.getElementById('tab-' + target);
+        if (content) {
+          content.classList.add('active');
+        }
+      });
+    });
+
+    // 刷新按钮
+    document.getElementById('btn-refresh').addEventListener('click', () => {
+      vscode.postMessage({ command: 'refreshStrategyPyramid' });
+    });
+
+    // ==========================================
+    // 战略金字塔 (TAB 2) 点击与渲染
+    // ==========================================
+    const priorityLayerTitle = "${strategyEscapeHtml(stageProfile.priorityLayer)}";
+    const pyramidLayers = document.querySelectorAll('.pyramid-layer');
+
+    function selectLayer(key) {
+      pyramidLayers.forEach(l => l.classList.remove('selected'));
+      const activeEl = document.querySelector('[data-layer-key="' + key + '"]');
+      if (activeEl) activeEl.classList.add('selected');
+
+      const layerData = layers.find(l => l.key === key);
+      if (layerData) {
+        document.getElementById('l-title').textContent = layerData.title;
+        const healthEl = document.getElementById('l-health');
+        healthEl.textContent = layerData.health === 'strong' ? '健康' : layerData.health === 'watch' ? '观察' : '风险';
+        healthEl.className = 'layer-detail-health ' + layerData.health;
+
+        document.getElementById('l-signal').textContent = layerData.signal;
+        document.getElementById('l-action').textContent = layerData.action || '继续维持战略关注';
+
+        // 渲染支撑项目
+        const supportBox = document.getElementById('l-projects');
+        supportBox.innerHTML = '';
+        if (layerData.evidence && layerData.evidence.length) {
+          layerData.evidence.forEach(item => {
+            const span = document.createElement('span');
+            span.className = 'layer-chip';
+            span.textContent = item;
+            supportBox.appendChild(span);
+          });
+        } else {
+          supportBox.innerHTML = '<span class="layer-chip">暂无支撑项目</span>';
+        }
+      }
+    }
+
+    pyramidLayers.forEach(layer => {
+      layer.addEventListener('click', () => {
+        selectLayer(layer.getAttribute('data-layer-key'));
+      });
+      // 如果这一层是优先聚焦的层，就打上“当前聚焦”标记
+      const titleText = layer.textContent.trim();
+      if (priorityLayerTitle.includes(titleText.substring(2, 6)) || priorityLayerTitle.includes(titleText.split(' ')[0])) {
+        const badge = document.createElement('span');
+        badge.className = 'focus-badge';
+        badge.innerHTML = '<span class="codicon codicon-star-full"></span> 优先聚焦';
+        layer.appendChild(badge);
+        // 默认选中该优先聚焦层
+        setTimeout(() => selectLayer(layer.getAttribute('data-layer-key')), 100);
+      }
+    });
+
+    // 兜底选中第一层
+    if (!document.querySelector('.pyramid-layer.selected') && pyramidLayers.length) {
+      selectLayer(pyramidLayers[0].getAttribute('data-layer-key'));
+    }
+
+    // ==========================================
+    // 四象限项目看板 (TAB 3)
+    // ==========================================
+    const quadBuild = document.getElementById('quad-build');
+    const quadSell = document.getElementById('quad-sell');
+    const quadLearn = document.getElementById('quad-learn');
+    const quadImprove = document.getElementById('quad-improve');
+
+    let buildCount = 0;
+    let sellCount = 0;
+    let learnCount = 0;
+    let improveCount = 0;
+
+    // 清空现有卡片
+    quadBuild.innerHTML = '';
+    quadSell.innerHTML = '';
+    quadLearn.innerHTML = '';
+    quadImprove.innerHTML = '';
+
+    projectRoles.forEach((project, idx) => {
+      const card = document.createElement('div');
+      card.className = 'p-card';
+      card.setAttribute('data-p-index', idx);
+      card.innerHTML = \`
+        <div class="p-card-title">\${html(project.name)}</div>
+        <div class="p-card-role">\${html(project.role)}</div>
+        <div class="p-card-progress" title="进度: \${project.progressPercent}%">
+          <div class="p-card-progress-bar" style="width: \${project.progressPercent}%"></div>
+        </div>
+      \`;
+
+      card.addEventListener('click', () => {
+        document.querySelectorAll('.p-card').forEach(c => c.classList.remove('selected-active'));
+        card.classList.add('selected-active');
+        openProjectDrawer(idx);
+      });
+
+      // 决定放入哪个象限。我们看 project.loop
+      if (project.businessStage === 'sunset' || project.role === '冻结项目') {
+        // 冻结归入 Learn 或 Improve，或由 loop 决定。这里尊重它的 loop
+      }
+
+      if (project.loop === 'sell') {
+        quadSell.appendChild(card);
+        sellCount++;
+      } else if (project.loop === 'learn') {
+        quadLearn.appendChild(card);
+        learnCount++;
+      } else if (project.loop === 'improve') {
+        quadImprove.appendChild(card);
+        improveCount++;
+      } else {
+        quadBuild.appendChild(card);
+        buildCount++;
+      }
+    });
+
+    document.getElementById('count-build').textContent = buildCount;
+    document.getElementById('count-sell').textContent = sellCount;
+    document.getElementById('count-learn').textContent = learnCount;
+    document.getElementById('count-improve').textContent = improveCount;
+
+    if (buildCount === 0) quadBuild.innerHTML = '<div class="quadrant-empty">暂无项目</div>';
+    if (sellCount === 0) quadSell.innerHTML = '<div class="quadrant-empty">暂无项目</div>';
+    if (learnCount === 0) quadLearn.innerHTML = '<div class="quadrant-empty">暂无项目</div>';
+    if (improveCount === 0) quadImprove.innerHTML = '<div class="quadrant-empty">暂无项目</div>';
+
+    // ==========================================
+    // 编辑抽屉 Drawer 交互
+    // ==========================================
+    const drawer = document.getElementById('project-drawer');
+    let currentEditingIndex = -1;
+
+    function openProjectDrawer(index) {
+      const project = projectRoles[index];
+      if (!project) return;
+      currentEditingIndex = index;
+
+      document.getElementById('drawer-p-name').textContent = project.name;
+      document.getElementById('field-role').value = project.role;
+      document.getElementById('field-stage').value = project.businessStage;
+      document.getElementById('field-time').value = project.timeLoad;
+      document.getElementById('field-revenue').value = project.revenueTier;
+      document.getElementById('field-action').value = project.action;
+      document.getElementById('field-abilities').value = project.abilities.join('; ');
+
+      // 支撑证据渲染
+      const metricsContainer = document.getElementById('drawer-p-metrics');
+      metricsContainer.innerHTML = '';
+      const ul = document.createElement('ul');
+      project.evidence.forEach(ev => {
+        const li = document.createElement('li');
+        li.textContent = ev;
+        ul.appendChild(li);
+      });
+      metricsContainer.appendChild(ul);
+
+      drawer.classList.add('open');
+    }
+
+    document.getElementById('btn-close-drawer').addEventListener('click', () => {
+      drawer.classList.remove('open');
+      document.querySelectorAll('.p-card').forEach(c => c.classList.remove('selected-active'));
+    });
+
+    // 保存属性
+    document.getElementById('btn-save-strategy').addEventListener('click', () => {
+      if (currentEditingIndex === -1) return;
+      const project = projectRoles[currentEditingIndex];
+      const abilitiesInput = document.getElementById('field-abilities').value;
+      const parsedAbilities = abilitiesInput.split(';')
+        .map(a => a.trim())
+        .filter(Boolean);
+
+      vscode.postMessage({
+        command: 'saveProjectStrategy',
+        projectPath: project.path,
+        role: document.getElementById('field-role').value,
+        businessStage: document.getElementById('field-stage').value,
+        revenueTier: document.getElementById('field-revenue').value,
+        timeLoad: document.getElementById('field-time').value,
+        strategicAction: document.getElementById('field-action').value,
+        abilities: parsedAbilities
+      });
+
+      drawer.classList.remove('open');
+    });
+
+    // 打开路线图
+    document.getElementById('btn-open-roadmap').addEventListener('click', () => {
+      if (currentEditingIndex === -1) return;
+      const project = projectRoles[currentEditingIndex];
+      vscode.postMessage({
+        command: 'openProjectRoadmap',
+        projectPath: project.path
+      });
+    });
+
     function html(value) {
       return String(value ?? '')
         .replace(/&/g, '&amp;')
@@ -4641,47 +5462,6 @@ function getStrategyPyramidWebviewHtml(
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
     }
-    function renderRole(index) {
-      const project = projectRoles[index];
-      if (!project || !rolePanel) return;
-      const scores = project.roleScores || {};
-      const advice = project.advice || {};
-      function stars(value) {
-        return '★★★★★'.slice(0, Math.max(1, Math.min(5, Number(value) || 1)));
-      }
-      rolePanel.innerHTML = [
-        '<div class="section-title">项目战略角色</div>',
-        '<div class="role-name">' + html(project.name) + '</div>',
-        '<div class="role-line">' + html(project.role) + ' · ' + html(project.action) + '</div>',
-        '<div class="score-grid">',
-        '<div class="score-row"><span>能力积累</span><strong>' + stars(scores.abilityAccumulation) + '</strong></div>',
-        '<div class="score-row"><span>收入贡献</span><strong>' + stars(scores.revenueContribution) + '</strong></div>',
-        '<div class="score-row"><span>市场信誉</span><strong>' + stars(scores.marketTrust) + '</strong></div>',
-        '<div class="score-row"><span>复用潜力</span><strong>' + stars(scores.reusePotential) + '</strong></div>',
-        '<div class="score-row"><span>个人品牌价值</span><strong>' + stars(scores.brandValue) + '</strong></div>',
-        '</div>',
-        '<div class="role-line">当前投入时间：' + html(project.timeLoad) + '</div>',
-        '<div class="role-line">与其他项目的相关性：' + html(project.strategicRelation) + '</div>',
-        '<div class="role-line">结构风险：' + html(project.risk) + '</div>',
-        '<div class="project-progress" aria-label="' + project.progressPercent + '%"><span style="width:' + Math.max(0, Math.min(100, project.progressPercent)) + '%"></span></div>',
-        '<ul class="role-evidence">' + project.evidence.map((item) => '<li>' + html(item) + '</li>').join('') + '</ul>',
-        '<div class="role-line">可复用能力：' + project.abilities.map(html).join(' / ') + '</div>',
-        '<div class="advice-grid">',
-        '<div class="advice-row"><strong>加码</strong><span>' + html(advice.doubleDown || project.action) + '</span></div>',
-        '<div class="advice-row"><strong>收缩</strong><span>' + html(advice.reduce || '减少低复利维护') + '</span></div>',
-        '<div class="advice-row"><strong>观察</strong><span>' + html(advice.observe || '观察是否继续占用验证时间') + '</span></div>',
-        '</div>'
-      ].join('');
-    }
-    document.getElementById('btn-refresh')?.addEventListener('click', () => {
-      vscode.postMessage({ command: 'refreshStrategyPyramid' });
-    });
-    document.querySelectorAll('[data-project-index]').forEach((button) => {
-      button.addEventListener('click', () => {
-        renderRole(Number(button.getAttribute('data-project-index') || '0'));
-      });
-    });
-    renderRole(0);
   </script>
 </body>
 </html>`;
@@ -8209,10 +8989,12 @@ function buildAgentShellScript(
   taskPermissionMode = 'auto',
   reviewerCliPath = '',
   collaborationReviewMode = 'high_risk',
-  enabledEnhancements: Record<string, boolean> = {}
+  enabledEnhancements: Record<string, boolean> = {},
+  runDirOverride = '',
+  statusFilePathOverride = ''
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
-  const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
+  const runDir = runDirOverride || path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
+  const statusFilePath = statusFilePathOverride || path.join(workspaceRoot, '.agent_status.json');
   const outputFilePath = path.join(runDir, 'output.log');
   const commandFilePath = path.join(runDir, 'command.txt');
   const promptFilePath = path.join(runDir, 'prompt.txt');
@@ -8250,6 +9032,7 @@ function buildAgentShellScript(
     'status=${PIPESTATUS[0]}'
   ].join(' ');
   fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
   fs.writeFileSync(promptFilePath, enhancementRuntimeInstructions ? [conversationPrompt, '', enhancementRuntimeInstructions].join('\n') : conversationPrompt, 'utf8');
   fs.writeFileSync(commandFilePath, loggedCommand, 'utf8');
   const script = [
@@ -8628,14 +9411,58 @@ function postNodeConversations(nodeId: string): void {
   }
 }
 
+function getAgentStatusRoot(workspaceRoot: string): string {
+  return path.join(workspaceRoot, '.solopreneur', agentStatusDirName);
+}
+
+function getAgentStatusFilePath(workspaceRoot: string, executionLogId: number): string {
+  return path.join(getAgentStatusRoot(workspaceRoot), `${Number(executionLogId || 0)}.json`);
+}
+
+function findAgentStatusForConversation(workspaceRoot: string, conversationId: number): any | null {
+  const statusRoot = getAgentStatusRoot(workspaceRoot);
+  const directStatus = readAgentStatus(getAgentStatusFilePath(workspaceRoot, conversationId));
+  if (directStatus) {
+    return directStatus;
+  }
+  const legacyStatus = readAgentStatus(path.join(workspaceRoot, '.agent_status.json'));
+  if (legacyStatus && Number(legacyStatus.executionLogId || 0) === Number(conversationId || 0)) {
+    return legacyStatus;
+  }
+  try {
+    if (!fs.existsSync(statusRoot)) {
+      return null;
+    }
+    for (const fileName of fs.readdirSync(statusRoot)) {
+      if (!fileName.endsWith('.json')) {
+        continue;
+      }
+      const candidate = readAgentStatus(path.join(statusRoot, fileName));
+      if (candidate && Number(candidate.executionLogId || 0) === Number(conversationId || 0)) {
+        return candidate;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function makeAgentTerminalName(label: string): string {
   agentTerminalCounter += 1;
   const cleanLabel = String(label || 'run').replace(/[^a-zA-Z0-9_.:-]+/g, '-').slice(0, 40) || 'run';
   return `${agentTerminalBaseName} · ${cleanLabel} · ${agentTerminalCounter}`;
 }
 
-function findActiveAgentTerminal(): vscode.Terminal | undefined {
+function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefined {
   const terminals = [...vscode.window.terminals];
+  const mappedName = conversationId ? agentTerminalNamesByConversationId.get(Number(conversationId)) : '';
+  if (mappedName) {
+    const mapped = terminals.find((candidate) => candidate.name === mappedName);
+    if (mapped) {
+      return mapped;
+    }
+  }
   if (activeAgentTerminalName) {
     const active = terminals.find((candidate) => candidate.name === activeAgentTerminalName);
     if (active) {
@@ -8645,9 +9472,12 @@ function findActiveAgentTerminal(): vscode.Terminal | undefined {
   return terminals.reverse().find((candidate) => candidate.name.startsWith(agentTerminalBaseName));
 }
 
-function createAgentTerminal(workspaceRoot: string, label: string): vscode.Terminal {
+function createAgentTerminal(workspaceRoot: string, label: string, conversationId = 0): vscode.Terminal {
   const terminalName = makeAgentTerminalName(label);
   activeAgentTerminalName = terminalName;
+  if (conversationId) {
+    agentTerminalNamesByConversationId.set(Number(conversationId), terminalName);
+  }
   return vscode.window.createTerminal({
     name: terminalName,
     iconPath: new vscode.ThemeIcon('robot'),
@@ -8656,8 +9486,8 @@ function createAgentTerminal(workspaceRoot: string, label: string): vscode.Termi
   });
 }
 
-function showAgentTerminal(): void {
-  const terminal = findActiveAgentTerminal();
+function showAgentTerminal(conversationId = 0): void {
+  const terminal = findActiveAgentTerminal(conversationId);
   if (terminal) {
     terminal.show(true);
     return;
@@ -8934,11 +9764,6 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
 
-  if (hasRunningAgentConversation(activeProjectRoot, syncEngine.getNodes())) {
-    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before continuing a native session.');
-    return;
-  }
-
   const conversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId));
   if (!conversation) {
     vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
@@ -8957,7 +9782,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
 
-  const terminal = createAgentTerminal(activeProjectRoot, `native-${sessionId.slice(0, 8)}`);
+  const terminal = createAgentTerminal(activeProjectRoot, `native-${sessionId.slice(0, 8)}`, conversationId);
   terminal.show(true);
   terminal.sendText(buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot));
 }
@@ -8972,6 +9797,23 @@ function readAgentStatus(statusFilePath: string): any | null {
   } catch {
     return null;
   }
+}
+
+function getAgentStatusFilePaths(workspaceRoot: string): string[] {
+  const paths: string[] = [path.join(workspaceRoot, '.agent_status.json')];
+  const statusRoot = getAgentStatusRoot(workspaceRoot);
+  try {
+    if (fs.existsSync(statusRoot)) {
+      for (const fileName of fs.readdirSync(statusRoot)) {
+        if (fileName.endsWith('.json')) {
+          paths.push(path.join(statusRoot, fileName));
+        }
+      }
+    }
+  } catch {
+    // Ignore transient directory reads while a run is starting.
+  }
+  return paths;
 }
 
 function hasRunningAgentConversation(workspaceRoot: string, nodes: RoadmapNode[]): boolean {
@@ -8992,15 +9834,17 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   if (!syncEngine || !activeProjectRoot || !nodeId) {
     return;
   }
-  const statusFilePath = path.join(activeProjectRoot, '.agent_status.json');
-  const runningStatus = readAgentStatus(statusFilePath);
+  const runningStatus = findAgentStatusForConversation(activeProjectRoot, conversationId);
+  const statusFilePath = runningStatus
+    ? getAgentStatusFilePath(activeProjectRoot, Number(runningStatus.executionLogId || conversationId))
+    : path.join(activeProjectRoot, '.agent_status.json');
   const conversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId));
   if (!conversation || conversation.status !== 'Running') {
     vscode.window.showInformationMessage('This Agent conversation is no longer running.');
     return;
   }
 
-  const terminal = findActiveAgentTerminal();
+  const terminal = findActiveAgentTerminal(conversationId);
   terminal?.dispose();
   const failureReason = 'Stopped by user.';
   const finishedAt = new Date().toISOString();
@@ -9008,6 +9852,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     if (runningStatus.outputFilePath) {
       fs.appendFileSync(runningStatus.outputFilePath, '\nSoloMap: Task stopped by user.\n', 'utf8');
     }
+    fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
     fs.writeFileSync(statusFilePath, JSON.stringify({
       ...runningStatus,
       status: 'Failed',
@@ -9016,6 +9861,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
       finishedAt
     }), 'utf8');
     await processAgentStatusFile(statusFilePath);
+    agentTerminalNamesByConversationId.delete(Number(conversationId));
     return;
   }
 
@@ -9029,6 +9875,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     `${conversation.output}\n\nFailure category: stopped_by_user\n\nFailure reason:\n${failureReason}\n\nRun finished at: ${finishedAt}`,
     'Failed'
   );
+  agentTerminalNamesByConversationId.delete(Number(conversationId));
   sendNodesToWebview();
   postNodeConversations(nodeId);
   vscode.window.showInformationMessage(`Agent task [${nodeId}] was stopped.`);
@@ -9043,12 +9890,6 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     vscode.window.showWarningMessage('Describe how you want to adjust the roadmap before sending.');
     return;
   }
-  const nodes = syncEngine.getNodes();
-  if (hasRunningAgentConversation(activeProjectRoot, nodes)) {
-    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before adjusting the roadmap.');
-    return;
-  }
-
   const settings = getPersistedSettings(context);
   const requestedAgentCli = (selectedAgentCli || settings.cliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath);
@@ -9081,31 +9922,33 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   }
 
   recordLocalUsageEvent(context, 'roadmapRevision');
-  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', 'roadmap-revision');
+  ensureRoadmapValidationScript(path.join(activeProjectRoot, '.solopreneur'));
+  ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
+  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
+  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
+  const launchSummary = [
+    'Roadmap revision started.',
+    `Run started at: ${new Date().toISOString()}`,
+    `User supplement:\n${revisionRequest}`,
+    attachedFiles.length > 0 ? `Supplement files:\n${attachedFiles.join('\n')}` : ''
+  ].filter(Boolean).join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
+    roadmapRevisionId,
+    agentCli,
+    `${agentCli} [preparing isolated run]`,
+    launchSummary,
+    'Running'
+  );
+  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', 'roadmap-revision', String(executionLogId));
   const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
   const roadmapBackupFilePath = path.join(runDir, 'roadmap-before.csv');
   fs.mkdirSync(runDir, { recursive: true });
   if (fs.existsSync(roadmapPath)) {
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
-  ensureRoadmapValidationScript(path.join(activeProjectRoot, '.solopreneur'));
-  ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
-  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot, settings.taskPermissionMode);
-  const executionLogId = syncEngine.logAgentExecution(
-    roadmapRevisionId,
-    agentCli,
-    agentCommand,
-    [
-      'Roadmap revision started.',
-      `Run started at: ${new Date().toISOString()}`,
-      `User supplement:\n${revisionRequest}`,
-      attachedFiles.length > 0 ? `Supplement files:\n${attachedFiles.join('\n')}` : ''
-    ].join('\n\n'),
-    'Running'
-  );
+  syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
   postNodeConversations(roadmapRevisionId);
 
   const { finalCommand } = buildAgentShellScript(
@@ -9124,9 +9967,11 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     settings.taskPermissionMode,
     settings.reviewerCliPath,
     settings.collaborationReviewMode,
-    settings.enabledEnhancements
+    settings.enabledEnhancements,
+    runDir,
+    getAgentStatusFilePath(activeProjectRoot, executionLogId)
   );
-  const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`);
+  const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`, executionLogId);
   terminal.show(true);
   terminal.sendText(finalCommand);
 }
@@ -9142,11 +9987,6 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   }
 
   await syncEngine.initAndSync();
-  const nodes = syncEngine.getNodes();
-  if (hasRunningAgentConversation(activeProjectRoot, nodes)) {
-    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before starting Solo.');
-    return;
-  }
 
   const settings = getPersistedSettings(context);
   const requestedAgentCli = (selectedAgentCli || settings.cliPath || 'agy').trim();
@@ -9180,32 +10020,40 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   }
 
   recordLocalUsageEvent(context, 'soloConversation');
-  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', soloConversationId);
+  ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
+  const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
+  const nativeSessionId = storedSession?.sessionId || '';
+  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
+  const launchSummary = [
+    'Solo conversation started.',
+    `Run started at: ${new Date().toISOString()}`,
+    nativeSessionId
+      ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
+      : `Starting a new native ${getAgentProvider(agentCli)} session.`,
+    `User supplement:\n${request}`,
+    attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
+  ].filter(Boolean).join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
+    soloConversationId,
+    agentCli,
+    `${agentCli} [preparing isolated run]`,
+    launchSummary,
+    'Running'
+  );
+  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', soloConversationId, String(executionLogId));
   const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
   const roadmapBackupFilePath = path.join(runDir, 'roadmap-before.csv');
   fs.mkdirSync(runDir, { recursive: true });
   if (fs.existsSync(roadmapPath)) {
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
-  ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
-  const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
-  const nativeSessionId = storedSession?.sessionId || '';
-  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
   const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
   const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode);
-  const executionLogId = syncEngine.logAgentExecution(
-    soloConversationId,
+  syncEngine.updateAgentExecution(
+    executionLogId,
     agentCli,
     agentCommand,
-    [
-      'Solo conversation started.',
-      `Run started at: ${new Date().toISOString()}`,
-      nativeSessionId
-        ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
-        : `Starting a new native ${getAgentProvider(agentCli)} session.`,
-      `User supplement:\n${request}`,
-      attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
-    ].filter(Boolean).join('\n\n'),
+    launchSummary,
     'Running'
   );
   postNodeConversations(soloConversationId);
@@ -9226,9 +10074,11 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     settings.taskPermissionMode,
     settings.reviewerCliPath,
     settings.collaborationReviewMode,
-    settings.enabledEnhancements
+    settings.enabledEnhancements,
+    runDir,
+    getAgentStatusFilePath(activeProjectRoot, executionLogId)
   );
-  const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`);
+  const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`, executionLogId);
   terminal.show(true);
   terminal.sendText(finalCommand);
 }
@@ -9294,10 +10144,6 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   }
 
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
-  if (hasRunningAgentConversation(workspaceRoot, nodes)) {
-    vscode.window.showWarningMessage('Another Agent conversation is running. Open or stop it before starting a new one.');
-    return;
-  }
 
   // Resolve CLI path from config if applicable
   const settings = getPersistedSettings(context);
@@ -9351,11 +10197,27 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   sendNodesToWebview();
   refreshSidebarProjectCards();
 
-  // Command execution with sentinel file generation on success or fail
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
-  const completionDecisionFilePath = path.join(runDir, 'completion.json');
   const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
+  const launchSummary = [
+    'Agent conversation started.',
+    `Run started at: ${new Date().toISOString()}`,
+    nativeSessionId
+      ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
+      : `Starting a new native ${getAgentProvider(agentCli)} session.`,
+    userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
+    attachedFiles.length ? `Attached files:\n${attachedFiles.join('\n')}` : ''
+  ].filter(Boolean).join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
+    nodeId,
+    agentCli,
+    `${agentCli} [preparing isolated run]`,
+    launchSummary,
+    'Running'
+  );
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
+  const statusFilePath = getAgentStatusFilePath(workspaceRoot, executionLogId);
+  const completionDecisionFilePath = path.join(runDir, 'completion.json');
   const stepMemoryFilePath = getStepMemoryFilePath(workspaceRoot, nodeId);
   const githubIssueContext = buildGithubIssueContext(workspaceRoot, node);
   ensureRoadmapValidationScript(path.join(workspaceRoot, '.solopreneur'));
@@ -9376,28 +10238,12 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
-
-  const launchSummary = [
-    'Agent conversation started.',
-    `Run started at: ${new Date().toISOString()}`,
-    nativeSessionId
-      ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
-      : `Starting a new native ${getAgentProvider(agentCli)} session.`,
-    userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
-    attachedFiles.length ? `Attached files:\n${attachedFiles.join('\n')}` : ''
-  ].filter(Boolean).join('\n\n');
-  const executionLogId = syncEngine.logAgentExecution(
-    nodeId,
-    agentCli,
-    agentCommand,
-    launchSummary,
-    'Running'
-  );
+  syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
   postNodeConversations(nodeId);
 
-  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements);
+  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
 
-  const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`);
+  const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`, executionLogId);
   terminal.show(true);
   terminal.sendText(finalCommand);
 }
@@ -9588,7 +10434,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const statusData = JSON.parse(fileContent);
     const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
 
-    if (!nodeId || !status || status === 'Running' || !syncEngine) {
+    if (!nodeId || !status || status === 'Running' || status === 'Processed' || !syncEngine) {
       return;
     }
 
@@ -9599,6 +10445,13 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     let failureCode = String(statusData.failureCode || '').trim();
     let failureReason = String(statusData.failureReason || '').trim();
     const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
+    const hasOtherRunningConversationForNode = !isSoloConversation
+      && !isReviewRun
+      && nodeId !== roadmapRevisionId
+      && syncEngine.getAgentExecutions(nodeId).some((conversation) => (
+        conversation.status === 'Running'
+        && Number(conversation.id || 0) !== Number(executionLogId || 0)
+      ));
     let reviewResult: ReturnType<typeof parseAgentReviewResult> | null = null;
     if (isReviewRun && status === 'In Progress') {
       reviewResult = parseAgentReviewResult(String(reviewResultFilePath || ''));
@@ -9721,9 +10574,16 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         : '主 Agent 已标记完成，正在等待副 Agent 复核。';
     }
     if (shouldWriteNodeStatus) {
-      const completedAt = nextStatus === 'Completed' ? new Date().toISOString() : '';
+      let nodeStatus = nextStatus;
+      if (hasOtherRunningConversationForNode) {
+        nodeStatus = 'Running';
+        completionReason = completionReason
+          ? `${completionReason} 该环节仍有其他 Agent 对话正在运行。`
+          : '该环节仍有其他 Agent 对话正在运行。';
+      }
+      const completedAt = nodeStatus === 'Completed' ? new Date().toISOString() : '';
       syncEngine.updateNode(nodeId, {
-        status: nextStatus,
+        status: nodeStatus,
         completedAt,
       });
       refreshSidebarProjectCards();
@@ -9918,13 +10778,18 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${nextStatus}`);
     }
 
+    agentTerminalNamesByConversationId.delete(Number(executionLogId || 0));
     setTimeout(() => {
       const currentStatus = readAgentStatus(statusFilePath);
       const belongsToProcessedRun = currentStatus
         && Number(currentStatus.executionLogId || 0) === Number(executionLogId || 0)
         && String(currentStatus.status || '') === String(status || '');
       if (belongsToProcessedRun && fs.existsSync(statusFilePath)) {
-        fs.unlinkSync(statusFilePath);
+        fs.writeFileSync(statusFilePath, JSON.stringify({
+          ...currentStatus,
+          status: 'Processed',
+          processedAt: new Date().toISOString()
+        }), 'utf8');
       }
     }, 1000);
   } catch (e) {
@@ -9944,14 +10809,14 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
     statusPoller = null;
   }
 
-  const statusFilePath = path.join(workspaceRoot, '.agent_status.json');
-
   watcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(workspaceRoot, '.agent_status.json')
+    new vscode.RelativePattern(workspaceRoot, `{.agent_status.json,.solopreneur/${agentStatusDirName}/*.json}`)
   );
 
   const handleSentinelChange = () => {
-    void processAgentStatusFile(statusFilePath);
+    for (const statusFilePath of getAgentStatusFilePaths(workspaceRoot)) {
+      void processAgentStatusFile(statusFilePath);
+    }
   };
   watcher.onDidChange(handleSentinelChange);
   watcher.onDidCreate(handleSentinelChange);
@@ -9981,7 +10846,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   <noscript>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
   </noscript>
-  
+
   <style>
     :root {
       --bg-dark: #0f111a;
@@ -13450,7 +14315,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const expanded = expandedNodeId === node.id;
         const conversations = nodeConversations[node.id] || [];
         const supplementFiles = nodeSupplementFiles[node.id] || [];
-        const conversationDisabled = node.status === 'Running' ? 'disabled' : '';
+        const conversationDisabled = '';
         const promptHtml = expanded ? \`
           <div class="node-expanded-body">
             <div class="node-desc">\${escapeHtml(node.description)}</div>
@@ -13464,7 +14329,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                   <span class="codicon codicon-attach"></span>
                 </button>
                 <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" value="\${escapeHtml(conversationDrafts[node.id] || '')}" \${conversationDisabled}>
-                \${renderSoloSelect('conversation-agent-select', 'data-agent-select-id="' + escapeHtml(node.id) + '" title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions(node), node.status === 'Running')}
+                \${renderSoloSelect('conversation-agent-select', 'data-agent-select-id="' + escapeHtml(node.id) + '" title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions(node), false)}
                 <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" title="\${t('send')}" \${conversationDisabled}>
                   <span class="codicon codicon-send"></span>
                 </button>
@@ -13571,7 +14436,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         row.querySelectorAll('[data-show-agent-terminal]').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
-            vscode.postMessage({ command: 'showAgentTerminal' });
+            vscode.postMessage({
+              command: 'showAgentTerminal',
+              conversationId: item.getAttribute('data-show-agent-terminal')
+            });
           });
         });
         row.querySelectorAll('[data-continue-native-conversation-id]').forEach(item => {
@@ -13628,9 +14496,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       const conversations = nodeConversations[soloConversationId] || [];
       const supplementFiles = nodeSupplementFiles[soloConversationId] || [];
-      const running = conversations.some(conversation => conversation.status === 'Running')
-        || (nodes || []).some(node => node.status === 'Running');
-      const disabled = running ? 'disabled' : '';
+      const disabled = '';
       soloPanel.classList.toggle('active', soloExpanded);
       btnToggleSolo.classList.toggle('active', soloExpanded);
       if (!soloExpanded) {
@@ -13644,7 +14510,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
               <span class="codicon codicon-attach"></span>
             </button>
             <input type="text" class="conversation-input" data-solo-input placeholder="\${escapeHtml(t('soloPlaceholder'))}" \${disabled}>
-            \${renderSoloSelect('conversation-agent-select', 'data-solo-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), running)}
+            \${renderSoloSelect('conversation-agent-select', 'data-solo-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false)}
             <button class="btn-send-conversation" data-send-solo title="\${escapeHtml(t('sendSolo'))}" \${disabled}>
               <span class="codicon codicon-send"></span>
             </button>
@@ -13698,9 +14564,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         return;
       }
       const conversations = nodeConversations[roadmapRevisionId] || [];
-      const revisionRunning = conversations.some(conversation => conversation.status === 'Running')
-        || (nodes || []).some(node => node.status === 'Running');
-      const disabled = revisionRunning ? 'disabled' : '';
+      const disabled = '';
       roadmapRevisionPanel.classList.toggle('open', roadmapRevisionExpanded);
       btnToggleRoadmapRevision.classList.toggle('active', roadmapRevisionExpanded);
       if (!roadmapRevisionExpanded) {
@@ -13711,7 +14575,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         <div class="conversation-composer">
           <div class="conversation-compose">
             <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" \${disabled}>
-            \${renderSoloSelect('conversation-agent-select', 'data-roadmap-revision-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), revisionRunning)}
+            \${renderSoloSelect('conversation-agent-select', 'data-roadmap-revision-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false)}
             <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${disabled}>
               <span class="codicon codicon-send"></span>
             </button>
@@ -13809,7 +14673,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       container.querySelectorAll('[data-show-agent-terminal]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
-          vscode.postMessage({ command: 'showAgentTerminal' });
+          vscode.postMessage({
+            command: 'showAgentTerminal',
+            conversationId: item.getAttribute('data-show-agent-terminal')
+          });
         });
       });
       container.querySelectorAll('[data-continue-native-conversation-id]').forEach(item => {
@@ -13865,7 +14732,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           : '';
         const runningButtons = conversation.status === 'Running'
           ? \`
-            <button class="conversation-control-btn" data-show-agent-terminal title="\${escapeHtml(t('openTerminal'))}">\${t('openTerminal')}</button>
+            <button class="conversation-control-btn" data-show-agent-terminal="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('openTerminal'))}">\${t('openTerminal')}</button>
             <button class="conversation-control-btn stop" data-stop-agent-run="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${t('stopRun')}</button>
           \`
           : '';

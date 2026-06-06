@@ -301,10 +301,11 @@ function runScriptWithMinimalDom(script, ids) {
 test('extension manifest uses SoloMap visible branding', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
 
-  assert.equal(manifest.displayName, 'SoloMap: AI Roadmap & Agent Task Flow');
-  assert.equal(manifest.description, 'Stop losing momentum in scattered AI chats. SoloMap turns your projects into a local execution cockpit for roadmaps, agents, feedback, and learning. / 别让项目迷失在零散 AI 对话里。SoloMap 把路线图、Agent 执行、反馈与学习收进 VS Code 本地推进驾驶舱。');
+  assert.equal(manifest.displayName, 'SoloMap - Local AI Agent Cockpit & Coding Roadmap Assistant');
+  assert.equal(manifest.description, 'Stop losing momentum in scattered AI chats. SoloMap is a local AI Agent cockpit and coding roadmap assistant for solo developers. / 别让项目迷失在零散 AI 对话里。SoloMap 是专为独立开发者打造的本地 AI Agent 驾驶舱与编码路线图助手。');
   assert.deepEqual(manifest.categories, ['AI', 'Chat', 'Machine Learning', 'Visualization', 'Other']);
-  assert.ok(manifest.keywords.includes('ai'));
+  assert.ok(manifest.keywords.includes('ai-agent'));
+  assert.ok(manifest.keywords.includes('ai-coding'));
   assert.ok(manifest.keywords.includes('chat'));
   assert.ok(manifest.keywords.includes('agent'));
   assert.ok(manifest.keywords.includes('roadmap'));
@@ -322,13 +323,13 @@ test('readme uses bilingual marketplace copy and marketplace-compatible remote l
   const readme = fs.readFileSync(path.join(projectRoot, 'README.md'), 'utf8');
 
   assert.match(readme, /raw\.githubusercontent\.com\/jobssteve164dev\/solopreneur-roadmap\/main\/resources\/logo_with_text\.png/);
-  assert.match(readme, /Why SoloMap\? \/ 为什么选择 SoloMap？/);
+  assert.match(readme, /Are you suffering from "AI Chat Hell"\? \/ 你是否正陷入“AI 乱聊地狱”？/);
   assert.match(readme, /Core Capabilities \/ 核心能力/);
   assert.match(readme, /Quick Start \/ 快速开始/);
-  assert.match(readme, /Local Agent CLI \/ 本地 Agent CLI/);
-  assert.match(readme, /Data Location \/ 数据位置/);
-  assert.match(readme, /Privacy \/ 隐私/);
-  assert.match(readme, /Feedback \/ 反馈/);
+  assert.match(readme, /Integrated Agent CLIs \/ 本地 Agent 支持/);
+  assert.match(readme, /Privacy & Architecture \/ 本地数据结构/);
+  assert.match(readme, /Privacy/);
+  assert.match(readme, /Feedback/);
 });
 
 test('feedback issue URL includes local usage summary when provided', () => {
@@ -877,6 +878,9 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /renderConversationOutcome/);
   assert.match(script, /extractAgentConclusion/);
   assert.match(script, /Open terminal|打开终端/);
+  assert.match(script, /data-show-agent-terminal=.*conversation\.id/);
+  assert.doesNotMatch(script, /node\.status === 'Running' \? 'disabled'/);
+  assert.doesNotMatch(script, /Another Agent conversation is running/);
   assert.match(script, /Failure reason|失败原因/);
   assert.match(script, /runRoadmapRevision/);
   assert.match(script, /Roadmap Revision History|路线图调整历史/);
@@ -3438,7 +3442,7 @@ test('agent impact summary counts local SoloMap contribution by agent', () => {
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 2, 2], ['claude', 1, 1, 2]]);
 });
 
-test('step conversation can start while roadmap dependencies are still incomplete', async () => {
+test('step conversations can start independently while dependencies or other runs are active', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -3480,8 +3484,16 @@ test('step conversation can start while roadmap dependencies are still incomplet
     getNodes: () => nodes,
     updateNode: (nodeId, update) => updates.push({ nodeId, update }),
     logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      executionLogs.push({ nodeId, agentCli, command, output, status });
-      return 41;
+      const id = 41 + executionLogs.length;
+      executionLogs.push({ id, nodeId, agentCli, command, output, status });
+      return id;
+    },
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      const entry = executionLogs.find((candidate) => candidate.id === id);
+      if (entry) {
+        Object.assign(entry, { agentCli, command, output, status });
+      }
+      return Boolean(entry);
     },
     getAgentExecutions: () => []
   }, projectRoot);
@@ -3491,12 +3503,81 @@ test('step conversation can start while roadmap dependencies are still incomplet
       get: () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '' })
     }
   }, '2', '先讨论可交付的 MVP 范围。', 'codex');
+  nodes[1].status = 'Running';
+  await extensionModule.__handleRunAgent({
+    globalState: {
+      get: () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '' })
+    }
+  }, '2', '并行评估另一版 MVP 范围。', 'codex');
 
   assert.ok(updates.some((entry) => entry.nodeId === '2' && entry.update.status === 'Running'));
-  assert.equal(executionLogs.length, 1);
+  assert.equal(executionLogs.length, 2);
   assert.equal(executionLogs[0].nodeId, '2');
   assert.equal(executionLogs[0].status, 'Running');
-  assert.ok(fs.existsSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', 'run-agent.sh')));
+  assert.equal(executionLogs[1].nodeId, '2');
+  assert.equal(executionLogs[1].status, 'Running');
+  assert.ok(fs.existsSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '41', 'run-agent.sh')));
+  assert.ok(fs.existsSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '42', 'run-agent.sh')));
+  assert.ok(fs.readFileSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '41', 'run-agent.sh'), 'utf8').includes('.solopreneur/agent-status/41.json'));
+  assert.ok(fs.readFileSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '42', 'run-agent.sh'), 'utf8').includes('.solopreneur/agent-status/42.json'));
+});
+
+test('finishing one parallel step conversation keeps the node running without rewriting that conversation status', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-parallel-finish-'));
+  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '21');
+  fs.mkdirSync(runDir, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  const completionDecisionFilePath = path.join(runDir, 'completion.json');
+  fs.writeFileSync(outputFilePath, 'Done.\n', 'utf8');
+  fs.writeFileSync(changesFilePath, ' M src/app.ts\n', 'utf8');
+  fs.writeFileSync(touchedFilesPath, 'src/app.ts\n', 'utf8');
+  fs.writeFileSync(completionDecisionFilePath, JSON.stringify({ markCompleted: true, reason: '已完成这一条对话。' }), 'utf8');
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '21.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '2',
+    runKind: 'step',
+    status: 'In Progress',
+    agentCli: 'codex',
+    command: 'codex exec',
+    executionLogId: 21,
+    userMessage: '完成第一条并发对话',
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    completionDecisionFilePath,
+    startedAt: '2026-06-06T00:00:00.000Z'
+  }), 'utf8');
+  let nodeUpdate = null;
+  let executionUpdate = null;
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
+    updateNode: (_nodeId, update) => { nodeUpdate = update; },
+    getAgentExecutions: () => [
+      { id: 22, nodeId: '2', agentCli: 'codex', command: 'codex exec', output: 'Still running.', status: 'Running' },
+      { id: 21, nodeId: '2', agentCli: 'codex', command: 'codex exec', output: 'Agent conversation started.', status: 'Running' }
+    ],
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      executionUpdate = { id, agentCli, command, output, status };
+      return true;
+    },
+    logAgentExecution: () => 99
+  }, projectRoot);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(nodeUpdate.status, 'Running');
+  assert.equal(executionUpdate.id, 21);
+  assert.equal(executionUpdate.status, 'Completed');
 });
 
 test('roadmap csv generated by an agent is not overwritten by stale node state', async () => {
