@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.165 - 2026-06-06
+
+### Changed
+- Add Passport device authorization flow (5c8f06c)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.164 - 2026-06-06
 
 ### Changed
