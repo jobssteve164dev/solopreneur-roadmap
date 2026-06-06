@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.172 - 2026-06-06
+
+### Changed
+- Fix TS2345 type error, exclude search crawlers from GEO redirection, and implement HTML structured sitemap for Googlebot indexing (225a10c)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.171 - 2026-06-06
 
 ### Changed
