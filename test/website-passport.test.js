@@ -614,3 +614,53 @@ test('Pro subscription page renders SEO keywords and Pro FAQs', async () => {
   assert.match(htmlZh, /订阅 Pro 后，我的代码会被上传到服务器吗/);
 });
 
+test('HTML structured sitemap directory and search engine crawlers bypass redirection', async () => {
+  const worker = await loadWebsiteWorker();
+  const env = { SITE_ORIGIN: 'https://solomap.app' };
+
+  // 1. Googlebot crawler requesting / with zh-CN Accept-Language should NOT be redirected
+  const googlebotReq = new Request('https://solomap.app/', {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+      'accept-language': 'zh-CN,zh;q=0.9'
+    }
+  });
+  const googlebotRes = await worker.default.fetch(googlebotReq, env);
+  assert.equal(googlebotRes.status, 200); // Excluded from 302 redirect
+
+  // 2. Normal user requesting / with zh-CN should be redirected
+  const normalReq = new Request('https://solomap.app/', {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'accept-language': 'zh-CN,zh;q=0.9'
+    }
+  });
+  const normalRes = await worker.default.fetch(normalReq, env);
+  assert.equal(normalRes.status, 302);
+  assert.equal(normalRes.headers.get('location'), 'https://solomap.app/zh');
+
+  // 3. English HTML Sitemap Page renders correctly
+  const resEn = await worker.default.fetch(new Request('https://solomap.app/sitemap'), env);
+  const htmlEn = await resEn.text();
+  assert.equal(resEn.status, 200);
+  assert.match(htmlEn, /Site Directory &amp; Structured Sitemap/);
+  assert.match(htmlEn, /href="\/docs\/solomap-method"/);
+  assert.match(htmlEn, /href="\/pro"/);
+
+  // 4. Chinese HTML Sitemap Page renders correctly
+  const resZh = await worker.default.fetch(new Request('https://solomap.app/zh/sitemap'), env);
+  const htmlZh = await resZh.text();
+  assert.equal(resZh.status, 200);
+  assert.match(htmlZh, /网站地图与结构化目录/);
+  assert.match(htmlZh, /href="\/zh\/docs\/solomap-method"/);
+  assert.match(htmlZh, /href="\/zh\/pro"/);
+
+  // 5. XML Sitemap includes sitemap.xml entries for HTML Sitemap
+  const resXml = await worker.default.fetch(new Request('https://solomap.app/sitemap.xml'), env);
+  const xml = await resXml.text();
+  assert.equal(resXml.status, 200);
+  assert.match(xml, /<loc>https:\/\/solomap\.app\/sitemap<\/loc>/);
+  assert.match(xml, /<loc>https:\/\/solomap\.app\/zh\/sitemap<\/loc>/);
+});
+
+

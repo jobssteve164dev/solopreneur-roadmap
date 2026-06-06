@@ -2858,6 +2858,7 @@ function buildHeader(t, locale, currentPath) {
 }
 
 function buildFooter(t) {
+  const isZh = t.lang === "zh-Hans";
   return `<footer>
     <div class="shell footer-row">
       <div>SoloMap · solomap.app · SZLK</div>
@@ -2868,9 +2869,57 @@ function buildFooter(t) {
         <a href="${OPEN_VSX_URL}">Open VSX</a>
         <a href="${FEEDBACK_URL}">${escapeHtml(t.footer.feedback)}</a>
         <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
+        <a href="${t.pathPrefix}/sitemap">${isZh ? "网站地图" : "Sitemap"}</a>
       </div>
     </div>
   </footer>`;
+}
+
+function buildHtmlSitemapPage(locale, origin) {
+  const t = content[locale];
+  const isZh = locale === "zh";
+  const sitemapTitle = isZh ? "SoloMap 网站地图 - 结构化目录" : "SoloMap Sitemap - Structured Site Directory";
+  const sitemapHeading = isZh ? "网站地图与结构化目录" : "Site Directory & Structured Sitemap";
+  const docsList = Object.entries(docsContent[locale].pages).map(([slug, doc]) => {
+    const href = `${t.docsPath}/${slug}`;
+    return `<li><a href="${href}"><strong>${escapeHtml(doc.heading)}</strong> - ${escapeHtml(doc.lead)}</a></li>`;
+  }).join("");
+
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead(
+    { ...t, meta: { ...t.meta, title: sitemapTitle, description: sitemapTitle } },
+    origin,
+    `${t.pathPrefix}/sitemap`,
+    locale === "zh" ? "/sitemap" : "/zh/sitemap"
+  )}
+  ${buildStyles()}
+</head>
+<body>
+  ${buildHeader(t, locale, `${t.pathPrefix}/sitemap`)}
+  <main class="privacy-page">
+    <div class="privacy-nav">
+      <a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a>
+    </div>
+    <h1>${escapeHtml(sitemapHeading)}</h1>
+    
+    <h2>${isZh ? "核心页面" : "Core Pages"}</h2>
+    <ul>
+      <li><a href="${t.homePath}"><strong>${isZh ? "SoloMap 首页" : "SoloMap Home"}</strong></a></li>
+      <li><a href="${t.pathPrefix}/pro"><strong>SoloMap Pro ${isZh ? "订阅页" : "Subscription"}</strong></a></li>
+      <li><a href="${t.privacyPath}"><strong>${isZh ? "本地优先与隐私说明" : "Local-first & Privacy Policy"}</strong></a></li>
+    </ul>
+
+    <h2 style="margin-top: 32px;">${isZh ? "产品指南与文档" : "Product Guides & Documentation"}</h2>
+    <ul>
+      <li><a href="${t.docsPath}"><strong>${isZh ? "文档中心首页" : "Documentation Center Index"}</strong></a></li>
+      ${docsList}
+    </ul>
+  </main>
+  ${buildFooter(t)}
+</body>
+</html>`;
 }
 
 function alternatePathFor(pathname, locale) {
@@ -3152,6 +3201,12 @@ function resolveRoute(pathname) {
   if (pathname === "/zh" || pathname === "/zh/") {
     return { type: "home", locale: "zh", status: 200 };
   }
+  if (pathname === "/sitemap" || pathname === "/sitemap/") {
+    return { type: "sitemap-html", locale: "en", status: 200 };
+  }
+  if (pathname === "/zh/sitemap" || pathname === "/zh/sitemap/") {
+    return { type: "sitemap-html", locale: "zh", status: 200 };
+  }
   if (pathname === "/docs" || pathname === "/docs/") {
     return { type: "docs-index", locale: "en", status: 200 };
   }
@@ -3186,7 +3241,8 @@ function buildSitemap(origin) {
       priority: "0.6",
       changefreq: "monthly"
     })),
-    { en: "/privacy-local-first", zh: "/zh/privacy-local-first", priority: "0.4", changefreq: "yearly" }
+    { en: "/privacy-local-first", zh: "/zh/privacy-local-first", priority: "0.4", changefreq: "yearly" },
+    { en: "/sitemap", zh: "/zh/sitemap", priority: "0.5", changefreq: "weekly" }
   ];
   const renderUrl = (loc, pair) => `  <url>
     <loc>${escapeHtml(absoluteUrl(loc, origin))}</loc>
@@ -3267,7 +3323,10 @@ export default {
       const cookie = request.headers.get("cookie") || "";
       const hasLangPref = cookie.includes("lang_pref=");
       
-      if (!url.searchParams.has("lang") && !hasLangPref) {
+      const ua = request.headers.get("user-agent") || "";
+      const isBot = /bot|spider|crawl|slurp|tracker/i.test(ua);
+      
+      if (!isBot && !url.searchParams.has("lang") && !hasLangPref) {
         const country = request.cf?.country;
         const acceptLang = request.headers.get("accept-language") || "";
         const isChineseRegion = ["CN", "TW", "HK", "MO"].includes(country);
@@ -3349,6 +3408,9 @@ Sitemap: ${origin}/sitemap.xml
       extraHeaders["Set-Cookie"] = "lang_pref=en; Path=/; Max-Age=31536000; SameSite=Lax";
     }
 
+    if (route.type === "sitemap-html") {
+      return htmlResponse(buildHtmlSitemapPage(route.locale, origin), route.status, extraHeaders);
+    }
     if (route.type === "privacy") {
       return htmlResponse(buildLocalFirstPage(route.locale, origin), route.status, extraHeaders);
     }

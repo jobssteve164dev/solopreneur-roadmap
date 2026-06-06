@@ -103,8 +103,11 @@ interface StrategyPyramidProjectSummary {
   path: string;
   type: string;
   role: string;
+  loop: MethodologyStageKey;
   action: string;
   risk: string;
+  evidence: string[];
+  abilities: string[];
   completedNodes: number;
   failedNodes: number;
   runningNodes: number;
@@ -115,14 +118,52 @@ interface StrategyPyramidProjectSummary {
   nodes: StrategyPyramidNodeSummary[];
 }
 
+interface StrategyPyramidLoopSummary {
+  key: MethodologyStageKey;
+  label: string;
+  title: string;
+  count: number;
+  projectNames: string[];
+  judgment: string;
+}
+
+interface StrategyPyramidLayerSummary {
+  key: string;
+  title: string;
+  health: 'strong' | 'watch' | 'risk';
+  signal: string;
+  action: string;
+}
+
+interface StrategyPyramidMoveSummary {
+  horizon: string;
+  title: string;
+  reason: string;
+}
+
+interface StrategyPyramidAbilitySummary {
+  name: string;
+  projectCount: number;
+  judgment: string;
+}
+
 interface StrategyPyramidSnapshot {
   generatedAt: string;
+  confidence: 'low' | 'medium' | 'high';
+  stageTitle: string;
+  mainJudgment: string;
+  strategicAction: string;
+  constraint: string;
   totalProjects: number;
   buildCount: number;
   sellCount: number;
   learnCount: number;
   improveCount: number;
   risks: string[];
+  loops: StrategyPyramidLoopSummary[];
+  layers: StrategyPyramidLayerSummary[];
+  moves: StrategyPyramidMoveSummary[];
+  abilities: StrategyPyramidAbilitySummary[];
   projects: StrategyPyramidProjectSummary[];
 }
 
@@ -3069,6 +3110,51 @@ function classifyStrategyLoop(node: StrategyPyramidNodeSummary): MethodologyStag
   return 'build';
 }
 
+function labelStrategyLoop(key: MethodologyStageKey): string {
+  return {
+    build: 'Build',
+    sell: 'Sell',
+    learn: 'Learn',
+    improve: 'Improve'
+  }[key];
+}
+
+function titleStrategyLoop(key: MethodologyStageKey): string {
+  return {
+    build: '产品与交付',
+    sell: '收入与市场',
+    learn: '学习与反馈',
+    improve: '改进与复利'
+  }[key];
+}
+
+function inferDominantStrategyLoop(nodes: StrategyPyramidNodeSummary[]): MethodologyStageKey {
+  const counts: Record<MethodologyStageKey, number> = { build: 0, sell: 0, learn: 0, improve: 0 };
+  for (const node of nodes) {
+    counts[classifyStrategyLoop(node)] += 1;
+  }
+  const ordered: MethodologyStageKey[] = ['sell', 'learn', 'improve', 'build'];
+  return ordered.sort((a, b) => counts[b] - counts[a])[0] || 'build';
+}
+
+function inferProjectAbilities(project: SolopreneurProject, nodes: StrategyPyramidNodeSummary[]): string[] {
+  const text = `${project.name} ${project.type || ''} ${nodes.map((node) => `${node.stage} ${node.title}`).join(' ')}`.toLowerCase();
+  const abilities: string[] = [];
+  const add = (label: string, pattern: RegExp) => {
+    if (pattern.test(text) && !abilities.includes(label)) {
+      abilities.push(label);
+    }
+  };
+  add('AI 产品编排', /ai|agent|llm|prompt|codex|claude|智能体|大模型|代理|编排/);
+  add('CLI 与开发者工具', /cli|terminal|command|vscode|extension|插件|命令行|开发者工具/);
+  add('Web 产品交付', /web|website|frontend|react|next|vue|官网|前端|页面/);
+  add('订阅与商业化', /stripe|passport|billing|subscription|pricing|pro|订阅|付费|收费|定价|商业化/);
+  add('内容与分发', /content|blog|seo|wechat|video|newsletter|内容|文章|宣发|渠道|分发/);
+  add('基础设施与自动化', /infra|cloud|worker|deploy|ci|github actions|mcp|数据库|基础设施|自动化|部署/);
+  add('反馈与研究', /feedback|learn|research|review|interview|用户|反馈|研究|访谈|复盘/);
+  return abilities.slice(0, 4);
+}
+
 function inferStrategyRole(project: SolopreneurProject, nodes: StrategyPyramidNodeSummary[]): string {
   const type = String(project.type || '').trim();
   const stages = nodes.map((node) => node.stage).join(' ');
@@ -3098,6 +3184,186 @@ function inferStrategyRisk(summary: Omit<StrategyPyramidProjectSummary, 'action'
   return '';
 }
 
+function inferProjectEvidence(summary: Omit<StrategyPyramidProjectSummary, 'action' | 'risk' | 'evidence'>): string[] {
+  const evidence: string[] = [];
+  if (summary.totalNodes === 0) {
+    evidence.push('还没有可读取的路线图信号');
+  } else {
+    evidence.push(`${summary.completedNodes}/${summary.totalNodes} 个环节已完成`);
+  }
+  if (summary.runningNodes + summary.inProgressNodes > 0) {
+    evidence.push('当前有推进中的环节');
+  }
+  if (summary.failedNodes > 0) {
+    evidence.push('存在失败环节');
+  }
+  if (!summary.nodes.some((node) => classifyStrategyLoop(node) === 'sell')) {
+    evidence.push('缺少销售动作');
+  }
+  if (!summary.nodes.some((node) => classifyStrategyLoop(node) === 'learn')) {
+    evidence.push('缺少学习信号');
+  }
+  return evidence.slice(0, 3);
+}
+
+function buildLoopSummaries(projects: StrategyPyramidProjectSummary[], allNodes: StrategyPyramidNodeSummary[]): StrategyPyramidLoopSummary[] {
+  const keys: MethodologyStageKey[] = ['build', 'sell', 'learn', 'improve'];
+  return keys.map((key) => {
+    const count = allNodes.filter((node) => classifyStrategyLoop(node) === key).length;
+    const projectNames = projects
+      .filter((project) => project.loop === key || project.nodes.some((node) => classifyStrategyLoop(node) === key))
+      .map((project) => project.name)
+      .slice(0, 5);
+    const judgment = count === 0
+      ? `${labelStrategyLoop(key)} 信号不足`
+      : projectNames.length > 0
+        ? `${projectNames.length} 个项目形成 ${labelStrategyLoop(key)} 信号`
+        : `${count} 个 ${labelStrategyLoop(key)} 信号`;
+    return {
+      key,
+      label: labelStrategyLoop(key),
+      title: titleStrategyLoop(key),
+      count,
+      projectNames,
+      judgment
+    };
+  });
+}
+
+function buildAbilitySummaries(projects: StrategyPyramidProjectSummary[]): StrategyPyramidAbilitySummary[] {
+  const abilityProjects = new Map<string, Set<string>>();
+  for (const project of projects) {
+    for (const ability of project.abilities) {
+      if (!abilityProjects.has(ability)) {
+        abilityProjects.set(ability, new Set());
+      }
+      abilityProjects.get(ability)?.add(project.name);
+    }
+  }
+  return [...abilityProjects.entries()]
+    .map(([name, projectSet]) => {
+      const projectCount = projectSet.size;
+      return {
+        name,
+        projectCount,
+        judgment: projectCount >= 2 ? '正在跨项目复用' : '已有信号，继续观察'
+      };
+    })
+    .sort((a, b) => b.projectCount - a.projectCount || a.name.localeCompare(b.name))
+    .slice(0, 6);
+}
+
+function inferStrategyStage(projects: StrategyPyramidProjectSummary[], buildCount: number, sellCount: number, learnCount: number): string {
+  if (projects.length === 0) return '起步定向期';
+  if (projects.some((project) => project.failedNodes > 0)) return '结构收口期';
+  if (projects.length <= 2) return sellCount + learnCount > 0 ? '早期验证期' : '集中建设期';
+  if (buildCount > sellCount + learnCount + 1) return 'Build 偏重期';
+  if (projects.length >= 6) return '组合治理期';
+  return '组合成长期';
+}
+
+function inferMainJudgment(projects: StrategyPyramidProjectSummary[], buildCount: number, sellCount: number, learnCount: number): string {
+  if (projects.length === 0) return '还没有形成项目组合，先把一个能接近付费用户的项目推进到可验证状态。';
+  if (projects.some((project) => project.failedNodes > 0)) return '当前组合的第一优先级不是继续扩张，而是收口失败环节，避免风险拖累核心产品。';
+  if (sellCount === 0 && learnCount === 0) return '项目组合正在积累建设动作，但还没有形成足够的销售和学习信号。';
+  if (buildCount > sellCount + learnCount + 1) return 'Build 信号明显偏重，继续新增功能会降低商业化验证效率。';
+  if (!projects.some((project) => project.type === 'core_product' || project.role === '核心产品')) return '组合已有多个推进点，但缺少一个明确承载收入、信誉和能力复利的核心产品。';
+  return '组合已经具备跨项目推进信号，下一步应让收入、反馈和能力复用互相增强。';
+}
+
+function inferPortfolioStrategicAction(projects: StrategyPyramidProjectSummary[], sellCount: number, learnCount: number): string {
+  if (projects.length === 0) return '选择一个最接近付费用户的问题，先推进到可演示切片。';
+  if (projects.some((project) => project.failedNodes > 0)) return '先收口阻塞，再决定哪些项目值得继续加码。';
+  if (sellCount === 0 || learnCount === 0) return '加码核心产品的商业化验证，补上销售与反馈信号。';
+  if (!projects.some((project) => project.type === 'core_product' || project.role === '核心产品')) return '选出一个核心产品承载收入验证，其他项目围绕它复用能力。';
+  return '围绕核心产品建立第二收入源假设，并减少低复利维护投入。';
+}
+
+function inferPortfolioConstraint(projects: StrategyPyramidProjectSummary[], buildCount: number, sellCount: number, learnCount: number): string {
+  if (projects.length === 0) return '不要先铺多个方向，先让一个项目产生真实反馈。';
+  if (buildCount > sellCount + learnCount + 1) return '未来 30 天减少新功能建设，把时间转向商业化验证和用户反馈。';
+  if (projects.filter((project) => project.totalNodes === 0).length > 0) return '没有路线图信号的项目先不要加码，避免项目数量制造虚假的安全感。';
+  return '新增项目必须复用已有能力或补上收入缺口，否则先暂停孵化。';
+}
+
+function buildStrategyLayers(
+  projects: StrategyPyramidProjectSummary[],
+  buildCount: number,
+  sellCount: number,
+  learnCount: number,
+  improveCount: number,
+  abilities: StrategyPyramidAbilitySummary[]
+): StrategyPyramidLayerSummary[] {
+  const hasCore = projects.some((project) => project.type === 'core_product' || project.role === '核心产品');
+  const activeProjects = projects.filter((project) => project.runningNodes + project.inProgressNodes > 0).length;
+  const reusableAbilities = abilities.filter((ability) => ability.projectCount >= 2).length;
+  const health = (ok: boolean, watch: boolean): 'strong' | 'watch' | 'risk' => ok ? 'strong' : watch ? 'watch' : 'risk';
+  return [{
+    key: 'freedom-brand',
+    title: '自由选择与个人品牌',
+    health: health(hasCore && (sellCount > 0 || learnCount > 0), hasCore),
+    signal: hasCore ? '已有核心产品承载信誉积累。' : '核心产品尚未明确，品牌信号容易分散。',
+    action: hasCore ? '继续把市场反馈沉淀到核心产品。' : '先选出最能代表长期方向的核心产品。'
+  }, {
+    key: 'revenue-system',
+    title: '可复利收入系统',
+    health: health(sellCount >= 2, sellCount === 1),
+    signal: sellCount > 0 ? `${sellCount} 个收入或市场动作可继续验证。` : '还没有可读取的收入验证动作。',
+    action: sellCount > 0 ? '把销售动作接到明确的升级或付费路径。' : '补一个低成本销售实验，不继续只做功能。'
+  }, {
+    key: 'market-trust',
+    title: '市场覆盖与信誉',
+    health: health(learnCount >= 2, learnCount === 1 || sellCount > 0),
+    signal: learnCount > 0 ? `${learnCount} 个学习信号可用于下一轮改进。` : '用户反馈和市场学习信号不足。',
+    action: learnCount > 0 ? '把反馈转成下一轮取舍，而不是继续堆需求。' : '补一次真实用户反馈或公开分发验证。'
+  }, {
+    key: 'ability-compounding',
+    title: '能力系统与产品交付',
+    health: health(reusableAbilities > 0 && improveCount > 0, abilities.length > 0 || activeProjects > 0),
+    signal: reusableAbilities > 0 ? `${reusableAbilities} 项能力正在跨项目复用。` : '能力复用还没有形成稳定信号。',
+    action: reusableAbilities > 0 ? '把可复用能力产品化或品牌化。' : '标记能跨项目复用的能力，减少一次性建设。'
+  }, {
+    key: 'reality-inventory',
+    title: '现实锚点与投资库存',
+    health: health(projects.length > 0 && buildCount + sellCount + learnCount + improveCount > 0, projects.length > 0),
+    signal: projects.length > 0 ? `${projects.length} 个项目进入组合视野。` : '还没有项目进入组合视野。',
+    action: projects.length > 0 ? '冻结低复利项目，把注意力留给核心验证。' : '先登记一个真实项目，形成第一组战略信号。'
+  }];
+}
+
+function buildStrategyMoves(projects: StrategyPyramidProjectSummary[], sellCount: number, learnCount: number, abilities: StrategyPyramidAbilitySummary[]): StrategyPyramidMoveSummary[] {
+  const moves: StrategyPyramidMoveSummary[] = [];
+  if (projects.length === 0) {
+    moves.push({ horizon: '未来 30 天', title: '推进一个可演示切片', reason: '先让战略判断有真实项目和用户反馈可依赖。' });
+  } else if (sellCount === 0 || learnCount === 0) {
+    moves.push({ horizon: '未来 30 天', title: '补齐商业化与反馈验证', reason: '当前组合的建设动作多于市场信号，继续 Build 会放大战略盲区。' });
+  } else {
+    moves.push({ horizon: '未来 30 天', title: '把核心项目推向更清晰的付费路径', reason: '已有市场与反馈信号，下一步要让收入验证闭环。' });
+  }
+  if (projects.some((project) => project.failedNodes > 0)) {
+    moves.push({ horizon: '本周', title: '收口失败环节', reason: '失败环节会吞噬注意力，先处理再加码。' });
+  } else {
+    moves.push({ horizon: '本季度', title: '减少低复利维护投入', reason: '组合价值来自复利关系，不来自项目数量。' });
+  }
+  if (abilities.some((ability) => ability.projectCount >= 2)) {
+    moves.push({ horizon: '本季度', title: '把复用能力变成对外可表达的卖点', reason: '跨项目复用能力已经出现，适合沉淀成产品、模板或内容资产。' });
+  } else {
+    moves.push({ horizon: '本季度', title: '识别一个可跨项目复用的能力', reason: '没有能力复利时，多项目会更容易变成维护负担。' });
+  }
+  return moves.slice(0, 4);
+}
+
+function writeStrategyPyramidSnapshot(context: vscode.ExtensionContext, snapshot: StrategyPyramidSnapshot): void {
+  try {
+    const globalRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+    const strategyRoot = path.join(globalRoot, 'strategy');
+    fs.mkdirSync(strategyRoot, { recursive: true });
+    fs.writeFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+  } catch (error) {
+    console.warn('Failed to write strategy pyramid snapshot:', error);
+  }
+}
+
 function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): StrategyPyramidSnapshot {
   const projects = getProjects(context)
     .filter((project) => project && project.path)
@@ -3115,6 +3381,8 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
         path: project.path,
         type: project.type || '',
         role: inferStrategyRole(project, nodes),
+        loop: inferDominantStrategyLoop(nodes),
+        abilities: inferProjectAbilities(project, nodes),
         completedNodes,
         failedNodes,
         runningNodes,
@@ -3124,10 +3392,12 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
         progressPercent,
         nodes
       };
+      const evidence = inferProjectEvidence(base);
+      const tempBase = { ...base, evidence };
       return {
-        ...base,
-        action: inferStrategyAction(base),
-        risk: inferStrategyRisk(base)
+        ...tempBase,
+        action: inferStrategyAction(tempBase),
+        risk: inferStrategyRisk(tempBase)
       };
     })
     .sort((a, b) => (
@@ -3140,24 +3410,40 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
 
   const allNodes = projects.flatMap((project) => project.nodes);
   const countLoop = (key: MethodologyStageKey) => allNodes.filter((node) => classifyStrategyLoop(node) === key).length;
+  const buildCount = countLoop('build');
   const sellCount = countLoop('sell');
   const learnCount = countLoop('learn');
+  const improveCount = countLoop('improve');
   const risks: string[] = [];
   if (projects.length > 0 && sellCount === 0) risks.push('组合缺少 Sell 信号，容易只 Build 不卖。');
   if (projects.length > 0 && learnCount === 0) risks.push('组合缺少 Learn 信号，下一轮改进依据不足。');
   if (projects.some((project) => project.failedNodes > 0)) risks.push('存在失败环节，应先收口再继续加码。');
   if (projects.length > 1 && !projects.some((project) => project.type === 'core_product')) risks.push('组合缺少明确核心产品。');
-
-  return {
+  if (projects.filter((project) => project.totalNodes === 0).length > 0) risks.push('部分项目缺少路线图信号，容易形成低复利库存。');
+  const loops = buildLoopSummaries(projects, allNodes);
+  const abilities = buildAbilitySummaries(projects);
+  const snapshot: StrategyPyramidSnapshot = {
     generatedAt: new Date().toISOString(),
+    confidence: allNodes.length >= 4 ? 'medium' : 'low',
+    stageTitle: inferStrategyStage(projects, buildCount, sellCount, learnCount),
+    mainJudgment: inferMainJudgment(projects, buildCount, sellCount, learnCount),
+    strategicAction: inferPortfolioStrategicAction(projects, sellCount, learnCount),
+    constraint: inferPortfolioConstraint(projects, buildCount, sellCount, learnCount),
     totalProjects: projects.length,
-    buildCount: countLoop('build'),
+    buildCount,
     sellCount,
     learnCount,
-    improveCount: countLoop('improve'),
+    improveCount,
     risks,
+    loops,
+    layers: buildStrategyLayers(projects, buildCount, sellCount, learnCount, improveCount, abilities),
+    moves: buildStrategyMoves(projects, sellCount, learnCount, abilities),
+    abilities,
     projects
   };
+
+  writeStrategyPyramidSnapshot(context, snapshot);
+  return snapshot;
 }
 
 function strategyEscapeHtml(value: string | number): string {
