@@ -556,3 +556,61 @@ test('Passport dev grant redirects to VS Code callback and verifies without expo
   assert.equal(body.email, 'pro@solomap.app');
   assert.ok(body.entitlements.includes('strategy_pyramid'));
 });
+
+test('GEO language redirection and Cookie preferences work correctly', async () => {
+  const worker = await loadWebsiteWorker();
+  const env = { SITE_ORIGIN: 'https://solomap.app' };
+
+  // 1. Accept-language: zh-CN triggers redirect to /zh
+  const req1 = new Request('https://solomap.app/', {
+    headers: { 'accept-language': 'zh-CN,zh;q=0.9' }
+  });
+  const res1 = await worker.default.fetch(req1, env);
+  assert.equal(res1.status, 302);
+  assert.equal(res1.headers.get('location'), 'https://solomap.app/zh');
+  assert.match(res1.headers.get('set-cookie') || '', /lang_pref=zh/);
+
+  // 2. CF Country: CN triggers redirect
+  const req2 = new Request('https://solomap.app/');
+  req2.cf = { country: 'CN' };
+  const res2 = await worker.default.fetch(req2, env);
+  assert.equal(res2.status, 302);
+  assert.equal(res2.headers.get('location'), 'https://solomap.app/zh');
+
+  // 3. cookie lang_pref=en bypasses redirect
+  const req3 = new Request('https://solomap.app/', {
+    headers: { 'accept-language': 'zh-CN,zh;q=0.9', 'cookie': 'lang_pref=en' }
+  });
+  const res3 = await worker.default.fetch(req3, env);
+  assert.equal(res3.status, 200);
+
+  // 4. lang=en param updates cookie to en
+  const req4 = new Request('https://solomap.app/?lang=en');
+  const res4 = await worker.default.fetch(req4, env);
+  assert.equal(res4.status, 200);
+  assert.match(res4.headers.get('set-cookie') || '', /lang_pref=en/);
+});
+
+test('Pro subscription page renders SEO keywords and Pro FAQs', async () => {
+  const worker = await loadWebsiteWorker();
+  const env = { SITE_ORIGIN: 'https://solomap.app' };
+
+  // 1. English Pro Page
+  const resEn = await worker.default.fetch(new Request('https://solomap.app/pro'), env);
+  const htmlEn = await resEn.text();
+  assert.equal(resEn.status, 200);
+  assert.match(htmlEn, /name="keywords" content="[^"]*solomap pro/);
+  assert.match(htmlEn, /Pro Subscription FAQ/);
+  assert.match(htmlEn, /class="faq-item"/);
+  assert.match(htmlEn, /class="faq-icon"/);
+  assert.match(htmlEn, /Is my code sent to any servers if I subscribe to Pro\?/);
+
+  // 2. Chinese Pro Page
+  const resZh = await worker.default.fetch(new Request('https://solomap.app/zh/pro'), env);
+  const htmlZh = await resZh.text();
+  assert.equal(resZh.status, 200);
+  assert.match(htmlZh, /name="keywords" content="[^"]*SoloMap Pro/);
+  assert.match(htmlZh, /Pro 订阅常见问题/);
+  assert.match(htmlZh, /订阅 Pro 后，我的代码会被上传到服务器吗/);
+});
+

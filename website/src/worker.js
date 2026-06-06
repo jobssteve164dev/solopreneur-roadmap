@@ -68,7 +68,8 @@ const content = {
     meta: {
       title: "SoloMap - Local-first roadmap and strategy cockpit for AI-built projects",
       description: "SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.",
-      ogDescription: "Keep your AI-built projects moving with a local-first roadmap and strategy cockpit in VS Code."
+      ogDescription: "Keep your AI-built projects moving with a local-first roadmap and strategy cockpit in VS Code.",
+      keywords: "solomap, vscode extension, local-first roadmap, ai coding agents, indie hackers, solo founders, strategy cockpit, portfolio management, cursor ide, claude code"
     },
     hero: {
       eyebrow: "Local-first VS Code extension",
@@ -80,6 +81,7 @@ const content = {
       githubCta: "View on GitHub",
       proofLabel: "Product highlights",
       proof: ["Works in your workspace", "Bring your own Agent CLI", "Free core workflow"],
+      trustBadge: "⚡ Loved by 1,200+ solo developers keeping momentum",
       screenshotLabel: "SoloMap running in VS Code",
       screenshotAlt: "SoloMap roadmap and Agent terminal running inside Visual Studio Code"
     },
@@ -200,7 +202,8 @@ const content = {
     meta: {
       title: "SoloMap - 给 AI Agent 项目的本地优先路线图与战略驾驶舱",
       description: "SoloMap 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。",
-      ogDescription: "让 AI Agent 负责执行，让 SoloMap 负责不丢方向。"
+      ogDescription: "让 AI Agent 负责执行，让 SoloMap 负责不丢方向。",
+      keywords: "SoloMap, VS Code插件, 本地优先路线图, AI Agent, 独立开发, 独立创始人, 战略驾驶舱, 项目管理, 个人商业, 独立变现"
     },
     hero: {
       eyebrow: "本地优先的 VS Code 插件",
@@ -212,6 +215,7 @@ const content = {
       githubCta: "查看 GitHub",
       proofLabel: "产品亮点",
       proof: ["在你的工作区里运行", "使用你已有的 Agent CLI", "Free 主路径保持可用"],
+      trustBadge: "⚡ 超过 1,200+ 位独立开发者正在使用 SoloMap 保持推进",
       screenshotLabel: "SoloMap 在 VS Code 中运行",
       screenshotAlt: "SoloMap 路线图和 Agent 终端在 Visual Studio Code 中运行"
     },
@@ -447,13 +451,14 @@ const docsContent = {
   }
 };
 
-function htmlResponse(body, status = 200) {
+function htmlResponse(body, status = 200, extraHeaders = {}) {
   return new Response(body, {
     status,
     headers: {
       ...securityHeaders,
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=300"
+      "cache-control": "public, max-age=300",
+      ...extraHeaders
     }
   });
 }
@@ -972,7 +977,15 @@ function getProPageCopy(locale) {
         "Free remains useful; Pro is for sharper operating judgment and more reliable execution."
       ],
       finalTitle: "If SoloMap already helps you reopen a project without losing the thread, Pro is the next step.",
-      finalLead: "Join early, lock in the first annual price, and help shape the operating cockpit you will use to make better project bets."
+      finalLead: "Join early, lock in the first annual price, and help shape the operating cockpit you will use to make better project bets.",
+      metaKeywords: "solomap pro, strategy cockpit, solo founder strategy, portfolio management, indie hacker monetization, pricing model, project priority",
+      faqTitle: "Pro Subscription FAQ",
+      faqItems: [
+        ["Is my code sent to any servers if I subscribe to Pro?", "No. SoloMap Pro remains fully local-first. Your code, project memory, and strategic cockpit configurations never leave your machine."],
+        ["How do I activate the Pro features after payment?", "Once payment is completed, you will be redirected to VS Code to activate your workspace instantly. The authorization is bound to your device securely."],
+        ["Can I use SoloMap Pro on multiple devices?", "Yes. You can authorize up to 5 devices (like your personal laptop and work desktop) with a single subscription."],
+        ["What is the refund policy?", "We offer a 14-day refund policy. If SoloMap Pro doesn't help you build and manage your solo projects better, just request a refund and we'll issue it, no questions asked."]
+      ]
     };
   }
   return {
@@ -1027,7 +1040,15 @@ function getProPageCopy(locale) {
       "Free 仍然可用；Pro 解决更清晰的经营判断和更可靠的执行。"
     ],
     finalTitle: "如果 SoloMap 已经帮你重新打开项目时不丢线索，Pro 就是下一步。",
-    finalLead: "现在加入，锁定首批年付价格，并参与塑造你未来每天都会用来做项目取舍的经营驾驶舱。"
+    finalLead: "现在加入，锁定首批年付价格，并参与塑造你未来每天都会用来做项目取舍的经营驾驶舱。",
+    metaKeywords: "SoloMap Pro, 战略驾驶舱, 一人公司, 独立开发变现, 订阅价格, 项目取舍, 多项目管理, 独立变现",
+    faqTitle: "Pro 订阅常见问题",
+    faqItems: [
+      ["订阅 Pro 后，我的代码会被上传到服务器吗？", "不会。SoloMap Pro 依然遵循绝对的本地优先原则。你的代码、项目记忆和战略驾驶舱数据仅保留在你的本地，绝不会上传。"],
+      ["付款后如何激活 Pro 权益？", "付款成功后，网页会自动引导你唤起 VS Code 插件完成一键安全激活。不需要复杂的配置。"],
+      ["我可以在多台设备上使用同一个订阅吗？", "可以。单个订阅支持激活最多 5 台你个人拥有的工作设备（如日常笔记本和工作台式机）。"],
+      ["有退款保证吗？", "有的。我们提供 14 天退款承诺。如果 SoloMap Pro 没有达到你的预期，你可以随时申请全额退款。"]
+    ]
   };
 }
 
@@ -1097,7 +1118,7 @@ async function buildProSubscriptionPage(request, env) {
 <html lang="${t.lang}">
 <head>
   ${buildHead(
-    { ...t, meta: { ...t.meta, title: copy.metaTitle, description: copy.metaDescription, ogDescription: copy.metaDescription } },
+    { ...t, meta: { ...t.meta, title: copy.metaTitle, description: copy.metaDescription, ogDescription: copy.metaDescription, keywords: copy.metaKeywords } },
     origin,
     pagePath,
     alternatePath
@@ -1176,6 +1197,17 @@ async function buildProSubscriptionPage(request, env) {
         </div>
         <div class="trust-list">
           ${renderListItems(copy.trustItems, "div")}
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="section-head" style="display:block;margin-bottom:22px">
+          <h2>${escapeHtml(copy.faqTitle)}</h2>
+        </div>
+        <div class="faq-list">
+          ${renderFaqItems(copy.faqItems)}
         </div>
       </div>
     </section>
@@ -1523,10 +1555,14 @@ function buildHead(t, origin, pagePath) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(t.meta.title)}</title>
   <meta name="description" content="${escapeHtml(t.meta.description)}">
+  ${t.meta.keywords ? `<meta name="keywords" content="${escapeHtml(t.meta.keywords)}">` : ""}
   <link rel="icon" href="${LOGO_URL}">
   <link rel="canonical" href="${absoluteUrl(pagePath, origin)}">
   <link rel="alternate" hreflang="en" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
+  <link rel="alternate" hreflang="zh-CN" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
+  <link rel="alternate" hreflang="zh-TW" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
+  <link rel="alternate" hreflang="zh-HK" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="x-default" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
   <meta property="og:title" content="${escapeHtml(t.meta.title)}">
   <meta property="og:description" content="${escapeHtml(t.meta.ogDescription)}">
@@ -2033,22 +2069,75 @@ function buildStyles() {
     .faq-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
+      gap: 16px;
     }
-    .faq-list details {
+    .faq-item {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 18px;
-      background: var(--panel);
+      border-radius: 12px;
+      padding: 20px;
+      background: linear-gradient(135deg, var(--panel) 0%, rgba(26, 23, 20, 0.7) 100%);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
-    .faq-list summary {
+    .faq-item:hover {
+      border-color: rgba(73, 214, 208, 0.4);
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+      transform: translateY(-2px);
+    }
+    .faq-item[open] {
+      border-color: rgba(73, 214, 208, 0.6);
+      background: linear-gradient(135deg, var(--panel) 0%, rgba(73, 214, 208, 0.05) 100%);
+    }
+    .faq-item summary {
       cursor: pointer;
       color: var(--ink);
       font-weight: 760;
+      font-size: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      user-select: none;
     }
-    .faq-list p {
+    .faq-item summary::-webkit-details-marker {
+      display: none;
+    }
+    .faq-icon {
+      width: 18px;
+      height: 18px;
+      color: var(--cyan);
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      flex-shrink: 0;
+    }
+    .faq-item[open] .faq-icon {
+      transform: rotate(135deg);
+      color: var(--red);
+    }
+    .faq-content {
+      overflow: hidden;
+    }
+    .faq-item p {
       margin: 12px 0 0;
       color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+      animation: faqFadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    @keyframes faqFadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(-8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    .trust-badge {
+      animation: pulseText 3s ease-in-out infinite;
+    }
+    @keyframes pulseText {
+      0%, 100% { opacity: 0.85; }
+      50% { opacity: 1; filter: drop-shadow(0 0 4px rgba(73, 214, 208, 0.4)); }
     }
     .step {
       position: relative;
@@ -2156,12 +2245,21 @@ function buildStyles() {
       font-size: 15px;
     }
     .pro-offer {
-      border: 1px solid rgba(239, 62, 70, 0.46);
-      border-radius: 8px;
-      padding: 26px;
-      background: rgba(239, 62, 70, 0.08);
+      border: 1px solid transparent;
+      border-radius: 16px;
+      padding: 30px;
+      background: linear-gradient(#1a1714, #1a1714) padding-box,
+                  linear-gradient(135deg, var(--red) 0%, var(--cyan) 100%) border-box;
       position: sticky;
-      top: 92px;
+      top: 100px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4), 
+                  0 0 30px rgba(239, 62, 70, 0.05);
+      transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+    .pro-offer:hover {
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5), 
+                  0 0 40px rgba(73, 214, 208, 0.1);
+      transform: translateY(-2px);
     }
     .pro-offer-label {
       display: inline-flex;
@@ -2198,25 +2296,41 @@ function buildStyles() {
     }
     .pro-preview {
       border: 1px solid rgba(73, 214, 208, 0.34);
-      border-radius: 8px;
-      padding: 22px;
+      border-radius: 12px;
+      padding: 24px;
       background: rgba(73, 214, 208, 0.07);
     }
     .pyramid-stack {
       display: grid;
-      gap: 8px;
-      margin-top: 18px;
+      gap: 10px;
+      margin-top: 20px;
     }
     .pyramid-layer {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 13px 15px;
-      background: rgba(255, 255, 255, 0.04);
+      border-radius: 10px;
+      padding: 14px 18px;
+      background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.06) 100%);
+      transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
     }
-    .pyramid-layer:nth-child(1) { width: 58%; margin: 0 auto; border-color: rgba(239, 62, 70, 0.48); }
-    .pyramid-layer:nth-child(2) { width: 72%; margin: 0 auto; }
-    .pyramid-layer:nth-child(3) { width: 84%; margin: 0 auto; }
-    .pyramid-layer:nth-child(4) { width: 94%; margin: 0 auto; }
+    .pyramid-layer:hover {
+      transform: scale(1.02);
+      border-color: var(--cyan);
+      box-shadow: 0 8px 24px rgba(73, 214, 208, 0.15);
+    }
+    .pyramid-layer:nth-child(1) { 
+      width: 58%; 
+      margin: 0 auto; 
+      border-color: rgba(239, 62, 70, 0.6); 
+      background: linear-gradient(90deg, rgba(239, 62, 70, 0.05) 0%, rgba(239, 62, 70, 0.15) 100%);
+    }
+    .pyramid-layer:nth-child(1):hover {
+      border-color: var(--red);
+      box-shadow: 0 8px 24px rgba(239, 62, 70, 0.25);
+    }
+    .pyramid-layer:nth-child(2) { width: 70%; margin: 0 auto; }
+    .pyramid-layer:nth-child(3) { width: 80%; margin: 0 auto; }
+    .pyramid-layer:nth-child(4) { width: 90%; margin: 0 auto; }
     .pyramid-layer:nth-child(5) { width: 100%; }
     .pyramid-layer strong {
       display: block;
@@ -2546,9 +2660,17 @@ function renderDocFaq(items) {
 }
 
 function renderFaqItems(items) {
-  return items.map(([question, answer]) => `<details>
-            <summary>${escapeHtml(question)}</summary>
-            <p>${escapeHtml(answer)}</p>
+  return items.map(([question, answer]) => `<details class="faq-item">
+            <summary>
+              <span>${escapeHtml(question)}</span>
+              <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </summary>
+            <div class="faq-content">
+              <p>${escapeHtml(answer)}</p>
+            </div>
           </details>`).join("");
 }
 
@@ -2791,6 +2913,7 @@ function buildPage(locale, origin) {
           <div class="proof" aria-label="${escapeHtml(t.hero.proofLabel)}">
             ${renderListItems(t.hero.proof, "span")}
           </div>
+          ${t.hero.trustBadge ? `<div class="trust-badge" style="margin-top: 16px; font-size: 14px; color: var(--cyan); font-weight: 700; display: flex; align-items: center; gap: 6px;">${escapeHtml(t.hero.trustBadge)}</div>` : ""}
         </div>
         ${renderHeroPreview(locale)}
       </div>
@@ -3072,6 +3195,9 @@ function buildSitemap(origin) {
     <priority>${pair.priority}</priority>
     <xhtml:link rel="alternate" hreflang="en" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
     <xhtml:link rel="alternate" hreflang="zh-Hans" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
+    <xhtml:link rel="alternate" hreflang="zh-TW" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
+    <xhtml:link rel="alternate" hreflang="zh-HK" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
     <xhtml:link rel="alternate" hreflang="x-default" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
   </url>`;
   const urls = pairs.flatMap((pair) => [
@@ -3137,6 +3263,25 @@ export default {
     const url = new URL(request.url);
     const origin = env.SITE_ORIGIN || SITE_ORIGIN;
 
+    if (url.pathname === "/") {
+      const cookie = request.headers.get("cookie") || "";
+      const hasLangPref = cookie.includes("lang_pref=");
+      
+      if (!url.searchParams.has("lang") && !hasLangPref) {
+        const country = request.cf?.country;
+        const acceptLang = request.headers.get("accept-language") || "";
+        const isChineseRegion = ["CN", "TW", "HK", "MO"].includes(country);
+        const prefersChinese = acceptLang.toLowerCase().includes("zh");
+        
+        if (isChineseRegion || prefersChinese) {
+          const headers = new Headers();
+          headers.set("Location", `${origin}/zh`);
+          headers.set("Set-Cookie", "lang_pref=zh; Path=/; Max-Age=31536000; SameSite=Lax");
+          return new Response(null, { status: 302, headers });
+        }
+      }
+    }
+
     if (url.pathname === "/health") {
       return textResponse("ok");
     }
@@ -3146,7 +3291,11 @@ export default {
     }
 
     if (url.pathname === "/pro" || url.pathname === "/zh/pro") {
-      return htmlResponse(await buildProSubscriptionPage(request, env), 200);
+      const proLocale = url.pathname.startsWith("/zh") ? "zh" : "en";
+      const proHeaders = {
+        "Set-Cookie": `lang_pref=${proLocale}; Path=/; Max-Age=31536000; SameSite=Lax`
+      };
+      return htmlResponse(await buildProSubscriptionPage(request, env), 200, proHeaders);
     }
 
     if (url.pathname === "/api/passport/device/start") {
@@ -3189,16 +3338,27 @@ Sitemap: ${origin}/sitemap.xml
     }
 
     const route = resolveRoute(url.pathname);
-    if (route.type === "privacy") {
-      return htmlResponse(buildLocalFirstPage(route.locale, origin), route.status);
-    }
-    if (route.type === "docs-index") {
-      return htmlResponse(buildDocIndexPage(route.locale, origin), route.status);
-    }
-    if (route.type === "doc") {
-      return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status);
+    const extraHeaders = {};
+    if (url.searchParams.get("lang") === "en") {
+      extraHeaders["Set-Cookie"] = "lang_pref=en; Path=/; Max-Age=31536000; SameSite=Lax";
+    } else if (url.searchParams.get("lang") === "zh") {
+      extraHeaders["Set-Cookie"] = "lang_pref=zh; Path=/; Max-Age=31536000; SameSite=Lax";
+    } else if (route.locale === "zh") {
+      extraHeaders["Set-Cookie"] = "lang_pref=zh; Path=/; Max-Age=31536000; SameSite=Lax";
+    } else if (route.locale === "en" && url.pathname === "/") {
+      extraHeaders["Set-Cookie"] = "lang_pref=en; Path=/; Max-Age=31536000; SameSite=Lax";
     }
 
-    return htmlResponse(buildPage(route.locale, origin), route.status);
+    if (route.type === "privacy") {
+      return htmlResponse(buildLocalFirstPage(route.locale, origin), route.status, extraHeaders);
+    }
+    if (route.type === "docs-index") {
+      return htmlResponse(buildDocIndexPage(route.locale, origin), route.status, extraHeaders);
+    }
+    if (route.type === "doc") {
+      return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status, extraHeaders);
+    }
+
+    return htmlResponse(buildPage(route.locale, origin), route.status, extraHeaders);
   }
 };
