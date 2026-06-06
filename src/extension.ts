@@ -2808,7 +2808,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
   // Create Webview Panel
   activePanel = vscode.window.createWebviewPanel(
     'solopreneurRoadmap',
-    'SoloMap: AI Roadmap & Agent Task Flow',
+    'SoloMap - Local AI Agent Cockpit & Coding Roadmap Assistant',
     vscode.ViewColumn.One,
     {
       enableScripts: true,
@@ -4011,6 +4011,7 @@ function getStrategyPyramidWebviewHtml(
   snapshot: StrategyPyramidSnapshot
 ): string {
   const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
+  const wordmarkUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo_with_text.svg'));
   const stageTitle = snapshot.stageTitle || '组合判断期';
   const mainJudgment = snapshot.mainJudgment || '从项目组合判断现在该加码、收缩、暂停、转向，还是孵化新方向。';
   const strategicAction = snapshot.strategicAction || '选择一个项目补上最缺的市场或反馈信号。';
@@ -4146,6 +4147,18 @@ function getStrategyPyramidWebviewHtml(
       background: linear-gradient(135deg, var(--accent), var(--accent-purple));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
+    }
+
+    .brand-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-wordmark {
+      width: 132px;
+      height: auto;
+      flex-shrink: 0;
     }
 
     .sub-heading {
@@ -4914,9 +4927,13 @@ function getStrategyPyramidWebviewHtml(
   <div class="neon-glow-container"></div>
   <main class="shell">
     <header>
-      <div>
-        <h1>一人公司战略驾驶舱</h1>
-        <div class="sub-heading">判断多个项目、能力、收入和市场信誉是否正在形成一套可复利系统。</div>
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap"></h1>
+        <div style="width: 1px; height: 20px; background: var(--border);"></div>
+        <div>
+          <h2 style="margin: 0; font-size: 16px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent-purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; line-height: 1.2;">一人公司战略驾驶舱</h2>
+          <div class="sub-heading">判断多个项目、能力、收入和市场信誉是否正在形成一套可复利系统。</div>
+        </div>
       </div>
       <div class="header-actions">
         <button type="button" class="btn-header" id="btn-refresh"><span class="codicon codicon-refresh"></span>刷新</button>

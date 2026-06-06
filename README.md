@@ -107,10 +107,10 @@ SoloMap 会在每个项目根目录下自动创建 `.solopreneur/` 目录，数�
 ## 📖 Methodology & Advanced Docs / 深度方法论文档
 
 For solo founders looking to build a highly reproducible delivery machine, explore our core blueprints:
-如果你想把一人公司打造成高频交付的闭金石，请查阅我们的核心方法论与设计边界：
+如果你想把一人公司打造成高效可复制的交付引擎，请查阅我们的核心方法论与设计边界：
 
 *   **Core Methodology / 核心推进模型**: [docs/methodology/methodology.zh.md](docs/methodology/methodology.zh.md)
-*   **Delivery Boundary / 独立开发者交付闭环边界**: [docs/solo-delivery-loop-boundary.zh.md](docs/solo-delivery-loop-boundary.zh.md)
+*   **Delivery Boundary / 独立开发者交付闭环边界**: [docs/architecture/solo-delivery-loop-boundary.zh.md](docs/architecture/solo-delivery-loop-boundary.zh.md)
 *   **Next-stage Roadmap / 下一阶段功能规划**: [docs/roadmap/next-feature-plan.zh.md](docs/roadmap/next-feature-plan.zh.md)
 *   **Full Documentation Index / 完整正式文档入口**: [docs/README.zh.md](docs/README.zh.md)
 
