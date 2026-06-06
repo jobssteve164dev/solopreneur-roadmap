@@ -655,12 +655,21 @@ test('HTML structured sitemap directory and search engine crawlers bypass redire
   assert.match(htmlZh, /href="\/zh\/docs\/solomap-method"/);
   assert.match(htmlZh, /href="\/zh\/pro"/);
 
-  // 5. XML Sitemap includes sitemap.xml entries for HTML Sitemap
+  // 5. XML Sitemap includes sitemap.xml entries for HTML Sitemap and references stylesheet
   const resXml = await worker.default.fetch(new Request('https://solomap.app/sitemap.xml'), env);
   const xml = await resXml.text();
   assert.equal(resXml.status, 200);
+  assert.match(xml, /<\?xml-stylesheet type="text\/xsl" href="\/sitemap\.xsl"\?>/);
   assert.match(xml, /<loc>https:\/\/solomap\.app\/sitemap<\/loc>/);
   assert.match(xml, /<loc>https:\/\/solomap\.app\/zh\/sitemap<\/loc>/);
+
+  // 6. XSL Stylesheet renders correctly
+  const resXsl = await worker.default.fetch(new Request('https://solomap.app/sitemap.xsl'), env);
+  const xsl = await resXsl.text();
+  assert.equal(resXsl.status, 200);
+  assert.equal(resXsl.headers.get('content-type'), 'application/xml; charset=utf-8');
+  assert.match(xsl, /<xsl:stylesheet/);
+  assert.match(xsl, /SoloMap XML Sitemap/);
 });
 
 

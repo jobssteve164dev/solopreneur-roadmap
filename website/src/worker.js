@@ -3261,10 +3261,131 @@ function buildSitemap(origin) {
     renderUrl(pair.zh, pair)
   ]).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="/sitemap.xsl"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
 ${urls}
 </urlset>
+`;
+}
+
+function buildSitemapXsl() {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:s="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <xsl:output method="html" encoding="UTF-8" indent="yes"/>
+  <xsl:template match="/">
+    <html lang="en">
+    <head>
+      <title>SoloMap XML Sitemap</title>
+      <meta charset="utf-8"/>
+      <meta name="viewport" content="width=device-width, initial-scale=1"/>
+      <style>
+        body {
+          margin: 0;
+          padding: 40px 20px;
+          background: #11100e;
+          color: #f6f0e8;
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+          line-height: 1.5;
+        }
+        .container {
+          max-width: 1000px;
+          margin: 0 auto;
+        }
+        h1 {
+          font-size: 32px;
+          margin-bottom: 8px;
+          font-weight: 800;
+          background: linear-gradient(135deg, #ef3e46 0%, #49d6d0 100%);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+        }
+        p {
+          color: #bfb5a7;
+          margin-bottom: 24px;
+          font-size: 16px;
+        }
+        table {
+          width: 100%;
+          border-collapse: collapse;
+          border: 1px solid rgba(246, 240, 232, 0.16);
+          border-radius: 12px;
+          overflow: hidden;
+          background: #1a1714;
+        }
+        th, td {
+          padding: 14px 18px;
+          text-align: left;
+          border-bottom: 1px solid rgba(246, 240, 232, 0.12);
+        }
+        th {
+          background: rgba(255, 255, 255, 0.04);
+          color: #f6f0e8;
+          font-weight: 700;
+          font-size: 14px;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+        tr:last-child td {
+          border-bottom: none;
+        }
+        a {
+          color: #49d6d0;
+          text-decoration: none;
+          word-break: break-all;
+          transition: color 0.2s;
+        }
+        a:hover {
+          color: #ef3e46;
+        }
+        .badge {
+          display: inline-block;
+          padding: 4px 8px;
+          border-radius: 6px;
+          font-size: 12px;
+          font-weight: 700;
+          background: rgba(73, 214, 208, 0.1);
+          color: #49d6d0;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>SoloMap XML Sitemap</h1>
+        <p>This is an XML sitemap generated for search engine crawlers like Google. It contains all indexable URLs on solomap.app.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>URL</th>
+              <th>Last Modified</th>
+              <th>Change Frequency</th>
+              <th>Priority</th>
+            </tr>
+          </thead>
+          <tbody>
+            <xsl:for-each select="s:urlset/s:url">
+              <tr>
+                <td>
+                  <a href="{s:loc}"><xsl:value-of select="s:loc"/></a>
+                </td>
+                <td>
+                  <xsl:value-of select="s:lastmod"/>
+                </td>
+                <td>
+                  <xsl:value-of select="s:changefreq"/>
+                </td>
+                <td>
+                  <span class="badge"><xsl:value-of select="s:priority"/></span>
+                </td>
+              </tr>
+            </xsl:for-each>
+          </tbody>
+        </table>
+      </div>
+    </body>
+    </html>
+  </xsl:template>
+</xsl:stylesheet>
 `;
 }
 
@@ -3394,6 +3515,10 @@ Sitemap: ${origin}/sitemap.xml
 
     if (url.pathname === "/sitemap.xml") {
       return textResponse(buildSitemap(origin), "application/xml; charset=utf-8");
+    }
+
+    if (url.pathname === "/sitemap.xsl") {
+      return textResponse(buildSitemapXsl(), "application/xml; charset=utf-8");
     }
 
     const route = resolveRoute(url.pathname);
