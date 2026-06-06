@@ -9,7 +9,8 @@ const SOLOMAP_PRODUCT = "solomap";
 const STRATEGY_PYRAMID_FEATURE = "strategy_pyramid";
 const VSCODE_CALLBACK_PREFIXES = [
   "vscode://SZLK.solopreneur-roadmap/passport/callback",
-  "vscode-insiders://SZLK.solopreneur-roadmap/passport/callback"
+  "vscode-insiders://SZLK.solopreneur-roadmap/passport/callback",
+  "code-oss://SZLK.solopreneur-roadmap/passport/callback"
 ];
 const PASSPORT_ISSUER = "https://passport.szlk.ai";
 const PASSPORT_OIDC_AUTHORIZE_URL = `${PASSPORT_ISSUER}/api/oidc/authorize`;
@@ -524,6 +525,12 @@ function isAllowedVsCodeCallback(callback) {
   return VSCODE_CALLBACK_PREFIXES.some((prefix) => String(callback || "").startsWith(prefix));
 }
 
+function getDeviceAuthorizeUrl(requestUrl, deviceCode) {
+  const url = new URL("/api/passport/device/authorize", requestUrl.origin);
+  url.searchParams.set("device", deviceCode);
+  return url.toString();
+}
+
 async function signState(env, payload) {
   if (!env.SOLOMAP_PASSPORT_PRODUCT_SECRET) {
     throw new Error("missing_product_secret");
@@ -552,6 +559,15 @@ async function verifyState(env, state) {
   } catch (error) {
     return null;
   }
+}
+
+async function createDeviceCode(env) {
+  return signState(env, {
+    mode: "device",
+    nonce: randomString(24),
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  });
 }
 
 async function issueSoloMapGrant(env, email = "pro-test@solomap.app", options = {}) {
@@ -717,6 +733,61 @@ function buildPassportFallbackPage(callback) {
 </html>`;
 }
 
+function buildDeviceGrantPage(grant) {
+  const escapedGrant = escapeHtml(grant);
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoloMap Pro 已授权</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #11100e; color: #f6f0e8; }
+    main { width: min(720px, calc(100vw - 32px)); }
+    h1 { font-size: 30px; margin: 0 0 12px; }
+    p { color: #ded4c8; line-height: 1.6; }
+    textarea { width: 100%; min-height: 140px; margin-top: 12px; padding: 14px; border-radius: 8px; border: 1px solid rgba(246,240,232,.24); background: #1a1714; color: #f6f0e8; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    button { margin-top: 14px; border: 0; border-radius: 8px; padding: 11px 16px; background: #f6f0e8; color: #11100e; font-weight: 700; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>SoloMap Pro 已授权</h1>
+    <p>复制下面的授权码，回到 SoloMap 粘贴后即可打开战略金字塔视图。</p>
+    <textarea id="code" readonly>${escapedGrant}</textarea>
+    <button id="copy" type="button">复制授权码</button>
+  </main>
+  <script>
+    document.getElementById('copy').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(document.getElementById('code').value);
+      document.getElementById('copy').textContent = '已复制';
+    });
+  </script>
+</body>
+</html>`;
+}
+
+async function buildPassportAuthorizeRedirect(request, env, payload) {
+  const url = new URL(request.url);
+  const verifier = randomString(48);
+  const challenge = base64UrlEncode(await sha256(verifier));
+  const state = await signState(env, {
+    ...payload,
+    verifier,
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  });
+  const authorizeUrl = new URL(env.SOLOMAP_PASSPORT_AUTH_URL || PASSPORT_OIDC_AUTHORIZE_URL);
+  authorizeUrl.searchParams.set("client_id", env.SOLOMAP_PASSPORT_OIDC_CLIENT_ID || SOLOMAP_OIDC_CLIENT_ID);
+  authorizeUrl.searchParams.set("redirect_uri", `${url.origin}/api/passport/oidc/callback`);
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("scope", "openid profile email offline_access");
+  authorizeUrl.searchParams.set("code_challenge", challenge);
+  authorizeUrl.searchParams.set("code_challenge_method", "S256");
+  authorizeUrl.searchParams.set("state", state);
+  return Response.redirect(authorizeUrl.toString(), 302);
+}
+
 async function handlePassportStart(request, env) {
   const url = new URL(request.url);
   const callback = String(url.searchParams.get("callback") || "");
@@ -730,23 +801,7 @@ async function handlePassportStart(request, env) {
     return Response.redirect(callbackUrl.toString(), 302);
   }
   if (callback) {
-    const verifier = randomString(48);
-    const challenge = base64UrlEncode(await sha256(verifier));
-    const state = await signState(env, {
-      callback,
-      verifier,
-      issuedAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
-    });
-    const authorizeUrl = new URL(env.SOLOMAP_PASSPORT_AUTH_URL || PASSPORT_OIDC_AUTHORIZE_URL);
-    authorizeUrl.searchParams.set("client_id", env.SOLOMAP_PASSPORT_OIDC_CLIENT_ID || SOLOMAP_OIDC_CLIENT_ID);
-    authorizeUrl.searchParams.set("redirect_uri", `${url.origin}/api/passport/oidc/callback`);
-    authorizeUrl.searchParams.set("response_type", "code");
-    authorizeUrl.searchParams.set("scope", "openid profile email offline_access");
-    authorizeUrl.searchParams.set("code_challenge", challenge);
-    authorizeUrl.searchParams.set("code_challenge_method", "S256");
-    authorizeUrl.searchParams.set("state", state);
-    return Response.redirect(authorizeUrl.toString(), 302);
+    return buildPassportAuthorizeRedirect(request, env, { mode: "callback", callback });
   }
   if (env.SOLOMAP_PASSPORT_AUTH_URL) {
     const authUrl = new URL(env.SOLOMAP_PASSPORT_AUTH_URL);
@@ -758,11 +813,41 @@ async function handlePassportStart(request, env) {
   return htmlResponse(buildPassportFallbackPage(callback), 200);
 }
 
+async function handlePassportDeviceStart(request, env) {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, reason: "method_not_allowed" }, 405);
+  }
+  const url = new URL(request.url);
+  const deviceCode = await createDeviceCode(env);
+  return jsonResponse({
+    ok: true,
+    deviceCode,
+    loginUrl: getDeviceAuthorizeUrl(url, deviceCode),
+    expiresIn: 600
+  });
+}
+
+async function handlePassportDeviceAuthorize(request, env) {
+  const url = new URL(request.url);
+  const deviceCode = String(url.searchParams.get("device") || "");
+  const device = await verifyState(env, deviceCode);
+  if (!device || device.mode !== "device") {
+    return htmlResponse(buildPassportFallbackPage(""), 400);
+  }
+  return buildPassportAuthorizeRedirect(request, env, {
+    mode: "device",
+    deviceCode
+  });
+}
+
 async function handlePassportOidcCallback(request, env) {
   const url = new URL(request.url);
   const code = String(url.searchParams.get("code") || "");
   const state = await verifyState(env, String(url.searchParams.get("state") || ""));
-  if (!code || !state || !isAllowedVsCodeCallback(state.callback)) {
+  if (!code || !state) {
+    return htmlResponse(buildPassportFallbackPage(""), 400);
+  }
+  if (state.mode !== "device" && !isAllowedVsCodeCallback(state.callback)) {
     return htmlResponse(buildPassportFallbackPage(""), 400);
   }
   const tokenResponse = await fetch(env.SOLOMAP_PASSPORT_TOKEN_URL || PASSPORT_OIDC_TOKEN_URL, {
@@ -797,9 +882,33 @@ async function handlePassportOidcCallback(request, env) {
     userId: String(access.userId || userinfo.sub || ""),
     entitlements: Array.isArray(access.entitlements) && access.entitlements.length ? access.entitlements : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"]
   });
+  if (state.mode === "device") {
+    return htmlResponse(buildDeviceGrantPage(grant), 200);
+  }
   const callbackUrl = new URL(state.callback);
   callbackUrl.searchParams.set("grant", grant);
   return Response.redirect(callbackUrl.toString(), 302);
+}
+
+async function handlePassportDeviceVerify(request, env) {
+  if (request.method !== "POST") {
+    return jsonResponse({ allowed: false, reason: "method_not_allowed" }, 405);
+  }
+  let payload = {};
+  try {
+    payload = await request.json();
+  } catch (error) {
+    return jsonResponse({ allowed: false, reason: "invalid_json" }, 400);
+  }
+  const device = await verifyState(env, String(payload.deviceCode || ""));
+  if (!device || device.mode !== "device") {
+    return jsonResponse({ allowed: false, reason: "invalid_device_code" }, 400);
+  }
+  const grant = String(payload.code || payload.grant || "").trim();
+  if (!grant) {
+    return jsonResponse({ allowed: false, reason: "missing_code" }, 400);
+  }
+  return jsonResponse(await verifySignedGrant(env, grant));
 }
 
 async function handlePassportVerify(request, env) {
@@ -2231,6 +2340,18 @@ export default {
 
     if (url.pathname === "/api/passport/start") {
       return handlePassportStart(request, env);
+    }
+
+    if (url.pathname === "/api/passport/device/start") {
+      return handlePassportDeviceStart(request, env);
+    }
+
+    if (url.pathname === "/api/passport/device/authorize") {
+      return handlePassportDeviceAuthorize(request, env);
+    }
+
+    if (url.pathname === "/api/passport/device/verify") {
+      return handlePassportDeviceVerify(request, env);
     }
 
     if (url.pathname === "/api/passport/oidc/callback") {

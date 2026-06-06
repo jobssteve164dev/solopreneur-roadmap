@@ -136,6 +136,14 @@ interface PassportVerifyResult {
   expiresAt?: string;
 }
 
+interface PassportDeviceStartResult {
+  ok: boolean;
+  reason?: string;
+  deviceCode?: string;
+  loginUrl?: string;
+  expiresIn?: number;
+}
+
 interface AgentStepSession {
   agentCli: string;
   provider: string;
@@ -947,6 +955,14 @@ function buildPassportVerifyUrl(): string {
   return new URL('/api/passport/verify', getPassportBaseUrl()).toString();
 }
 
+function buildPassportDeviceStartUrl(): string {
+  return new URL('/api/passport/device/start', getPassportBaseUrl()).toString();
+}
+
+function buildPassportDeviceVerifyUrl(): string {
+  return new URL('/api/passport/device/verify', getPassportBaseUrl()).toString();
+}
+
 function grantContainsFeature(grant: Pick<PassportGrantCache, 'entitlements' | 'expiresAt' | 'checkedAt'>): boolean {
   const entitlements = new Set((grant.entitlements || []).map((item) => String(item || '').trim()));
   const expiresAtMs = Date.parse(grant.expiresAt || '');
@@ -1038,6 +1054,83 @@ async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promi
 
 async function beginPassportAuthorization(): Promise<void> {
   await vscode.env.openExternal(vscode.Uri.parse(buildPassportStartUrl()));
+}
+
+async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext): Promise<void> {
+  let session: PassportDeviceStartResult;
+  try {
+    const response = await fetch(buildPassportDeviceStartUrl(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        product: passportProduct,
+        feature: strategyPyramidFeature
+      })
+    });
+    session = await response.json() as PassportDeviceStartResult;
+    if (!response.ok || !session.ok || !session.deviceCode || !session.loginUrl) {
+      vscode.window.showWarningMessage('无法开始 SoloMap Pro 登录。');
+      return;
+    }
+  } catch (error) {
+    console.warn('Failed to start SoloMap Pro device authorization:', error);
+    vscode.window.showWarningMessage('无法开始 SoloMap Pro 登录。');
+    return;
+  }
+
+  await vscode.env.openExternal(vscode.Uri.parse(session.loginUrl));
+  const code = await vscode.window.showInputBox({
+    title: 'SoloMap Pro',
+    prompt: '登录完成后，粘贴网页上显示的授权码。',
+    placeHolder: '粘贴授权码',
+    ignoreFocusOut: true
+  });
+  const normalizedCode = String(code || '').trim();
+  if (!normalizedCode) {
+    return;
+  }
+  try {
+    const response = await fetch(buildPassportDeviceVerifyUrl(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        product: passportProduct,
+        feature: strategyPyramidFeature,
+        deviceCode: session.deviceCode,
+        code: normalizedCode
+      })
+    });
+    const result = await response.json() as PassportVerifyResult;
+    if (!response.ok || !result.allowed) {
+      vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
+      return;
+    }
+    await writePassportGrant(context, result, normalizedCode);
+    vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
+    await openStrategyPyramidPanel(context);
+  } catch (error) {
+    console.warn('Failed to verify SoloMap Pro device authorization:', error);
+    vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
+  }
+}
+
+async function beginPassportAuthorizationFlow(context: vscode.ExtensionContext): Promise<void> {
+  const isRemoteEnvironment = Boolean((vscode.env as any).remoteName);
+  const callbackLabel = '浏览器回到 VS Code';
+  const deviceLabel = '使用登录码';
+  const message = isRemoteEnvironment
+    ? '当前环境可能无法接收浏览器回调，请使用登录码完成 SoloMap Pro 登录。'
+    : '选择 SoloMap Pro 登录方式。';
+  const firstChoice = isRemoteEnvironment ? deviceLabel : callbackLabel;
+  const secondChoice = isRemoteEnvironment ? callbackLabel : deviceLabel;
+  const choice = await vscode.window.showInformationMessage(message, firstChoice, secondChoice);
+  if (choice === deviceLabel) {
+    await beginPassportDeviceAuthorization(context);
+    return;
+  }
+  if (choice === callbackLabel) {
+    await beginPassportAuthorization();
+  }
 }
 
 async function handlePassportUri(context: vscode.ExtensionContext, uri: vscode.Uri): Promise<void> {
@@ -2751,7 +2844,7 @@ async function handleOpenStrategyPyramid(context: vscode.ExtensionContext): Prom
       '升级 Pro'
     );
     if (choice === '升级 Pro') {
-      await beginPassportAuthorization();
+      await beginPassportAuthorizationFlow(context);
     }
     return;
   }

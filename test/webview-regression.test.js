@@ -39,6 +39,8 @@ function loadCompiledModule(relativePath, exportPatch) {
     uriHandlers: [],
     secrets: new Map(),
     nextInformationChoice: undefined,
+    nextInformationChoices: [],
+    nextInputBoxValue: undefined,
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) })
   };
   const context = {
@@ -58,7 +60,14 @@ function loadCompiledModule(relativePath, exportPatch) {
             terminals: [],
             showInformationMessage(message, ...items) {
               vscodeTestState.informationMessages.push({ message, items });
+              if (vscodeTestState.nextInformationChoices.length > 0) {
+                return Promise.resolve(vscodeTestState.nextInformationChoices.shift());
+              }
               return Promise.resolve(vscodeTestState.nextInformationChoice);
+            },
+            showInputBox(options) {
+              vscodeTestState.inputBoxOptions = options;
+              return Promise.resolve(vscodeTestState.nextInputBoxValue);
             },
             showWarningMessage(message, ...items) {
               vscodeTestState.warningMessages.push({ message, items });
@@ -1268,7 +1277,7 @@ test('strategy pyramid command blocks free users with a Pro upgrade action', asy
       'module.exports.__buildPassportStartUrl = buildPassportStartUrl;'
     ].join('\n')
   );
-  extensionModule.__vscodeTestState.nextInformationChoice = '升级 Pro';
+  extensionModule.__vscodeTestState.nextInformationChoices = ['升级 Pro', '浏览器回到 VS Code'];
   const context = {
     extensionUri: createUri(projectRoot),
     extensionPath: projectRoot,
@@ -1294,12 +1303,87 @@ test('strategy pyramid command blocks free users with a Pro upgrade action', asy
   await extensionModule.__handleOpenStrategyPyramid(context);
 
   assert.equal(extensionModule.__vscodeTestState.webviewPanels.length, 0);
-  assert.equal(extensionModule.__vscodeTestState.informationMessages.length, 1);
+  assert.equal(extensionModule.__vscodeTestState.informationMessages.length, 2);
   assert.match(extensionModule.__vscodeTestState.informationMessages[0].message, /战略金字塔是 Pro 功能/);
   assert.deepEqual(extensionModule.__vscodeTestState.informationMessages[0].items, ['升级 Pro']);
+  assert.match(extensionModule.__vscodeTestState.informationMessages[1].message, /选择 SoloMap Pro 登录方式/);
   assert.equal(extensionModule.__vscodeTestState.openedExternal.length, 1);
   assert.match(extensionModule.__vscodeTestState.openedExternal[0], /https:\/\/solomap\.app\/api\/passport\/start/);
   assert.match(extensionModule.__buildPassportStartUrl('vscode://SZLK.solopreneur-roadmap/passport/callback'), /callback=vscode%3A%2F%2FSZLK\.solopreneur-roadmap%2Fpassport%2Fcallback/);
+});
+
+test('strategy pyramid Pro upgrade supports device auth code entry', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__handleOpenStrategyPyramid = handleOpenStrategyPyramid;'
+  );
+  extensionModule.__vscodeTestState.nextInformationChoices = ['升级 Pro', '使用登录码'];
+  extensionModule.__vscodeTestState.nextInputBoxValue = 'signed-device-grant';
+  extensionModule.__vscodeTestState.fetchImpl = async (url, options = {}) => {
+    if (String(url).endsWith('/api/passport/device/start')) {
+      assert.equal(options.method, 'POST');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          deviceCode: 'device-code',
+          loginUrl: 'https://solomap.app/api/passport/device/authorize?device=device-code',
+          expiresIn: 600
+        })
+      };
+    }
+    if (String(url).endsWith('/api/passport/device/verify')) {
+      const body = JSON.parse(options.body);
+      assert.equal(body.product, 'solomap');
+      assert.equal(body.feature, 'strategy_pyramid');
+      assert.equal(body.deviceCode, 'device-code');
+      assert.equal(body.code, 'signed-device-grant');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          allowed: true,
+          email: 'pro@solomap.app',
+          userId: 'passport:user',
+          entitlements: ['strategy_pyramid'],
+          expiresAt: '2099-01-01T00:00:00.000Z'
+        })
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const storedSecrets = new Map();
+  const context = {
+    extensionUri: createUri(projectRoot),
+    extensionPath: projectRoot,
+    subscriptions: [],
+    secrets: {
+      get() {
+        return Promise.resolve(undefined);
+      },
+      store(key, value) {
+        storedSecrets.set(key, value);
+        return Promise.resolve();
+      }
+    },
+    globalState: {
+      get() {
+        return {};
+      },
+      update() {
+        return Promise.resolve();
+      }
+    }
+  };
+
+  await extensionModule.__handleOpenStrategyPyramid(context);
+
+  assert.equal(extensionModule.__vscodeTestState.openedExternal.length, 1);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /\/api\/passport\/device\/authorize\?device=device-code/);
+  assert.match(extensionModule.__vscodeTestState.inputBoxOptions.prompt, /粘贴网页上显示的授权码/);
+  assert.ok([...storedSecrets.values()].some((value) => String(value).includes('signed-device-grant')));
+  assert.equal(extensionModule.__vscodeTestState.webviewPanels.length, 1);
 });
 
 test('passport callback verifies and stores a user grant before unlocking Pro', async () => {
