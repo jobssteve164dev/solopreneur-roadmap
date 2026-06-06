@@ -694,7 +694,7 @@ export async function activate(context: vscode.ExtensionContext) {
   const showStrategyPyramidDisposable = vscode.commands.registerCommand(
     'solopreneur.showStrategyPyramid',
     async () => {
-      await openStrategyPyramidPanel(context);
+      await handleOpenStrategyPyramid(context);
     }
   );
   context.subscriptions.push(showStrategyPyramidDisposable);
@@ -2581,6 +2581,20 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
   );
 }
 
+async function handleOpenStrategyPyramid(context: vscode.ExtensionContext): Promise<void> {
+  if (!hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
+    const choice = await vscode.window.showInformationMessage(
+      '战略金字塔是 Pro 功能。',
+      '升级 Pro'
+    );
+    if (choice === '升级 Pro') {
+      vscode.env.openExternal(vscode.Uri.parse('https://solomap.app/pro'));
+    }
+    return;
+  }
+  await openStrategyPyramidPanel(context);
+}
+
 async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {
   if (activeStrategyPyramidPanel) {
     activeStrategyPyramidPanel.reveal(vscode.ViewColumn.One);
@@ -2605,8 +2619,7 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
     activeStrategyPyramidPanel.webview.html = getStrategyPyramidWebviewHtml(
       activeStrategyPyramidPanel.webview,
       context,
-      buildStrategyPyramidSnapshot(context),
-      hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')
+      buildStrategyPyramidSnapshot(context)
     );
   };
 
@@ -2623,9 +2636,6 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
             await selectProject(context, String(message.projectPath));
             await openRoadmapPanel(context);
           }
-          break;
-        case 'openStrategyUpgrade':
-          vscode.env.openExternal(vscode.Uri.parse('https://solomap.app/pro'));
           break;
       }
     },
@@ -2781,8 +2791,7 @@ function strategyEscapeHtml(value: string | number): string {
 function getStrategyPyramidWebviewHtml(
   webview: vscode.Webview,
   context: vscode.ExtensionContext,
-  snapshot: StrategyPyramidSnapshot,
-  proUnlocked = false
+  snapshot: StrategyPyramidSnapshot
 ): string {
   const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
   const loopCards = [
@@ -2807,18 +2816,7 @@ function getStrategyPyramidWebviewHtml(
     </article>
   `).join('');
 
-  const lockedBody = `
-    <section class="locked-panel">
-      <div>
-        <div class="locked-eyebrow">Pro</div>
-        <h2>解锁战略金字塔</h2>
-        <p>用一个视图判断所有项目在 Build、Sell、Learn、Improve 中的位置，并直接进入下一步。</p>
-      </div>
-      <button type="button" id="btn-open-upgrade"><span class="codicon codicon-sparkle"></span>升级 Pro</button>
-    </section>
-  `;
-
-  const unlockedBody = `
+  const body = `
     <section class="pyramid-band">
       ${loopCards.map((card, index) => `
         <div class="pyramid-layer layer-${strategyEscapeHtml(card.key)}" style="--layer:${index + 1}">
@@ -2904,20 +2902,6 @@ function getStrategyPyramidWebviewHtml(
     }
     .stat span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
     .stat strong { font-size: 22px; }
-    .locked-panel {
-      min-height: 380px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 22px;
-      padding: 32px;
-    }
-    .locked-eyebrow { color: var(--muted); font-size: 12px; text-transform: uppercase; margin-bottom: 8px; }
-    .locked-panel h2 { margin: 0 0 10px; font-size: 24px; }
-    .locked-panel p { margin: 0; max-width: 560px; color: var(--muted); line-height: 1.6; }
     .pyramid-band {
       display: grid;
       grid-template-columns: 1fr;
@@ -2985,7 +2969,7 @@ function getStrategyPyramidWebviewHtml(
     }
     @media (max-width: 760px) {
       .shell { padding: 18px; }
-      header, .locked-panel { align-items: stretch; flex-direction: column; }
+      header { align-items: stretch; flex-direction: column; }
       .stats { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .workbench { grid-template-columns: 1fr; }
       .project-row { grid-template-columns: 1fr; }
@@ -3006,15 +2990,12 @@ function getStrategyPyramidWebviewHtml(
       <div class="stat"><span>项目</span><strong>${snapshot.totalProjects}</strong></div>
       ${loopCards.map((card) => `<div class="stat"><span>${strategyEscapeHtml(card.label)}</span><strong>${card.count}</strong></div>`).join('')}
     </section>
-    ${proUnlocked ? unlockedBody : lockedBody}
+    ${body}
   </main>
   <script>
     const vscode = acquireVsCodeApi();
     document.getElementById('btn-refresh')?.addEventListener('click', () => {
       vscode.postMessage({ command: 'refreshStrategyPyramid' });
-    });
-    document.getElementById('btn-open-upgrade')?.addEventListener('click', () => {
-      vscode.postMessage({ command: 'openStrategyUpgrade' });
     });
     document.querySelectorAll('[data-open-project]').forEach((button) => {
       button.addEventListener('click', () => {

@@ -31,6 +31,13 @@ function loadCompiledModule(relativePath, exportPatch) {
   const source = fs.readFileSync(filename, 'utf8') + `\n${exportPatch}`;
   const exports = {};
   const module = { exports };
+  const vscodeTestState = {
+    informationMessages: [],
+    warningMessages: [],
+    openedExternal: [],
+    webviewPanels: [],
+    nextInformationChoice: undefined
+  };
   const context = {
     exports,
     module,
@@ -45,9 +52,29 @@ function loadCompiledModule(relativePath, exportPatch) {
           },
           window: {
             terminals: [],
-            showInformationMessage() {},
-            showWarningMessage() {},
+            showInformationMessage(message, ...items) {
+              vscodeTestState.informationMessages.push({ message, items });
+              return Promise.resolve(vscodeTestState.nextInformationChoice);
+            },
+            showWarningMessage(message, ...items) {
+              vscodeTestState.warningMessages.push({ message, items });
+              return Promise.resolve(undefined);
+            },
             showErrorMessage() {},
+            createWebviewPanel(viewType, title) {
+              const panel = {
+                viewType,
+                title,
+                webview: {
+                  html: '',
+                  onDidReceiveMessage() {}
+                },
+                reveal() {},
+                onDidDispose() {}
+              };
+              vscodeTestState.webviewPanels.push(panel);
+              return panel;
+            },
             createTerminal() {
               return {
                 name: 'SoloMap Agent Console · test',
@@ -64,6 +91,12 @@ function loadCompiledModule(relativePath, exportPatch) {
                   return '';
                 }
               };
+            }
+          },
+          env: {
+            openExternal(uri) {
+              vscodeTestState.openedExternal.push(String(uri && (uri.fsPath || uri.path || uri)));
+              return Promise.resolve(true);
             }
           },
           ThemeIcon: class ThemeIcon {},
@@ -88,6 +121,7 @@ function loadCompiledModule(relativePath, exportPatch) {
   };
 
   vm.runInNewContext(source, context, { filename });
+  context.module.exports.__vscodeTestState = vscodeTestState;
   return context.module.exports;
 }
 
@@ -1162,7 +1196,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: {} }, 'strategyPyramid'), false);
 });
 
-test('strategy pyramid webview renders gated free state and unlocked project actions', () => {
+test('strategy pyramid webview renders only unlocked project actions', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -1200,23 +1234,43 @@ test('strategy pyramid webview renders gated free state and unlocked project act
     }]
   };
 
-  const freeHtml = extensionModule.__getStrategyPyramidWebviewHtml(createWebviewStub(), context, snapshot, false);
-  assert.match(freeHtml, /战略金字塔/);
-  assert.match(freeHtml, /解锁战略金字塔/);
-  assert.match(freeHtml, /升级 Pro/);
-  assert.doesNotMatch(freeHtml, /GitHub|Passport|CloudMCP|entitlement|strategy_pyramid/);
-  assert.doesNotThrow(() => new vm.Script(extractLastScript(freeHtml)));
-
-  const proHtml = extensionModule.__getStrategyPyramidWebviewHtml(createWebviewStub(), context, snapshot, true);
+  const proHtml = extensionModule.__getStrategyPyramidWebviewHtml(createWebviewStub(), context, snapshot);
   assert.match(proHtml, /Build/);
   assert.match(proHtml, /Sell/);
   assert.match(proHtml, /Learn/);
   assert.match(proHtml, /Improve/);
   assert.match(proHtml, /查看项目/);
   assert.match(proHtml, /data-open-project="\/workspace\/solomap"/);
-  assert.doesNotMatch(proHtml, /解锁战略金字塔|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid/);
+  assert.doesNotMatch(proHtml, /解锁战略金字塔|升级 Pro|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid/);
   assert.doesNotThrow(() => new vm.Script(extractLastScript(proHtml)));
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
+});
+
+test('strategy pyramid command blocks free users with a Pro upgrade action', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__handleOpenStrategyPyramid = handleOpenStrategyPyramid;'
+  );
+  const context = {
+    extensionUri: createUri(projectRoot),
+    extensionPath: projectRoot,
+    subscriptions: [],
+    globalState: {
+      get() {
+        return {};
+      },
+      update() {
+        return Promise.resolve();
+      }
+    }
+  };
+
+  await extensionModule.__handleOpenStrategyPyramid(context);
+
+  assert.equal(extensionModule.__vscodeTestState.webviewPanels.length, 0);
+  assert.equal(extensionModule.__vscodeTestState.informationMessages.length, 1);
+  assert.match(extensionModule.__vscodeTestState.informationMessages[0].message, /战略金字塔是 Pro 功能/);
+  assert.deepEqual(extensionModule.__vscodeTestState.informationMessages[0].items, ['升级 Pro']);
 });
 
 test('global engineering store writes git-friendly portfolio files', () => {
