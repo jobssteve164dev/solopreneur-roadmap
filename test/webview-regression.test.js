@@ -1277,18 +1277,58 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
       { horizon: '本季度', title: '减少低复利维护投入', reason: '组合价值来自复利关系。' }
     ],
     abilities: [
-      { name: 'AI 产品编排', projectCount: 2, judgment: '正在跨项目复用' }
+      { name: 'AI 产品编排', projectCount: 2, projectNames: ['SoloMap', 'Agent Kit'], value: '中高', judgment: '继续加码并对外表达' }
     ],
+    stageProfile: {
+      title: 'Build 偏重期',
+      priorityLayer: '中层：项目组合 + 收入结构',
+      keyMetric: '哪些项目在积累复利，哪些在消耗注意力',
+      defaultQuestion: '应该加码、收缩还是暂停？'
+    },
+    structureSignals: [
+      { key: 'portfolio', title: '项目组合', health: 'watch', summary: 'Build 偏重，Sell / Learn 信号不足。', evidence: ['Build: 2', 'Sell: 1'] },
+      { key: 'time', title: '时间结构', health: 'watch', summary: '维护占用需要观察。', evidence: ['基于推进信号'] },
+      { key: 'ability', title: '能力复利', health: 'strong', summary: 'AI 产品编排正在跨项目复用。', evidence: ['AI 产品编排: 2 项目'] },
+      { key: 'trust', title: '市场信誉', health: 'watch', summary: '已有反馈信号但渠道证据不足。', evidence: ['Learn: 1'] }
+    ],
+    riskSignals: [
+      { severity: 'medium', title: '中等结构风险', summary: 'Build 偏重，商业化与反馈验证不足。', evidence: ['Build: 2', 'Sell: 1', 'Learn: 1'] }
+    ],
+    opportunitySignals: [
+      { severity: 'healthy', title: '结构机会', summary: '跨项目能力已经出现。', evidence: ['AI 产品编排: SoloMap / Agent Kit'] }
+    ],
+    scenarios: [
+      { key: 'A', title: '场景 A：深化 SoloMap', investment: '集中核心产品', returnProfile: '单一产品商业化验证', cost: '压缩其他项目', risk: '单一产品依赖风险', timeline: '6-12 个月', summary: '适合信号增强后选择。' },
+      { key: 'B', title: '场景 B：建立产品组合', investment: '核心产品加第二收入源', returnProfile: '平衡增长', cost: '投入强度下降', risk: '注意力分散风险', timeline: '12-18 个月', summary: '适合跨项目复利。' },
+      { key: 'C', title: '场景 C：咨询/服务产品化', investment: '部分时间换收入反馈', returnProfile: '收入反馈更快', cost: '挤占产品时间', risk: '活跃收入反向锁死风险', timeline: '3-6 个月', summary: '适合补足市场信号。' }
+    ],
+    recommendedScenarioPath: '推荐路径：场景 B 运行 6 个月，若核心产品转化信号增强再切到场景 A。',
     projects: [{
       name: 'SoloMap',
       path: '/workspace/solomap',
       type: 'core_product',
       role: '核心产品',
+      businessStage: 'commercial_validation',
+      revenueTier: 'unknown',
+      timeLoad: 'medium',
+      strategicRelation: '高：承载收入、信誉和能力复利的主线',
       loop: 'sell',
       action: '继续当前推进',
       risk: '',
       evidence: ['2/5 个环节已完成', '当前有推进中的环节'],
       abilities: ['AI 产品编排'],
+      roleScores: {
+        abilityAccumulation: 4,
+        revenueContribution: 5,
+        marketTrust: 4,
+        reusePotential: 4,
+        brandValue: 5
+      },
+      advice: {
+        doubleDown: '加码商业化验证、渠道建设和能沉淀信誉的交付',
+        reduce: '收缩重复支持、临时修补和不产生学习信号的投入',
+        observe: '观察反馈是否能转成定价、转化或明确取舍'
+      },
       completedNodes: 2,
       failedNodes: 0,
       runningNodes: 1,
@@ -1301,6 +1341,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   };
 
   const proHtml = extensionModule.__getStrategyPyramidWebviewHtml(createWebviewStub(), context, snapshot);
+  assert.match(proHtml, /一人公司战略驾驶舱/);
   assert.match(proHtml, /Build/);
   assert.match(proHtml, /Sell/);
   assert.match(proHtml, /Learn/);
@@ -1308,7 +1349,13 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   assert.match(proHtml, /当前战略状态|Build 偏重期/);
   assert.match(proHtml, /战略动作/);
   assert.match(proHtml, /边界约束/);
+  assert.match(proHtml, /结构信号/);
+  assert.match(proHtml, /战略阶段自适应/);
+  assert.match(proHtml, /收入结构/);
+  assert.match(proHtml, /市场信誉/);
+  assert.match(proHtml, /时间结构/);
   assert.match(proHtml, /1-3 个月结构风险/);
+  assert.match(proHtml, /结构机会/);
   assert.match(proHtml, /自由选择与个人品牌/);
   assert.match(proHtml, /可复利收入系统/);
   assert.match(proHtml, /市场覆盖与信誉/);
@@ -1318,8 +1365,20 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   assert.match(proHtml, /能力复利/);
   assert.match(proHtml, /未来 30 天战略动作/);
   assert.match(proHtml, /项目战略角色/);
+  assert.match(proHtml, /能力积累/);
+  assert.match(proHtml, /收入贡献/);
+  assert.match(proHtml, /复用潜力/);
+  assert.match(proHtml, /个人品牌价值/);
+  assert.match(proHtml, /加码/);
+  assert.match(proHtml, /收缩/);
+  assert.match(proHtml, /观察/);
+  assert.match(proHtml, /场景建模/);
+  assert.match(proHtml, /场景 A/);
+  assert.match(proHtml, /场景 B/);
+  assert.match(proHtml, /场景 C/);
+  assert.match(proHtml, /推荐路径/);
   assert.match(proHtml, /data-project-index="0"/);
-  assert.doesNotMatch(proHtml, /查看项目|data-open-project|解锁战略金字塔|升级 Pro|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid|snapshot|CSV|JSON|内部|配置|组件目的|来自 SoloMap 已确认/);
+  assert.doesNotMatch(proHtml, /查看项目|data-open-project|解锁战略金字塔|升级 Pro|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid|snapshot|CSV|JSON|内部|配置|组件目的|来自 SoloMap 已确认|今日安排第|今天先跑/);
   assert.doesNotThrow(() => new vm.Script(extractLastScript(proHtml)));
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
 });
@@ -1373,18 +1432,30 @@ test('strategy pyramid snapshot aggregates portfolio signals and writes a reusab
 
   const snapshot = extensionModule.__buildStrategyPyramidSnapshot(context);
   const snapshotPath = path.join(globalRoot, 'strategy', 'pyramid-snapshot.json');
+  const projectStrategyPath = path.join(globalRoot, 'strategy', 'project-strategy.csv');
+  const abilityRegistryPath = path.join(globalRoot, 'strategy', 'ability-registry.csv');
   assert.equal(snapshot.totalProjects, 2);
   assert.equal(snapshot.stageTitle.length > 0, true);
+  assert.equal(snapshot.stageProfile.defaultQuestion.length > 0, true);
   assert.match(snapshot.mainJudgment, /组合|项目|Build|收入|反馈|核心/);
   assert.match(snapshot.strategicAction, /商业化|核心产品|销售|反馈|收入/);
   assert.equal(snapshot.layers.length, 5);
+  assert.equal(snapshot.structureSignals.length, 4);
+  assert.ok(snapshot.riskSignals.length >= 1);
+  assert.ok(snapshot.opportunitySignals.length >= 1);
+  assert.equal(snapshot.scenarios.length, 3);
+  assert.match(snapshot.recommendedScenarioPath, /推荐路径/);
   assert.ok(snapshot.loops.some((loop) => loop.key === 'sell' && loop.count >= 1));
   assert.ok(snapshot.moves.length >= 2);
-  assert.ok(snapshot.projects.some((project) => project.name === 'SoloMap' && project.role === '核心产品'));
+  assert.ok(snapshot.projects.some((project) => project.name === 'SoloMap' && project.role === '核心产品' && project.roleScores.brandValue >= 1));
   assert.ok(fs.existsSync(snapshotPath));
+  assert.ok(fs.existsSync(projectStrategyPath));
+  assert.ok(fs.existsSync(abilityRegistryPath));
   const written = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
   assert.equal(written.totalProjects, 2);
   assert.equal(written.layers.length, 5);
+  assert.match(fs.readFileSync(projectStrategyPath, 'utf8'), /projectPath,role,businessStage,revenueTier,timeLoad,strategicAction,abilities,updatedAt/);
+  assert.match(fs.readFileSync(abilityRegistryPath, 'utf8'), /abilityId,name,category,marketRelevance,notes,updatedAt/);
 });
 
 test('strategy pyramid command blocks free users with a Pro upgrade action', async () => {

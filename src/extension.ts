@@ -103,11 +103,17 @@ interface StrategyPyramidProjectSummary {
   path: string;
   type: string;
   role: string;
+  businessStage: string;
+  revenueTier: string;
+  timeLoad: string;
+  strategicRelation: string;
   loop: MethodologyStageKey;
   action: string;
   risk: string;
   evidence: string[];
   abilities: string[];
+  roleScores: StrategyPyramidProjectRoleScores;
+  advice: StrategyPyramidProjectAdvice;
   completedNodes: number;
   failedNodes: number;
   runningNodes: number;
@@ -133,24 +139,76 @@ interface StrategyPyramidLayerSummary {
   health: 'strong' | 'watch' | 'risk';
   signal: string;
   action: string;
+  evidence: string[];
 }
 
 interface StrategyPyramidMoveSummary {
   horizon: string;
   title: string;
   reason: string;
+  evidence: string[];
 }
 
 interface StrategyPyramidAbilitySummary {
   name: string;
   projectCount: number;
+  projectNames: string[];
+  value: string;
   judgment: string;
+}
+
+interface StrategyPyramidProjectRoleScores {
+  abilityAccumulation: number;
+  revenueContribution: number;
+  marketTrust: number;
+  reusePotential: number;
+  brandValue: number;
+}
+
+interface StrategyPyramidProjectAdvice {
+  doubleDown: string;
+  reduce: string;
+  observe: string;
+}
+
+interface StrategyPyramidStageProfile {
+  title: string;
+  priorityLayer: string;
+  keyMetric: string;
+  defaultQuestion: string;
+}
+
+interface StrategyPyramidStructureSignal {
+  key: string;
+  title: string;
+  summary: string;
+  health: 'strong' | 'watch' | 'risk';
+  evidence: string[];
+}
+
+interface StrategyPyramidRiskSignal {
+  severity: 'high' | 'medium' | 'healthy';
+  title: string;
+  summary: string;
+  evidence: string[];
+}
+
+interface StrategyPyramidScenario {
+  key: string;
+  title: string;
+  investment: string;
+  returnProfile: string;
+  cost: string;
+  risk: string;
+  timeline: string;
+  summary: string;
 }
 
 interface StrategyPyramidSnapshot {
   generatedAt: string;
   confidence: 'low' | 'medium' | 'high';
   stageTitle: string;
+  stageProfile: StrategyPyramidStageProfile;
   mainJudgment: string;
   strategicAction: string;
   constraint: string;
@@ -164,6 +222,11 @@ interface StrategyPyramidSnapshot {
   layers: StrategyPyramidLayerSummary[];
   moves: StrategyPyramidMoveSummary[];
   abilities: StrategyPyramidAbilitySummary[];
+  structureSignals: StrategyPyramidStructureSignal[];
+  riskSignals: StrategyPyramidRiskSignal[];
+  opportunitySignals: StrategyPyramidRiskSignal[];
+  scenarios: StrategyPyramidScenario[];
+  recommendedScenarioPath: string;
   projects: StrategyPyramidProjectSummary[];
 }
 
@@ -3166,7 +3229,85 @@ function inferStrategyRole(project: SolopreneurProject, nodes: StrategyPyramidNo
   return '推进项目';
 }
 
-function inferStrategyAction(summary: Omit<StrategyPyramidProjectSummary, 'action' | 'risk'>): string {
+function countProjectLoops(nodes: StrategyPyramidNodeSummary[]): Record<MethodologyStageKey, number> {
+  const counts: Record<MethodologyStageKey, number> = { build: 0, sell: 0, learn: 0, improve: 0 };
+  for (const node of nodes) {
+    counts[classifyStrategyLoop(node)] += 1;
+  }
+  return counts;
+}
+
+function inferBusinessStage(project: SolopreneurProject, nodes: StrategyPyramidNodeSummary[]): string {
+  const loops = countProjectLoops(nodes);
+  const completed = nodes.filter((node) => node.status === 'Completed').length;
+  if (/archive|frozen|归档|冻结/i.test(`${project.type || ''} ${project.name}`)) return 'sunset';
+  if (loops.sell > 0 && loops.learn > 0) return completed > 0 ? 'commercial_validation' : 'validation';
+  if (loops.learn > 0) return 'validation';
+  if (loops.sell > 0) return 'commercial_validation';
+  if (loops.build > 0) return 'build';
+  return 'idea';
+}
+
+function inferRevenueTier(project: SolopreneurProject, nodes: StrategyPyramidNodeSummary[]): string {
+  const loops = countProjectLoops(nodes);
+  if (loops.sell === 0) return 'unknown';
+  if (project.type === 'core_product') return 'unknown';
+  return 'unknown';
+}
+
+function inferTimeLoadFromCounts(runningNodes: number, inProgressNodes: number, failedNodes: number, totalNodes: number): string {
+  if (failedNodes > 0 || runningNodes + inProgressNodes >= 2) return 'high';
+  if (runningNodes + inProgressNodes === 1 || totalNodes >= 6) return 'medium';
+  if (totalNodes > 0) return 'low';
+  return 'unknown';
+}
+
+function inferStrategicRelation(role: string, abilities: string[], nodes: StrategyPyramidNodeSummary[]): string {
+  const loops = countProjectLoops(nodes);
+  if (role === '核心产品') return '高：承载收入、信誉和能力复利的主线';
+  if (abilities.length >= 2 && loops.improve + loops.learn > 0) return '高：能力可跨项目复用';
+  if (abilities.length > 0 || loops.sell + loops.learn > 0) return '中：已有可复用或市场信号';
+  return '低：仍需验证它与整体系统的关系';
+}
+
+function inferProjectRoleScores(
+  project: SolopreneurProject,
+  nodes: StrategyPyramidNodeSummary[],
+  abilities: string[],
+  role: string
+): StrategyPyramidProjectRoleScores {
+  const loops = countProjectLoops(nodes);
+  const completed = nodes.filter((node) => node.status === 'Completed').length;
+  const score = (value: number) => Math.max(1, Math.min(5, value));
+  return {
+    abilityAccumulation: score(1 + Math.min(3, abilities.length) + (loops.improve > 0 ? 1 : 0)),
+    revenueContribution: score(1 + Math.min(3, loops.sell) + (project.type === 'core_product' ? 1 : 0)),
+    marketTrust: score(1 + Math.min(2, loops.learn) + (loops.sell > 0 ? 1 : 0) + (completed > 0 ? 1 : 0)),
+    reusePotential: score(1 + Math.min(3, abilities.length) + (loops.improve > 0 ? 1 : 0)),
+    brandValue: score(1 + (role === '核心产品' ? 2 : 0) + (loops.sell > 0 ? 1 : 0) + (loops.learn > 0 ? 1 : 0))
+  };
+}
+
+function inferProjectAdvice(summary: Pick<StrategyPyramidProjectSummary, 'role' | 'nodes' | 'abilities' | 'failedNodes' | 'progressPercent'>): StrategyPyramidProjectAdvice {
+  const hasSell = summary.nodes.some((node) => classifyStrategyLoop(node) === 'sell');
+  const hasLearn = summary.nodes.some((node) => classifyStrategyLoop(node) === 'learn');
+  const lowReuse = summary.abilities.length === 0 && summary.progressPercent < 40;
+  return {
+    doubleDown: summary.role === '核心产品' || hasSell
+      ? '加码商业化验证、渠道建设和能沉淀信誉的交付'
+      : '只加码能补市场反馈或复用能力的切片',
+    reduce: summary.failedNodes > 0
+      ? '收缩失败环节外的新增建设，先让阻塞收口'
+      : lowReuse
+        ? '减少一次性建设和低复利维护'
+        : '收缩重复支持、临时修补和不产生学习信号的投入',
+    observe: hasLearn
+      ? '观察反馈是否能转成定价、转化或明确取舍'
+      : '观察它是否继续占用新收入源验证时间'
+  };
+}
+
+function inferStrategyAction(summary: Pick<StrategyPyramidProjectSummary, 'failedNodes' | 'runningNodes' | 'inProgressNodes' | 'progressPercent' | 'nodes'>): string {
   if (summary.failedNodes > 0) return '先收口失败点';
   if (summary.runningNodes > 0 || summary.inProgressNodes > 0) return '继续当前推进';
   if (summary.progressPercent >= 80) return '复盘价值，决定加码或收缩';
@@ -3176,7 +3317,7 @@ function inferStrategyAction(summary: Omit<StrategyPyramidProjectSummary, 'actio
   return '推进下一个可验证切片';
 }
 
-function inferStrategyRisk(summary: Omit<StrategyPyramidProjectSummary, 'action' | 'risk'>): string {
+function inferStrategyRisk(summary: Pick<StrategyPyramidProjectSummary, 'failedNodes' | 'nodes' | 'progressPercent'>): string {
   if (summary.failedNodes > 0) return '交付阻塞';
   if (!summary.nodes.some((node) => classifyStrategyLoop(node) === 'sell')) return '缺少销售动作';
   if (!summary.nodes.some((node) => classifyStrategyLoop(node) === 'learn')) return '缺少学习信号';
@@ -3184,7 +3325,7 @@ function inferStrategyRisk(summary: Omit<StrategyPyramidProjectSummary, 'action'
   return '';
 }
 
-function inferProjectEvidence(summary: Omit<StrategyPyramidProjectSummary, 'action' | 'risk' | 'evidence'>): string[] {
+function inferProjectEvidence(summary: Pick<StrategyPyramidProjectSummary, 'totalNodes' | 'completedNodes' | 'runningNodes' | 'inProgressNodes' | 'failedNodes' | 'nodes'>): string[] {
   const evidence: string[] = [];
   if (summary.totalNodes === 0) {
     evidence.push('还没有可读取的路线图信号');
@@ -3243,14 +3384,42 @@ function buildAbilitySummaries(projects: StrategyPyramidProjectSummary[]): Strat
   return [...abilityProjects.entries()]
     .map(([name, projectSet]) => {
       const projectCount = projectSet.size;
+      const projectNames = [...projectSet].sort((a, b) => a.localeCompare(b));
       return {
         name,
         projectCount,
-        judgment: projectCount >= 2 ? '正在跨项目复用' : '已有信号，继续观察'
+        projectNames,
+        value: projectCount >= 3 ? '高' : projectCount >= 2 ? '中高' : '观察',
+        judgment: projectCount >= 2 ? '继续加码并对外表达' : '已有信号，继续观察'
       };
     })
     .sort((a, b) => b.projectCount - a.projectCount || a.name.localeCompare(b.name))
     .slice(0, 6);
+}
+
+function buildStageProfile(stageTitle: string, projects: StrategyPyramidProjectSummary[]): StrategyPyramidStageProfile {
+  if (projects.length <= 2) {
+    return {
+      title: stageTitle,
+      priorityLayer: '底层：能力库 + 市场发现渠道',
+      keyMetric: '是否能接近第一个付费用户',
+      defaultQuestion: '我应该集中在哪个细分方向？'
+    };
+  }
+  if (projects.length >= 6) {
+    return {
+      title: stageTitle,
+      priorityLayer: '上层：可复利收入 + 系统自动化',
+      keyMetric: '总投入时间是否可持续',
+      defaultQuestion: '哪些部分应该自动化、委托或冻结？'
+    };
+  }
+  return {
+    title: stageTitle,
+    priorityLayer: '中层：项目组合 + 收入结构',
+    keyMetric: '哪些项目在积累复利，哪些在消耗注意力',
+    defaultQuestion: '应该加码、收缩还是暂停？'
+  };
 }
 
 function inferStrategyStage(projects: StrategyPyramidProjectSummary[], buildCount: number, sellCount: number, learnCount: number): string {
@@ -3303,54 +3472,241 @@ function buildStrategyLayers(
     title: '自由选择与个人品牌',
     health: health(hasCore && (sellCount > 0 || learnCount > 0), hasCore),
     signal: hasCore ? '已有核心产品承载信誉积累。' : '核心产品尚未明确，品牌信号容易分散。',
-    action: hasCore ? '继续把市场反馈沉淀到核心产品。' : '先选出最能代表长期方向的核心产品。'
+    action: hasCore ? '继续把市场反馈沉淀到核心产品。' : '先选出最能代表长期方向的核心产品。',
+    evidence: hasCore ? ['存在核心产品标记或核心产品角色'] : ['未识别到核心产品角色']
   }, {
     key: 'revenue-system',
     title: '可复利收入系统',
     health: health(sellCount >= 2, sellCount === 1),
     signal: sellCount > 0 ? `${sellCount} 个收入或市场动作可继续验证。` : '还没有可读取的收入验证动作。',
-    action: sellCount > 0 ? '把销售动作接到明确的升级或付费路径。' : '补一个低成本销售实验，不继续只做功能。'
+    action: sellCount > 0 ? '把销售动作接到明确的升级或付费路径。' : '补一个低成本销售实验，不继续只做功能。',
+    evidence: [`${sellCount} 个 Sell 阶段信号`]
   }, {
     key: 'market-trust',
     title: '市场覆盖与信誉',
     health: health(learnCount >= 2, learnCount === 1 || sellCount > 0),
     signal: learnCount > 0 ? `${learnCount} 个学习信号可用于下一轮改进。` : '用户反馈和市场学习信号不足。',
-    action: learnCount > 0 ? '把反馈转成下一轮取舍，而不是继续堆需求。' : '补一次真实用户反馈或公开分发验证。'
+    action: learnCount > 0 ? '把反馈转成下一轮取舍，而不是继续堆需求。' : '补一次真实用户反馈或公开分发验证。',
+    evidence: [`${learnCount} 个 Learn 阶段信号`]
   }, {
     key: 'ability-compounding',
     title: '能力系统与产品交付',
     health: health(reusableAbilities > 0 && improveCount > 0, abilities.length > 0 || activeProjects > 0),
     signal: reusableAbilities > 0 ? `${reusableAbilities} 项能力正在跨项目复用。` : '能力复用还没有形成稳定信号。',
-    action: reusableAbilities > 0 ? '把可复用能力产品化或品牌化。' : '标记能跨项目复用的能力，减少一次性建设。'
+    action: reusableAbilities > 0 ? '把可复用能力产品化或品牌化。' : '标记能跨项目复用的能力，减少一次性建设。',
+    evidence: [`${abilities.length} 项能力标签`, `${improveCount} 个 Improve 阶段信号`]
   }, {
     key: 'reality-inventory',
     title: '现实锚点与投资库存',
     health: health(projects.length > 0 && buildCount + sellCount + learnCount + improveCount > 0, projects.length > 0),
     signal: projects.length > 0 ? `${projects.length} 个项目进入组合视野。` : '还没有项目进入组合视野。',
-    action: projects.length > 0 ? '冻结低复利项目，把注意力留给核心验证。' : '先登记一个真实项目，形成第一组战略信号。'
+    action: projects.length > 0 ? '冻结低复利项目，把注意力留给核心验证。' : '先登记一个真实项目，形成第一组战略信号。',
+    evidence: [`${projects.length} 个本地登记项目`, `${activeProjects} 个当前推进项目`]
   }];
 }
 
 function buildStrategyMoves(projects: StrategyPyramidProjectSummary[], sellCount: number, learnCount: number, abilities: StrategyPyramidAbilitySummary[]): StrategyPyramidMoveSummary[] {
   const moves: StrategyPyramidMoveSummary[] = [];
   if (projects.length === 0) {
-    moves.push({ horizon: '未来 30 天', title: '推进一个可演示切片', reason: '先让战略判断有真实项目和用户反馈可依赖。' });
+    moves.push({ horizon: '未来 30 天', title: '推进一个可演示切片', reason: '先让战略判断有真实项目和用户反馈可依赖。', evidence: ['未读取到已登记项目'] });
   } else if (sellCount === 0 || learnCount === 0) {
-    moves.push({ horizon: '未来 30 天', title: '补齐商业化与反馈验证', reason: '当前组合的建设动作多于市场信号，继续 Build 会放大战略盲区。' });
+    moves.push({ horizon: '未来 30 天', title: '补齐商业化与反馈验证', reason: '当前组合的建设动作多于市场信号，继续 Build 会放大战略盲区。', evidence: [`${sellCount} 个 Sell 信号`, `${learnCount} 个 Learn 信号`] });
   } else {
-    moves.push({ horizon: '未来 30 天', title: '把核心项目推向更清晰的付费路径', reason: '已有市场与反馈信号，下一步要让收入验证闭环。' });
+    moves.push({ horizon: '未来 30 天', title: '把核心项目推向更清晰的付费路径', reason: '已有市场与反馈信号，下一步要让收入验证闭环。', evidence: [`${sellCount} 个 Sell 信号`, `${learnCount} 个 Learn 信号`] });
   }
   if (projects.some((project) => project.failedNodes > 0)) {
-    moves.push({ horizon: '本周', title: '收口失败环节', reason: '失败环节会吞噬注意力，先处理再加码。' });
+    moves.push({ horizon: '本季度', title: '收口失败环节', reason: '失败环节会吞噬注意力，先处理再加码。', evidence: ['存在失败环节'] });
   } else {
-    moves.push({ horizon: '本季度', title: '减少低复利维护投入', reason: '组合价值来自复利关系，不来自项目数量。' });
+    moves.push({ horizon: '本季度', title: '减少低复利维护投入', reason: '组合价值来自复利关系，不来自项目数量。', evidence: [`${projects.length} 个项目进入组合`] });
   }
   if (abilities.some((ability) => ability.projectCount >= 2)) {
-    moves.push({ horizon: '本季度', title: '把复用能力变成对外可表达的卖点', reason: '跨项目复用能力已经出现，适合沉淀成产品、模板或内容资产。' });
+    moves.push({ horizon: '本季度', title: '把复用能力变成对外可表达的卖点', reason: '跨项目复用能力已经出现，适合沉淀成产品、模板或内容资产。', evidence: abilities.filter((ability) => ability.projectCount >= 2).map((ability) => ability.name).slice(0, 3) });
   } else {
-    moves.push({ horizon: '本季度', title: '识别一个可跨项目复用的能力', reason: '没有能力复利时，多项目会更容易变成维护负担。' });
+    moves.push({ horizon: '本季度', title: '识别一个可跨项目复用的能力', reason: '没有能力复利时，多项目会更容易变成维护负担。', evidence: ['尚未识别跨项目复用能力'] });
   }
   return moves.slice(0, 4);
+}
+
+function buildStructureSignals(
+  projects: StrategyPyramidProjectSummary[],
+  loops: StrategyPyramidLoopSummary[],
+  abilities: StrategyPyramidAbilitySummary[]
+): StrategyPyramidStructureSignal[] {
+  const loopCount = (key: MethodologyStageKey) => loops.find((loop) => loop.key === key)?.count || 0;
+  const buildCount = loopCount('build');
+  const sellCount = loopCount('sell');
+  const learnCount = loopCount('learn');
+  const heavyTimeProjects = projects.filter((project) => project.timeLoad === 'high');
+  const reusableAbilities = abilities.filter((ability) => ability.projectCount >= 2);
+  const high = (health: StrategyPyramidStructureSignal['health']) => health;
+  return [{
+    key: 'portfolio',
+    title: '项目组合',
+    health: high(projects.length === 0 ? 'risk' : buildCount > sellCount + learnCount + 1 ? 'watch' : 'strong'),
+    summary: projects.length === 0
+      ? '还没有项目进入战略组合。'
+      : buildCount > sellCount + learnCount + 1
+        ? 'Build 偏重，Sell / Learn 信号不足。'
+        : 'Build / Sell / Learn / Improve 已形成可判断结构。',
+    evidence: loops.map((loop) => `${loop.label}: ${loop.count}`)
+  }, {
+    key: 'time',
+    title: '时间结构',
+    health: high(heavyTimeProjects.length > 0 ? 'risk' : projects.some((project) => project.timeLoad === 'medium') ? 'watch' : 'strong'),
+    summary: heavyTimeProjects.length > 0
+      ? '已有项目显示高时间负担，可能挤压第二收入源验证。'
+      : '未读取到明显高负担项目，但仍需用推进记录持续观察。',
+    evidence: heavyTimeProjects.length ? heavyTimeProjects.map((project) => `${project.name}: ${project.timeLoad}`) : ['基于推进中、失败和路线图数量推断']
+  }, {
+    key: 'ability',
+    title: '能力复利',
+    health: high(reusableAbilities.length > 0 ? 'strong' : abilities.length > 0 ? 'watch' : 'risk'),
+    summary: reusableAbilities.length > 0
+      ? '已有能力在跨项目复用，适合沉淀为产品卖点或内容资产。'
+      : abilities.length > 0
+        ? '能力信号已出现，但跨项目复用还不稳定。'
+        : '尚未识别稳定能力复利信号。',
+    evidence: reusableAbilities.length ? reusableAbilities.map((ability) => `${ability.name}: ${ability.projectCount} 项目`) : ['来自项目类型、阶段标题和路线图文本']
+  }, {
+    key: 'trust',
+    title: '市场信誉',
+    health: high(learnCount >= 2 ? 'strong' : learnCount + sellCount > 0 ? 'watch' : 'risk'),
+    summary: learnCount > 0
+      ? '已有反馈或学习信号，但渠道、评价和转化仍需要更硬证据。'
+      : '市场信誉信号不足，当前判断不能假装已有品牌增长。',
+    evidence: [`${learnCount} 个 Learn 信号`, `${sellCount} 个 Sell 信号`]
+  }];
+}
+
+function buildRiskSignals(projects: StrategyPyramidProjectSummary[], sellCount: number, learnCount: number, buildCount: number): StrategyPyramidRiskSignal[] {
+  const signals: StrategyPyramidRiskSignal[] = [];
+  const failedProjects = projects.filter((project) => project.failedNodes > 0);
+  if (failedProjects.length > 0) {
+    signals.push({
+      severity: 'high',
+      title: '结构高风险',
+      summary: '存在失败环节，继续扩张会放大维护负担。',
+      evidence: failedProjects.map((project) => `${project.name}: ${project.failedNodes} 个失败环节`)
+    });
+  }
+  if (projects.length > 0 && buildCount > sellCount + learnCount + 1) {
+    signals.push({
+      severity: 'medium',
+      title: '中等结构风险',
+      summary: 'Build 偏重，商业化与反馈验证不足。',
+      evidence: [`Build: ${buildCount}`, `Sell: ${sellCount}`, `Learn: ${learnCount}`]
+    });
+  }
+  if (projects.length > 1 && !projects.some((project) => project.type === 'core_product' || project.role === '核心产品')) {
+    signals.push({
+      severity: 'medium',
+      title: '中等结构风险',
+      summary: '组合缺少明确核心产品，收入、信誉和能力复利容易分散。',
+      evidence: [`${projects.length} 个项目`, '未识别核心产品角色']
+    });
+  }
+  if (signals.length === 0) {
+    signals.push({
+      severity: 'healthy',
+      title: '健康结构信号',
+      summary: '没有读取到高风险阻塞，可以继续围绕核心验证推进。',
+      evidence: [`${projects.length} 个项目`, `${sellCount} 个 Sell 信号`, `${learnCount} 个 Learn 信号`]
+    });
+  }
+  return signals.slice(0, 4);
+}
+
+function buildOpportunitySignals(projects: StrategyPyramidProjectSummary[], abilities: StrategyPyramidAbilitySummary[]): StrategyPyramidRiskSignal[] {
+  const reusable = abilities.filter((ability) => ability.projectCount >= 2);
+  const coreProjects = projects.filter((project) => project.role === '核心产品');
+  const signals: StrategyPyramidRiskSignal[] = [];
+  if (reusable.length > 0) {
+    signals.push({
+      severity: 'healthy',
+      title: '结构机会',
+      summary: '跨项目能力已经出现，可以转成模板、内容资产、服务产品化或核心卖点。',
+      evidence: reusable.map((ability) => `${ability.name}: ${ability.projectNames.join(' / ')}`).slice(0, 3)
+    });
+  }
+  if (coreProjects.length > 0) {
+    signals.push({
+      severity: 'healthy',
+      title: '结构机会',
+      summary: '核心产品可作为收入、信誉和能力复利的统一承载点。',
+      evidence: coreProjects.map((project) => project.name).slice(0, 3)
+    });
+  }
+  if (signals.length === 0) {
+    signals.push({
+      severity: 'medium',
+      title: '结构机会',
+      summary: '先让一个项目形成明确市场反馈，再判断是否值得加码。',
+      evidence: ['当前本地事实不足以识别稳定机会']
+    });
+  }
+  return signals.slice(0, 3);
+}
+
+function buildStrategyScenarios(projects: StrategyPyramidProjectSummary[], abilities: StrategyPyramidAbilitySummary[]): StrategyPyramidScenario[] {
+  const core = projects.find((project) => project.role === '核心产品') || projects[0];
+  const reusable = abilities.find((ability) => ability.projectCount >= 2);
+  return [{
+    key: 'A',
+    title: `场景 A：深化${core ? ` ${core.name}` : '核心产品'}`,
+    investment: '把主要注意力集中到一个核心产品',
+    returnProfile: '回报依赖单一产品商业化验证，增长速度可能更快但波动更高',
+    cost: '其他孵化项目和第二收入源验证会被压缩',
+    risk: '单一产品依赖风险',
+    timeline: '6-12 个月',
+    summary: core ? `适合 ${core.name} 已经形成 Sell / Learn 信号时选择。` : '适合先选出一个能代表长期方向的项目。'
+  }, {
+    key: 'B',
+    title: '场景 B：建立产品组合',
+    investment: '保持核心产品推进，同时保留一个低成本第二收入源假设',
+    returnProfile: '回报增长更平衡，依赖能力复用和市场反馈互相增强',
+    cost: '每个项目的投入强度会下降，需要严格冻结低复利维护',
+    risk: '注意力分散风险',
+    timeline: '12-18 个月',
+    summary: reusable ? `适合围绕 ${reusable.name} 做跨项目复利。` : '适合已有多个项目但还需要识别复用能力。'
+  }, {
+    key: 'C',
+    title: '场景 C：咨询/服务产品化',
+    investment: '用一部分时间换取更快收入反馈，并把服务过程产品化',
+    returnProfile: '收入反馈可能更快，但不应吞掉产品时间',
+    cost: '咨询会挤占产品复利和自动化沉淀',
+    risk: '活跃收入反向锁死风险',
+    timeline: '3-6 个月',
+    summary: '适合在产品收入证据不足时，用高质量需求验证补足市场信号。'
+  }];
+}
+
+function inferRecommendedScenarioPath(projects: StrategyPyramidProjectSummary[], sellCount: number, learnCount: number): string {
+  if (projects.length <= 1 || sellCount + learnCount === 0) return '推荐路径：先用场景 C 获取市场反馈，再决定是否切到场景 A。';
+  if (projects.some((project) => project.role === '核心产品') && sellCount > 0 && learnCount > 0) return '推荐路径：场景 B 运行 6 个月，若核心产品转化信号增强再切到场景 A。';
+  return '推荐路径：场景 B 为主，先冻结低复利项目，保留一个商业化验证窗口。';
+}
+
+function toStrategyId(value: string): string {
+  return String(value || 'unknown')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'unknown';
+}
+
+function mapStrategicActionToCsv(action: string): string {
+  if (/加码|继续|推进|核心|付费|商业化/.test(action)) return 'double_down';
+  if (/收缩|减少|冻结|失败|阻塞/.test(action)) return 'reduce';
+  if (/观察|复盘/.test(action)) return 'maintain';
+  if (/验证|孵化|选择/.test(action)) return 'explore';
+  return 'maintain';
+}
+
+function mapAbilityCategory(ability: string): string {
+  if (/内容|分发|反馈|研究/.test(ability)) return 'marketing';
+  if (/订阅|商业化/.test(ability)) return 'business';
+  if (/基础设施|自动化|CLI|开发者|Web|AI/.test(ability)) return 'technical';
+  return 'operations';
 }
 
 function writeStrategyPyramidSnapshot(context: vscode.ExtensionContext, snapshot: StrategyPyramidSnapshot): void {
@@ -3359,6 +3715,26 @@ function writeStrategyPyramidSnapshot(context: vscode.ExtensionContext, snapshot
     const strategyRoot = path.join(globalRoot, 'strategy');
     fs.mkdirSync(strategyRoot, { recursive: true });
     fs.writeFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+    const projectRows = snapshot.projects.map((project) => ({
+      projectPath: project.path,
+      role: project.role === '核心产品' ? 'core_product' : project.role === '机会验证' ? 'experiment' : project.role === '稳定维护' ? 'maintenance' : 'incubation',
+      businessStage: project.businessStage,
+      revenueTier: project.revenueTier,
+      timeLoad: project.timeLoad,
+      strategicAction: mapStrategicActionToCsv(project.action),
+      abilities: project.abilities.map(toStrategyId).join(';'),
+      updatedAt: snapshot.generatedAt
+    }));
+    fs.writeFileSync(path.join(strategyRoot, 'project-strategy.csv'), Papa.unparse(projectRows), 'utf8');
+    const abilityRows = snapshot.abilities.map((ability) => ({
+      abilityId: toStrategyId(ability.name),
+      name: ability.name,
+      category: mapAbilityCategory(ability.name),
+      marketRelevance: ability.projectCount >= 2 ? 'high' : 'medium',
+      notes: ability.judgment,
+      updatedAt: snapshot.generatedAt
+    }));
+    fs.writeFileSync(path.join(strategyRoot, 'ability-registry.csv'), Papa.unparse(abilityRows), 'utf8');
   } catch (error) {
     console.warn('Failed to write strategy pyramid snapshot:', error);
   }
@@ -3376,13 +3752,20 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
       const inProgressNodes = nodes.filter((node) => node.status === 'In Progress').length;
       const pendingNodes = nodes.filter((node) => node.status === 'Pending').length;
       const progressPercent = totalNodes ? Math.round((completedNodes / totalNodes) * 100) : 0;
+      const abilities = inferProjectAbilities(project, nodes);
+      const role = inferStrategyRole(project, nodes);
       const base = {
         name: project.name,
         path: project.path,
         type: project.type || '',
-        role: inferStrategyRole(project, nodes),
+        role,
+        businessStage: inferBusinessStage(project, nodes),
+        revenueTier: inferRevenueTier(project, nodes),
+        timeLoad: inferTimeLoadFromCounts(runningNodes, inProgressNodes, failedNodes, totalNodes),
+        strategicRelation: inferStrategicRelation(role, abilities, nodes),
         loop: inferDominantStrategyLoop(nodes),
-        abilities: inferProjectAbilities(project, nodes),
+        abilities,
+        roleScores: inferProjectRoleScores(project, nodes, abilities, role),
         completedNodes,
         failedNodes,
         runningNodes,
@@ -3397,7 +3780,14 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
       return {
         ...tempBase,
         action: inferStrategyAction(tempBase),
-        risk: inferStrategyRisk(tempBase)
+        risk: inferStrategyRisk(tempBase),
+        advice: inferProjectAdvice({
+          role: tempBase.role,
+          nodes: tempBase.nodes,
+          abilities: tempBase.abilities,
+          failedNodes: tempBase.failedNodes,
+          progressPercent: tempBase.progressPercent
+        })
       };
     })
     .sort((a, b) => (
@@ -3422,10 +3812,13 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
   if (projects.filter((project) => project.totalNodes === 0).length > 0) risks.push('部分项目缺少路线图信号，容易形成低复利库存。');
   const loops = buildLoopSummaries(projects, allNodes);
   const abilities = buildAbilitySummaries(projects);
+  const stageTitle = inferStrategyStage(projects, buildCount, sellCount, learnCount);
+  const riskSignals = buildRiskSignals(projects, sellCount, learnCount, buildCount);
   const snapshot: StrategyPyramidSnapshot = {
     generatedAt: new Date().toISOString(),
     confidence: allNodes.length >= 4 ? 'medium' : 'low',
-    stageTitle: inferStrategyStage(projects, buildCount, sellCount, learnCount),
+    stageTitle,
+    stageProfile: buildStageProfile(stageTitle, projects),
     mainJudgment: inferMainJudgment(projects, buildCount, sellCount, learnCount),
     strategicAction: inferPortfolioStrategicAction(projects, sellCount, learnCount),
     constraint: inferPortfolioConstraint(projects, buildCount, sellCount, learnCount),
@@ -3439,6 +3832,11 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
     layers: buildStrategyLayers(projects, buildCount, sellCount, learnCount, improveCount, abilities),
     moves: buildStrategyMoves(projects, sellCount, learnCount, abilities),
     abilities,
+    structureSignals: buildStructureSignals(projects, loops, abilities),
+    riskSignals,
+    opportunitySignals: buildOpportunitySignals(projects, abilities),
+    scenarios: buildStrategyScenarios(projects, abilities),
+    recommendedScenarioPath: inferRecommendedScenarioPath(projects, sellCount, learnCount),
     projects
   };
 
@@ -3476,15 +3874,32 @@ function getStrategyPyramidWebviewHtml(
   const layers = snapshot.layers && snapshot.layers.length ? snapshot.layers : [];
   const moves = snapshot.moves && snapshot.moves.length ? snapshot.moves : [];
   const abilities = snapshot.abilities && snapshot.abilities.length ? snapshot.abilities : [];
+  const stageProfile = snapshot.stageProfile || {
+    title: stageTitle,
+    priorityLayer: '中层：项目组合 + 收入结构',
+    keyMetric: '哪些项目在积累复利，哪些在消耗注意力',
+    defaultQuestion: '应该加码、收缩还是暂停？'
+  };
+  const structureSignals = snapshot.structureSignals && snapshot.structureSignals.length ? snapshot.structureSignals : [];
+  const riskSignals = snapshot.riskSignals && snapshot.riskSignals.length ? snapshot.riskSignals : [];
+  const opportunitySignals = snapshot.opportunitySignals && snapshot.opportunitySignals.length ? snapshot.opportunitySignals : [];
+  const scenarios = snapshot.scenarios && snapshot.scenarios.length ? snapshot.scenarios : [];
+  const recommendedScenarioPath = snapshot.recommendedScenarioPath || '推荐路径：先补足市场反馈，再决定是否集中加码。';
+  const healthLabel = (health: string) => health === 'strong' ? '健康' : health === 'watch' ? '观察' : '风险';
+  const severityLabel = (severity: string) => severity === 'high' ? '高风险' : severity === 'medium' ? '观察' : '健康';
   const hasStrategyLayerHealth = (items: StrategyPyramidLayerSummary[], key: string) => (
     items.some((item) => item.key === key && item.health === 'strong')
   );
   const projectRoleData = topProjects.map((project) => ({
     name: project.name,
     role: project.role,
+    timeLoad: project.timeLoad,
+    strategicRelation: project.strategicRelation,
     action: project.action,
     risk: project.risk || '暂无明显结构风险',
     progressPercent: project.progressPercent,
+    roleScores: project.roleScores,
+    advice: project.advice,
     evidence: project.evidence && project.evidence.length ? project.evidence : ['等待更多推进信号'],
     abilities: project.abilities && project.abilities.length ? project.abilities : ['暂未识别可复用能力']
   }));
@@ -3565,7 +3980,7 @@ function getStrategyPyramidWebviewHtml(
     <article class="project-row">
       <button type="button" class="project-select" data-project-index="${index}">
         <span class="project-title">${strategyEscapeHtml(project.name)}</span>
-        <span class="project-meta">${strategyEscapeHtml(project.role)} · ${strategyEscapeHtml(project.action)}</span>
+        <span class="project-meta">${strategyEscapeHtml(project.role)} · ${strategyEscapeHtml(project.businessStage)} · ${strategyEscapeHtml(project.action)}</span>
       </button>
       <div class="project-progress" aria-label="${strategyEscapeHtml(project.progressPercent)}%">
         <span style="width:${Math.max(0, Math.min(100, project.progressPercent))}%"></span>
@@ -3576,7 +3991,7 @@ function getStrategyPyramidWebviewHtml(
   const abilityRows = abilities.map((ability) => `
     <div class="ability-row">
       <strong>${strategyEscapeHtml(ability.name)}</strong>
-      <span>${strategyEscapeHtml(ability.projectCount)} 个项目 · ${strategyEscapeHtml(ability.judgment)}</span>
+      <span>${strategyEscapeHtml(ability.projectCount)} 个项目 · ${strategyEscapeHtml(ability.value)} · ${strategyEscapeHtml(ability.judgment)}</span>
     </div>
   `).join('');
   const moveRows = moves.map((move, index) => `
@@ -3586,7 +4001,61 @@ function getStrategyPyramidWebviewHtml(
         <div class="move-horizon">${strategyEscapeHtml(move.horizon)}</div>
         <strong>${strategyEscapeHtml(move.title)}</strong>
         <p>${strategyEscapeHtml(move.reason)}</p>
+        <p>${strategyEscapeHtml((move.evidence || []).join(' / '))}</p>
       </div>
+    </article>
+  `).join('');
+  const structureRows = structureSignals.map((signal) => `
+    <article class="signal-row ${strategyEscapeHtml(signal.health)}">
+      <div>
+        <strong>${strategyEscapeHtml(signal.title)}</strong>
+        <p>${strategyEscapeHtml(signal.summary)}</p>
+      </div>
+      <span>${strategyEscapeHtml(healthLabel(signal.health))}</span>
+      <small>${strategyEscapeHtml(signal.evidence.join(' / '))}</small>
+    </article>
+  `).join('');
+  const riskRows = riskSignals.map((signal) => `
+    <article class="risk-signal ${strategyEscapeHtml(signal.severity)}">
+      <span>${strategyEscapeHtml(severityLabel(signal.severity))}</span>
+      <strong>${strategyEscapeHtml(signal.title)}</strong>
+      <p>${strategyEscapeHtml(signal.summary)}</p>
+      <small>${strategyEscapeHtml(signal.evidence.join(' / '))}</small>
+    </article>
+  `).join('');
+  const opportunityRows = opportunitySignals.map((signal) => `
+    <article class="risk-signal ${strategyEscapeHtml(signal.severity)}">
+      <span>${strategyEscapeHtml(severityLabel(signal.severity))}</span>
+      <strong>${strategyEscapeHtml(signal.title)}</strong>
+      <p>${strategyEscapeHtml(signal.summary)}</p>
+      <small>${strategyEscapeHtml(signal.evidence.join(' / '))}</small>
+    </article>
+  `).join('');
+  const portfolioByLoop = loopCards.map((loop) => {
+    const names = topProjects
+      .filter((project) => project.loop === loop.key || project.nodes.some((node) => classifyStrategyLoop(node) === loop.key))
+      .map((project) => project.name)
+      .slice(0, 6);
+    return `
+      <article class="portfolio-loop">
+        <span>${strategyEscapeHtml(loop.label)}</span>
+        <strong>${strategyEscapeHtml(loop.title)}</strong>
+        <p>${strategyEscapeHtml(names.length ? names.join(' / ') : `${loop.label} 信号不足`)}</p>
+      </article>
+    `;
+  }).join('');
+  const scenarioRows = scenarios.map((scenario) => `
+    <article class="scenario-card">
+      <span>${strategyEscapeHtml(scenario.key)}</span>
+      <strong>${strategyEscapeHtml(scenario.title)}</strong>
+      <dl>
+        <div><dt>投入</dt><dd>${strategyEscapeHtml(scenario.investment)}</dd></div>
+        <div><dt>回报假设</dt><dd>${strategyEscapeHtml(scenario.returnProfile)}</dd></div>
+        <div><dt>成本</dt><dd>${strategyEscapeHtml(scenario.cost)}</dd></div>
+        <div><dt>风险</dt><dd>${strategyEscapeHtml(scenario.risk)}</dd></div>
+        <div><dt>时间轴</dt><dd>${strategyEscapeHtml(scenario.timeline)}</dd></div>
+      </dl>
+      <p>${strategyEscapeHtml(scenario.summary)}</p>
     </article>
   `).join('');
 
@@ -3594,6 +4063,7 @@ function getStrategyPyramidWebviewHtml(
     <section class="judgment-panel">
       <div class="state-pill">当前战略状态：${strategyEscapeHtml(stageTitle)}</div>
       <h2>${strategyEscapeHtml(mainJudgment)}</h2>
+      <div class="confidence-line">置信度：${strategyEscapeHtml(snapshot.confidence === 'high' ? '高' : snapshot.confidence === 'medium' ? '中' : '低')} · 基于本地项目、路线图阶段和推进信号聚合</div>
       <div class="decision-grid">
         <article>
           <span>战略动作</span>
@@ -3605,7 +4075,19 @@ function getStrategyPyramidWebviewHtml(
         </article>
       </div>
     </section>
-    <section class="signal-grid">
+    <section class="cockpit-grid">
+      <div class="structure-panel">
+        <div class="section-title">结构信号</div>
+        ${structureRows || '<div class="empty-state">等待更多本地事实形成结构信号。</div>'}
+      </div>
+      <div class="stage-panel">
+        <div class="section-title">战略阶段自适应</div>
+        <div class="stage-line"><span>优先显示层</span><strong>${strategyEscapeHtml(stageProfile.priorityLayer)}</strong></div>
+        <div class="stage-line"><span>关键指标</span><strong>${strategyEscapeHtml(stageProfile.keyMetric)}</strong></div>
+        <div class="stage-line"><span>默认问题</span><strong>${strategyEscapeHtml(stageProfile.defaultQuestion)}</strong></div>
+      </div>
+    </section>
+    <section class="signal-grid" aria-label="项目组合结构">
       ${loopCards.map((card, index) => `
         <article class="loop-card layer-${strategyEscapeHtml(card.key)}" style="--layer:${index + 1}">
           <span>${strategyEscapeHtml(card.label)}</span>
@@ -3621,10 +4103,14 @@ function getStrategyPyramidWebviewHtml(
     <section class="workbench">
       <div class="risk-panel">
         <div class="section-title">1-3 个月结构风险</div>
-        ${riskItems.map((risk) => `<div class="risk-item"><span class="codicon codicon-warning"></span>${strategyEscapeHtml(risk)}</div>`).join('')}
+        ${riskRows || riskItems.map((risk) => `<div class="risk-item"><span class="codicon codicon-warning"></span>${strategyEscapeHtml(risk)}</div>`).join('')}
+        <div class="section-title section-spaced">结构机会</div>
+        ${opportunityRows}
       </div>
       <div class="project-panel">
         <div class="section-title">项目组合结构</div>
+        <div class="portfolio-loops">${portfolioByLoop}</div>
+        <div class="portfolio-judgment">结构判断：${strategyEscapeHtml(mainJudgment)}</div>
         ${projectRows || '<div class="empty-state">还没有已登记项目。先在侧边栏添加项目。</div>'}
       </div>
     </section>
@@ -3642,6 +4128,25 @@ function getStrategyPyramidWebviewHtml(
         <div class="empty-state">选择一个项目，先看它在一人公司系统里的角色。</div>
       </aside>
     </section>
+    <section class="market-grid">
+      <article>
+        <div class="section-title">收入结构</div>
+        <p>${strategyEscapeHtml(snapshot.sellCount > 0 ? `${snapshot.sellCount} 个收入或市场信号可继续验证。首版不伪造收入金额，后续只接入用户明确标记或外部收入事实。` : '收入结构证据不足，不能假装已有可复利收入。先补一个低成本商业化假设。')}</p>
+      </article>
+      <article>
+        <div class="section-title">市场信誉</div>
+        <p>${strategyEscapeHtml(snapshot.learnCount > 0 ? `${snapshot.learnCount} 个反馈或学习信号可用于判断信誉积累，但仍需要渠道、评价或转化证据。` : '市场信誉证据不足，优先补真实反馈、公开分发或用户访谈信号。')}</p>
+      </article>
+      <article>
+        <div class="section-title">时间结构</div>
+        <p>${strategyEscapeHtml(topProjects.some((project) => project.timeLoad === 'high') ? '已有项目显示高时间负担，应收缩低复利维护，释放稳定验证窗口。' : '未读取到明显高时间负担，但仍应避免新增 Build 项目挤压 Sell / Learn。')}</p>
+      </article>
+    </section>
+    <section class="scenario-panel">
+      <div class="section-title">场景建模</div>
+      <div class="scenario-grid">${scenarioRows}</div>
+      <div class="recommended-path">${strategyEscapeHtml(recommendedScenarioPath)}</div>
+    </section>
   `;
 
   return `<!DOCTYPE html>
@@ -3650,7 +4155,7 @@ function getStrategyPyramidWebviewHtml(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link href="${codiconsUri}" rel="stylesheet">
-  <title>战略金字塔</title>
+  <title>一人公司战略驾驶舱</title>
   <style>
     :root {
       color-scheme: dark;
@@ -3725,7 +4230,12 @@ function getStrategyPyramidWebviewHtml(
       background: rgba(0, 229, 255, 0.08);
     }
     h2 { margin: 0; font-size: 22px; line-height: 1.35; letter-spacing: 0; }
-    .decision-grid, .signal-grid, .insight-grid {
+    .confidence-line {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .decision-grid, .signal-grid, .insight-grid, .cockpit-grid, .market-grid, .scenario-grid {
       display: grid;
       gap: 12px;
     }
@@ -3751,6 +4261,60 @@ function getStrategyPyramidWebviewHtml(
       grid-template-columns: repeat(4, minmax(130px, 1fr));
       margin-bottom: 14px;
     }
+    .cockpit-grid {
+      grid-template-columns: minmax(340px, 1.35fr) minmax(260px, .85fr);
+      margin-bottom: 14px;
+    }
+    .structure-panel, .stage-panel, .scenario-panel, .market-grid article {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+      backdrop-filter: blur(10px);
+    }
+    .signal-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px 12px;
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+    .signal-row:first-of-type { border-top: 0; padding-top: 0; }
+    .signal-row p, .risk-signal p, .scenario-card p, .market-grid p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .signal-row span {
+      height: 22px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .signal-row.strong span { color: var(--success); }
+    .signal-row.watch span { color: var(--warn); }
+    .signal-row.risk span { color: var(--danger); }
+    .signal-row small {
+      grid-column: 1 / -1;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .stage-line {
+      padding: 11px 0;
+      border-top: 1px solid var(--border);
+    }
+    .stage-line:first-of-type { border-top: 0; padding-top: 0; }
+    .stage-line span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 5px;
+    }
+    .stage-line strong { font-size: 13px; line-height: 1.45; }
     .loop-card div { font-weight: 650; margin-bottom: 10px; }
     .loop-card strong { font-size: 28px; margin-bottom: 8px; }
     .loop-card p, .layer-card p, .move-row p {
@@ -3858,6 +4422,59 @@ function getStrategyPyramidWebviewHtml(
       line-height: 1.45;
     }
     .risk-item:first-of-type { border-top: 0; }
+    .section-spaced { margin-top: 18px; }
+    .risk-signal {
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+    .risk-signal:first-of-type { border-top: 0; padding-top: 0; }
+    .risk-signal > span {
+      display: inline-flex;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 7px;
+    }
+    .risk-signal.high > span { color: var(--danger); }
+    .risk-signal.medium > span { color: var(--warn); }
+    .risk-signal.healthy > span { color: var(--success); }
+    .risk-signal small {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .portfolio-loops {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .portfolio-loop {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 7px;
+      padding: 10px;
+      background: rgba(0, 0, 0, 0.14);
+    }
+    .portfolio-loop span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 5px;
+    }
+    .portfolio-loop p, .portfolio-judgment {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .portfolio-judgment {
+      border-top: 1px solid var(--border);
+      padding: 12px 0;
+    }
     .project-row {
       display: grid;
       grid-template-columns: minmax(180px, 1.4fr) minmax(100px, 0.8fr) minmax(110px, 0.8fr);
@@ -3929,10 +4546,70 @@ function getStrategyPyramidWebviewHtml(
     .role-name { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
     .role-line { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
     .role-evidence { margin: 10px 0 0; padding-left: 18px; }
+    .score-grid, .advice-grid {
+      display: grid;
+      gap: 8px;
+      margin: 12px 0;
+    }
+    .score-row, .advice-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+      padding-top: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    .score-row strong, .advice-row strong { color: var(--fg); font-size: 12px; }
+    .market-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 14px;
+    }
+    .scenario-panel { margin-top: 14px; }
+    .scenario-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    .scenario-card {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 12px;
+      background: rgba(0, 0, 0, 0.14);
+    }
+    .scenario-card > span {
+      display: inline-flex;
+      width: 24px;
+      height: 24px;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+    .scenario-card dl { margin: 10px 0; }
+    .scenario-card div {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      gap: 8px;
+      padding: 6px 0;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .scenario-card dt { color: var(--muted); }
+    .scenario-card dd { margin: 0; line-height: 1.4; }
+    .recommended-path {
+      margin-top: 12px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+      color: #d8fbff;
+      font-weight: 650;
+      line-height: 1.45;
+    }
     @media (max-width: 760px) {
       .shell { padding: 18px; }
       header { align-items: stretch; flex-direction: column; }
-      .decision-grid, .signal-grid, .insight-grid, .layer-analysis-grid { grid-template-columns: 1fr; }
+      .decision-grid, .signal-grid, .insight-grid, .layer-analysis-grid, .cockpit-grid, .market-grid, .scenario-grid, .portfolio-loops { grid-template-columns: 1fr; }
       .layer-card { grid-template-columns: 1fr; }
       .layer-index { min-height: 32px; }
       .layer-foot { flex-direction: column; }
@@ -3945,7 +4622,7 @@ function getStrategyPyramidWebviewHtml(
   <main class="shell">
     <header>
       <div>
-        <h1>战略金字塔</h1>
+        <h1>一人公司战略驾驶舱</h1>
         <div class="sub">判断多个项目、能力、收入和市场信誉是否正在形成一套可复利系统。</div>
       </div>
       <button type="button" id="btn-refresh"><span class="codicon codicon-refresh"></span>刷新</button>
@@ -3967,14 +4644,33 @@ function getStrategyPyramidWebviewHtml(
     function renderRole(index) {
       const project = projectRoles[index];
       if (!project || !rolePanel) return;
+      const scores = project.roleScores || {};
+      const advice = project.advice || {};
+      function stars(value) {
+        return '★★★★★'.slice(0, Math.max(1, Math.min(5, Number(value) || 1)));
+      }
       rolePanel.innerHTML = [
         '<div class="section-title">项目战略角色</div>',
         '<div class="role-name">' + html(project.name) + '</div>',
         '<div class="role-line">' + html(project.role) + ' · ' + html(project.action) + '</div>',
+        '<div class="score-grid">',
+        '<div class="score-row"><span>能力积累</span><strong>' + stars(scores.abilityAccumulation) + '</strong></div>',
+        '<div class="score-row"><span>收入贡献</span><strong>' + stars(scores.revenueContribution) + '</strong></div>',
+        '<div class="score-row"><span>市场信誉</span><strong>' + stars(scores.marketTrust) + '</strong></div>',
+        '<div class="score-row"><span>复用潜力</span><strong>' + stars(scores.reusePotential) + '</strong></div>',
+        '<div class="score-row"><span>个人品牌价值</span><strong>' + stars(scores.brandValue) + '</strong></div>',
+        '</div>',
+        '<div class="role-line">当前投入时间：' + html(project.timeLoad) + '</div>',
+        '<div class="role-line">与其他项目的相关性：' + html(project.strategicRelation) + '</div>',
         '<div class="role-line">结构风险：' + html(project.risk) + '</div>',
         '<div class="project-progress" aria-label="' + project.progressPercent + '%"><span style="width:' + Math.max(0, Math.min(100, project.progressPercent)) + '%"></span></div>',
         '<ul class="role-evidence">' + project.evidence.map((item) => '<li>' + html(item) + '</li>').join('') + '</ul>',
-        '<div class="role-line">可复用能力：' + project.abilities.map(html).join(' / ') + '</div>'
+        '<div class="role-line">可复用能力：' + project.abilities.map(html).join(' / ') + '</div>',
+        '<div class="advice-grid">',
+        '<div class="advice-row"><strong>加码</strong><span>' + html(advice.doubleDown || project.action) + '</span></div>',
+        '<div class="advice-row"><strong>收缩</strong><span>' + html(advice.reduce || '减少低复利维护') + '</span></div>',
+        '<div class="advice-row"><strong>观察</strong><span>' + html(advice.observe || '观察是否继续占用验证时间') + '</span></div>',
+        '</div>'
       ].join('');
     }
     document.getElementById('btn-refresh')?.addEventListener('click', () => {
