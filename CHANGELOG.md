@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.176 - 2026-06-06
+
+### Changed
+- Optimize website footer, navigation responsive layout, professional privacy policy, slogans, and multi-language routing (ca8f634)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.175 - 2026-06-06
 
 ### Changed
