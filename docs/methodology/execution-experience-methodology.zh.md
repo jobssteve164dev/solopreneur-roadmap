@@ -4,7 +4,7 @@
 
 这份文档说明 SoloMap 如何把每次 Agent 工作从原始日志转化为下一轮任务可复用的上下文、经验和方法包。
 
-核心判断只有一句：**每次运行结束后，都应该留下能改变下一次执行决策的最小结构化经验。**
+核心判断只有一句：**每次运行结束后，都应该留下能改变下一次执行决策的结构化交接经验。**
 
 ## 适用范围
 
@@ -18,9 +18,10 @@
 
 ```text
 Raw Run
-  -> Run Digest
+  -> Run Digest v2 / Agent Handoff
   -> Execution Graph
-  -> Retrieval Pack
+  -> Retrieval Pack / CLI Query
+  -> Prompt Injection
   -> Stable Memory / Skill
 ```
 
@@ -42,37 +43,45 @@ Raw Run 默认不直接注入下一轮 Agent。
 
 Run Digest 是单次运行的结构化摘要。
 
-建议最小字段：
+当前字段形态：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "runId": "",
+  "executionLogId": 0,
   "projectPath": "",
-  "scope": "roadmap-step | solo | revision | install-skill | install-mcp",
-  "roadmapStepId": "",
+  "nodeId": "",
+  "runKind": "step | solo | roadmap_revision",
   "userIntent": "",
-  "agentFamily": "",
-  "outcome": "completed | failed | partial | stopped",
+  "agentCli": "",
+  "outcome": "",
+  "status": "Completed | Failed | In Progress",
   "touchedFiles": [],
-  "commands": [],
+  "changedFiles": [],
+  "commandSignals": [],
   "verification": [],
   "failures": [],
-  "fixes": [],
-  "reusableLessons": [],
-  "relatedIssues": [],
-  "relatedSkills": [],
-  "relatedDocs": [],
+  "reusableSignals": [],
   "tags": [],
-  "createdAt": ""
+  "handoff": {
+    "nextAgentBrief": "",
+    "recommendedFirstActions": [],
+    "filesToInspectFirst": [],
+    "commandsToRunNext": [],
+    "blockedBy": [],
+    "doNotRepeat": [],
+    "confidence": "low | medium | high",
+    "riskLevel": "low | medium | high"
+  }
 }
 ```
 
-字段保持少而准，先覆盖召回价值最高的信息。
+字段保持短而准，覆盖跨 Agent 接手价值最高的信息。
 
 ### 3. Execution Graph
 
-Execution Graph 是 digest 之间的关系索引。第一版不需要复杂图数据库，可以用 JSONL、SQLite 或项目现有 SQLite 表实现。
+Execution Graph 是 digest 之间的关系索引。当前采用项目本地 `.solopreneur/execution-graph.json`，不引入独立图数据库。
 
 核心关系：
 
@@ -98,6 +107,12 @@ Retrieval Pack 是下一轮 Agent 启动前注入的少量相关历史经验。
 - 哪些路径不要重复。
 - 哪个命令或检查证明过结果。
 
+同时，Agent 可以通过本地 CLI 自行取更完整的交接包：
+
+```bash
+node resources/tools/solomap-experience.cjs handoff --project . --node <node-id> --limit 3
+```
+
 示例：
 
 ```text
@@ -117,6 +132,8 @@ Retrieval Pack 是下一轮 Agent 启动前注入的少量相关历史经验。
 - 可复用做法 -> `memory/patterns/`
 - 已确认决策 -> `memory/decisions/`
 - 稳定流程 -> `skills/`
+
+当前配套 skill 为 `resources/skills/solomap-cross-agent-handoff/SKILL.md`，用于固定跨 Agent 接手时的查询顺序和边界。
 
 ## Digest 生成时机
 
@@ -153,7 +170,8 @@ Retrieval Pack 是下一轮 Agent 启动前注入的少量相关历史经验。
 3. 同错误类型或同验证命令 digest。
 4. 同 skill 或同任务类型 digest。
 5. 同 Issue、同文档职责或同路线图阶段 digest。
-6. embedding 语义相似 digest（可选，作为补充）。
+6. 如自动召回不足，Agent 使用 `solomap-experience` CLI 查询 handoff、failures、latest-changes 或 search。
+7. embedding 语义相似 digest（可选，作为补充）。
 
 召回结果必须经过去重和压缩，禁止超过主任务 prompt 的必要比例。
 
@@ -208,17 +226,20 @@ Digest 进入长期经验前必须满足至少一个条件：
 | 稳定执行流程 | `skills/` |
 | 未验证观察 | `memory/inbox/` 或 `learning/candidates/` |
 
-## 最小可落地版本
+## 当前可落地闭环
 
-第一版不需要 embedding，也不需要独立图数据库。当前插件首版已经采用项目本地 JSON digest 的方式落地。
+当前闭环不需要 embedding，也不需要独立图数据库。插件采用项目本地 JSON digest、execution graph、SQLite log 查询工具和配套 skill 落地。
 
 已落地范围：
 
-1. 从现有 Raw Run 生成 digest JSON。
+1. 从现有 Raw Run 生成 digest v2 JSON。
 2. 保存到 `.solopreneur/run-digests/`。
-3. 用文件路径、任务入口、运行类型、关键词做确定召回。
-4. Agent prompt 注入最多 3 条 Retrieval Pack。
-5. 注入时保留“历史摘要不能覆盖本轮事实”的优先级约束。
+3. 每次 digest 写入后刷新 `.solopreneur/execution-graph.json`。
+4. 用文件路径、任务入口、运行类型、关键词做确定召回。
+5. Agent prompt 注入最多 3 条 Retrieval Pack，并注入跨 Agent handoff 工具入口。
+6. `resources/tools/solomap-experience.cjs` 从 digest、execution graph 和 SQLite `execution_logs` 输出 handoff、summary、history、failures、latest-changes 和 search。
+7. `resources/skills/solomap-cross-agent-handoff/SKILL.md` 固定跨 Agent 接手规则，避免 Agent 直接复制原始 execution log 或用历史覆盖本轮目标。
+8. 注入时保留“历史摘要不能覆盖本轮事实”的优先级约束。
 
 下一阶段再补：
 
@@ -227,7 +248,7 @@ Digest 进入长期经验前必须满足至少一个条件：
 3. 代码结构维度的 CodeGraph 连接器。
 4. 结构化召回不足时的 embedding 辅助召回。
 
-第一版成功标准：
+当前闭环成功标准：
 
 - Agent 少读重复文件。
 - 相同区域的问题能复用历史验证命令。

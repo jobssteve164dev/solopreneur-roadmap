@@ -14,7 +14,7 @@
 - SQLite `execution_logs` 中的 Agent 对话记录。
 - `.solopreneur/step-memory/` 中的环节交接和完成标准。
 - `.solomap-global/memory`、`skills`、`mcp`、`learning` 中的跨项目经验、技能、连接器和学习候选。
-- 后续可能出现的 Run Digest、Execution Graph、执行经验召回、CodeGraph 连接器和 embedding 辅助召回。
+- Run Digest、Execution Graph、执行经验召回、跨 Agent handoff 工具、CodeGraph 连接器和 embedding 辅助召回。
 
 本文不约束 Agent CLI 自身的原生 memory、rules、AGENTS/CLAUDE 类项目指令文件，也不要求 SoloMap 写入或接管这些私有机制。
 
@@ -58,33 +58,39 @@ SoloMap 首先依靠确定关系召回经验：项目、路线图环节、Issue�
 
 ## 目标形态
 
-SoloMap 的执行经验层最终形成以下链路：
+SoloMap 的执行经验层形成以下链路：
 
 ```text
 Agent 原始运行记录
-  -> Run Digest
+  -> Run Digest v2 / Agent Handoff
   -> Execution Graph
-  -> 本轮相关经验召回
+  -> Retrieval Pack / CLI 查询
+  -> Agent prompt 启动注入
   -> 稳定经验提升为 Memory / Skill / Decision / Pattern
 ```
 
 其中：
 
-- Run Digest 是单次运行的结构化摘要。
-- Execution Graph 是运行摘要之间，以及摘要与项目、文件、路线图、Issue、skill、验证命令之间的关系索引。
+- Run Digest 是单次运行的结构化摘要，并包含给下一位 Agent 的 handoff。
+- Execution Graph 是运行摘要之间，以及摘要与项目、文件、路线图、Issue、skill、验证命令之间的轻量关系索引。
+- CLI 查询工具让 Agent 可以自己从 digest、graph 和 SQLite execution log 中提取需要的交接信号。
 - Memory / Skill 是经过验证且跨会话仍值得复用的稳定经验。
 
-## 当前首版落地边界
+## 当前落地边界
 
-首版已经落地为项目本地的轻量闭环：
+当前已经落地为项目本地的完整闭环：
 
 - 每次路线图环节、Solo 对话或路线图调整 run 收尾时，插件从现有运行事实生成 `Run Digest` JSON。
-- Digest 保存到 `.solopreneur/run-digests/`，作为原始日志和长期记忆之间的中间层。
-- 下一轮 Agent prompt 会按同任务入口、同运行类型、文件路径和关键词命中召回最多 3 条相关执行经验。
-- 注入内容只包含上次目标、结果、相关文件、可复用信号、验证信号和风险信号，不注入原始日志全文。
+- Digest v2 保存到 `.solopreneur/run-digests/`，作为原始日志和长期记忆之间的中间层。
+- Digest v2 包含 handoff：下一位 Agent 简报、建议先看的文件、建议动作、建议验证、阻塞项、不要重复的失败路径和风险等级。
+- 每次写入 digest 后，SoloMap 自动刷新 `.solopreneur/execution-graph.json`，按环节、Agent、文件、状态、失败和命令建立轻量索引。
+- 下一轮 Agent prompt 会按同任务入口、同运行类型、文件路径和关键词命中召回最多 3 条相关执行经验，并注入跨 Agent handoff 工具入口。
+- `resources/tools/solomap-experience.cjs` 可从 digest、execution graph 和 SQLite `execution_logs` 生成 `handoff`、`summary`、`history`、`failures`、`latest-changes`、`search` 等查询结果。
+- `resources/skills/solomap-cross-agent-handoff/SKILL.md` 固定 Agent 接手另一位 Agent 工作时的查询顺序、验证边界和原始日志使用规则。
+- 注入内容只包含上次目标、结果、交接简报、相关文件、可复用信号、验证信号和风险信号，不注入原始日志全文。
 - 历史经验在 prompt 中被明确标注为“历史结构化摘要”，不能覆盖用户本轮要求、当前代码、测试或日志。
 
-首版暂不引入 embedding、独立图数据库或 CodeGraph 连接器。它先验证最小闭环是否能减少重复探索，再决定是否扩展为更完整的 Execution Graph。
+当前闭环暂不引入 embedding、独立图数据库或 CodeGraph 连接器。Execution Graph 先采用项目本地 JSON 索引，后续如有足够命中价值，再接入更复杂的代码结构或语义召回。
 
 ## Run Digest 边界
 
@@ -99,6 +105,7 @@ Run Digest 是原始日志和长期记忆之间的中间层。它不替代日志
 - 执行命令、验证命令和结果。
 - 失败信号、根因判断和修复动作。
 - 可复用经验候选。
+- 给下一位 Agent 的 handoff，包括建议先看文件、建议动作、建议验证、阻塞项和不要重复路径。
 - 与 Issue、文档、skill、MCP、CodeGraph 查询的关系。
 
 它不应记录：
@@ -120,7 +127,7 @@ Execution Graph 不是聊天搜索，也不是日志浏览器。它是为了在�
 - 哪些长期规则或 skill 来源于这些 run？
 - 哪些历史经验已经稳定到可以提升为 memory 或 skill？
 
-它应优先建立以下关系：
+当前本地索引优先建立以下关系：
 
 - `run -> project`
 - `run -> roadmap step`
@@ -134,6 +141,8 @@ Execution Graph 不是聊天搜索，也不是日志浏览器。它是为了在�
 - `run -> reusable lesson`
 - `lesson -> memory/pattern/decision/skill`
 - `file -> CodeGraph symbol/module`（当 CodeGraph 可用时）
+
+当前实现把这些关系压缩进 `.solopreneur/execution-graph.json`，不要求用户理解或维护图结构。
 
 ## CodeGraph 的位置
 
@@ -203,5 +212,9 @@ SoloMap 可以对 Run Digest 的自然语言字段做 embedding，用于补充�
 - `docs/architecture/global-system-plugin-blueprint.zh.md`
 - `.solopreneur/agent-runs/`
 - `.solopreneur/step-memory/`
+- `.solopreneur/run-digests/`
+- `.solopreneur/execution-graph.json`
+- `resources/tools/solomap-experience.cjs`
+- `resources/skills/solomap-cross-agent-handoff/SKILL.md`
 - `.solomap-global/memory/`
 - `.solomap-global/learning/`

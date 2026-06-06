@@ -1903,7 +1903,7 @@ test('sidebar issue creation keeps labels auxiliary to creation', () => {
   assert.equal(sidebarModule.__parseIssueNumberFromOutput('created issue'), 0);
 });
 
-test('agent command builder uses non-interactive task runs and native continuation commands', () => {
+test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -1949,7 +1949,9 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
       'module.exports.__buildRunDigest = buildRunDigest;',
       'module.exports.__writeRunDigest = writeRunDigest;',
+      'module.exports.__writeExecutionGraph = writeExecutionGraph;',
       'module.exports.__buildExecutionExperiencePrompt = buildExecutionExperiencePrompt;',
+      'module.exports.__buildCrossAgentHandoffInstructions = buildCrossAgentHandoffInstructions;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
       'module.exports.__parseStepHandoffEntries = parseStepHandoffEntries;',
       'module.exports.__buildStepHandoffSummary = buildStepHandoffSummary;',
@@ -3062,8 +3064,17 @@ test('agent command builder uses non-interactive task runs and native continuati
     failureCode: '',
     failureReason: ''
   });
+  assert.equal(digest.schemaVersion, 2);
+  assert.match(digest.handoff.nextAgentBrief, /相关执行经验已接入 prompt/);
+  assert.ok(digest.handoff.filesToInspectFirst.includes('src/extension.ts'));
+  assert.ok(digest.handoff.commandsToRunNext.includes('npm test'));
   const digestPath = extensionModule.__writeRunDigest(digestRoot, digest);
   assert.ok(fs.existsSync(digestPath));
+  const graphPath = path.join(digestRoot, '.solopreneur', 'execution-graph.json');
+  assert.ok(fs.existsSync(graphPath));
+  const graphFile = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+  assert.equal(graphFile.runCount, 1);
+  assert.ok(graphFile.indexes.byFile['src/extension.ts'].includes(digest.runId));
   const experiencePrompt = extensionModule.__buildExecutionExperiencePrompt(digestRoot, {
     nodeId: '2',
     runKind: 'step',
@@ -3073,8 +3084,63 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(experiencePrompt, /SoloMap 相关执行经验/);
   assert.match(experiencePrompt, /修复 src\/extension\.ts/);
   assert.match(experiencePrompt, /src\/extension\.ts/);
+  assert.match(experiencePrompt, /下一位 Agent 交接/);
+  assert.match(experiencePrompt, /建议先看/);
   assert.match(experiencePrompt, /npm test passed/);
   assert.doesNotMatch(experiencePrompt, /RAW_LOG_SHOULD_NOT_APPEAR/);
+  const crossAgentInstructions = extensionModule.__buildCrossAgentHandoffInstructions(digestRoot, '2', 'step');
+  assert.match(crossAgentInstructions, /solomap-experience\.cjs handoff/);
+  assert.match(crossAgentInstructions, /solomap-cross-agent-handoff\/SKILL\.md/);
+
+  const SQL = await require('sql.js')();
+  const cliDbPath = path.join(digestRoot, '.solopreneur', 'project_journal.db');
+  const db = new SQL.Database();
+  db.run('CREATE TABLE execution_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, nodeId TEXT, timestamp TEXT, agentCli TEXT, command TEXT, output TEXT, status TEXT)');
+  db.run(
+    'INSERT INTO execution_logs (nodeId, timestamp, agentCli, command, output, status) VALUES (?, ?, ?, ?, ?, ?)',
+    [
+      '2',
+      '2026-06-02T00:01:00.000Z',
+      'codex',
+      'npm test',
+      [
+        'User supplement:',
+        '继续修复 prompt 注入',
+        '',
+        'Workspace changes:',
+        'M src/extension.ts',
+        '',
+        'Completion decision:',
+        '相关执行经验已接入 prompt。',
+        '',
+        'Agent output tail:',
+        'RAW_SQLITE_LOG_SHOULD_NOT_APPEAR',
+        'npm test passed'
+      ].join('\n'),
+      'Completed'
+    ]
+  );
+  fs.writeFileSync(cliDbPath, Buffer.from(db.export()));
+  db.close();
+  const cliOutput = childProcess.execFileSync(
+    process.execPath,
+    [
+      path.join(projectRoot, 'resources/tools/solomap-experience.cjs'),
+      'handoff',
+      '--project',
+      digestRoot,
+      '--node',
+      '2',
+      '--json'
+    ],
+    { encoding: 'utf8' }
+  );
+  const cliJson = JSON.parse(cliOutput);
+  assert.equal(cliJson.command, 'handoff');
+  assert.equal(cliJson.payload[0].executionLogId, 42);
+  assert.match(cliJson.payload[0].brief, /相关执行经验已接入 prompt/);
+  assert.ok(cliJson.payload[0].filesToInspectFirst.includes('src/extension.ts'));
+  assert.doesNotMatch(cliOutput, /RAW_SQLITE_LOG_SHOULD_NOT_APPEAR/);
 
   const dirtySummary = [
     '# 环节交接总结',

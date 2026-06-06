@@ -125,6 +125,7 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
     "test": "node --test test/*.test.js",
+    "solomap:experience": "node resources/tools/solomap-experience.cjs",
     "install:local-dev": "node scripts/install-local-dev.js",
     "build-webview": "echo 'No webview build configured yet'"
   },

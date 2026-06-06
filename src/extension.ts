@@ -1942,7 +1942,8 @@ function buildSolopreneurDirectoryReadme(): string {
     '- `documentation.json`：项目解释性文档的索引与审计状态。它由 SoloMap 维护，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
-    '- `run-digests/`：每次 Agent 调用结束后的结构化执行摘要。下一轮相关任务会读取少量摘要来减少重复探索。',
+    '- `run-digests/`：每次 Agent 调用结束后的结构化执行摘要和跨 Agent 交接信号。下一轮相关任务会读取少量摘要来减少重复探索。',
+    '- `execution-graph.json`：由 run digest 自动生成的轻量索引，按环节、Agent、文件、状态、失败和命令组织最近执行信号。',
     '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
     '',
     '## 请不要随意删除',
@@ -6504,6 +6505,56 @@ interface RunDigest {
   failures: string[];
   reusableSignals: string[];
   tags: string[];
+  handoff?: AgentHandoff;
+  rawRefs?: {
+    sqliteTable: string;
+    executionLogId: number;
+    digestPath?: string;
+  };
+}
+
+interface AgentHandoff {
+  summary: string;
+  nextAgentBrief: string;
+  recommendedFirstActions: string[];
+  filesToInspectFirst: string[];
+  commandsToRunNext: string[];
+  openQuestions: string[];
+  blockedBy: string[];
+  assumptions: string[];
+  decisionsMade: string[];
+  doNotRepeat: string[];
+  confidence: 'low' | 'medium' | 'high';
+  riskLevel: 'low' | 'medium' | 'high';
+}
+
+interface ExecutionGraphRun {
+  runId: string;
+  executionLogId: number;
+  nodeId: string;
+  runKind: string;
+  agentCli: string;
+  status: string;
+  finishedAt: string;
+  changedFiles: string[];
+  touchedFiles: string[];
+  failures: string[];
+  handoffSummary: string;
+}
+
+interface ExecutionGraph {
+  schemaVersion: number;
+  updatedAt: string;
+  runCount: number;
+  indexes: {
+    byNode: Record<string, string[]>;
+    byAgent: Record<string, string[]>;
+    byFile: Record<string, string[]>;
+    byStatus: Record<string, string[]>;
+    byFailure: Record<string, string[]>;
+    byCommand: Record<string, string[]>;
+  };
+  runs: ExecutionGraphRun[];
 }
 
 interface RunDigestInput {
@@ -6619,6 +6670,99 @@ function extractReusableSignals(outputTail: string, completionReason: string, ch
   return signals.filter((entry, index, all) => all.indexOf(entry) === index).slice(0, 6);
 }
 
+function uniqueCompactList(values: string[], limit: number, maxLength = 220): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const item = compactLine(value || '', maxLength);
+    if (!item || seen.has(item)) {
+      continue;
+    }
+    seen.add(item);
+    result.push(item);
+    if (result.length >= limit) {
+      break;
+    }
+  }
+  return result;
+}
+
+function extractHandoffActionLines(outputTail: string): string[] {
+  return extractLinesByPattern(
+    outputTail,
+    /\b(next|todo|follow[- ]?up|remaining|继续|下一步|后续|待办|需要|建议|验证|检查)\b/i,
+    8
+  );
+}
+
+function extractDecisionSignals(outputTail: string, reusableSignals: string[]): string[] {
+  return uniqueCompactList([
+    ...reusableSignals.filter((signal) => /\b(decision|decided|选择|决定|采用|保留|改为)\b/i.test(signal)),
+    ...extractLinesByPattern(outputTail, /\b(decision|decided|选择|决定|采用|保留|改为)\b/i, 6)
+  ], 6);
+}
+
+function buildAgentHandoff(input: RunDigestInput, changedFiles: string[], touchedFiles: string[], verification: string[], failures: string[], reusableSignals: string[]): AgentHandoff {
+  const status = String(input.status || '');
+  const isFailed = status === 'Failed' || failures.length > 0;
+  const summary = compactLine(input.completionReason || input.failureReason || (isFailed ? '上一轮未完成。' : '上一轮已结束。'), 500);
+  const fileSignals = uniqueCompactList([...changedFiles, ...touchedFiles], 8);
+  const actionLines = extractHandoffActionLines(input.outputTail);
+  const firstActions = uniqueCompactList([
+    isFailed && input.failureReason ? `先复核上一轮失败原因：${compactLine(input.failureReason, 180)}` : '',
+    fileSignals.length > 0 ? `先阅读上一轮改动/触达文件：${fileSignals.slice(0, 4).join(', ')}` : '',
+    ...actionLines,
+    verification.length > 0 ? `复用或复跑验证信号：${verification.slice(0, 2).join(' / ')}` : ''
+  ], 6);
+  const commandsToRunNext = uniqueCompactList([
+    ...verification
+      .map((signal) => {
+        const match = signal.match(/^Command:\s*(.+)$/i);
+        return match ? match[1] : '';
+      }),
+    /\b(test|check|lint|validate|verify|tsc|vitest|jest|playwright|pytest|node --test)\b/i.test(input.resolvedCommand || '')
+      ? input.resolvedCommand
+      : ''
+  ], 4, 300);
+  const blockedBy = isFailed
+    ? uniqueCompactList([
+      input.failureCode ? `Failure category: ${input.failureCode}` : '',
+      input.failureReason || '',
+      ...failures
+    ], 6)
+    : [];
+  const nextAgentBrief = compactLine([
+    summary,
+    fileSignals.length > 0 ? `优先查看 ${fileSignals.slice(0, 4).join(', ')}。` : '',
+    blockedBy.length > 0 ? `阻塞/风险：${blockedBy.slice(0, 2).join(' / ')}。` : '',
+    commandsToRunNext.length > 0 ? `建议验证：${commandsToRunNext.slice(0, 2).join(' / ')}。` : ''
+  ].filter(Boolean).join(' '), 800);
+  return {
+    summary,
+    nextAgentBrief,
+    recommendedFirstActions: firstActions,
+    filesToInspectFirst: fileSignals,
+    commandsToRunNext,
+    openQuestions: isFailed ? uniqueCompactList(failures, 4) : [],
+    blockedBy,
+    assumptions: uniqueCompactList(
+      status === 'Completed' && verification.length === 0
+        ? ['上一轮记录显示完成，但 captured tail 中没有明确验证信号；接手时应先补最窄验证。']
+        : [],
+      4
+    ),
+    decisionsMade: extractDecisionSignals(input.outputTail, reusableSignals),
+    doNotRepeat: isFailed
+      ? uniqueCompactList([
+        input.failureReason ? `不要只重复上一轮失败路径：${input.failureReason}` : '',
+        failures[0] ? `先处理风险信号再继续：${failures[0]}` : ''
+      ], 4)
+      : [],
+    confidence: isFailed ? 'low' : verification.length > 0 ? 'high' : 'medium',
+    riskLevel: isFailed ? 'high' : verification.length > 0 ? 'low' : 'medium'
+  };
+}
+
 function tokenizeExperienceText(value: string): Set<string> {
   const tokens = (value || '')
     .toLowerCase()
@@ -6632,6 +6776,10 @@ function tokenizeExperienceText(value: string): Set<string> {
 function buildRunDigest(input: RunDigestInput): RunDigest {
   const changedFiles = parseFileSummaryLines(input.changedFilesSummary);
   const touchedFiles = parseFileSummaryLines(input.touchedFilesSummary);
+  const commandSignals = extractCommandSignals(input.resolvedCommand);
+  const verification = extractVerificationSignals(input.outputTail, input.resolvedCommand, input.status);
+  const failures = extractFailureSignals(input.outputTail, input.failureCode, input.failureReason, input.status);
+  const reusableSignals = extractReusableSignals(input.outputTail, input.completionReason, changedFiles);
   const runId = `${sanitizeRunDigestSegment(input.nodeId)}-${input.executionLogId || Date.parse(input.finishedAt) || Date.now()}`;
   const contextTokens = Array.from(tokenizeExperienceText([
     input.nodeId,
@@ -6643,7 +6791,7 @@ function buildRunDigest(input: RunDigestInput): RunDigest {
     input.failureReason
   ].join('\n'))).slice(0, 24);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
     executionLogId: Number(input.executionLogId || 0),
     projectPath: input.workspaceRoot,
@@ -6658,11 +6806,23 @@ function buildRunDigest(input: RunDigestInput): RunDigest {
     durationMs: Number(input.durationMs || 0),
     changedFiles,
     touchedFiles,
-    commandSignals: extractCommandSignals(input.resolvedCommand),
-    verification: extractVerificationSignals(input.outputTail, input.resolvedCommand, input.status),
-    failures: extractFailureSignals(input.outputTail, input.failureCode, input.failureReason, input.status),
-    reusableSignals: extractReusableSignals(input.outputTail, input.completionReason, changedFiles),
-    tags: contextTokens
+    commandSignals,
+    verification,
+    failures,
+    reusableSignals,
+    tags: contextTokens,
+    handoff: buildAgentHandoff(
+      input,
+      changedFiles,
+      touchedFiles,
+      verification,
+      failures,
+      reusableSignals
+    ),
+    rawRefs: {
+      sqliteTable: 'execution_logs',
+      executionLogId: Number(input.executionLogId || 0)
+    }
   };
 }
 
@@ -6670,7 +6830,19 @@ function writeRunDigest(workspaceRoot: string, digest: RunDigest): string {
   const digestRoot = getRunDigestRoot(workspaceRoot);
   fs.mkdirSync(digestRoot, { recursive: true });
   const digestPath = path.join(digestRoot, `${sanitizeRunDigestSegment(digest.runId)}.json`);
-  fs.writeFileSync(digestPath, JSON.stringify(digest, null, 2), 'utf8');
+  const nextDigest: RunDigest = {
+    ...digest,
+    rawRefs: {
+      ...(digest.rawRefs || { sqliteTable: 'execution_logs', executionLogId: Number(digest.executionLogId || 0) }),
+      digestPath: toProjectRelativeRuntimePath(workspaceRoot, digestPath)
+    }
+  };
+  fs.writeFileSync(digestPath, JSON.stringify(nextDigest, null, 2), 'utf8');
+  try {
+    writeExecutionGraph(workspaceRoot);
+  } catch (error) {
+    console.warn('Failed to update SoloMap execution graph:', error);
+  }
   return digestPath;
 }
 
@@ -6684,7 +6856,7 @@ function readRunDigests(workspaceRoot: string): RunDigest[] {
     .map((file) => {
       try {
         const parsed = JSON.parse(fs.readFileSync(path.join(digestRoot, file), 'utf8'));
-        return parsed && parsed.schemaVersion === 1 ? parsed as RunDigest : null;
+        return parsed && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2) ? parsed as RunDigest : null;
       } catch {
         return null;
       }
@@ -6692,6 +6864,80 @@ function readRunDigests(workspaceRoot: string): RunDigest[] {
     .filter((entry): entry is RunDigest => Boolean(entry))
     .sort((a, b) => String(b.finishedAt || '').localeCompare(String(a.finishedAt || '')))
     .slice(0, 120);
+}
+
+function getExecutionGraphPath(workspaceRoot: string): string {
+  return path.join(workspaceRoot, '.solopreneur', 'execution-graph.json');
+}
+
+function addExecutionGraphIndex(index: Record<string, string[]>, key: string, runId: string): void {
+  const normalizedKey = compactLine(key || '', 180);
+  if (!normalizedKey) {
+    return;
+  }
+  if (!index[normalizedKey]) {
+    index[normalizedKey] = [];
+  }
+  if (!index[normalizedKey].includes(runId)) {
+    index[normalizedKey].push(runId);
+  }
+}
+
+function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
+  const digests = readRunDigests(workspaceRoot);
+  const graph: ExecutionGraph = {
+    schemaVersion: 1,
+    updatedAt: new Date().toISOString(),
+    runCount: digests.length,
+    indexes: {
+      byNode: {},
+      byAgent: {},
+      byFile: {},
+      byStatus: {},
+      byFailure: {},
+      byCommand: {}
+    },
+    runs: []
+  };
+  for (const digest of digests) {
+    const runId = String(digest.runId || '');
+    if (!runId) {
+      continue;
+    }
+    graph.runs.push({
+      runId,
+      executionLogId: Number(digest.executionLogId || 0),
+      nodeId: String(digest.nodeId || ''),
+      runKind: String(digest.runKind || ''),
+      agentCli: String(digest.agentCli || ''),
+      status: String(digest.status || ''),
+      finishedAt: String(digest.finishedAt || ''),
+      changedFiles: (digest.changedFiles || []).slice(0, 24),
+      touchedFiles: (digest.touchedFiles || []).slice(0, 24),
+      failures: (digest.failures || []).slice(0, 8),
+      handoffSummary: compactLine(digest.handoff?.nextAgentBrief || digest.outcome || '', 800)
+    });
+    addExecutionGraphIndex(graph.indexes.byNode, digest.nodeId, runId);
+    addExecutionGraphIndex(graph.indexes.byAgent, digest.agentCli, runId);
+    addExecutionGraphIndex(graph.indexes.byStatus, digest.status, runId);
+    for (const file of [...(digest.changedFiles || []), ...(digest.touchedFiles || [])]) {
+      addExecutionGraphIndex(graph.indexes.byFile, file, runId);
+    }
+    for (const failure of digest.failures || []) {
+      addExecutionGraphIndex(graph.indexes.byFailure, failure, runId);
+    }
+    for (const command of digest.commandSignals || []) {
+      addExecutionGraphIndex(graph.indexes.byCommand, command, runId);
+    }
+  }
+  return graph;
+}
+
+function writeExecutionGraph(workspaceRoot: string): string {
+  const graphPath = getExecutionGraphPath(workspaceRoot);
+  fs.mkdirSync(path.dirname(graphPath), { recursive: true });
+  fs.writeFileSync(graphPath, JSON.stringify(buildExecutionGraph(workspaceRoot), null, 2), 'utf8');
+  return graphPath;
 }
 
 function scoreRunDigest(digest: RunDigest, query: ExecutionExperienceQuery): { score: number; reasons: string[] } {
@@ -6738,11 +6984,17 @@ function buildExecutionExperiencePrompt(workspaceRoot: string, query: ExecutionE
     const fileSignals = [...(digest.changedFiles || []), ...(digest.touchedFiles || [])]
       .filter((file, fileIndex, all) => file && all.indexOf(file) === fileIndex)
       .slice(0, 6);
+    const handoff = digest.handoff;
     return [
       `${index + 1}. 命中原因：${entry.reasons.join('；') || '近期相关执行'}`,
       digest.userIntent ? `   - 上次目标：${digest.userIntent}` : '',
       digest.outcome ? `   - 上次结果：${digest.outcome}` : `   - 上次状态：${digest.status}`,
+      handoff?.nextAgentBrief ? `   - 下一位 Agent 交接：${handoff.nextAgentBrief}` : '',
       fileSignals.length > 0 ? `   - 相关文件：${fileSignals.join(', ')}` : '',
+      handoff?.filesToInspectFirst?.length ? `   - 建议先看：${handoff.filesToInspectFirst.slice(0, 5).join(', ')}` : '',
+      handoff?.recommendedFirstActions?.length ? `   - 建议动作：${handoff.recommendedFirstActions.slice(0, 3).join(' / ')}` : '',
+      handoff?.commandsToRunNext?.length ? `   - 建议验证：${handoff.commandsToRunNext.slice(0, 2).join(' / ')}` : '',
+      handoff?.doNotRepeat?.length ? `   - 避免重复：${handoff.doNotRepeat.slice(0, 2).join(' / ')}` : '',
       (digest.reusableSignals || []).length > 0 ? `   - 可复用信号：${(digest.reusableSignals || []).slice(0, 3).join(' / ')}` : '',
       (digest.verification || []).length > 0 ? `   - 验证信号：${(digest.verification || []).slice(0, 2).join(' / ')}` : '',
       (digest.failures || []).length > 0 ? `   - 风险信号：${(digest.failures || []).slice(0, 2).join(' / ')}` : ''
@@ -6752,6 +7004,20 @@ function buildExecutionExperiencePrompt(workspaceRoot: string, query: ExecutionE
     'SoloMap 相关执行经验（自动召回，最多 3 条）：',
     '这些是历史结构化摘要，不是本轮事实；只能帮助减少重复探索，不能覆盖用户本轮要求、当前代码、测试或日志。',
     ...blocks
+  ].join('\n');
+}
+
+function buildCrossAgentHandoffInstructions(workspaceRoot: string, nodeId: string, runKind: string): string {
+  const relativeTool = 'resources/tools/solomap-experience.cjs';
+  const skillPath = 'resources/skills/solomap-cross-agent-handoff/SKILL.md';
+  const nodeFilter = nodeId ? ` --node ${JSON.stringify(nodeId)}` : '';
+  return [
+    'SoloMap 跨 Agent 协作入口：',
+    `- 如果本轮是在接续、复核、修复失败运行、跨不同 Agent CLI 协作，或你不确定上一轮到底改了什么，先读取 ${skillPath}，再运行：`,
+    `  node ${relativeTool} handoff --project ${JSON.stringify(workspaceRoot)}${nodeFilter} --limit 3`,
+    `- 需要进一步查看 SQLite 中的结构化历史信号时，用同一工具的 \`summary\`、\`history\`、\`failures\`、\`latest-changes\` 或 \`search\` 子命令；当前运行类型：${runKind || 'unknown'}。`,
+    '- 这些历史信号只能降低重复探索，不能覆盖本轮用户最新要求、当前文件、测试和命令输出。',
+    '- 不要把原始 execution log 全文复制进最终回复；只提炼对用户有帮助的结论、改动、验证和风险。'
   ].join('\n');
 }
 
@@ -8792,6 +9058,7 @@ function buildAgentConversationPrompt(
     ].join('\n'),
     supplementFiles: attachedFiles
   });
+  const crossAgentHandoffInstructions = buildCrossAgentHandoffInstructions(workspaceRoot, node.id || '', 'step');
 
   return [
     '你正在 SoloMap 的一个路线图环节中工作。',
@@ -8819,6 +9086,8 @@ function buildAgentConversationPrompt(
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
+    '',
+    crossAgentHandoffInstructions,
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
@@ -8874,6 +9143,7 @@ function buildRoadmapRevisionPrompt(
     contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
     supplementFiles: attachedFiles
   });
+  const crossAgentHandoffInstructions = buildCrossAgentHandoffInstructions(workspaceRoot, roadmapRevisionId, 'roadmap_revision');
   return [
     '你正在 SoloMap 中调整当前项目路线图。',
     '本轮唯一交付物是根据用户的最新目标，直接更新项目目录中的 `.solopreneur/roadmap.csv`。',
@@ -8889,6 +9159,8 @@ function buildRoadmapRevisionPrompt(
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
+    '',
+    crossAgentHandoffInstructions,
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
@@ -8944,6 +9216,7 @@ function buildSoloConversationPrompt(
     contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
     supplementFiles: attachedFiles
   });
+  const crossAgentHandoffInstructions = buildCrossAgentHandoffInstructions(workspaceRoot, soloConversationId, 'solo');
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -8959,6 +9232,8 @@ function buildSoloConversationPrompt(
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
     ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
+    '',
+    crossAgentHandoffInstructions,
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
