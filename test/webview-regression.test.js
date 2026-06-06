@@ -1232,7 +1232,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: {} }, 'strategyPyramid'), false);
 });
 
-test('strategy pyramid webview renders only unlocked project actions', () => {
+test('strategy pyramid webview renders the paid strategic cockpit without internal mechanics', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -1246,19 +1246,47 @@ test('strategy pyramid webview renders only unlocked project actions', () => {
   };
   const snapshot = {
     generatedAt: '2026-06-05T00:00:00.000Z',
+    confidence: 'medium',
+    stageTitle: 'Build 偏重期',
+    mainJudgment: 'Build 信号明显偏重，继续新增功能会降低商业化验证效率。',
+    strategicAction: '加码核心产品的商业化验证，补上销售与反馈信号。',
+    constraint: '未来 30 天减少新功能建设，把时间转向商业化验证和用户反馈。',
     totalProjects: 1,
     buildCount: 2,
     sellCount: 1,
     learnCount: 1,
     improveCount: 1,
     risks: ['存在失败环节，应先收口再继续加码。'],
+    loops: [
+      { key: 'build', label: 'Build', title: '产品与交付', count: 2, projectNames: ['SoloMap'], judgment: '1 个项目形成 Build 信号' },
+      { key: 'sell', label: 'Sell', title: '收入与市场', count: 1, projectNames: ['SoloMap'], judgment: '1 个项目形成 Sell 信号' },
+      { key: 'learn', label: 'Learn', title: '学习与反馈', count: 1, projectNames: ['SoloMap'], judgment: '1 个项目形成 Learn 信号' },
+      { key: 'improve', label: 'Improve', title: '改进与复利', count: 1, projectNames: ['SoloMap'], judgment: '1 个项目形成 Improve 信号' }
+    ],
+    layers: [
+      { key: 'freedom-brand', title: '自由选择与个人品牌', health: 'watch', signal: '已有核心产品承载信誉积累。', action: '继续把市场反馈沉淀到核心产品。' },
+      { key: 'revenue-system', title: '可复利收入系统', health: 'watch', signal: '1 个收入或市场动作可继续验证。', action: '把销售动作接到明确的升级或付费路径。' },
+      { key: 'market-trust', title: '市场覆盖与信誉', health: 'watch', signal: '1 个学习信号可用于下一轮改进。', action: '把反馈转成下一轮取舍。' },
+      { key: 'ability-compounding', title: '能力系统与产品交付', health: 'strong', signal: '1 项能力正在跨项目复用。', action: '把可复用能力产品化或品牌化。' },
+      { key: 'reality-inventory', title: '现实锚点与投资库存', health: 'strong', signal: '1 个项目进入组合视野。', action: '冻结低复利项目，把注意力留给核心验证。' }
+    ],
+    moves: [
+      { horizon: '未来 30 天', title: '补齐商业化与反馈验证', reason: '当前组合的建设动作多于市场信号。' },
+      { horizon: '本季度', title: '减少低复利维护投入', reason: '组合价值来自复利关系。' }
+    ],
+    abilities: [
+      { name: 'AI 产品编排', projectCount: 2, judgment: '正在跨项目复用' }
+    ],
     projects: [{
       name: 'SoloMap',
       path: '/workspace/solomap',
       type: 'core_product',
       role: '核心产品',
+      loop: 'sell',
       action: '继续当前推进',
       risk: '',
+      evidence: ['2/5 个环节已完成', '当前有推进中的环节'],
+      abilities: ['AI 产品编排'],
       completedNodes: 2,
       failedNodes: 0,
       runningNodes: 1,
@@ -1275,11 +1303,86 @@ test('strategy pyramid webview renders only unlocked project actions', () => {
   assert.match(proHtml, /Sell/);
   assert.match(proHtml, /Learn/);
   assert.match(proHtml, /Improve/);
-  assert.match(proHtml, /查看项目/);
-  assert.match(proHtml, /data-open-project="\/workspace\/solomap"/);
-  assert.doesNotMatch(proHtml, /解锁战略金字塔|升级 Pro|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid/);
+  assert.match(proHtml, /当前战略状态|Build 偏重期/);
+  assert.match(proHtml, /战略动作/);
+  assert.match(proHtml, /边界约束/);
+  assert.match(proHtml, /1-3 个月结构风险/);
+  assert.match(proHtml, /自由选择与个人品牌/);
+  assert.match(proHtml, /可复利收入系统/);
+  assert.match(proHtml, /市场覆盖与信誉/);
+  assert.match(proHtml, /能力系统与产品交付/);
+  assert.match(proHtml, /现实锚点与投资库存/);
+  assert.match(proHtml, /项目组合结构/);
+  assert.match(proHtml, /能力复利/);
+  assert.match(proHtml, /未来 30 天战略动作/);
+  assert.match(proHtml, /项目战略角色/);
+  assert.match(proHtml, /data-project-index="0"/);
+  assert.doesNotMatch(proHtml, /查看项目|data-open-project|解锁战略金字塔|升级 Pro|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid|snapshot|CSV|JSON|内部|配置|组件目的|来自 SoloMap 已确认/);
   assert.doesNotThrow(() => new vm.Script(extractLastScript(proHtml)));
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
+});
+
+test('strategy pyramid snapshot aggregates portfolio signals and writes a reusable global view', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildStrategyPyramidSnapshot = buildStrategyPyramidSnapshot;'
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-strategy-pyramid-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const coreProject = path.join(root, 'solomap');
+  const contentProject = path.join(root, 'content');
+  fs.mkdirSync(path.join(coreProject, '.solopreneur'), { recursive: true });
+  fs.mkdirSync(path.join(contentProject, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(coreProject, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Build Pro cockpit,,产品与 MVP,,,,Completed,,',
+    '2,Sell Pro subscription,,销售与增长,,,,In Progress,,',
+    '3,Learn from paid users,,反馈与学习,,,,Pending,,',
+    '4,Improve onboarding,,改进与规模化,,,,Pending,,'
+  ].join('\n'), 'utf8');
+  fs.writeFileSync(path.join(contentProject, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Publish SEO content,,销售与增长,,,,Pending,,'
+  ].join('\n'), 'utf8');
+  fs.mkdirSync(globalRoot, { recursive: true });
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({
+    schemaVersion: 1,
+    updatedAt: '2026-06-06T00:00:00.000Z',
+    hiddenProjects: [],
+    projects: [
+      { name: 'SoloMap', path: coreProject, type: 'core_product' },
+      { name: 'Content Engine', path: contentProject, type: 'content' }
+    ]
+  }, null, 2), 'utf8');
+
+  const context = {
+    globalState: {
+      get(key) {
+        if (key === 'solopreneur.settings') {
+          return { cliPath: 'agy', language: 'zh', globalPrompt: '', globalDataPath: globalRoot };
+        }
+        return undefined;
+      },
+      update() {
+        return Promise.resolve();
+      }
+    }
+  };
+
+  const snapshot = extensionModule.__buildStrategyPyramidSnapshot(context);
+  const snapshotPath = path.join(globalRoot, 'strategy', 'pyramid-snapshot.json');
+  assert.equal(snapshot.totalProjects, 2);
+  assert.equal(snapshot.stageTitle.length > 0, true);
+  assert.match(snapshot.mainJudgment, /组合|项目|Build|收入|反馈|核心/);
+  assert.match(snapshot.strategicAction, /商业化|核心产品|销售|反馈|收入/);
+  assert.equal(snapshot.layers.length, 5);
+  assert.ok(snapshot.loops.some((loop) => loop.key === 'sell' && loop.count >= 1));
+  assert.ok(snapshot.moves.length >= 2);
+  assert.ok(snapshot.projects.some((project) => project.name === 'SoloMap' && project.role === '核心产品'));
+  assert.ok(fs.existsSync(snapshotPath));
+  const written = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
+  assert.equal(written.totalProjects, 2);
+  assert.equal(written.layers.length, 5);
 });
 
 test('strategy pyramid command blocks free users with a Pro upgrade action', async () => {

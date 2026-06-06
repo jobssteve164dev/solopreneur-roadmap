@@ -3461,49 +3461,121 @@ function getStrategyPyramidWebviewHtml(
   snapshot: StrategyPyramidSnapshot
 ): string {
   const codiconsUri = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
-  const loopCards = [
-    { key: 'build', label: 'Build', title: '产品与能力', count: snapshot.buildCount },
-    { key: 'sell', label: 'Sell', title: '收入与市场', count: snapshot.sellCount },
-    { key: 'learn', label: 'Learn', title: '学习与反馈', count: snapshot.learnCount },
-    { key: 'improve', label: 'Improve', title: '下一次改进', count: snapshot.improveCount }
-  ];
+  const loopCards = (snapshot.loops && snapshot.loops.length ? snapshot.loops : [
+    { key: 'build' as MethodologyStageKey, label: 'Build', title: '产品与交付', count: snapshot.buildCount, projectNames: [], judgment: 'Build 信号' },
+    { key: 'sell' as MethodologyStageKey, label: 'Sell', title: '收入与市场', count: snapshot.sellCount, projectNames: [], judgment: 'Sell 信号' },
+    { key: 'learn' as MethodologyStageKey, label: 'Learn', title: '学习与反馈', count: snapshot.learnCount, projectNames: [], judgment: 'Learn 信号' },
+    { key: 'improve' as MethodologyStageKey, label: 'Improve', title: '改进与复利', count: snapshot.improveCount, projectNames: [], judgment: 'Improve 信号' }
+  ]);
+  const stageTitle = snapshot.stageTitle || '组合判断期';
+  const mainJudgment = snapshot.mainJudgment || '从项目组合判断现在该加码、收缩、暂停、转向，还是孵化新方向。';
+  const strategicAction = snapshot.strategicAction || '选择一个项目补上最缺的市场或反馈信号。';
+  const constraint = snapshot.constraint || '不要让项目数量替代真实验证。';
   const topProjects = snapshot.projects.slice(0, 12);
-  const riskItems = snapshot.risks.length ? snapshot.risks : ['当前组合没有明显阻塞，选择一个项目继续推进。'];
-  const projectRows = topProjects.map((project) => `
-    <article class="project-row">
-      <div class="project-main">
-        <div class="project-title">${strategyEscapeHtml(project.name)}</div>
-        <div class="project-meta">${strategyEscapeHtml(project.role)} · ${strategyEscapeHtml(project.action)}</div>
+  const riskItems = snapshot.risks.length ? snapshot.risks : ['当前组合没有明显结构阻塞，可以围绕核心产品继续验证收入和反馈。'];
+  const layers = snapshot.layers && snapshot.layers.length ? snapshot.layers : [];
+  const moves = snapshot.moves && snapshot.moves.length ? snapshot.moves : [];
+  const abilities = snapshot.abilities && snapshot.abilities.length ? snapshot.abilities : [];
+  const projectRoleData = topProjects.map((project) => ({
+    name: project.name,
+    role: project.role,
+    action: project.action,
+    risk: project.risk || '暂无明显结构风险',
+    progressPercent: project.progressPercent,
+    evidence: project.evidence && project.evidence.length ? project.evidence : ['等待更多推进信号'],
+    abilities: project.abilities && project.abilities.length ? project.abilities : ['暂未识别可复用能力']
+  }));
+  const projectRoleJson = JSON.stringify(projectRoleData).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
+  const layerRows = layers.map((layer) => `
+    <article class="layer-card ${strategyEscapeHtml(layer.health)}">
+      <div class="layer-top">
+        <div class="layer-title">${strategyEscapeHtml(layer.title)}</div>
+        <span>${layer.health === 'strong' ? '健康' : layer.health === 'watch' ? '观察' : '风险'}</span>
       </div>
+      <p>${strategyEscapeHtml(layer.signal)}</p>
+      <strong>${strategyEscapeHtml(layer.action)}</strong>
+    </article>
+  `).join('');
+  const projectRows = topProjects.map((project, index) => `
+    <article class="project-row">
+      <button type="button" class="project-select" data-project-index="${index}">
+        <span class="project-title">${strategyEscapeHtml(project.name)}</span>
+        <span class="project-meta">${strategyEscapeHtml(project.role)} · ${strategyEscapeHtml(project.action)}</span>
+      </button>
       <div class="project-progress" aria-label="${strategyEscapeHtml(project.progressPercent)}%">
         <span style="width:${Math.max(0, Math.min(100, project.progressPercent))}%"></span>
       </div>
       <div class="project-risk">${project.risk ? strategyEscapeHtml(project.risk) : '可继续推进'}</div>
-      <button type="button" data-open-project="${strategyEscapeHtml(project.path)}"><span class="codicon codicon-graph"></span>查看项目</button>
+    </article>
+  `).join('');
+  const abilityRows = abilities.map((ability) => `
+    <div class="ability-row">
+      <strong>${strategyEscapeHtml(ability.name)}</strong>
+      <span>${strategyEscapeHtml(ability.projectCount)} 个项目 · ${strategyEscapeHtml(ability.judgment)}</span>
+    </div>
+  `).join('');
+  const moveRows = moves.map((move, index) => `
+    <article class="move-row">
+      <span>${index + 1}</span>
+      <div>
+        <div class="move-horizon">${strategyEscapeHtml(move.horizon)}</div>
+        <strong>${strategyEscapeHtml(move.title)}</strong>
+        <p>${strategyEscapeHtml(move.reason)}</p>
+      </div>
     </article>
   `).join('');
 
   const body = `
-    <section class="pyramid-band">
+    <section class="judgment-panel">
+      <div class="state-pill">当前战略状态：${strategyEscapeHtml(stageTitle)}</div>
+      <h2>${strategyEscapeHtml(mainJudgment)}</h2>
+      <div class="decision-grid">
+        <article>
+          <span>战略动作</span>
+          <strong>${strategyEscapeHtml(strategicAction)}</strong>
+        </article>
+        <article>
+          <span>边界约束</span>
+          <strong>${strategyEscapeHtml(constraint)}</strong>
+        </article>
+      </div>
+    </section>
+    <section class="signal-grid">
       ${loopCards.map((card, index) => `
-        <div class="pyramid-layer layer-${strategyEscapeHtml(card.key)}" style="--layer:${index + 1}">
-          <div>
-            <div class="layer-label">${strategyEscapeHtml(card.label)}</div>
-            <div class="layer-title">${strategyEscapeHtml(card.title)}</div>
-          </div>
+        <article class="loop-card layer-${strategyEscapeHtml(card.key)}" style="--layer:${index + 1}">
+          <span>${strategyEscapeHtml(card.label)}</span>
+          <div>${strategyEscapeHtml(card.title)}</div>
           <strong>${card.count}</strong>
-        </div>
+          <p>${strategyEscapeHtml(card.judgment)}</p>
+        </article>
       `).join('')}
+    </section>
+    <section class="pyramid-band" aria-label="五层战略结构">
+      ${layerRows || '<div class="empty-state">等待更多项目推进信号后形成五层判断。</div>'}
     </section>
     <section class="workbench">
       <div class="risk-panel">
-        <div class="section-title">先看风险</div>
+        <div class="section-title">1-3 个月结构风险</div>
         ${riskItems.map((risk) => `<div class="risk-item"><span class="codicon codicon-warning"></span>${strategyEscapeHtml(risk)}</div>`).join('')}
       </div>
       <div class="project-panel">
-        <div class="section-title">下一步动作</div>
+        <div class="section-title">项目组合结构</div>
         ${projectRows || '<div class="empty-state">还没有已登记项目。先在侧边栏添加项目。</div>'}
       </div>
+    </section>
+    <section class="insight-grid">
+      <div class="ability-panel">
+        <div class="section-title">能力复利</div>
+        ${abilityRows || '<div class="empty-state">暂未识别跨项目复用能力。先让核心项目沉淀一个可复用能力。</div>'}
+      </div>
+      <div class="move-panel">
+        <div class="section-title">未来 30 天战略动作</div>
+        ${moveRows || '<div class="empty-state">等待更多项目推进信号后给出动作建议。</div>'}
+      </div>
+      <aside class="role-panel" id="project-role-panel">
+        <div class="section-title">项目战略角色</div>
+        <div class="empty-state">选择一个项目，先看它在一人公司系统里的角色。</div>
+      </aside>
     </section>
   `;
 
@@ -3524,6 +3596,9 @@ function getStrategyPyramidWebviewHtml(
       --border: var(--vscode-panel-border);
       --accent: var(--vscode-button-background);
       --accent-fg: var(--vscode-button-foreground);
+      --success: var(--vscode-testing-iconPassed, #2ea043);
+      --warn: var(--vscode-editorWarning-foreground, #d29922);
+      --danger: var(--vscode-testing-iconFailed, #f85149);
     }
     * { box-sizing: border-box; }
     body {
@@ -3555,6 +3630,57 @@ function getStrategyPyramidWebviewHtml(
       font: inherit;
       white-space: nowrap;
     }
+    .judgment-panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px;
+      background: var(--panel);
+      margin-bottom: 14px;
+    }
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 10px;
+    }
+    h2 { margin: 0; font-size: 22px; line-height: 1.35; letter-spacing: 0; }
+    .decision-grid, .signal-grid, .insight-grid {
+      display: grid;
+      gap: 12px;
+    }
+    .decision-grid {
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      margin-top: 16px;
+    }
+    .decision-grid article, .loop-card, .ability-panel, .move-panel, .role-panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 14px;
+    }
+    .decision-grid span, .loop-card span, .move-horizon {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .decision-grid strong, .loop-card strong { display: block; font-size: 16px; line-height: 1.4; }
+    .signal-grid {
+      grid-template-columns: repeat(4, minmax(130px, 1fr));
+      margin-bottom: 14px;
+    }
+    .loop-card div { font-weight: 650; margin-bottom: 10px; }
+    .loop-card strong { font-size: 28px; margin-bottom: 8px; }
+    .loop-card p, .layer-card p, .move-row p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
     .stats {
       display: grid;
       grid-template-columns: repeat(5, minmax(110px, 1fr));
@@ -3571,29 +3697,42 @@ function getStrategyPyramidWebviewHtml(
     .stat strong { font-size: 22px; }
     .pyramid-band {
       display: grid;
-      grid-template-columns: 1fr;
-      gap: 8px;
+      grid-template-columns: repeat(5, minmax(140px, 1fr));
+      gap: 10px;
       margin-bottom: 18px;
     }
-    .pyramid-layer {
-      min-height: 72px;
-      width: calc(100% - (4 - var(--layer)) * 7%);
-      margin: 0 auto;
+    .layer-card {
+      min-height: 142px;
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 14px 18px;
+      padding: 14px;
       background: var(--panel);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
     }
-    .layer-label { color: var(--muted); font-size: 12px; }
-    .layer-title { margin-top: 4px; font-size: 16px; font-weight: 650; }
-    .pyramid-layer strong { font-size: 26px; }
+    .layer-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .layer-top span {
+      flex: 0 0 auto;
+      height: 22px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .layer-card.strong .layer-top span { color: var(--success); }
+    .layer-card.watch .layer-top span { color: var(--warn); }
+    .layer-card.risk .layer-top span { color: var(--danger); }
+    .layer-title { font-size: 15px; font-weight: 650; line-height: 1.35; }
+    .layer-card strong { display: block; margin-top: 10px; font-size: 12px; line-height: 1.45; }
     .workbench {
       display: grid;
       grid-template-columns: minmax(220px, 0.8fr) minmax(420px, 1.8fr);
       gap: 14px;
+      margin-bottom: 14px;
     }
     .risk-panel, .project-panel {
       border: 1px solid var(--border);
@@ -3614,13 +3753,23 @@ function getStrategyPyramidWebviewHtml(
     .risk-item:first-of-type { border-top: 0; }
     .project-row {
       display: grid;
-      grid-template-columns: minmax(180px, 1.4fr) minmax(100px, 0.8fr) minmax(110px, 0.8fr) auto;
+      grid-template-columns: minmax(180px, 1.4fr) minmax(100px, 0.8fr) minmax(110px, 0.8fr);
       align-items: center;
       gap: 12px;
       padding: 12px 0;
       border-top: 1px solid var(--border);
     }
     .project-row:first-of-type { border-top: 0; }
+    .project-select {
+      display: block;
+      width: 100%;
+      text-align: left;
+      border: 0;
+      background: transparent;
+      color: var(--fg);
+      padding: 0;
+      white-space: normal;
+    }
     .project-title { font-weight: 650; margin-bottom: 4px; }
     .project-meta, .project-risk, .empty-state { color: var(--muted); font-size: 12px; }
     .project-progress {
@@ -3634,13 +3783,52 @@ function getStrategyPyramidWebviewHtml(
       height: 100%;
       background: var(--accent);
     }
+    .insight-grid {
+      grid-template-columns: minmax(220px, .8fr) minmax(300px, 1fr) minmax(280px, 1fr);
+      align-items: start;
+    }
+    .ability-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 0;
+      border-top: 1px solid var(--border);
+    }
+    .ability-row:first-of-type { border-top: 0; }
+    .ability-row span, .role-evidence li {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .move-row {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 10px;
+      padding: 12px 0;
+      border-top: 1px solid var(--border);
+    }
+    .move-row:first-of-type { border-top: 0; padding-top: 0; }
+    .move-row > span {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .role-name { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
+    .role-line { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+    .role-evidence { margin: 10px 0 0; padding-left: 18px; }
     @media (max-width: 760px) {
       .shell { padding: 18px; }
       header { align-items: stretch; flex-direction: column; }
       .stats { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .decision-grid, .signal-grid, .pyramid-band, .insight-grid { grid-template-columns: 1fr; }
       .workbench { grid-template-columns: 1fr; }
       .project-row { grid-template-columns: 1fr; }
-      .pyramid-layer { width: 100%; }
     }
   </style>
 </head>
@@ -3649,7 +3837,7 @@ function getStrategyPyramidWebviewHtml(
     <header>
       <div>
         <h1>战略金字塔</h1>
-        <div class="sub">从项目组合判断现在该推进、收口、学习还是改进。</div>
+        <div class="sub">判断多个项目、能力、收入和市场信誉是否正在形成一套可复利系统。</div>
       </div>
       <button type="button" id="btn-refresh"><span class="codicon codicon-refresh"></span>刷新</button>
     </header>
@@ -3661,14 +3849,38 @@ function getStrategyPyramidWebviewHtml(
   </main>
   <script>
     const vscode = acquireVsCodeApi();
+    const projectRoles = ${projectRoleJson};
+    const rolePanel = document.getElementById('project-role-panel');
+    function html(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+    function renderRole(index) {
+      const project = projectRoles[index];
+      if (!project || !rolePanel) return;
+      rolePanel.innerHTML = [
+        '<div class="section-title">项目战略角色</div>',
+        '<div class="role-name">' + html(project.name) + '</div>',
+        '<div class="role-line">' + html(project.role) + ' · ' + html(project.action) + '</div>',
+        '<div class="role-line">结构风险：' + html(project.risk) + '</div>',
+        '<div class="project-progress" aria-label="' + project.progressPercent + '%"><span style="width:' + Math.max(0, Math.min(100, project.progressPercent)) + '%"></span></div>',
+        '<ul class="role-evidence">' + project.evidence.map((item) => '<li>' + html(item) + '</li>').join('') + '</ul>',
+        '<div class="role-line">可复用能力：' + project.abilities.map(html).join(' / ') + '</div>'
+      ].join('');
+    }
     document.getElementById('btn-refresh')?.addEventListener('click', () => {
       vscode.postMessage({ command: 'refreshStrategyPyramid' });
     });
-    document.querySelectorAll('[data-open-project]').forEach((button) => {
+    document.querySelectorAll('[data-project-index]').forEach((button) => {
       button.addEventListener('click', () => {
-        vscode.postMessage({ command: 'openProjectRoadmap', projectPath: button.getAttribute('data-open-project') || '' });
+        renderRole(Number(button.getAttribute('data-project-index') || '0'));
       });
     });
+    renderRole(0);
   </script>
 </body>
 </html>`;
