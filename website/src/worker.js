@@ -917,64 +917,280 @@ function buildDeviceGrantPage(grant) {
 </html>`;
 }
 
+function getProPageCopy(locale) {
+  if (locale === "en") {
+    return {
+      metaTitle: "SoloMap Pro - Strategy cockpit for solo founders",
+      metaDescription: "SoloMap Pro Early Access unlocks the strategy cockpit for indie developers running multiple AI-built projects.",
+      eyebrow: "Pro Early Access for indie builders",
+      title: "Stop treating every project like the same next task.",
+      lead: "SoloMap Pro is for the moment your AI-built projects stop being a folder list and start becoming a one-person company. See where your time, products, capabilities, revenue, and market trust are compounding.",
+      primaryCta: "Join Pro Early Access",
+      secondaryCta: "Install Free first",
+      bullets: [
+        ["Make sharper tradeoffs", "Spot which projects deserve more time, which should pause, and which are only creating maintenance drag."],
+        ["Turn execution into evidence", "Move beyond whether an agent run ended and see whether the work is becoming reliable progress."],
+        ["Build a compounding system", "Connect product work, distribution, learning, reusable capability, and revenue into one operating view."]
+      ],
+      offerLabel: "Early Access",
+      price: "$29",
+      priceSuffix: "/ year",
+      offerCopy: "Lock in the first Pro price while the strategy cockpit is being shaped with early users.",
+      offerNote: "Free keeps the local roadmap, today plan, Agent runs, and basic history. Pro unlocks the company-level cockpit.",
+      previewTitle: "What Pro unlocks now",
+      previewLead: "The first paid gate is the Strategy Pyramid: a company-level view for solo founders, not another task dashboard.",
+      pyramid: [
+        ["Freedom & brand", "Are you gaining optionality?"],
+        ["Compounding revenue", "Are income sources getting healthier?"],
+        ["Market trust", "Are discovery and feedback signals improving?"],
+        ["Capability compounding", "Which skills now pay off across projects?"],
+        ["Strategic inventory", "Which bets deserve the next 30 days?"]
+      ],
+      comparisonTitle: "Free vs Pro",
+      comparisonLead: "Free keeps the core SoloMap habit. Pro is for people who need operating judgment across projects.",
+      planHeader: ["Capability", "Free", "Pro Early Access"],
+      plans: [
+        ["Project movement", "Single-project roadmap, today plan, local Agent runs, basic execution history.", "Everything in Free, plus company-level project portfolio context."],
+        ["Strategic view", "Know what to do next inside one project.", "See whether projects, capabilities, market trust, and revenue reinforce each other."],
+        ["Execution confidence", "Know whether the latest run ended, failed, or needs manual continuation.", "Upcoming execution trace and Flow: evidence-backed loops that reduce false completion risk."],
+        ["Portfolio decisions", "Manual project switching and local project summaries.", "Multi-project scoring, portfolio health, ability compounding, and structural risk signals."],
+        ["Roadmap influence", "Use the public Free workflow and send feedback.", "Help shape the Pro roadmap while keeping the early access price."]
+      ],
+      roadmapTitle: "What Pro is growing into",
+      roadmapLead: "These are the planned Pro directions from the SoloMap roadmap. They are shown as product direction, not as hidden configuration users must manage.",
+      roadmap: [
+        ["Available first", "Strategy Pyramid", "A one-person-company cockpit for portfolio structure, capability compounding, market trust, and strategic tradeoffs."],
+        ["Next Pro pillar", "Execution trace", "A readable account of what the agent tried, what evidence exists, and where completion is still weak."],
+        ["Flagship Pro mode", "Flow", "Give SoloMap a goal and let it plan, execute, verify, and roll forward through multiple evidence-backed loops."]
+      ],
+      trustTitle: "Still local-first.",
+      trustCopy: "Your project roadmap, Agent records, and local memory stay in your workspace. Pro only checks whether you can unlock paid capabilities.",
+      trustItems: [
+        "No hosted SoloMap project database is required for the core workflow.",
+        "You keep using the Agent CLI and workspace you already trust.",
+        "Free remains useful; Pro is for sharper operating judgment and more reliable execution."
+      ],
+      finalTitle: "If SoloMap already helps you reopen a project without losing the thread, Pro is the next step.",
+      finalLead: "Early Access is intentionally simple: one annual price, one clear paid capability today, and a roadmap shaped around serious solo builders."
+    };
+  }
+  return {
+    metaTitle: "SoloMap Pro - 一人公司的战略驾驶舱",
+    metaDescription: "SoloMap Pro Early Access 为使用 AI Agent 做产品的独立开发者解锁战略金字塔、一人公司经营判断和后续 Flow 能力。",
+    eyebrow: "给独立开发者的 Pro Early Access",
+    title: "别再把每个项目都当成同一个下一步任务。",
+    lead: "当你不只是在推进一个项目，而是在经营多个 AI Agent 项目时，SoloMap Pro 帮你看清时间、项目、能力、收入和市场信誉是否正在形成一套可复利系统。",
+    primaryCta: "加入 Pro Early Access",
+    secondaryCta: "先安装 Free",
+    bullets: [
+      ["更果断地取舍", "看清哪些项目该加码，哪些该暂停，哪些只是在制造维护负担。"],
+      ["让执行变成证据", "不只看 Agent 是否跑完，而是看这次工作是否真的支撑路线图继续推进。"],
+      ["经营一套复利系统", "把产品、分发、学习、可复用能力和收入结构放到同一个判断面里。"]
+    ],
+    offerLabel: "Early Access",
+    price: "$29",
+    priceSuffix: "/ 年",
+    offerCopy: "用首批价格解锁战略驾驶舱，并参与塑造 SoloMap Pro 的后续能力。",
+    offerNote: "Free 保留本地路线图、今日安排、Agent 推进和基础历史。Pro 解锁一人公司层面的经营判断。",
+    previewTitle: "现在 Pro 解锁什么",
+    previewLead: "首个付费验收石是战略金字塔：它不是任务看板，而是一人公司的战略驾驶舱。",
+    pyramid: [
+      ["自由与品牌", "你是否在获得更多选择权？"],
+      ["可复利收入", "收入来源是否更健康？"],
+      ["市场信誉", "发现渠道和反馈是否在变强？"],
+      ["能力复利", "哪些能力正在跨项目产生回报？"],
+      ["战略库存", "未来 30 天该把时间押在哪里？"]
+    ],
+    comparisonTitle: "Free 与 Pro 的区别",
+    comparisonLead: "Free 让你形成 SoloMap 使用习惯；Pro 面向已经需要跨项目经营判断的人。",
+    planHeader: ["能力", "Free", "Pro Early Access"],
+    plans: [
+      ["项目推进", "单项目路线图、今日安排、本地 Agent 推进、基础执行历史。", "包含 Free 全部能力，并增加一人公司层面的项目组合上下文。"],
+      ["战略视图", "知道一个项目里下一步该做什么。", "判断项目、能力、市场信誉和收入结构是否彼此增强。"],
+      ["执行可信度", "知道最近一次运行是否结束、失败，是否需要手动继续。", "后续解锁执行轨迹与 Flow：用证据链降低 Agent 假完成风险。"],
+      ["组合决策", "手动切换项目，查看本地项目摘要。", "多项目战略评分、项目组合健康度、能力复利和结构性风险信号。"],
+      ["路线图共创", "使用公开 Free 主路径并提交反馈。", "参与塑造 Pro 路线图，同时锁定 Early Access 价格。"]
+    ],
+    roadmapTitle: "Pro 接下来会长成什么",
+    roadmapLead: "这些来自 SoloMap 已确认的功能规划。页面只表达用户能获得的结果，不要求用户理解内部配置。",
+    roadmap: [
+        ["已优先开放", "战略金字塔", "面向一人公司的经营驾驶舱，覆盖项目组合、能力复利、市场信誉和战略取舍。"],
+        ["下一根支柱", "执行轨迹", "让你看懂 Agent 做了什么、证据在哪里、哪里还不够支撑完成判断。"],
+        ["旗舰 Pro 模式", "Flow", "给 SoloMap 一个目标，让它规划、执行、复核并基于证据滚动多个执行循环。"]
+    ],
+    trustTitle: "仍然本地优先。",
+    trustCopy: "你的项目路线图、Agent 记录和本地经验库仍留在工作区。Pro 只验证你是否可以解锁付费能力。",
+    trustItems: [
+      "核心工作流不需要托管的 SoloMap 项目数据库。",
+      "你继续使用自己信任的 Agent CLI 和本地工作区。",
+      "Free 仍然可用；Pro 解决更清晰的经营判断和更可靠的执行。"
+    ],
+    finalTitle: "如果 SoloMap 已经帮你重新打开项目时不丢线索，Pro 就是下一步。",
+    finalLead: "Early Access 只保留一个年付价格、一个当前明确解锁的能力，以及一条面向认真独立开发者的 Pro 路线图。"
+  };
+}
+
+function renderProBullets(items) {
+  return items.map(([title, copy]) => `<article class="pro-bullet">
+            <strong>${escapeHtml(title)}</strong>
+            <p>${escapeHtml(copy)}</p>
+          </article>`).join("");
+}
+
+function renderPyramidLayers(items) {
+  return items.map(([title, copy]) => `<div class="pyramid-layer">
+            <strong>${escapeHtml(title)}</strong>
+            <span>${escapeHtml(copy)}</span>
+          </div>`).join("");
+}
+
+function renderPlanRows(copy) {
+  const header = `<div class="plan-row plan-head">
+          <div>${escapeHtml(copy.planHeader[0])}</div>
+          <div>${escapeHtml(copy.planHeader[1])}</div>
+          <div>${escapeHtml(copy.planHeader[2])}</div>
+        </div>`;
+  const rows = copy.plans.map(([name, free, pro]) => `<div class="plan-row">
+          <div><strong>${escapeHtml(name)}</strong></div>
+          <div><p>${escapeHtml(free)}</p></div>
+          <div><p>${escapeHtml(pro)}</p></div>
+        </div>`).join("");
+  return `${header}${rows}`;
+}
+
+function renderProRoadmap(items) {
+  return items.map(([phase, title, copy], index) => `<article class="timeline-item${index === 0 ? " current" : ""}">
+            <span class="pro-offer-label">${escapeHtml(phase)}</span>
+            <strong>${escapeHtml(title)}</strong>
+            <p>${escapeHtml(copy)}</p>
+          </article>`).join("");
+}
+
 async function buildProSubscriptionPage(request, env) {
   const url = new URL(request.url);
   const origin = env.SITE_ORIGIN || url.origin;
+  const locale = url.pathname.startsWith("/zh") ? "zh" : "en";
+  const t = content[locale];
+  const copy = getProPageCopy(locale);
+  const pagePath = locale === "zh" ? "/zh/pro" : "/pro";
+  const alternatePath = locale === "zh" ? "/pro" : "/zh/pro";
   const mode = normalizeAuthMode(url.searchParams.get("mode"));
   const callback = String(url.searchParams.get("callback") || "").trim();
   const authNonce = normalizeAuthNonce(url.searchParams.get("auth_nonce"));
-  const upgradeState = await createUpgradeState(env, {
-    mode,
-    callback,
-    authNonce,
-    source: url.searchParams.get("source") || "web"
-  });
+  let upgradeState = "";
+  try {
+    upgradeState = await createUpgradeState(env, {
+      mode,
+      callback,
+      authNonce,
+      source: url.searchParams.get("source") || "web"
+    });
+  } catch (_error) {
+    upgradeState = "";
+  }
   const ctaHref = upgradeState
     ? `/api/passport/start?upgrade_state=${encodeURIComponent(upgradeState)}`
     : "/api/passport/start";
+  const installHref = `${t.homePath}#install`;
   return `<!doctype html>
-<html lang="zh">
+<html lang="${t.lang}">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SoloMap Pro</title>
-  <style>
-    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #101417; color: #f6f0e8; }
-    main { width: min(1040px, calc(100vw - 32px)); margin: 0 auto; padding: 56px 0; }
-    .hero { display: grid; grid-template-columns: minmax(0, 1.1fr) 340px; gap: 28px; align-items: start; }
-    h1 { margin: 0 0 16px; font-size: clamp(36px, 6vw, 68px); line-height: 0.96; letter-spacing: 0; }
-    p { color: #c9d0cf; line-height: 1.65; font-size: 17px; }
-    .panel { border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 22px; background: rgba(255,255,255,.04); }
-    .price { font-size: 42px; font-weight: 800; margin: 10px 0; }
-    .button { display: inline-flex; justify-content: center; width: 100%; box-sizing: border-box; padding: 13px 18px; border-radius: 7px; background: #f4c542; color: #15110a; font-weight: 750; text-decoration: none; }
-    .muted { font-size: 13px; color: #95a09e; margin-top: 12px; }
-    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 28px; }
-    .card { border: 1px solid rgba(255,255,255,.1); border-radius: 8px; padding: 18px; background: rgba(255,255,255,.035); }
-    .card strong { display: block; margin-bottom: 8px; }
-    @media (max-width: 800px) { .hero, .grid { grid-template-columns: 1fr; } main { padding-top: 32px; } }
-  </style>
+  ${buildHead(
+    { ...t, meta: { ...t.meta, title: copy.metaTitle, description: copy.metaDescription, ogDescription: copy.metaDescription } },
+    origin,
+    pagePath,
+    alternatePath
+  )}
+  ${buildStyles()}
 </head>
 <body>
-  <main>
+  ${buildHeader(t, locale, pagePath)}
+  <main class="pro-page">
     <section class="hero">
-      <div>
-        <h1>SoloMap Pro</h1>
-        <p>解锁战略金字塔视图，把多个项目的方向、优先级和下一步动作放到同一个判断面里。</p>
-        <div class="grid">
-          <div class="card"><strong>战略金字塔</strong><span>看清哪个项目该继续、暂停或加速。</span></div>
-          <div class="card"><strong>优先级压缩</strong><span>把分散路线图收束成下一步动作。</span></div>
-          <div class="card"><strong>Pro 授权</strong><span>付款后通过 Passport 授权回到插件。</span></div>
+      <div class="shell pro-hero-grid">
+        <div>
+          <div class="eyebrow">${escapeHtml(copy.eyebrow)}</div>
+          <h1>${escapeHtml(copy.title)}</h1>
+          <p class="pro-hero-copy">${escapeHtml(copy.lead)}</p>
+          <div class="cta-row">
+            <a class="button primary" href="${escapeHtml(ctaHref)}">${escapeHtml(copy.primaryCta)}</a>
+            <a class="button ghost" href="${escapeHtml(installHref)}">${escapeHtml(copy.secondaryCta)}</a>
+          </div>
+          <div class="pro-bullets">
+            ${renderProBullets(copy.bullets)}
+          </div>
+        </div>
+        <aside class="pro-offer" aria-label="${escapeHtml(copy.offerLabel)}">
+          <span class="pro-offer-label">${escapeHtml(copy.offerLabel)}</span>
+          <div class="pro-price">${escapeHtml(copy.price)} <span>${escapeHtml(copy.priceSuffix)}</span></div>
+          <p>${escapeHtml(copy.offerCopy)}</p>
+          <a class="button primary" href="${escapeHtml(ctaHref)}">${escapeHtml(copy.primaryCta)}</a>
+          <span class="pro-note">${escapeHtml(copy.offerNote)}</span>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell answer-block">
+        <div class="pro-preview">
+          <h2>${escapeHtml(copy.previewTitle)}</h2>
+          <p class="pro-hero-copy">${escapeHtml(copy.previewLead)}</p>
+        </div>
+        <div class="pyramid-stack" aria-label="${escapeHtml(copy.previewTitle)}">
+          ${renderPyramidLayers(copy.pyramid)}
         </div>
       </div>
-      <aside class="panel">
-        <span>Early access</span>
-        <div class="price">$29 / year</div>
-        <p>适合已经在用 SoloMap 推进真实项目、需要更清晰组合判断的独立开发者。</p>
-        <a class="button" href="${escapeHtml(ctaHref)}">升级 Pro</a>
-        <div class="muted">登录、付款和授权由 Passport 承接。付款后会回到插件或显示授权码。</div>
-      </aside>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="section-head">
+          <h2>${escapeHtml(copy.comparisonTitle)}</h2>
+          <p>${escapeHtml(copy.comparisonLead)}</p>
+        </div>
+        <div class="plan-table">
+          ${renderPlanRows(copy)}
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="section-head">
+          <h2>${escapeHtml(copy.roadmapTitle)}</h2>
+          <p>${escapeHtml(copy.roadmapLead)}</p>
+        </div>
+        <div class="pro-roadmap">
+          ${renderProRoadmap(copy.roadmap)}
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell pro-trust">
+        <div class="pro-trust-panel">
+          <h2>${escapeHtml(copy.trustTitle)}</h2>
+          <p>${escapeHtml(copy.trustCopy)}</p>
+        </div>
+        <div class="trust-list">
+          ${renderListItems(copy.trustItems, "div")}
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell pro-final">
+        <div>
+          <h2>${escapeHtml(copy.finalTitle)}</h2>
+          <p class="pro-hero-copy">${escapeHtml(copy.finalLead)}</p>
+        </div>
+        <div>
+          <a class="button primary" href="${escapeHtml(ctaHref)}">${escapeHtml(copy.primaryCta)}</a>
+        </div>
+      </div>
     </section>
   </main>
+  ${buildFooter(t)}
 </body>
 </html>`;
 }
@@ -1891,6 +2107,185 @@ function buildStyles() {
       margin: 10px 0 14px;
       letter-spacing: 0;
     }
+    .pro-page .hero {
+      min-height: auto;
+      padding: 74px 0 42px;
+    }
+    .pro-hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 0.62fr) minmax(330px, 0.38fr);
+      gap: 28px;
+      align-items: start;
+    }
+    .pro-hero-copy {
+      margin: 20px 0 0;
+      max-width: 720px;
+      color: var(--soft);
+      font-size: 20px;
+    }
+    .pro-bullets {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 26px;
+    }
+    .pro-bullet {
+      min-height: 120px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .pro-bullet strong,
+    .timeline-item strong,
+    .plan-row strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--ink);
+    }
+    .pro-bullet p,
+    .timeline-item p,
+    .plan-row p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+    .pro-offer {
+      border: 1px solid rgba(239, 62, 70, 0.46);
+      border-radius: 8px;
+      padding: 26px;
+      background: rgba(239, 62, 70, 0.08);
+      position: sticky;
+      top: 92px;
+    }
+    .pro-offer-label {
+      display: inline-flex;
+      width: fit-content;
+      border: 1px solid rgba(246, 240, 232, 0.22);
+      border-radius: 999px;
+      padding: 7px 10px;
+      color: var(--soft);
+      font-size: 13px;
+      font-weight: 760;
+    }
+    .pro-price {
+      margin: 12px 0 8px;
+      font-size: 52px;
+      line-height: 1;
+      font-weight: 850;
+      letter-spacing: 0;
+    }
+    .pro-price span {
+      font-size: 18px;
+      color: var(--muted);
+      font-weight: 680;
+    }
+    .pro-offer p {
+      color: var(--soft);
+      margin: 0 0 16px;
+    }
+    .pro-note {
+      display: block;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .pro-preview {
+      border: 1px solid rgba(73, 214, 208, 0.34);
+      border-radius: 8px;
+      padding: 22px;
+      background: rgba(73, 214, 208, 0.07);
+    }
+    .pyramid-stack {
+      display: grid;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    .pyramid-layer {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 13px 15px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .pyramid-layer:nth-child(1) { width: 58%; margin: 0 auto; border-color: rgba(239, 62, 70, 0.48); }
+    .pyramid-layer:nth-child(2) { width: 72%; margin: 0 auto; }
+    .pyramid-layer:nth-child(3) { width: 84%; margin: 0 auto; }
+    .pyramid-layer:nth-child(4) { width: 94%; margin: 0 auto; }
+    .pyramid-layer:nth-child(5) { width: 100%; }
+    .pyramid-layer strong {
+      display: block;
+      color: var(--ink);
+      font-size: 14px;
+    }
+    .pyramid-layer span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .plan-table {
+      display: grid;
+      gap: 10px;
+    }
+    .plan-row {
+      display: grid;
+      grid-template-columns: 180px minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .plan-row > div {
+      padding: 16px;
+      border-left: 1px solid var(--line);
+    }
+    .plan-row > div:first-child {
+      border-left: 0;
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .plan-head {
+      color: var(--ink);
+      font-weight: 800;
+    }
+    .pro-roadmap {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .timeline-item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .timeline-item.current {
+      border-color: rgba(165, 214, 109, 0.42);
+      background: rgba(165, 214, 109, 0.07);
+    }
+    .pro-trust {
+      display: grid;
+      grid-template-columns: minmax(0, 0.5fr) minmax(0, 0.5fr);
+      gap: 14px;
+      align-items: stretch;
+    }
+    .pro-trust-panel {
+      border: 1px solid rgba(165, 214, 109, 0.34);
+      border-radius: 8px;
+      padding: 24px;
+      background: rgba(165, 214, 109, 0.07);
+    }
+    .pro-final {
+      display: grid;
+      grid-template-columns: minmax(0, 0.62fr) minmax(300px, 0.38fr);
+      gap: 16px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 28px;
+      background: #171411;
+    }
     .feature-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2033,10 +2428,13 @@ function buildStyles() {
       .links a:not(.install-link):not(.language-link) { display: none; }
       .hero { min-height: auto; padding-top: 44px; }
       .hero-grid,
+      .pro-hero-grid,
       .section-head,
       .trust-band,
       .answer-block,
       .pro,
+      .pro-trust,
+      .pro-final,
       .install-panel {
         grid-template-columns: 1fr;
       }
@@ -2045,9 +2443,19 @@ function buildStyles() {
       .docs-grid,
       .docs-body,
       .faq-list,
-      .feature-list {
+      .feature-list,
+      .pro-bullets,
+      .pro-roadmap {
         grid-template-columns: 1fr;
       }
+      .pro-offer { position: static; }
+      .plan-row { grid-template-columns: 1fr; }
+      .plan-row > div,
+      .plan-row > div:first-child {
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }
+      .plan-row > div:first-child { border-top: 0; }
       .product-preview { min-height: 520px; }
       .preview-body { grid-template-columns: 1fr; }
       .preview-side { display: none; }
@@ -2275,6 +2683,8 @@ function buildFooter(t) {
 }
 
 function alternatePathFor(pathname, locale) {
+  if (pathname === "/pro") return "/zh/pro";
+  if (pathname === "/zh/pro") return "/pro";
   if (pathname === "/docs") return "/zh/docs";
   if (pathname === "/zh/docs") return "/docs";
   if (pathname.startsWith("/docs/")) return `/zh${pathname}`;
@@ -2596,6 +3006,16 @@ function buildSitemap(origin) {
     <loc>${origin}/zh</loc>
     <xhtml:link rel="alternate" hreflang="en" href="${origin}/" />
     <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh" />
+  </url>
+  <url>
+    <loc>${origin}/pro</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/pro" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/pro" />
+  </url>
+  <url>
+    <loc>${origin}/zh/pro</loc>
+    <xhtml:link rel="alternate" hreflang="en" href="${origin}/pro" />
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${origin}/zh/pro" />
   </url>
   <url>
     <loc>${origin}/docs</loc>

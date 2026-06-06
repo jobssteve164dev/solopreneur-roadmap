@@ -36,12 +36,58 @@ test('Pro subscription page carries signed upgrade state into Passport start', a
   const location = new URL(start.headers.get('location') || '');
 
   assert.equal(response.status, 200);
-  assert.match(html, /SoloMap Pro/);
+  assert.match(html, /Stop treating every project like the same next task/);
+  assert.match(html, /Free vs Pro/);
+  assert.match(html, /Strategy Pyramid/);
+  assert.match(html, /Execution trace/);
+  assert.match(html, /Flow/);
+  assert.match(html, /VS Code Marketplace/);
+  assert.match(html, /Privacy \/ Local-first note/);
+  assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP/);
   assert.ok(href);
   assert.equal(start.status, 302);
   assert.equal(location.origin, 'https://passport.szlk.ai');
   assert.equal(location.searchParams.get('redirect_uri'), 'https://solomap.app/api/passport/oidc/callback');
   assert.ok(location.searchParams.get('state'));
+});
+
+test('Chinese Pro subscription page stays inside the website frame and explains Pro value', async () => {
+  const worker = await loadWebsiteWorker();
+  const response = await worker.default.fetch(
+    new Request(`https://solomap.app/zh/pro?mode=device&auth_nonce=${'b'.repeat(32)}`),
+    {
+      SITE_ORIGIN: 'https://solomap.app',
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret'
+    }
+  );
+  const html = await response.text();
+  const href = html.match(/href="([^"]*\/api\/passport\/start\?upgrade_state=[^"]+)"/)?.[1] || '';
+
+  assert.equal(response.status, 200);
+  assert.match(html, /<header class="topbar">/);
+  assert.match(html, /<footer>/);
+  assert.match(html, /Free 与 Pro 的区别/);
+  assert.match(html, /战略金字塔/);
+  assert.match(html, /执行轨迹/);
+  assert.match(html, /Flow/);
+  assert.match(html, /仍然本地优先/);
+  assert.match(html, /href="\/pro" hreflang="en"/);
+  assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP/);
+  assert.ok(href);
+});
+
+test('Pro subscription page remains readable when signing is unavailable', async () => {
+  const worker = await loadWebsiteWorker();
+  const response = await worker.default.fetch(
+    new Request(`https://solomap.app/zh/pro?mode=device&auth_nonce=${'c'.repeat(32)}`),
+    { SITE_ORIGIN: 'https://solomap.app' }
+  );
+  const html = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(html, /Free 与 Pro 的区别/);
+  assert.match(html, /href="\/api\/passport\/start"/);
+  assert.doesNotMatch(html, /missing_product_secret|Passport|CloudMCP/);
 });
 
 test('Passport start rejects non-extension callbacks', async () => {
