@@ -1321,7 +1321,10 @@ test('strategy pyramid command blocks free users with a Pro upgrade action', asy
   assert.deepEqual(extensionModule.__vscodeTestState.informationMessages[0].items, ['升级 Pro']);
   assert.match(extensionModule.__vscodeTestState.informationMessages[1].message, /选择 SoloMap Pro 登录方式/);
   assert.equal(extensionModule.__vscodeTestState.openedExternal.length, 1);
-  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /https:\/\/solomap\.app\/api\/passport\/start/);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /https:\/\/solomap\.app\/pro/);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /mode=callback/);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /auth_nonce=/);
+  assert.match(extensionModule.__buildPassportStartUrl('vscode://SZLK.solopreneur-roadmap/passport/callback'), /\/pro\?/);
   assert.match(extensionModule.__buildPassportStartUrl('vscode://SZLK.solopreneur-roadmap/passport/callback'), /callback=vscode%3A%2F%2FSZLK\.solopreneur-roadmap%2Fpassport%2Fcallback/);
 });
 
@@ -1331,32 +1334,20 @@ test('strategy pyramid Pro upgrade supports device auth code entry', async () =>
     'module.exports.__handleOpenStrategyPyramid = handleOpenStrategyPyramid;'
   );
   extensionModule.__vscodeTestState.nextInformationChoices = ['升级 Pro', '使用登录码'];
-  extensionModule.__vscodeTestState.nextInputBoxValue = 'signed-device-grant';
+  extensionModule.__vscodeTestState.nextInputBoxValue = 'signed-device-code';
   extensionModule.__vscodeTestState.fetchImpl = async (url, options = {}) => {
-    if (String(url).endsWith('/api/passport/device/start')) {
-      assert.equal(options.method, 'POST');
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          ok: true,
-          deviceCode: 'device-code',
-          loginUrl: 'https://solomap.app/api/passport/device/authorize?device=device-code',
-          expiresIn: 600
-        })
-      };
-    }
-    if (String(url).endsWith('/api/passport/device/verify')) {
+    if (String(url).endsWith('/api/passport/verify')) {
       const body = JSON.parse(options.body);
       assert.equal(body.product, 'solomap');
       assert.equal(body.feature, 'strategy_pyramid');
-      assert.equal(body.deviceCode, 'device-code');
-      assert.equal(body.code, 'signed-device-grant');
+      assert.equal(body.code, 'signed-device-code');
+      assert.match(body.authNonce, /^[A-Za-z0-9_-]{24,160}$/);
       return {
         ok: true,
         status: 200,
         json: async () => ({
           allowed: true,
+          grant: 'final-device-grant',
           email: 'pro@solomap.app',
           userId: 'passport:user',
           entitlements: ['strategy_pyramid'],
@@ -1393,9 +1384,11 @@ test('strategy pyramid Pro upgrade supports device auth code entry', async () =>
   await extensionModule.__handleOpenStrategyPyramid(context);
 
   assert.equal(extensionModule.__vscodeTestState.openedExternal.length, 1);
-  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /\/api\/passport\/device\/authorize\?device=device-code/);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /\/pro\?/);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /mode=device/);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /auth_nonce=/);
   assert.match(extensionModule.__vscodeTestState.inputBoxOptions.prompt, /粘贴网页上显示的授权码/);
-  assert.ok([...storedSecrets.values()].some((value) => String(value).includes('signed-device-grant')));
+  assert.ok([...storedSecrets.values()].some((value) => String(value).includes('final-device-grant')));
   assert.equal(extensionModule.__vscodeTestState.webviewPanels.length, 1);
 });
 

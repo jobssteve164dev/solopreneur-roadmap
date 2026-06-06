@@ -7,14 +7,41 @@ async function loadWebsiteWorker() {
   return import(new URL('website/src/worker.js', projectRootUrl));
 }
 
-test('website Pro CTA uses Passport authorization entry', async () => {
+test('website Pro CTA uses dedicated subscription page before authorization', async () => {
   const worker = await loadWebsiteWorker();
   const response = await worker.default.fetch(new Request('https://solomap.app/'), { SITE_ORIGIN: 'https://solomap.app' });
   const html = await response.text();
 
   assert.equal(response.status, 200);
-  assert.match(html, /href="\/api\/passport\/start"/);
+  assert.match(html, /href="\/pro"/);
   assert.doesNotMatch(html, /issues\/new[^"]*Join Pro Early Access/);
+});
+
+test('Pro subscription page carries signed upgrade state into Passport start', async () => {
+  const worker = await loadWebsiteWorker();
+  const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
+  const response = await worker.default.fetch(
+    new Request(`https://solomap.app/pro?mode=callback&auth_nonce=${'a'.repeat(32)}&callback=${encodeURIComponent(callback)}`),
+    {
+      SITE_ORIGIN: 'https://solomap.app',
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret'
+    }
+  );
+  const html = await response.text();
+  const href = html.match(/href="([^"]*\/api\/passport\/start\?upgrade_state=[^"]+)"/)?.[1] || '';
+  const start = await worker.default.fetch(new Request(new URL(href, 'https://solomap.app').toString()), {
+    SITE_ORIGIN: 'https://solomap.app',
+    SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret'
+  });
+  const location = new URL(start.headers.get('location') || '');
+
+  assert.equal(response.status, 200);
+  assert.match(html, /SoloMap Pro/);
+  assert.ok(href);
+  assert.equal(start.status, 302);
+  assert.equal(location.origin, 'https://passport.szlk.ai');
+  assert.equal(location.searchParams.get('redirect_uri'), 'https://solomap.app/api/passport/oidc/callback');
+  assert.ok(location.searchParams.get('state'));
 });
 
 test('Passport start rejects non-extension callbacks', async () => {
@@ -121,6 +148,83 @@ test('Passport OIDC callback signs an extension grant after upstream access chec
     assert.match(location, /^vscode:\/\/SZLK\.solopreneur-roadmap\/passport\/callback/);
     assert.ok(grant);
     assert.doesNotMatch(location, /test-product-secret/);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('Pro upgrade callback returns a nonce-bound exchange code', async () => {
+  const worker = await loadWebsiteWorker();
+  const originalFetch = global.fetch;
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/oidc/token') {
+      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
+      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          allowed: true,
+          email: 'pro@solomap.app',
+          userId: 'passport-user',
+          entitlements: ['strategy_pyramid']
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const env = {
+      SITE_ORIGIN: 'https://solomap.app',
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+      SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
+    };
+    const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
+    const authNonce = 'n'.repeat(32);
+    const pro = await worker.default.fetch(
+      new Request(`https://solomap.app/pro?mode=callback&auth_nonce=${authNonce}&callback=${encodeURIComponent(callback)}`),
+      env
+    );
+    const href = (await pro.text()).match(/href="([^"]*\/api\/passport\/start\?upgrade_state=[^"]+)"/)?.[1] || '';
+    const start = await worker.default.fetch(new Request(new URL(href, 'https://solomap.app').toString()), env);
+    const state = new URL(start.headers.get('location') || '').searchParams.get('state');
+    const callbackResponse = await worker.default.fetch(
+      new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
+      env
+    );
+    const location = callbackResponse.headers.get('location') || '';
+    const code = new URL(location).searchParams.get('code') || '';
+    const denied = await worker.default.fetch(
+      new Request('https://solomap.app/api/passport/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code, authNonce: 'wrong'.repeat(8), callback })
+      }),
+      env
+    );
+    const allowed = await worker.default.fetch(
+      new Request('https://solomap.app/api/passport/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ code, authNonce, callback })
+      }),
+      env
+    );
+    const deniedBody = await denied.json();
+    const allowedBody = await allowed.json();
+
+    assert.equal(callbackResponse.status, 302);
+    assert.match(location, /^vscode:\/\/SZLK\.solopreneur-roadmap\/passport\/callback\?code=/);
+    assert.ok(code);
+    assert.equal(deniedBody.allowed, false);
+    assert.equal(deniedBody.reason, 'auth_context_mismatch');
+    assert.equal(allowedBody.allowed, true);
+    assert.ok(allowedBody.grant);
+    assert.notEqual(allowedBody.grant, code);
   } finally {
     global.fetch = originalFetch;
   }

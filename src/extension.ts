@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as childProcess from 'child_process';
+import * as crypto from 'crypto';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { SqliteStore } from './db/sqliteStore';
@@ -18,6 +19,7 @@ let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let activeProjectRoot: string | null = null;
 let syncEngineReady = false;
+let pendingPassportAuthNonce: string | null = null;
 let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
 
@@ -138,6 +140,7 @@ interface PassportGrantCache {
 interface PassportVerifyResult {
   allowed: boolean;
   reason?: string;
+  grant?: string;
   email?: string;
   userId?: string;
   entitlements?: string[];
@@ -1003,12 +1006,25 @@ function buildPassportCallbackUri(): string {
   return `${scheme}://SZLK.solopreneur-roadmap/passport/callback`;
 }
 
-function buildPassportStartUrl(callbackUri = buildPassportCallbackUri()): string {
-  const url = new URL('/api/passport/start', getPassportBaseUrl());
+function createPassportAuthNonce(): string {
+  return crypto.randomBytes(24).toString('base64url');
+}
+
+function buildPassportProUrl(mode: 'callback' | 'device', authNonce: string, callbackUri = buildPassportCallbackUri()): string {
+  const url = new URL('/pro', getPassportBaseUrl());
   url.searchParams.set('product', passportProduct);
   url.searchParams.set('feature', strategyPyramidFeature);
-  url.searchParams.set('callback', callbackUri);
+  url.searchParams.set('source', 'vscode');
+  url.searchParams.set('mode', mode);
+  url.searchParams.set('auth_nonce', authNonce);
+  if (mode === 'callback') {
+    url.searchParams.set('callback', callbackUri);
+  }
   return url.toString();
+}
+
+function buildPassportStartUrl(callbackUri = buildPassportCallbackUri()): string {
+  return buildPassportProUrl('callback', createPassportAuthNonce(), callbackUri);
 }
 
 function buildPassportVerifyUrl(): string {
@@ -1076,7 +1092,7 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
   await broadcastSettings(context);
 }
 
-async function verifyPassportGrant(grant: string): Promise<PassportVerifyResult> {
+async function verifyPassportGrant(grant: string, options: { authNonce?: string | null; callbackUri?: string | null; deviceCode?: string | null } = {}): Promise<PassportVerifyResult> {
   if (!grant) {
     return { allowed: false, reason: 'missing_grant' };
   }
@@ -1087,7 +1103,11 @@ async function verifyPassportGrant(grant: string): Promise<PassportVerifyResult>
       body: JSON.stringify({
         product: passportProduct,
         feature: strategyPyramidFeature,
-        grant
+        grant,
+        code: grant,
+        authNonce: options.authNonce || '',
+        callback: options.callbackUri || '',
+        deviceCode: options.deviceCode || ''
       })
     });
     if (!response.ok) {
@@ -1097,6 +1117,7 @@ async function verifyPassportGrant(grant: string): Promise<PassportVerifyResult>
     return {
       allowed: Boolean(body.allowed),
       reason: String(body.reason || ''),
+      grant: String(body.grant || ''),
       email: String(body.email || ''),
       userId: String(body.userId || ''),
       entitlements: Array.isArray(body.entitlements) ? body.entitlements.map((item) => String(item || '')).filter(Boolean) : [],
@@ -1125,32 +1146,16 @@ async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promi
 }
 
 async function beginPassportAuthorization(): Promise<void> {
-  await vscode.env.openExternal(vscode.Uri.parse(buildPassportStartUrl()));
+  const authNonce = createPassportAuthNonce();
+  pendingPassportAuthNonce = authNonce;
+  await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('callback', authNonce)));
 }
 
 async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext): Promise<void> {
-  let session: PassportDeviceStartResult;
-  try {
-    const response = await fetch(buildPassportDeviceStartUrl(), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        product: passportProduct,
-        feature: strategyPyramidFeature
-      })
-    });
-    session = await response.json() as PassportDeviceStartResult;
-    if (!response.ok || !session.ok || !session.deviceCode || !session.loginUrl) {
-      vscode.window.showWarningMessage('无法开始 SoloMap Pro 登录。');
-      return;
-    }
-  } catch (error) {
-    console.warn('Failed to start SoloMap Pro device authorization:', error);
-    vscode.window.showWarningMessage('无法开始 SoloMap Pro 登录。');
-    return;
-  }
+  const authNonce = createPassportAuthNonce();
+  pendingPassportAuthNonce = authNonce;
 
-  await vscode.env.openExternal(vscode.Uri.parse(session.loginUrl));
+  await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('device', authNonce)));
   const code = await vscode.window.showInputBox({
     title: 'SoloMap Pro',
     prompt: '登录完成后，粘贴网页上显示的授权码。',
@@ -1162,22 +1167,13 @@ async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext
     return;
   }
   try {
-    const response = await fetch(buildPassportDeviceVerifyUrl(), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        product: passportProduct,
-        feature: strategyPyramidFeature,
-        deviceCode: session.deviceCode,
-        code: normalizedCode
-      })
-    });
-    const result = await response.json() as PassportVerifyResult;
-    if (!response.ok || !result.allowed) {
+    const result = await verifyPassportGrant(normalizedCode, { authNonce });
+    if (!result.allowed) {
       vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
       return;
     }
-    await writePassportGrant(context, result, normalizedCode);
+    pendingPassportAuthNonce = null;
+    await writePassportGrant(context, result, result.grant || normalizedCode);
     vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
     await openStrategyPyramidPanel(context);
   } catch (error) {
@@ -1202,7 +1198,7 @@ async function pastePassportAuthorizationCode(context: vscode.ExtensionContext):
     vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
     return;
   }
-  await writePassportGrant(context, result, normalizedCode);
+  await writePassportGrant(context, result, result.grant || normalizedCode);
   vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
 }
 
@@ -1253,17 +1249,22 @@ async function handlePassportUri(context: vscode.ExtensionContext, uri: vscode.U
     return;
   }
   const params = new URLSearchParams(uri.query || '');
-  const grant = String(params.get('grant') || '').trim();
+  const grant = String(params.get('code') || params.get('grant') || '').trim();
   if (!grant) {
     vscode.window.showWarningMessage('没有收到 SoloMap Pro 授权结果。');
     return;
   }
-  const result = await verifyPassportGrant(grant);
+  const callbackUri = buildPassportCallbackUri();
+  const result = await verifyPassportGrant(grant, {
+    authNonce: pendingPassportAuthNonce,
+    callbackUri
+  });
   if (!result.allowed) {
     vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
     return;
   }
-  await writePassportGrant(context, result, grant);
+  pendingPassportAuthNonce = null;
+  await writePassportGrant(context, result, result.grant || grant);
   vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
   await openStrategyPyramidPanel(context);
 }

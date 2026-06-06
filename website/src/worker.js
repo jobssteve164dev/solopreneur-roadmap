@@ -527,6 +527,15 @@ function isAllowedVsCodeCallback(callback) {
   return VSCODE_CALLBACK_PREFIXES.some((prefix) => String(callback || "").startsWith(prefix));
 }
 
+function normalizeAuthMode(value) {
+  return String(value || "") === "device" ? "device" : "callback";
+}
+
+function normalizeAuthNonce(value) {
+  const nonce = String(value || "").trim();
+  return /^[A-Za-z0-9_-]{24,160}$/.test(nonce) ? nonce : "";
+}
+
 function getDeviceAuthorizeUrl(requestUrl, deviceCode) {
   const url = new URL("/api/passport/device/authorize", requestUrl.origin);
   url.searchParams.set("device", deviceCode);
@@ -542,6 +551,7 @@ async function getPassportCheckoutSuccessUrl(env, requestUrl, state, userinfo = 
     mode: state.mode,
     callback: state.callback || "",
     deviceCode: state.deviceCode || "",
+    authNonce: state.authNonce || "",
     email: userinfo.email || state.email || "",
     userId: userinfo.sub || userinfo.userId || state.userId || "",
     issuedAt: new Date().toISOString(),
@@ -582,10 +592,64 @@ async function verifyState(env, state) {
   }
 }
 
-async function createDeviceCode(env) {
+async function createUpgradeState(env, input) {
+  const mode = normalizeAuthMode(input.mode);
+  const authNonce = normalizeAuthNonce(input.authNonce);
+  const callback = String(input.callback || "").trim();
+  if (!authNonce) {
+    return null;
+  }
+  if (mode === "callback" && !isAllowedVsCodeCallback(callback)) {
+    return null;
+  }
+  return signState(env, {
+    product: SOLOMAP_PRODUCT,
+    feature: STRATEGY_PYRAMID_FEATURE,
+    source: String(input.source || "vscode").slice(0, 40),
+    mode,
+    callback: mode === "callback" ? callback : "",
+    authNonce,
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+  });
+}
+
+async function resolveUpgradeStateFromRequest(request, env) {
+  const url = new URL(request.url);
+  const signed = String(url.searchParams.get("upgrade_state") || "").trim();
+  if (signed) {
+    const payload = await verifyState(env, signed);
+    if (!payload || payload.product !== SOLOMAP_PRODUCT || payload.feature !== STRATEGY_PYRAMID_FEATURE) {
+      return null;
+    }
+    if (!normalizeAuthNonce(payload.authNonce)) {
+      return null;
+    }
+    if (payload.mode !== "device" && !isAllowedVsCodeCallback(payload.callback)) {
+      return null;
+    }
+    return payload;
+  }
+  const callback = String(url.searchParams.get("callback") || "").trim();
+  const mode = normalizeAuthMode(url.searchParams.get("mode") || (callback ? "callback" : "device"));
+  const authNonce = normalizeAuthNonce(url.searchParams.get("auth_nonce"));
+  const upgradeState = await createUpgradeState(env, {
+    mode,
+    callback,
+    authNonce,
+    source: url.searchParams.get("source") || "vscode"
+  });
+  if (!upgradeState) {
+    return null;
+  }
+  return verifyState(env, upgradeState);
+}
+
+async function createDeviceCode(env, options = {}) {
   return signState(env, {
     mode: "device",
     nonce: randomString(24),
+    authNonce: normalizeAuthNonce(options.authNonce),
     issuedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
   });
@@ -607,6 +671,46 @@ async function issueSoloMapGrant(env, email = "pro-test@solomap.app", options = 
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
   const signature = await hmacSha256(env.SOLOMAP_PASSPORT_PRODUCT_SECRET, encodedPayload);
   return `${encodedPayload}.${base64UrlEncode(signature)}`;
+}
+
+async function issueSoloMapExchangeCode(env, grant, context = {}) {
+  return signState(env, {
+    purpose: "solomap_grant_exchange",
+    product: SOLOMAP_PRODUCT,
+    feature: STRATEGY_PYRAMID_FEATURE,
+    mode: normalizeAuthMode(context.mode),
+    callback: String(context.callback || ""),
+    deviceCode: String(context.deviceCode || ""),
+    authNonce: normalizeAuthNonce(context.authNonce),
+    grant,
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  });
+}
+
+async function verifySoloMapExchangeCode(env, code, expected = {}) {
+  const payload = await verifyState(env, code);
+  if (!payload || payload.purpose !== "solomap_grant_exchange") {
+    return null;
+  }
+  if (payload.product !== SOLOMAP_PRODUCT || payload.feature !== STRATEGY_PYRAMID_FEATURE) {
+    return { allowed: false, reason: "invalid_exchange_scope" };
+  }
+  const expectedNonce = normalizeAuthNonce(expected.authNonce);
+  if (!expectedNonce || payload.authNonce !== expectedNonce) {
+    return { allowed: false, reason: "auth_context_mismatch" };
+  }
+  if (payload.mode === "callback" && String(expected.callback || "") !== String(payload.callback || "")) {
+    return { allowed: false, reason: "callback_mismatch" };
+  }
+  if (payload.mode === "device" && payload.deviceCode && String(expected.deviceCode || "") !== String(payload.deviceCode || "")) {
+    return { allowed: false, reason: "device_mismatch" };
+  }
+  const verified = await verifySignedGrant(env, String(payload.grant || ""));
+  return {
+    ...verified,
+    grant: verified.allowed ? String(payload.grant || "") : ""
+  };
 }
 
 async function verifySignedGrant(env, grant) {
@@ -813,6 +917,68 @@ function buildDeviceGrantPage(grant) {
 </html>`;
 }
 
+async function buildProSubscriptionPage(request, env) {
+  const url = new URL(request.url);
+  const origin = env.SITE_ORIGIN || url.origin;
+  const mode = normalizeAuthMode(url.searchParams.get("mode"));
+  const callback = String(url.searchParams.get("callback") || "").trim();
+  const authNonce = normalizeAuthNonce(url.searchParams.get("auth_nonce"));
+  const upgradeState = await createUpgradeState(env, {
+    mode,
+    callback,
+    authNonce,
+    source: url.searchParams.get("source") || "web"
+  });
+  const ctaHref = upgradeState
+    ? `/api/passport/start?upgrade_state=${encodeURIComponent(upgradeState)}`
+    : "/api/passport/start";
+  return `<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SoloMap Pro</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #101417; color: #f6f0e8; }
+    main { width: min(1040px, calc(100vw - 32px)); margin: 0 auto; padding: 56px 0; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.1fr) 340px; gap: 28px; align-items: start; }
+    h1 { margin: 0 0 16px; font-size: clamp(36px, 6vw, 68px); line-height: 0.96; letter-spacing: 0; }
+    p { color: #c9d0cf; line-height: 1.65; font-size: 17px; }
+    .panel { border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 22px; background: rgba(255,255,255,.04); }
+    .price { font-size: 42px; font-weight: 800; margin: 10px 0; }
+    .button { display: inline-flex; justify-content: center; width: 100%; box-sizing: border-box; padding: 13px 18px; border-radius: 7px; background: #f4c542; color: #15110a; font-weight: 750; text-decoration: none; }
+    .muted { font-size: 13px; color: #95a09e; margin-top: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 28px; }
+    .card { border: 1px solid rgba(255,255,255,.1); border-radius: 8px; padding: 18px; background: rgba(255,255,255,.035); }
+    .card strong { display: block; margin-bottom: 8px; }
+    @media (max-width: 800px) { .hero, .grid { grid-template-columns: 1fr; } main { padding-top: 32px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <div>
+        <h1>SoloMap Pro</h1>
+        <p>解锁战略金字塔视图，把多个项目的方向、优先级和下一步动作放到同一个判断面里。</p>
+        <div class="grid">
+          <div class="card"><strong>战略金字塔</strong><span>看清哪个项目该继续、暂停或加速。</span></div>
+          <div class="card"><strong>优先级压缩</strong><span>把分散路线图收束成下一步动作。</span></div>
+          <div class="card"><strong>Pro 授权</strong><span>付款后通过 Passport 授权回到插件。</span></div>
+        </div>
+      </div>
+      <aside class="panel">
+        <span>Early access</span>
+        <div class="price">$29 / year</div>
+        <p>适合已经在用 SoloMap 推进真实项目、需要更清晰组合判断的独立开发者。</p>
+        <a class="button" href="${escapeHtml(ctaHref)}">升级 Pro</a>
+        <div class="muted">登录、付款和授权由 Passport 承接。付款后会回到插件或显示授权码。</div>
+      </aside>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
 function buildPassportCheckoutPendingPage(requestUrl) {
   const retryUrl = escapeHtml(requestUrl.toString());
   return `<!doctype html>
@@ -899,11 +1065,12 @@ async function handlePassportCheckoutSuccess(request, env) {
     userId: String(access.userId || userinfo.sub || ""),
     entitlements: Array.isArray(access.entitlements) && access.entitlements.length ? access.entitlements : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"]
   });
+  const exchangeCode = state.authNonce ? await issueSoloMapExchangeCode(env, grant, state) : grant;
   if (state.mode === "device") {
-    return htmlResponse(buildDeviceGrantPage(grant), 200);
+    return htmlResponse(buildDeviceGrantPage(exchangeCode), 200);
   }
   const callbackUrl = new URL(state.callback);
-  callbackUrl.searchParams.set("grant", grant);
+  callbackUrl.searchParams.set(state.authNonce ? "code" : "grant", exchangeCode);
   return Response.redirect(callbackUrl.toString(), 302);
 }
 
@@ -930,6 +1097,17 @@ async function buildPassportAuthorizeRedirect(request, env, payload) {
 
 async function handlePassportStart(request, env) {
   const url = new URL(request.url);
+  const upgradeState = String(url.searchParams.get("upgrade_state") || "").trim();
+  if (upgradeState) {
+    const state = await verifyState(env, upgradeState);
+    if (!state || state.product !== SOLOMAP_PRODUCT || state.feature !== STRATEGY_PYRAMID_FEATURE || !normalizeAuthNonce(state.authNonce)) {
+      return jsonResponse({ ok: false, reason: "invalid_upgrade_state" }, 400);
+    }
+    if (state.mode !== "device" && !isAllowedVsCodeCallback(state.callback)) {
+      return jsonResponse({ ok: false, reason: "invalid_callback" }, 400);
+    }
+    return buildPassportAuthorizeRedirect(request, env, state);
+  }
   const callback = String(url.searchParams.get("callback") || "");
   if (callback && !isAllowedVsCodeCallback(callback)) {
     return jsonResponse({ ok: false, reason: "invalid_callback" }, 400);
@@ -958,7 +1136,13 @@ async function handlePassportDeviceStart(request, env) {
     return jsonResponse({ ok: false, reason: "method_not_allowed" }, 405);
   }
   const url = new URL(request.url);
-  const deviceCode = await createDeviceCode(env);
+  let payload = {};
+  try {
+    payload = await request.json();
+  } catch (error) {
+    payload = {};
+  }
+  const deviceCode = await createDeviceCode(env, { authNonce: payload.authNonce || payload.auth_nonce });
   return jsonResponse({
     ok: true,
     deviceCode,
@@ -976,7 +1160,8 @@ async function handlePassportDeviceAuthorize(request, env) {
   }
   return buildPassportAuthorizeRedirect(request, env, {
     mode: "device",
-    deviceCode
+    deviceCode,
+    authNonce: device.authNonce || ""
   });
 }
 
@@ -1020,11 +1205,12 @@ async function handlePassportOidcCallback(request, env) {
     userId: String(access.userId || userinfo.sub || ""),
     entitlements: Array.isArray(access.entitlements) && access.entitlements.length ? access.entitlements : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"]
   });
+  const exchangeCode = state.authNonce ? await issueSoloMapExchangeCode(env, grant, state) : grant;
   if (state.mode === "device") {
-    return htmlResponse(buildDeviceGrantPage(grant), 200);
+    return htmlResponse(buildDeviceGrantPage(exchangeCode), 200);
   }
   const callbackUrl = new URL(state.callback);
-  callbackUrl.searchParams.set("grant", grant);
+  callbackUrl.searchParams.set(state.authNonce ? "code" : "grant", exchangeCode);
   return Response.redirect(callbackUrl.toString(), 302);
 }
 
@@ -1046,6 +1232,13 @@ async function handlePassportDeviceVerify(request, env) {
   if (!grant) {
     return jsonResponse({ allowed: false, reason: "missing_code" }, 400);
   }
+  const exchanged = await verifySoloMapExchangeCode(env, grant, {
+    authNonce: payload.authNonce || payload.auth_nonce || device.authNonce || "",
+    deviceCode: payload.deviceCode || payload.device_code || ""
+  });
+  if (exchanged) {
+    return jsonResponse(exchanged);
+  }
   return jsonResponse(await verifySignedGrant(env, grant));
 }
 
@@ -1062,9 +1255,17 @@ async function handlePassportVerify(request, env) {
   } catch (error) {
     return jsonResponse({ allowed: false, reason: "invalid_json" }, 400);
   }
-  const grant = String(payload.grant || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "");
+  const grant = String(payload.code || payload.grant || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || "");
   if (!grant) {
     return jsonResponse({ allowed: false, reason: "missing_grant" }, 400);
+  }
+  const exchanged = await verifySoloMapExchangeCode(env, grant, {
+    authNonce: payload.authNonce || payload.auth_nonce || "",
+    callback: payload.callback || "",
+    deviceCode: payload.deviceCode || payload.device_code || ""
+  });
+  if (exchanged) {
+    return jsonResponse(exchanged);
   }
   const passportResult = await verifyGrantWithPassport(env, grant);
   if (passportResult) {
@@ -2187,7 +2388,7 @@ function buildPage(locale, origin) {
           <strong>${escapeHtml(t.pro.price)}</strong>
           <p>${escapeHtml(t.pro.copy)}</p>
           <div class="cta-row">
-            <a class="button primary" href="/api/passport/start">${escapeHtml(t.pro.cta)}</a>
+            <a class="button primary" href="/pro">${escapeHtml(t.pro.cta)}</a>
           </div>
         </aside>
       </div>
@@ -2478,6 +2679,10 @@ export default {
 
     if (url.pathname === "/api/passport/start") {
       return handlePassportStart(request, env);
+    }
+
+    if (url.pathname === "/pro" || url.pathname === "/zh/pro") {
+      return htmlResponse(await buildProSubscriptionPage(request, env), 200);
     }
 
     if (url.pathname === "/api/passport/device/start") {
