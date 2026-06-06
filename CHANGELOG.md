@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.174 - 2026-06-06
+
+### Changed
+- Build paid strategy pyramid cockpit (75824f5)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.173 - 2026-06-06
 
 ### Changed
