@@ -208,7 +208,7 @@ const content = {
     hero: {
       eyebrow: "本地优先的 VS Code 插件",
       title: "AI 负责编写代码，SoloMap 负责掌控方向。",
-      copy: "为独立开发者与个人黑客打造的本地优先战略驾驶舱。把想法变成路线图，让 Agent 奔跑在正确的道路上。",
+      copy: "为独立开发者与个人创业者打造的本地优先战略驾驶舱。把想法变成路线图，让 Agent 奔跑在正确的道路上。",
       support: "把产品想法、路线图、Agent 执行历史和下一步动作放回你的本地工作区。",
       primaryCta: "从 VS Code Marketplace 安装",
       secondaryCta: "在 Open VSX 获取",
