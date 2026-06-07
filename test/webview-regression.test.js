@@ -839,12 +839,14 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.doesNotMatch(html, /id="setting-enhancement-input"/);
   assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
   assert.match(script, /installEnhancement/);
-  assert.match(script, /checkEnhancement/);
-  assert.match(script, /setEnhancementEnabled/);
   assert.match(script, /uninstallEnhancement/);
+  assert.match(script, /setting-enhancement-select/);
+  assert.match(script, /btn-install-enhancement/);
+  assert.match(script, /btn-uninstall-enhancement/);
+  assert.doesNotMatch(script, /data-check-enhancement/);
+  assert.doesNotMatch(script, /data-toggle-enhancement/);
   assert.match(script, /enhancementInstallResult/);
-  assert.match(html, /实验性外部增强/);
-  assert.match(html, /外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出/);
+  assert.match(html, /真实安装和彻底卸载/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -1030,12 +1032,14 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /id="setting-enhancement-input"/);
   assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
   assert.match(html, /installEnhancement/);
-  assert.match(html, /checkEnhancement/);
-  assert.match(html, /setEnhancementEnabled/);
   assert.match(html, /uninstallEnhancement/);
+  assert.match(html, /setting-enhancement-select/);
+  assert.match(html, /btn-install-enhancement/);
+  assert.match(html, /btn-uninstall-enhancement/);
+  assert.doesNotMatch(html, /data-check-enhancement/);
+  assert.doesNotMatch(html, /data-toggle-enhancement/);
   assert.match(html, /enhancementInstallResult/);
-  assert.match(html, /实验性外部增强/);
-  assert.match(html, /外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出/);
+  assert.match(html, /真实安装和彻底卸载/);
   assert.match(html, /\.onboarding-panel\s*\{/);
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);
@@ -1937,7 +1941,9 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildSolomapEnhancementCandidateInstructions = buildSolomapEnhancementCandidateInstructions;',
       'module.exports.__ensureSolomapEnhancementRuntime = ensureSolomapEnhancementRuntime;',
       'module.exports.__buildEnhancementInstallPrompt = buildEnhancementInstallPrompt;',
+      'module.exports.__buildEnhancementUninstallPrompt = buildEnhancementUninstallPrompt;',
       'module.exports.__validateAndRegisterEnhancementInstall = validateAndRegisterEnhancementInstall;',
+      'module.exports.__validateAndRegisterEnhancementUninstall = validateAndRegisterEnhancementUninstall;',
       'module.exports.__getSolomapEnhancementStatusSummaries = getSolomapEnhancementStatusSummaries;',
       'module.exports.__checkAndRegisterEnhancement = checkAndRegisterEnhancement;',
       'module.exports.__setSolomapEnhancementEnabled = setSolomapEnhancementEnabled;',
@@ -2644,22 +2650,39 @@ test('agent command builder uses non-interactive task runs and native continuati
   const enhancementStatuses = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot);
   const codeGraphStatus = enhancementStatuses.find((item) => item.id === 'code-structure-assistant');
   assert.equal(codeGraphStatus.installed, true);
-  assert.equal(codeGraphStatus.enabled, false);
+  assert.equal(codeGraphStatus.enabled, true);
   assert.equal(codeGraphStatus.version, '1.2.3');
 
-  const disabledAfterInstallInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
+  const enabledAfterInstallInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
     '/workspace/app',
     enhancementRuntimeRoot,
-    '重构前需要检查函数引用和调用影响面'
+    '重构前需要用 codegraph 检查函数引用和调用影响面',
+    { 'code-structure-assistant': true }
   );
-  assert.doesNotMatch(disabledAfterInstallInstructions, /Code Structure Assistant/);
+  assert.match(enabledAfterInstallInstructions, /Code Structure Assistant/);
   const enableCodeGraph = extensionModule.__setSolomapEnhancementEnabled('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant', true);
   assert.equal(enableCodeGraph.ok, true);
   const enabledCodeGraphStatus = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
   assert.equal(enabledCodeGraphStatus.enabled, true);
   const disableCodeGraph = extensionModule.__setSolomapEnhancementEnabled('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant', false);
   assert.equal(disableCodeGraph.ok, true);
-  const uninstallCodeGraph = extensionModule.__uninstallSolomapEnhancement('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant');
+  const enhancementUninstallPrompt = extensionModule.__buildEnhancementUninstallPrompt(
+    'code-structure-assistant',
+    '/workspace/app',
+    enhancementRuntimeRoot,
+    path.join(enhancementRuntimeRoot, 'enhancements/runs/run/uninstall-result.json')
+  );
+  assert.match(enhancementUninstallPrompt, /卸载结果 JSON 必须写入/);
+  assert.match(enhancementUninstallPrompt, /彻底移除该增强/);
+  const fakeEnhancementUninstallResult = path.join(enhancementRuntimeRoot, 'enhancement-uninstall-result.json');
+  fs.writeFileSync(fakeEnhancementUninstallResult, JSON.stringify({
+    ok: true,
+    enhancementId: 'code-structure-assistant',
+    removedItems: ['codegraph mcp profile'],
+    remainingItems: [],
+    health: { ok: true, message: 'Removed from user environment.' }
+  }, null, 2), 'utf8');
+  const uninstallCodeGraph = extensionModule.__validateAndRegisterEnhancementUninstall('/workspace/app', enhancementRuntimeRoot, fakeEnhancementUninstallResult);
   assert.equal(uninstallCodeGraph.ok, true);
   const uninstalledCodeGraph = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
   assert.equal(uninstalledCodeGraph.installed, false);

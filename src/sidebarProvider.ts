@@ -5517,7 +5517,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-enhancement-toggles">执行增强</label>
       <div id="help-enhancement-toggles" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        实验性外部增强。它们可能节省上下文或补充分析能力，也可能因外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出；安装后不会自动启用，异常时可在这里禁用或卸载。
+        选择一个执行增强后安装或卸载。SoloMap 会让 Agent CLI 完成用户环境里的真实安装和彻底卸载；状态会自动检测。
       </div>
       <div class="enhancement-list" id="enhancement-list"></div>
       <div class="cli-badge" id="enhancement-install-badge" style="display:none;"></div>
@@ -5651,6 +5651,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let currentFeedbackType = 'not_working';
     let currentCliPath = 'agy';
     let currentSettings = {};
+    let selectedEnhancementId = '';
     const projectConversationModes = {};
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
@@ -5734,8 +5735,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
         enhancementToggles: '执行增强',
-        enhancementTogglesHelp: '实验性外部增强。它们可能节省上下文或补充分析能力，也可能因外部项目自身问题拖慢启动、卡住命令、改写配置或产生错误输出；安装后不会自动启用，异常时可在这里禁用或卸载。',
+        enhancementTogglesHelp: '选择一个执行增强后安装或卸载。SoloMap 会让 Agent CLI 完成用户环境里的真实安装和彻底卸载；状态会自动检测。',
+        selectEnhancement: '选择增强功能',
         installingEnhancement: '正在启动安装...',
+        uninstallingEnhancement: '正在启动卸载...',
         installEnhancement: '安装',
         repairEnhancement: '修复',
         enableEnhancement: '启用',
@@ -5949,8 +5952,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
         enhancementToggles: 'Harness Enhancements',
-        enhancementTogglesHelp: 'Experimental external enhancements. They may save context or add analysis, but external project issues can slow startup, hang commands, change configs, or produce wrong output. Installation does not enable them automatically; disable or uninstall them here if anything feels off.',
+        enhancementTogglesHelp: 'Choose one enhancement, then install or uninstall it. SoloMap asks the Agent CLI to perform the real user-environment install or full uninstall; status is detected automatically.',
+        selectEnhancement: 'Select enhancement',
         installingEnhancement: 'Starting install...',
+        uninstallingEnhancement: 'Starting uninstall...',
         installEnhancement: 'Install',
         repairEnhancement: 'Repair',
         enableEnhancement: 'Enable',
@@ -6377,25 +6382,46 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function renderEnhancementStatuses(statuses) {
       if (!enhancementList) return;
       const items = Array.isArray(statuses) ? statuses : [];
-      enhancementList.innerHTML = items.map(item => {
-        const actionText = item.installed ? t('repairEnhancement') : t('installEnhancement');
-        const toggleText = item.enabled ? t('disableEnhancement') : t('enableEnhancement');
-        return '<div class="enhancement-card" data-enhancement-card="' + escapeHtml(item.id) + '">'
-          + '<div class="enhancement-card-head"><div><div class="enhancement-title">' + escapeHtml(item.title || item.id) + '</div>'
-          + '<div class="enhancement-desc">' + escapeHtml(item.description || '') + '</div></div>'
-          + '<span class="enhancement-status ' + escapeHtml(item.status || '') + '">' + escapeHtml(item.statusLabel || '') + '</span></div>'
-          + '<div class="enhancement-meta">' + escapeHtml(t('enhancementVersion')) + '：' + escapeHtml(item.version || '') + '</div>'
-          + '<div class="enhancement-meta">' + escapeHtml(item.enabled ? t('enhancementStateEnabled') : t('enhancementStateDisabled')) + '</div>'
-          + '<div class="enhancement-actions">'
-          + '<button class="settings-action-btn test-btn" data-install-enhancement="' + escapeHtml(item.id) + '"><span class="codicon codicon-cloud-download"></span><span>' + escapeHtml(actionText) + '</span></button>'
-          + '<button class="settings-action-btn test-btn" data-check-enhancement="' + escapeHtml(item.id) + '"><span class="codicon codicon-search"></span><span>' + escapeHtml(t('checkEnhancement')) + '</span></button>'
-          + '<button class="settings-action-btn test-btn" data-toggle-enhancement="' + escapeHtml(item.id) + '" data-enhancement-enabled="' + (item.enabled ? 'false' : 'true') + '" ' + (!item.installed ? 'disabled' : '') + '><span class="codicon codicon-debug-start"></span><span>' + escapeHtml(toggleText) + '</span></button>'
-          + '<button class="settings-action-btn test-btn" data-uninstall-enhancement="' + escapeHtml(item.id) + '" ' + (!item.installed ? 'disabled' : '') + '><span class="codicon codicon-trash"></span><span>' + escapeHtml(t('uninstallEnhancement')) + '</span></button>'
-          + '</div></div>';
-      }).join('');
-      enhancementList.querySelectorAll('[data-install-enhancement]').forEach(button => {
-        button.addEventListener('click', () => {
-          const enhancementId = button.getAttribute('data-install-enhancement') || '';
+      if (!items.length) {
+        enhancementList.innerHTML = '<div class="enhancement-meta">' + escapeHtml(t('selectEnhancement')) + '</div>';
+        return;
+      }
+      if (!items.some(item => item.id === selectedEnhancementId)) {
+        selectedEnhancementId = items[0].id || '';
+      }
+      const selectedItem = items.find(item => item.id === selectedEnhancementId) || items[0];
+      const options = items.map(item => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title || item.id) + '</button>').join('');
+      const statusRows = items.map(item => (
+        '<div class="enhancement-card" data-enhancement-card="' + escapeHtml(item.id) + '">'
+        + '<div class="enhancement-card-head"><div><div class="enhancement-title">' + escapeHtml(item.title || item.id) + '</div>'
+        + '<div class="enhancement-desc">' + escapeHtml(item.description || '') + '</div></div>'
+        + '<span class="enhancement-status ' + escapeHtml(item.status || '') + '">' + escapeHtml(item.statusLabel || '') + '</span></div>'
+        + '<div class="enhancement-meta">' + escapeHtml(t('enhancementVersion')) + '：' + escapeHtml(item.version || '') + '</div>'
+        + (item.message ? '<div class="enhancement-meta">' + escapeHtml(item.message) + '</div>' : '')
+        + '</div>'
+      )).join('');
+      enhancementList.innerHTML =
+        '<div class="enhancement-card">'
+        + '<label class="settings-lbl-title">' + escapeHtml(t('selectEnhancement')) + '</label>'
+        + '<div class="solo-select settings-select" id="setting-enhancement-select" data-solo-select data-value="' + escapeHtml(selectedItem.id || '') + '">'
+        + '<button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">'
+        + '<span class="solo-select-trigger-label" data-solo-label>' + escapeHtml(selectedItem.title || selectedItem.id || '') + '</span>'
+        + '<span class="codicon codicon-chevron-down solo-select-caret"></span></button>'
+        + '<div class="solo-select-menu" data-solo-menu role="listbox">' + options + '</div></div>'
+        + '<div class="enhancement-actions">'
+        + '<button class="settings-action-btn test-btn" id="btn-install-enhancement"><span class="codicon codicon-cloud-download"></span><span>' + escapeHtml(t('installEnhancement')) + '</span></button>'
+        + '<button class="settings-action-btn test-btn" id="btn-uninstall-enhancement" ' + (!selectedItem.installed ? 'disabled' : '') + '><span class="codicon codicon-trash"></span><span>' + escapeHtml(t('uninstallEnhancement')) + '</span></button>'
+        + '</div></div>'
+        + statusRows;
+      const enhancementSelect = document.getElementById('setting-enhancement-select');
+      bindSoloSelect(enhancementSelect, (value) => {
+        selectedEnhancementId = value || '';
+        renderEnhancementStatuses(items);
+      });
+      const installButton = document.getElementById('btn-install-enhancement');
+      if (installButton) {
+        installButton.addEventListener('click', () => {
+          const enhancementId = getSoloSelectValue(enhancementSelect) || selectedEnhancementId;
           if (enhancementInstallBadge) {
             enhancementInstallBadge.style.display = 'block';
             enhancementInstallBadge.className = 'cli-badge';
@@ -6405,26 +6431,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           }
           vscode.postMessage({ command: 'installEnhancement', enhancementId });
         });
-      });
-      enhancementList.querySelectorAll('[data-check-enhancement]').forEach(button => {
-        button.addEventListener('click', () => {
-          const enhancementId = button.getAttribute('data-check-enhancement') || '';
-          vscode.postMessage({ command: 'checkEnhancement', enhancementId });
-        });
-      });
-      enhancementList.querySelectorAll('[data-toggle-enhancement]').forEach(button => {
-        button.addEventListener('click', () => {
-          const enhancementId = button.getAttribute('data-toggle-enhancement') || '';
-          const enabled = button.getAttribute('data-enhancement-enabled') === 'true';
-          vscode.postMessage({ command: 'setEnhancementEnabled', enhancementId, enabled });
-        });
-      });
-      enhancementList.querySelectorAll('[data-uninstall-enhancement]').forEach(button => {
-        button.addEventListener('click', () => {
-          const enhancementId = button.getAttribute('data-uninstall-enhancement') || '';
+      }
+      const uninstallButton = document.getElementById('btn-uninstall-enhancement');
+      if (uninstallButton) {
+        uninstallButton.addEventListener('click', () => {
+          const enhancementId = getSoloSelectValue(enhancementSelect) || selectedEnhancementId;
+          if (enhancementInstallBadge) {
+            enhancementInstallBadge.style.display = 'block';
+            enhancementInstallBadge.className = 'cli-badge';
+            enhancementInstallBadge.style.background = 'rgba(255,255,255,0.05)';
+            enhancementInstallBadge.style.color = 'var(--text-muted)';
+            enhancementInstallBadge.textContent = t('uninstallingEnhancement');
+          }
           vscode.postMessage({ command: 'uninstallEnhancement', enhancementId });
         });
-      });
+      }
     }
 
     // Request configurations and nodes on load
