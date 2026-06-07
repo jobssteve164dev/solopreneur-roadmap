@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.183 - 2026-06-07
+
+### Changed
+- Unify harness enhancement install controls (e1dcfb4)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.182 - 2026-06-06
 
 ### Changed
