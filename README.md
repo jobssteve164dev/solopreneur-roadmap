@@ -125,3 +125,5 @@ We are building SoloMap in public for solo developers. Your feedback directly sh
     **觉得好用？** 请到 [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap) 为我们留下五星好评，这能帮我们被更多开发者看到！
 *   **Having trouble?** Open a [GitHub Issue](https://github.com/jobssteve164dev/solopreneur-roadmap/issues) or submit a [Seed User Feedback](https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml).
     **遇到问题？** 欢迎直接在 [GitHub 仓库](https://github.com/jobssteve164dev/solopreneur-roadmap) 提交 Issue 或 [种子用户反馈](https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml)。
+*   **Contribute & Reward / 贡献与激励**：If you contribute to this project's source code or if your submitted issue/feedback is adopted, please contact [hello@szlk.ai](mailto:hello@szlk.ai). Once verified, you will be rewarded with a 1-year Pro membership!
+    凡是为本项目源码做出贡献或者反馈的 issue 被采纳，都欢迎联系 [hello@szlk.ai](mailto:hello@szlk.ai)，经过核实后可奖励 1 年 Pro 会员！

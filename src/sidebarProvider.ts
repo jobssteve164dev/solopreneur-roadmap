@@ -5718,6 +5718,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         proLocked: '未解锁',
         proAccountAnonymous: '未登录',
         proValidUntil: '有效期至',
+        proExpirationHelp: '注：此为本地授权缓存过期时间。每次联网或执行任务时，系统都会静默刷新授权，为您顺延有效期（如购买的是年会员请放心使用）。',
         proLogin: '登录 / 升级 Pro',
         proPasteCode: '粘贴授权码',
         proAccountHelp: '登录后即可打开 Pro 功能；本地项目数据仍留在你的工作区。',
@@ -5935,6 +5936,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         proLocked: 'Locked',
         proAccountAnonymous: 'Not signed in',
         proValidUntil: 'Valid until',
+        proExpirationHelp: 'Note: This is the local authorization cache expiration. The system will automatically and silently refresh the authorization to extend this date whenever you are online.',
         proLogin: 'Sign in / Upgrade Pro',
         proPasteCode: 'Paste authorization code',
         proAccountHelp: 'Sign in to open Pro features; local project data stays in your workspace.',
@@ -6365,7 +6367,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       let expiresText = '';
       if (expiresAt) {
         const dateText = new Date(expiresAt).toLocaleDateString(currentLanguage === 'zh' ? 'zh-CN' : 'en-US');
-        expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>';
+        expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>'
+          + '<div class="dependency-message" style="font-size: 10px; opacity: 0.8; line-height: 1.35; margin-top: 2px; color: var(--vscode-descriptionForeground, var(--text-muted));">' + escapeHtml(t('proExpirationHelp')) + '</div>';
       }
       proAccountPanel.innerHTML =
         '<div class="dependency-item">'

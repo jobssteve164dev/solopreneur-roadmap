@@ -129,6 +129,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './documentationManifest') {
           return require(path.join(projectRoot, 'out/documentationManifest.js'));
         }
+        if (id === './agentImpact') {
+          return require(path.join(projectRoot, 'out/agentImpact.js'));
+        }
         return {};
       }
       return require(id);

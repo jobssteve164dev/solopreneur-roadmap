@@ -8,7 +8,7 @@ import { SyncEngine } from './db/syncEngine';
 import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
-import { getAgentImpactStatus } from './agentImpact';
+import { getAgentImpactStatus, buildAgentImpactSummary } from './agentImpact';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 
 let syncEngine: SyncEngine | null = null;
@@ -3280,6 +3280,13 @@ function inferTimeLoadFromCounts(runningNodes: number, inProgressNodes: number, 
   return 'unknown';
 }
 
+function inferTimeLoad(actualMinutes: number, runningNodes: number, inProgressNodes: number, failedNodes: number, totalNodes: number): string {
+  if (actualMinutes > 120 || failedNodes > 0 || runningNodes + inProgressNodes >= 2) return 'high';
+  if (actualMinutes >= 30 || runningNodes + inProgressNodes === 1 || totalNodes >= 6) return 'medium';
+  if (actualMinutes > 0 || totalNodes > 0) return 'low';
+  return 'unknown';
+}
+
 function inferStrategicRelation(role: string, abilities: string[], nodes: StrategyPyramidNodeSummary[]): string {
   const loops = countProjectLoops(nodes);
   if (role === '核心产品') return '高：承载收入、信誉和能力复利的主线';
@@ -3893,10 +3900,14 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
 
       const saved = savedStrategies.get(project.path);
 
+      // 完善单独项目的时间花费统计逻辑
+      const impactSummary = buildAgentImpactSummary([{ name: project.name, path: project.path }]);
+      const actualMinutes = impactSummary.totalMinutes || 0;
+
       const role = saved ? csvRoleToDisplay(saved.role) : inferStrategyRole(project, nodes);
       const businessStage = saved ? saved.businessStage : inferBusinessStage(project, nodes);
       const revenueTier = saved ? saved.revenueTier : inferRevenueTier(project, nodes);
-      const timeLoad = saved ? saved.timeLoad : inferTimeLoadFromCounts(runningNodes, inProgressNodes, failedNodes, totalNodes);
+      const timeLoad = saved ? saved.timeLoad : inferTimeLoad(actualMinutes, runningNodes, inProgressNodes, failedNodes, totalNodes);
 
       const abilities = (saved && saved.abilities)
         ? saved.abilities.split(';').map(x => x.trim()).filter(Boolean)
@@ -3910,6 +3921,7 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
         businessStage,
         revenueTier,
         timeLoad,
+        actualMinutes,
         strategicRelation: inferStrategicRelation(role, abilities, nodes),
         loop: inferDominantStrategyLoop(nodes),
         abilities,
@@ -3924,6 +3936,11 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
         nodes
       };
       const evidence = inferProjectEvidence(base);
+      if (actualMinutes > 0) {
+        evidence.push(`实际累计耗时：${actualMinutes} 分钟`);
+      } else {
+        evidence.push(`实际累计耗时：0 分钟 (暂无本地 Agent 运行记录)`);
+      }
       const tempBase = { ...base, evidence };
 
       const action = saved ? csvActionToDisplay(saved.strategicAction) : inferStrategyAction(tempBase);
@@ -4042,6 +4059,7 @@ function getStrategyPyramidWebviewHtml(
     businessStage: project.businessStage,
     revenueTier: project.revenueTier,
     timeLoad: project.timeLoad,
+    actualMinutes: (project as any).actualMinutes || 0,
     strategicRelation: project.strategicRelation,
     action: project.action,
     risk: project.risk || '暂无明显结构风险',
@@ -4081,6 +4099,32 @@ function getStrategyPyramidWebviewHtml(
     }
 
     * { box-sizing: border-box; }
+
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+    }
+
+    *::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    *::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    *::-webkit-scrollbar-thumb {
+      border: 2px solid transparent;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.26);
+      background-clip: content-box;
+    }
+
+    *::-webkit-scrollbar-thumb:hover {
+      background: rgba(148, 163, 184, 0.42);
+      background-clip: content-box;
+    }
 
     body {
       margin: 0;
@@ -5207,6 +5251,13 @@ function getStrategyPyramidWebviewHtml(
     </div>
 
     <div class="form-group">
+      <label class="form-label">实际累计耗时</label>
+      <div id="drawer-p-actual-time" style="font-size: 13px; color: var(--fg); padding: 8px 12px; background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 6px;">
+        0 分钟 (暂无本地 Agent 运行记录)
+      </div>
+    </div>
+
+    <div class="form-group">
       <label class="form-label">收入贡献层级</label>
       <select class="form-select" id="field-revenue">
         <option value="none">无收入 (none)</option>
@@ -5419,6 +5470,11 @@ function getStrategyPyramidWebviewHtml(
       document.getElementById('field-revenue').value = project.revenueTier;
       document.getElementById('field-action').value = project.action;
       document.getElementById('field-abilities').value = project.abilities.join('; ');
+
+      const actualTimeVal = project.actualMinutes || 0;
+      document.getElementById('drawer-p-actual-time').textContent = actualTimeVal > 0 
+        ? actualTimeVal + ' 分钟' 
+        : '0 分钟 (暂无本地 Agent 运行记录)';
 
       // 支撑证据渲染
       const metricsContainer = document.getElementById('drawer-p-metrics');
@@ -13405,6 +13461,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         proLocked: '未解锁',
         proAccountAnonymous: '未登录',
         proValidUntil: '有效期至',
+        proExpirationHelp: '注：此为本地授权缓存过期时间。每次联网或执行任务时，系统都会静默刷新授权，为您顺延有效期（如购买的是年会员请放心使用）。',
         proLogin: '登录 / 升级 Pro',
         proPasteCode: '粘贴授权码',
         proAccountHelp: '登录后即可打开 Pro 功能；本地项目数据仍留在你的工作区。',
@@ -13562,6 +13619,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         proLocked: 'Locked',
         proAccountAnonymous: 'Not signed in',
         proValidUntil: 'Valid until',
+        proExpirationHelp: 'Note: This is the local authorization cache expiration. The system will automatically and silently refresh the authorization to extend this date whenever you are online.',
         proLogin: 'Sign in / Upgrade Pro',
         proPasteCode: 'Paste authorization code',
         proAccountHelp: 'Sign in to open Pro features; local project data stays in your workspace.',
@@ -14029,7 +14087,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       let expiresText = '';
       if (expiresAt) {
         const dateText = new Date(expiresAt).toLocaleDateString(currentLanguage === 'zh' ? 'zh-CN' : 'en-US');
-        expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>';
+        expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>'
+          + '<div class="dependency-message" style="font-size: 10px; opacity: 0.8; line-height: 1.35; margin-top: 2px; color: var(--vscode-descriptionForeground, var(--text-muted));">' + escapeHtml(t('proExpirationHelp')) + '</div>';
       }
       proAccountPanel.innerHTML =
         '<div class="dependency-item">'
