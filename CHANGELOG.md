@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.184 - 2026-06-07
+
+### Changed
+- docs, ui & tests: add issue contributor incentive to readme, custom scrollbar for strategy pyramid, helper explanation for pro expiration, and actual project minutes logic for time load assessment (11d45dd)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.183 - 2026-06-07
 
 ### Changed
