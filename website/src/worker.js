@@ -3569,7 +3569,112 @@ function alternatePathFor(pathname, locale) {
   if (pathname.startsWith("/zh/docs/")) return pathname.slice(3);
   return locale === "en" ? `/zh${pathname}` : (pathname.startsWith("/zh") ? (pathname.slice(3) || "/") : pathname);
 }
-function buildPage(locale, origin) {
+
+let statsCache = {
+  vscode: 40,
+  openvsx: 9326,
+  lastUpdated: 0
+};
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
+
+let updateStatsPromise = null;
+
+async function triggerStatsUpdate() {
+  if (updateStatsPromise) {
+    return updateStatsPromise;
+  }
+
+  updateStatsPromise = (async () => {
+    let vscodeCount = statsCache.vscode;
+    let openvsxCount = statsCache.openvsx;
+
+    try {
+      // 1. Fetch VS Code Installs
+      const vsPromise = (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        try {
+          const res = await fetch("https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery", {
+            method: "POST",
+            headers: {
+              "Accept": "application/json; charset=utf-8; api-version=3.0-preview.1",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              filters: [{
+                criteria: [{ filterType: 7, value: "SZLK.solopreneur-roadmap" }],
+                pageSize: 1
+              }],
+              flags: 914
+            }),
+            signal: controller.signal
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const statistics = data?.results?.[0]?.extensions?.[0]?.statistics || [];
+            const installStat = statistics.find(s => s.statisticName === "install");
+            if (installStat && typeof installStat.value === "number") {
+              vscodeCount = Math.round(installStat.value);
+            }
+          }
+        } catch (e) {
+          console.error("Failed to fetch VS Code stats:", e);
+        } finally {
+          clearTimeout(timeout);
+        }
+      })();
+
+      // 2. Fetch Open VSX downloads
+      const ovsPromise = (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        try {
+          const res = await fetch("https://open-vsx.org/api/SZLK/solopreneur-roadmap", {
+            signal: controller.signal
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data && typeof data.downloadCount === "number") {
+              openvsxCount = data.downloadCount;
+            }
+          }
+        } catch (e) {
+          console.error("Failed to fetch Open VSX stats:", e);
+        } finally {
+          clearTimeout(timeout);
+        }
+      })();
+
+      await Promise.all([vsPromise, ovsPromise]);
+
+      statsCache = {
+        vscode: vscodeCount,
+        openvsx: openvsxCount,
+        lastUpdated: Date.now()
+      };
+    } catch (e) {
+      console.error("Error updating stats:", e);
+    } finally {
+      updateStatsPromise = null;
+    }
+    return statsCache;
+  })();
+
+  return updateStatsPromise;
+}
+
+function getStats(ctx) {
+  const now = Date.now();
+  if (now - statsCache.lastUpdated > CACHE_DURATION) {
+    const promise = triggerStatsUpdate();
+    if (ctx && typeof ctx.waitUntil === "function") {
+      ctx.waitUntil(promise);
+    }
+  }
+  return statsCache;
+}
+
+function buildPage(locale, origin, stats) {
   const t = content[locale];
   return `<!doctype html>
 <html lang="${t.lang}">
@@ -3698,8 +3803,19 @@ function buildPage(locale, origin) {
           <p class="lead">${escapeHtml(t.install.lead)}</p>
         </div>
         <div class="install-actions">
-          <a class="button primary" href="${MARKETPLACE_URL}">${escapeHtml(t.install.marketplace)}</a>
-          <a class="button secondary" href="${OPEN_VSX_URL}">${escapeHtml(t.install.openVsx)}</a>
+          ${(() => {
+            const currentStats = stats || statsCache;
+            const vscodeText = locale === "zh"
+              ? `${t.install.marketplace} (${currentStats.vscode.toLocaleString()} 次安装)`
+              : `${t.install.marketplace} (${currentStats.vscode.toLocaleString()} installs)`;
+            const openVsxText = locale === "zh"
+              ? `${t.install.openVsx} (${currentStats.openvsx.toLocaleString()} 次下载)`
+              : `${t.install.openVsx} (${currentStats.openvsx.toLocaleString()} downloads)`;
+            return `
+              <a class="button primary" href="${MARKETPLACE_URL}">${escapeHtml(vscodeText)}</a>
+              <a class="button secondary" href="${OPEN_VSX_URL}">${escapeHtml(openVsxText)}</a>
+            `;
+          })()}
           <button class="button soon" type="button" disabled>${escapeHtml(t.install.ios)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
           <button class="button soon" type="button" disabled>${escapeHtml(t.install.android)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
           <button class="button soon" type="button" disabled>${escapeHtml(t.install.webWorkspace)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
@@ -4190,7 +4306,7 @@ function handleLocaleRedirect(request, env, origin) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const origin = env.SITE_ORIGIN || SITE_ORIGIN;
 
@@ -4284,6 +4400,7 @@ Sitemap: ${origin}/sitemap.xml
       return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status, extraHeaders);
     }
 
-    return htmlResponse(buildPage(route.locale, origin), route.status, extraHeaders);
+    const stats = getStats(ctx);
+    return htmlResponse(buildPage(route.locale, origin, stats), route.status, extraHeaders);
   }
 };
