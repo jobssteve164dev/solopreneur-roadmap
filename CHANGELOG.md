@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.185 - 2026-06-09
+
+### Added
+- add quick note issue input and session git pre-backup and rollback support (4f42c0a)
+- display live plugin downloads/installs on marketplace buttons in landing page footer (af57e92)
+
+### Changed
+- add github actions workflow to auto deploy website on website changes (0aea4f5)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.184 - 2026-06-07
 
 ### Changed
