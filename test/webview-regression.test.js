@@ -47,6 +47,22 @@ function loadCompiledModule(relativePath, exportPatch) {
     exports,
     module,
     require: (id) => {
+      if (id === 'child_process') {
+        const cp = require('child_process');
+        return new Proxy(cp, {
+          get(target, prop) {
+            if (prop === 'execFileSync') {
+              return (file, args, options) => {
+                if (args && args.some(arg => typeof arg === 'string' && (arg.includes('caveman') || arg.includes('caveman-shrink')))) {
+                  return '0.1.0';
+                }
+                return cp.execFileSync(file, args, options);
+              };
+            }
+            return target[prop];
+          }
+        });
+      }
       if (id === 'vscode') {
         return {
           Uri: {
@@ -829,27 +845,22 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /agentImpactLoaded/);
   assert.match(html, /id="btn-open-feedback"/);
   assert.match(script, /openFeedbackIssue/);
-  assert.match(html, /id="setting-mcp-input"/);
-  assert.match(html, /id="btn-install-mcp"/);
-  assert.match(html, /id="label-skill-install">安装技能</);
-  assert.match(html, /id="text-install-skill">安装技能</);
-  assert.match(html, /id="label-mcp-install">安装连接器</);
-  assert.match(html, /id="text-install-mcp">安装连接器</);
+  assert.match(html, /id="setting-ability-select"/);
+  assert.match(html, /id="setting-ability-url-input"/);
+  assert.match(html, /id="btn-install-ability"/);
+  assert.match(html, /id="btn-uninstall-ability"/);
+  assert.match(html, /id="ability-detail-card"/);
+  assert.match(html, /id="ability-action-badge"/);
+  assert.match(script, /installSkill/);
   assert.match(script, /installMcp/);
-  assert.match(script, /mcpInstallResult/);
-  assert.match(html, /id="enhancement-list"/);
-  assert.match(html, /id="enhancement-install-badge"/);
-  assert.doesNotMatch(html, /id="setting-enhancement-input"/);
-  assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
   assert.match(script, /installEnhancement/);
+  assert.match(script, /uninstallSkill/);
+  assert.match(script, /uninstallMcp/);
   assert.match(script, /uninstallEnhancement/);
-  assert.match(script, /setting-enhancement-select/);
-  assert.match(script, /btn-install-enhancement/);
-  assert.match(script, /btn-uninstall-enhancement/);
-  assert.doesNotMatch(script, /data-check-enhancement/);
-  assert.doesNotMatch(script, /data-toggle-enhancement/);
-  assert.match(script, /enhancementInstallResult/);
-  assert.match(html, /真实安装和彻底卸载/);
+  assert.match(script, /setting-ability-select/);
+  assert.match(script, /btn-install-ability/);
+  assert.match(script, /btn-uninstall-ability/);
+  assert.match(script, /abilityActionBadge/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
@@ -1022,27 +1033,22 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="btn-refresh-agent-impact"/);
   assert.match(html, /getAgentImpact/);
   assert.match(html, /agentImpactLoaded/);
-  assert.match(html, /id="setting-mcp-input"/);
-  assert.match(html, /id="btn-install-mcp"/);
-  assert.match(html, /id="label-skill-install">安装技能</);
-  assert.match(html, /id="text-install-skill">安装技能</);
-  assert.match(html, /id="label-mcp-install">安装连接器</);
-  assert.match(html, /id="text-install-mcp">安装连接器</);
+  assert.match(html, /id="setting-ability-select"/);
+  assert.match(html, /id="setting-ability-url-input"/);
+  assert.match(html, /id="btn-install-ability"/);
+  assert.match(html, /id="btn-uninstall-ability"/);
+  assert.match(html, /id="ability-detail-card"/);
+  assert.match(html, /id="ability-action-badge"/);
+  assert.match(html, /installSkill/);
   assert.match(html, /installMcp/);
-  assert.match(html, /mcpInstallResult/);
-  assert.match(html, /id="enhancement-list"/);
-  assert.match(html, /id="enhancement-install-badge"/);
-  assert.doesNotMatch(html, /id="setting-enhancement-input"/);
-  assert.doesNotMatch(html, /id="setting-enhancement-command-output-optimizer"/);
   assert.match(html, /installEnhancement/);
+  assert.match(html, /uninstallSkill/);
+  assert.match(html, /uninstallMcp/);
   assert.match(html, /uninstallEnhancement/);
-  assert.match(html, /setting-enhancement-select/);
-  assert.match(html, /btn-install-enhancement/);
-  assert.match(html, /btn-uninstall-enhancement/);
-  assert.doesNotMatch(html, /data-check-enhancement/);
-  assert.doesNotMatch(html, /data-toggle-enhancement/);
-  assert.match(html, /enhancementInstallResult/);
-  assert.match(html, /真实安装和彻底卸载/);
+  assert.match(html, /setting-ability-select/);
+  assert.match(html, /btn-install-ability"/);
+  assert.match(html, /btn-uninstall-ability"/);
+  assert.match(html, /abilityActionBadge/);
   assert.match(html, /\.onboarding-panel\s*\{/);
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);

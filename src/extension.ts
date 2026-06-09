@@ -35,6 +35,8 @@ interface SolopreneurSettings {
   proAccount?: ProAccountStatus;
   enabledEnhancements?: Record<string, boolean>;
   enhancementStatuses?: SolomapEnhancementStatusSummary[];
+  skills?: any[];
+  connectors?: any[];
 }
 
 interface ProAccountStatus {
@@ -1046,6 +1048,8 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     ...baseSettings,
     enhancementStatuses: refreshSolomapEnhancementStatusSummaries(settingsWorkspaceRoot, baseSettings.globalDataPath),
     enabledEnhancements: getEnabledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
+    skills: readSolomapSkillRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).skills || [],
+    connectors: readSolomapMcpRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).connectors || []
   };
 }
 
@@ -3035,6 +3039,14 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'uninstallEnhancement':
           await handleUninstallSolomapEnhancement(context, message.enhancementId || '');
+          break;
+
+        case 'uninstallSkill':
+          await handleUninstallSolomapSkill(context, message.skillId || '');
+          break;
+
+        case 'uninstallMcp':
+          await handleUninstallSolomapMcp(context, message.mcpId || '');
           break;
 
         case 'openFeedbackIssue':
@@ -9996,9 +10008,11 @@ function getSkillInstallWorkspaceRoot(context: vscode.ExtensionContext): string 
   return activeProjectRoot || getSelectedProjectPath(context) || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 }
 
-function postMcpInstallResult(success: boolean, message: string): void {
-  activePanel?.webview.postMessage({ command: 'mcpInstallResult', success, message });
+function postMcpInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
+  const settings = getPersistedSettings(context);
+  activePanel?.webview.postMessage({ command: 'mcpInstallResult', success, message, settings });
   sidebarProvider?.postMcpInstallResult(success, message);
+  vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
 }
 
 function postEnhancementInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
@@ -10064,12 +10078,14 @@ async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSk
     const validation = validateAndRegisterSkillInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
     if (validation.ok) {
       vscode.window.showInformationMessage(validation.message);
-      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: true, message: validation.message });
+      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: true, message: validation.message, settings: getPersistedSettings(context) });
       sidebarProvider?.postSkillInstallResult(true, validation.message);
+      vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
     } else {
       vscode.window.showErrorMessage(`SoloMap skill install failed validation: ${validation.message}`);
-      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: false, message: validation.message });
+      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: false, message: validation.message, settings: getPersistedSettings(context) });
       sidebarProvider?.postSkillInstallResult(false, validation.message);
+      vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
     }
   }, 2000);
 }
@@ -10130,12 +10146,58 @@ async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpI
     const validation = validateAndRegisterMcpInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
     if (validation.ok) {
       vscode.window.showInformationMessage(validation.message);
-      postMcpInstallResult(true, validation.message);
+      postMcpInstallResult(context, true, validation.message);
     } else {
       vscode.window.showErrorMessage(`SoloMap MCP install failed validation: ${validation.message}`);
-      postMcpInstallResult(false, validation.message);
+      postMcpInstallResult(context, false, validation.message);
     }
   }, 2000);
+}
+
+async function handleUninstallSolomapSkill(context: vscode.ExtensionContext, skillId: string): Promise<void> {
+  const settings = getPersistedSettings(context);
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const globalDataPath = settings.globalDataPath || '';
+  
+  try {
+    const registry = readSolomapSkillRegistry(workspaceRoot, globalDataPath);
+    const nextSkills = registry.skills.filter((skill) => skill.id !== skillId);
+    writeSolomapSkillRegistry(workspaceRoot, globalDataPath, { ...registry, skills: nextSkills });
+    
+    const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
+    const installedPath = path.join(skillsRoot, 'installed', skillId);
+    if (fs.existsSync(installedPath)) {
+      fs.rmSync(installedPath, { recursive: true, force: true });
+    }
+    
+    vscode.window.showInformationMessage(`SoloMap skill uninstalled successfully: ${skillId}`);
+    vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+  } catch (error: any) {
+    vscode.window.showErrorMessage(`Failed to uninstall skill: ${error.message || error}`);
+  }
+}
+
+async function handleUninstallSolomapMcp(context: vscode.ExtensionContext, mcpId: string): Promise<void> {
+  const settings = getPersistedSettings(context);
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const globalDataPath = settings.globalDataPath || '';
+  
+  try {
+    const registry = readSolomapMcpRegistry(workspaceRoot, globalDataPath);
+    const nextConnectors = registry.connectors.filter((connector) => connector.id !== mcpId);
+    writeSolomapMcpRegistry(workspaceRoot, globalDataPath, { ...registry, connectors: nextConnectors });
+    
+    const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
+    const installedPath = path.join(mcpRoot, 'servers', mcpId);
+    if (fs.existsSync(installedPath)) {
+      fs.rmSync(installedPath, { recursive: true, force: true });
+    }
+    
+    vscode.window.showInformationMessage(`SoloMap MCP connector uninstalled successfully: ${mcpId}`);
+    vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+  } catch (error: any) {
+    vscode.window.showErrorMessage(`Failed to uninstall MCP connector: ${error.message || error}`);
+  }
 }
 
 async function handleInstallSolomapEnhancement(context: vscode.ExtensionContext, rawEnhancementId: string): Promise<void> {
@@ -11630,6 +11692,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       display: flex;
       flex-direction: column;
       gap: 2px;
+    }
+
+    .solo-select-group-header {
+      padding: 8px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--border-glass);
+      margin: 4px 0 2px;
+      pointer-events: none;
     }
 
     .solo-select-option {
@@ -13457,44 +13530,49 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-extensions"></span><span id="settings-section-abilities">Abilities</span></div>
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-skill-install">安装技能</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-skill-input"
-        placeholder="e.g. https://skills.sh/owner/repo or owner/repo@skill"
-      >
-      <div id="help-skill-install" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Paste a skills.sh or GitHub skill link. SoloMap will install it into the global skill library.
-      </div>
-      <button class="settings-action-btn test-btn" id="btn-install-skill" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-cloud-download"></span><span id="text-install-skill">安装技能</span></button>
-      <div class="cli-badge" id="skill-install-badge" style="display:none;"></div>
-    </div>
+      <div class="settings-field">
+        <label class="settings-lbl-title" id="label-enhancement-toggles">能力扩展与执行增强</label>
+        <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+          在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。
+        </div>
+        
+        <div id="settings-ability-url-input-container" style="display: none; margin-bottom: 6px; margin-top: 6px;">
+          <input
+            type="text"
+            class="settings-input"
+            id="setting-ability-url-input"
+            placeholder=""
+          >
+          <div id="help-ability-url-input" style="font-size: 8px; color: var(--text-muted); margin-top: 2px;"></div>
+        </div>
 
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-mcp-install">安装连接器</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-mcp-input"
-        placeholder="e.g. GitHub MCP server URL, npm package, or config snippet"
-      >
-      <div id="help-mcp-install" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Paste an MCP connector source. SoloMap will register it as a global ability connector.
-      </div>
-      <button class="settings-action-btn test-btn" id="btn-install-mcp" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-plug"></span><span id="text-install-mcp">安装连接器</span></button>
-      <div class="cli-badge" id="mcp-install-badge" style="display:none;"></div>
-    </div>
+        <div class="solo-select settings-select" id="setting-ability-select" data-solo-select data-value="" style="margin-top: 6px;">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+            <span class="solo-select-trigger-label" data-solo-label>请选择能力或增强...</span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox" style="max-height: 250px; overflow-y: auto;">
+          </div>
+        </div>
 
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-enhancement-toggles">执行增强</label>
-      <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        选择一个执行增强后安装或卸载。SoloMap 会让 Agent CLI 完成用户环境里的真实安装和彻底卸载；状态会自动检测。
+        <div class="enhancement-card" id="ability-detail-card" style="margin-top: 8px; display: none;">
+          <div class="enhancement-card-head">
+            <div>
+              <div class="enhancement-title" id="ability-detail-title"></div>
+              <div class="enhancement-desc" id="ability-detail-desc" style="white-space: pre-wrap; font-size: 11px;"></div>
+            </div>
+            <span class="enhancement-status" id="ability-detail-status"></span>
+          </div>
+          <div class="enhancement-meta" id="ability-detail-meta"></div>
+        </div>
+
+        <div class="enhancement-actions" style="margin-top: 8px;">
+          <button class="settings-action-btn test-btn" id="btn-install-ability" disabled><span class="codicon codicon-cloud-download"></span><span id="text-install-ability">安装</span></button>
+          <button class="settings-action-btn test-btn" id="btn-uninstall-ability" disabled><span class="codicon codicon-trash"></span><span id="text-uninstall-ability">卸载</span></button>
+        </div>
+        
+        <div class="cli-badge" id="ability-action-badge" style="display:none; margin-top: 6px;"></div>
       </div>
-      <div class="enhancement-list" id="enhancement-list"></div>
-      <div class="cli-badge" id="enhancement-install-badge" style="display:none;"></div>
-    </div>
     </div>
 
     <div class="settings-actions">
@@ -13537,14 +13615,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const proAccountPanel = document.getElementById('pro-account-panel');
     const btnOpenProAuthorization = document.getElementById('btn-open-pro-authorization');
     const btnPasteProCode = document.getElementById('btn-paste-pro-code');
-    const settingSkillInput = document.getElementById('setting-skill-input');
-    const btnInstallSkill = document.getElementById('btn-install-skill');
-    const skillInstallBadge = document.getElementById('skill-install-badge');
-    const settingMcpInput = document.getElementById('setting-mcp-input');
-    const btnInstallMcp = document.getElementById('btn-install-mcp');
-    const mcpInstallBadge = document.getElementById('mcp-install-badge');
-    const enhancementList = document.getElementById('enhancement-list');
-    const enhancementInstallBadge = document.getElementById('enhancement-install-badge');
+    const settingAbilitySelect = document.getElementById('setting-ability-select');
+    const settingsAbilityUrlInputContainer = document.getElementById('settings-ability-url-input-container');
+    const settingAbilityUrlInput = document.getElementById('setting-ability-url-input');
+    const helpAbilityUrlInput = document.getElementById('help-ability-url-input');
+    const abilityDetailCard = document.getElementById('ability-detail-card');
+    const abilityDetailTitle = document.getElementById('ability-detail-title');
+    const abilityDetailDesc = document.getElementById('ability-detail-desc');
+    const abilityDetailStatus = document.getElementById('ability-detail-status');
+    const abilityDetailMeta = document.getElementById('ability-detail-meta');
+    const btnInstallAbility = document.getElementById('btn-install-ability');
+    const btnUninstallAbility = document.getElementById('btn-uninstall-ability');
+    const abilityActionBadge = document.getElementById('ability-action-badge');
     const settingFeedbackTitle = document.getElementById('setting-feedback-title');
     const settingFeedbackBody = document.getElementById('setting-feedback-body');
     const btnOpenFeedback = document.getElementById('btn-open-feedback');
@@ -13999,16 +14081,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
       setText('text-open-pro-authorization', t('proLogin'));
       setText('text-paste-pro-code', t('proPasteCode'));
-      setText('label-skill-install', t('skillInstall'));
-      if (settingSkillInput) settingSkillInput.placeholder = t('skillInstallPlaceholder');
-      setText('help-skill-install', t('skillInstallHelp'));
-      setText('text-install-skill', t('installSkill'));
-      setText('label-mcp-install', t('mcpInstall'));
-      if (settingMcpInput) settingMcpInput.placeholder = t('mcpInstallPlaceholder');
-      setText('help-mcp-install', t('mcpInstallHelp'));
-      setText('text-install-mcp', t('installMcp'));
-      setText('label-enhancement-toggles', t('enhancementToggles'));
-      setText('help-enhancement-toggles', t('enhancementTogglesHelp'));
+      setText('label-enhancement-toggles', '能力扩展与执行增强');
+      setText('help-enhancement-toggles', '在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。');
+      setText('text-install-ability', '安装');
+      setText('text-uninstall-ability', '卸载');
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -14247,73 +14323,231 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         + '</div>';
     }
 
-    function renderEnhancementStatuses(statuses) {
-      if (!enhancementList) return;
-      const items = Array.isArray(statuses) ? statuses : [];
-      if (!items.length) {
-        enhancementList.innerHTML = '<div class="enhancement-meta">' + escapeHtml(t('selectEnhancement')) + '</div>';
-        return;
-      }
-      if (!items.some(item => item.id === selectedEnhancementId)) {
-        selectedEnhancementId = items[0].id || '';
-      }
-      const selectedItem = items.find(item => item.id === selectedEnhancementId) || items[0];
-      const options = items.map(item => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title || item.id) + '</button>').join('');
-      const statusRows = items.map(item => (
-        '<div class="enhancement-card" data-enhancement-card="' + escapeHtml(item.id) + '">'
-        + '<div class="enhancement-card-head"><div><div class="enhancement-title">' + escapeHtml(item.title || item.id) + '</div>'
-        + '<div class="enhancement-desc">' + escapeHtml(item.description || '') + '</div></div>'
-        + '<span class="enhancement-status ' + escapeHtml(item.status || '') + '">' + escapeHtml(item.statusLabel || '') + '</span></div>'
-        + '<div class="enhancement-meta">' + escapeHtml(t('enhancementVersion')) + '：' + escapeHtml(item.version || '') + '</div>'
-        + (item.message ? '<div class="enhancement-meta">' + escapeHtml(item.message) + '</div>' : '')
-        + '</div>'
-      )).join('');
-      enhancementList.innerHTML =
-        '<div class="enhancement-card">'
-        + '<label class="settings-lbl-title">' + escapeHtml(t('selectEnhancement')) + '</label>'
-        + '<div class="solo-select settings-select" id="setting-enhancement-select" data-solo-select data-value="' + escapeHtml(selectedItem.id || '') + '">'
-        + '<button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">'
-        + '<span class="solo-select-trigger-label" data-solo-label>' + escapeHtml(selectedItem.title || selectedItem.id || '') + '</span>'
-        + '<span class="codicon codicon-chevron-down solo-select-caret"></span></button>'
-        + '<div class="solo-select-menu" data-solo-menu role="listbox">' + options + '</div></div>'
-        + '<div class="enhancement-actions">'
-        + '<button class="settings-action-btn test-btn" id="btn-install-enhancement"><span class="codicon codicon-cloud-download"></span><span>' + escapeHtml(t('installEnhancement')) + '</span></button>'
-        + '<button class="settings-action-btn test-btn" id="btn-uninstall-enhancement" ' + (!selectedItem.installed ? 'disabled' : '') + '><span class="codicon codicon-trash"></span><span>' + escapeHtml(t('uninstallEnhancement')) + '</span></button>'
-        + '</div></div>'
-        + statusRows;
-      const enhancementSelect = document.getElementById('setting-enhancement-select');
-      bindSoloSelect(enhancementSelect, (value) => {
-        selectedEnhancementId = value || '';
-        renderEnhancementStatuses(items);
+    let selectedAbilityId = '';
+    let currentAbilitySettings = null;
+
+    function renderAbilitiesAndEnhancements(settings) {
+      currentAbilitySettings = settings;
+      const skills = Array.isArray(settings.skills) ? settings.skills : [];
+      const connectors = Array.isArray(settings.connectors) ? settings.connectors : [];
+      const enhancements = Array.isArray(settings.enhancementStatuses) ? settings.enhancementStatuses : [];
+
+      const items = [];
+      skills.forEach(s => {
+        items.push({
+          id: 'skill-' + s.id,
+          type: 'skill',
+          originId: s.id,
+          title: s.title || s.id,
+          description: s.description || '',
+          installed: true,
+          statusLabel: '已安装',
+          statusClass: 'ready',
+          meta: '技能路径：' + (s.entry || '')
+        });
       });
-      const installButton = document.getElementById('btn-install-enhancement');
-      if (installButton) {
-        installButton.addEventListener('click', () => {
-          const enhancementId = getSoloSelectValue(enhancementSelect) || selectedEnhancementId;
-          if (enhancementInstallBadge) {
-            enhancementInstallBadge.style.display = 'block';
-            enhancementInstallBadge.className = 'cli-badge';
-            enhancementInstallBadge.style.background = 'rgba(255,255,255,0.05)';
-            enhancementInstallBadge.style.color = 'var(--text-muted)';
-            enhancementInstallBadge.textContent = t('installingEnhancement');
-          }
-          vscode.postMessage({ command: 'installEnhancement', enhancementId });
+      items.push({
+        id: 'add-new-skill',
+        type: 'add-new-skill',
+        title: '➕ 新增技能...',
+        description: '安装外部技能以扩展能力',
+        installed: false
+      });
+
+      connectors.forEach(c => {
+        items.push({
+          id: 'connector-' + c.id,
+          type: 'connector',
+          originId: c.id,
+          title: c.title || c.id,
+          description: c.description || '',
+          installed: true,
+          statusLabel: '已安装',
+          statusClass: 'ready',
+          meta: '连接器类型：' + (c.type || 'mcp')
         });
-      }
-      const uninstallButton = document.getElementById('btn-uninstall-enhancement');
-      if (uninstallButton) {
-        uninstallButton.addEventListener('click', () => {
-          const enhancementId = getSoloSelectValue(enhancementSelect) || selectedEnhancementId;
-          if (enhancementInstallBadge) {
-            enhancementInstallBadge.style.display = 'block';
-            enhancementInstallBadge.className = 'cli-badge';
-            enhancementInstallBadge.style.background = 'rgba(255,255,255,0.05)';
-            enhancementInstallBadge.style.color = 'var(--text-muted)';
-            enhancementInstallBadge.textContent = t('uninstallingEnhancement');
-          }
-          vscode.postMessage({ command: 'uninstallEnhancement', enhancementId });
+      });
+      items.push({
+        id: 'add-new-connector',
+        type: 'add-new-connector',
+        title: '➕ 新增连接器...',
+        description: '集成外部 MCP 服务生态',
+        installed: false
+      });
+
+      enhancements.forEach(e => {
+        const isInstalled = e.status === 'ready' || e.installed;
+        items.push({
+          id: 'enhancement-' + e.id,
+          type: 'enhancement',
+          originId: e.id,
+          title: e.title || e.id,
+          description: e.description || '',
+          installed: isInstalled,
+          statusLabel: e.statusLabel || (isInstalled ? '已就绪' : '未安装'),
+          statusClass: e.status || (isInstalled ? 'ready' : 'missing'),
+          meta: '内置增强 · 版本：' + (e.version || 'unknown')
         });
+      });
+
+      if (!selectedAbilityId || !items.some(item => item.id === selectedAbilityId)) {
+        selectedAbilityId = items.length > 0 ? items[0].id : '';
       }
+      const selectedItem = items.find(item => item.id === selectedAbilityId) || items[0];
+
+      let optionsHtml = '';
+      
+      optionsHtml += '<div class="solo-select-group-header">技能 (Skills)</div>';
+      optionsHtml += items.filter(i => i.type === 'skill' || i.type === 'add-new-skill').map(item => 
+        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
+      ).join('');
+
+      optionsHtml += '<div class="solo-select-group-header">连接器 (MCP Connectors)</div>';
+      optionsHtml += items.filter(i => i.type === 'connector' || i.type === 'add-new-connector').map(item => 
+        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
+      ).join('');
+
+      optionsHtml += '<div class="solo-select-group-header">执行增强 (Enhancements)</div>';
+      optionsHtml += items.filter(i => i.type === 'enhancement').map(item => 
+        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
+      ).join('');
+
+      const selectMenu = settingAbilitySelect.querySelector('[data-solo-menu]');
+      if (selectMenu) {
+        selectMenu.innerHTML = optionsHtml;
+      }
+      
+      const selectLabel = settingAbilitySelect.querySelector('[data-solo-label]');
+      if (selectLabel) {
+        selectLabel.textContent = selectedItem.title;
+      }
+      settingAbilitySelect.setAttribute('data-value', selectedItem.id);
+
+      if (selectedItem.type === 'add-new-skill') {
+        settingsAbilityUrlInputContainer.style.display = 'block';
+        settingAbilityUrlInput.placeholder = 'e.g. https://skills.sh/owner/repo or owner/repo@skill';
+        helpAbilityUrlInput.textContent = '粘贴 skills.sh 或 GitHub 技能仓库链接。SoloMap 会将其安装到全局技能库中。';
+        abilityDetailCard.style.display = 'none';
+        btnInstallAbility.removeAttribute('disabled');
+        btnUninstallAbility.setAttribute('disabled', 'true');
+      } else if (selectedItem.type === 'add-new-connector') {
+        settingsAbilityUrlInputContainer.style.display = 'block';
+        settingAbilityUrlInput.placeholder = 'e.g. GitHub MCP server URL, npm package, or config snippet';
+        helpAbilityUrlInput.textContent = '粘贴 MCP 连接器源。SoloMap 将其注册为全局连接器。';
+        abilityDetailCard.style.display = 'none';
+        btnInstallAbility.removeAttribute('disabled');
+        btnUninstallAbility.setAttribute('disabled', 'true');
+      } else {
+        settingsAbilityUrlInputContainer.style.display = 'none';
+        abilityDetailCard.style.display = 'block';
+        abilityDetailTitle.textContent = selectedItem.title;
+        abilityDetailDesc.textContent = selectedItem.description;
+        abilityDetailStatus.textContent = selectedItem.statusLabel;
+        abilityDetailStatus.className = 'enhancement-status ' + selectedItem.statusClass;
+        abilityDetailMeta.textContent = selectedItem.meta || '';
+        
+        if (selectedItem.type === 'enhancement') {
+          if (selectedItem.installed) {
+            btnInstallAbility.setAttribute('disabled', 'true');
+            btnUninstallAbility.removeAttribute('disabled');
+          } else {
+            btnInstallAbility.removeAttribute('disabled');
+            btnUninstallAbility.setAttribute('disabled', 'true');
+          }
+        } else {
+          btnInstallAbility.setAttribute('disabled', 'true');
+          btnUninstallAbility.removeAttribute('disabled');
+        }
+      }
+
+      bindSoloSelect(settingAbilitySelect, (value) => {
+        selectedAbilityId = value || '';
+        renderAbilitiesAndEnhancements(settings);
+      });
+    }
+
+    if (btnInstallAbility) {
+      btnInstallAbility.addEventListener('click', () => {
+        if (!selectedAbilityId || !currentAbilitySettings) return;
+        
+        if (selectedAbilityId === 'add-new-skill') {
+          const urlVal = settingAbilityUrlInput.value.trim();
+          if (!urlVal) {
+            vscode.window.showWarningMessage('请先输入要安装的技能链接。');
+            return;
+          }
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = 'cli-badge';
+            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
+            abilityActionBadge.style.color = 'var(--text-muted)';
+            abilityActionBadge.textContent = '正在安装技能...';
+          }
+          vscode.postMessage({ command: 'installSkill', skillInput: urlVal });
+        } else if (selectedAbilityId === 'add-new-connector') {
+          const urlVal = settingAbilityUrlInput.value.trim();
+          if (!urlVal) {
+            vscode.window.showWarningMessage('请先输入要安装的连接器源。');
+            return;
+          }
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = 'cli-badge';
+            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
+            abilityActionBadge.style.color = 'var(--text-muted)';
+            abilityActionBadge.textContent = '正在安装连接器...';
+          }
+          vscode.postMessage({ command: 'installMcp', mcpInput: urlVal });
+        } else if (selectedAbilityId.startsWith('enhancement-')) {
+          const originId = selectedAbilityId.substring('enhancement-'.length);
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = 'cli-badge';
+            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
+            abilityActionBadge.style.color = 'var(--text-muted)';
+            abilityActionBadge.textContent = '正在安装执行增强...';
+          }
+          vscode.postMessage({ command: 'installEnhancement', enhancementId: originId });
+        }
+      });
+    }
+
+    if (btnUninstallAbility) {
+      btnUninstallAbility.addEventListener('click', () => {
+        if (!selectedAbilityId || !currentAbilitySettings) return;
+        
+        if (selectedAbilityId.startsWith('skill-')) {
+          const originId = selectedAbilityId.substring('skill-'.length);
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = 'cli-badge';
+            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
+            abilityActionBadge.style.color = 'var(--text-muted)';
+            abilityActionBadge.textContent = '正在卸载技能...';
+          }
+          vscode.postMessage({ command: 'uninstallSkill', skillId: originId });
+        } else if (selectedAbilityId.startsWith('connector-')) {
+          const originId = selectedAbilityId.substring('connector-'.length);
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = 'cli-badge';
+            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
+            abilityActionBadge.style.color = 'var(--text-muted)';
+            abilityActionBadge.textContent = '正在卸载连接器...';
+          }
+          vscode.postMessage({ command: 'uninstallMcp', mcpId: originId });
+        } else if (selectedAbilityId.startsWith('enhancement-')) {
+          const originId = selectedAbilityId.substring('enhancement-'.length);
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = 'cli-badge';
+            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
+            abilityActionBadge.style.color = 'var(--text-muted)';
+            abilityActionBadge.textContent = '正在卸载执行增强...';
+          }
+          vscode.postMessage({ command: 'uninstallEnhancement', enhancementId: originId });
+        }
+      });
     }
 
     document.addEventListener('click', event => {
@@ -14382,7 +14616,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
           renderProAccount(currentSettings);
-          renderEnhancementStatuses(message.settings.enhancementStatuses || []);
+          renderAbilitiesAndEnhancements(message.settings);
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -14456,26 +14690,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderAgentImpact(message.status || {});
           break;
         case 'skillInstallResult':
-          if (skillInstallBadge) {
-            skillInstallBadge.style.display = 'block';
-            skillInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
-            skillInstallBadge.textContent = message.message || '';
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
+            abilityActionBadge.textContent = message.message || '';
           }
+          if (message.settings) renderAbilitiesAndEnhancements(message.settings);
           break;
         case 'mcpInstallResult':
-          if (mcpInstallBadge) {
-            mcpInstallBadge.style.display = 'block';
-            mcpInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
-            mcpInstallBadge.textContent = message.message || '';
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
+            abilityActionBadge.textContent = message.message || '';
           }
+          if (message.settings) renderAbilitiesAndEnhancements(message.settings);
           break;
         case 'enhancementInstallResult':
-          if (enhancementInstallBadge) {
-            enhancementInstallBadge.style.display = 'block';
-            enhancementInstallBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
-            enhancementInstallBadge.textContent = message.message || '';
+          if (abilityActionBadge) {
+            abilityActionBadge.style.display = 'block';
+            abilityActionBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
+            abilityActionBadge.textContent = message.message || '';
           }
-          if (message.settings) renderEnhancementStatuses(message.settings.enhancementStatuses || []);
+          if (message.settings) renderAbilitiesAndEnhancements(message.settings);
           break;
       }
     });
@@ -14562,49 +14798,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }).join('');
     }
 
-    if (btnInstallSkill) {
-      btnInstallSkill.addEventListener('click', () => {
-        const skillInput = (settingSkillInput ? settingSkillInput.value : '').trim();
-        if (!skillInput) {
-          if (skillInstallBadge) {
-            skillInstallBadge.style.display = 'block';
-            skillInstallBadge.className = 'cli-badge error';
-            skillInstallBadge.textContent = t('skillInstallPlaceholder');
-          }
-          return;
-        }
-        if (skillInstallBadge) {
-          skillInstallBadge.style.display = 'block';
-          skillInstallBadge.className = 'cli-badge';
-          skillInstallBadge.style.background = 'rgba(255,255,255,0.05)';
-          skillInstallBadge.style.color = 'var(--text-muted)';
-          skillInstallBadge.textContent = t('installingSkill');
-        }
-        vscode.postMessage({ command: 'installSkill', skillInput });
-      });
-    }
-
-    if (btnInstallMcp) {
-      btnInstallMcp.addEventListener('click', () => {
-        const mcpInput = (settingMcpInput ? settingMcpInput.value : '').trim();
-        if (!mcpInput) {
-          if (mcpInstallBadge) {
-            mcpInstallBadge.style.display = 'block';
-            mcpInstallBadge.className = 'cli-badge error';
-            mcpInstallBadge.textContent = t('mcpInstallPlaceholder');
-          }
-          return;
-        }
-        if (mcpInstallBadge) {
-          mcpInstallBadge.style.display = 'block';
-          mcpInstallBadge.className = 'cli-badge';
-          mcpInstallBadge.style.background = 'rgba(255,255,255,0.05)';
-          mcpInstallBadge.style.color = 'var(--text-muted)';
-          mcpInstallBadge.textContent = t('installingMcp');
-        }
-        vscode.postMessage({ command: 'installMcp', mcpInput });
-      });
-    }
 
     if (btnOpenFeedback) {
       btnOpenFeedback.addEventListener('click', () => {
