@@ -2869,6 +2869,43 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
+        case 'rollbackChanges': {
+          const projectPath = message.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '';
+          const gitHash = message.gitHash;
+          if (!projectPath || !gitHash) {
+            vscode.window.showErrorMessage('Invalid rollback request.');
+            break;
+          }
+          const confirm = await vscode.window.showWarningMessage(
+            `是否确认撤销本次修改？这将会将项目状态回退到该次对话开始之前（提交哈希：${gitHash.slice(0, 8)}），并在回滚过程中丢失在此之后的所有改动。`,
+            { modal: true },
+            '确认撤销'
+          );
+          if (confirm === '确认撤销') {
+            try {
+              const resetRes = childProcess.spawnSync('git', ['reset', '--hard', gitHash], {
+                cwd: projectPath,
+                encoding: 'utf8'
+              });
+              if (resetRes.status !== 0) {
+                vscode.window.showErrorMessage(`回滚失败：${resetRes.stderr || '未知 Git 错误'}`);
+                break;
+              }
+              childProcess.spawnSync('git', ['clean', '-fd'], { cwd: projectPath });
+              vscode.window.showInformationMessage(`项目修改已成功回滚到 ${gitHash.slice(0, 8)}`);
+              
+              if (syncEngine) {
+                await syncEngine.initAndSync();
+              }
+              sendNodesToWebview();
+              refreshSidebarProjectCards();
+            } catch (err: any) {
+              vscode.window.showErrorMessage(`执行回滚操作出错：${err.message || err}`);
+            }
+          }
+          break;
+        }
+
         case 'linkSoloConversation':
           linkSoloConversationToNode(Number(message.conversationId || 0), String(message.nodeId || ''));
           break;
@@ -10514,7 +10551,9 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
+  const preGitHash = createPreSessionGitCommit(activeProjectRoot);
   const launchSummary = [
+    preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Solo conversation started.',
     `Run started at: ${new Date().toISOString()}`,
     nativeSessionId
@@ -10608,6 +10647,41 @@ function linkSoloConversationToNode(conversationId: number, nodeId: string): voi
   vscode.window.showInformationMessage(`Solo conversation associated with step: ${node.title}`);
 }
 
+function createPreSessionGitCommit(projectPath: string): string | null {
+  try {
+    const isRepo = childProcess.spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+      cwd: projectPath,
+      encoding: 'utf8'
+    });
+    if (isRepo.status !== 0) {
+      return null;
+    }
+    
+    const statusResult = childProcess.spawnSync('git', ['status', '--porcelain'], {
+      cwd: projectPath,
+      encoding: 'utf8'
+    });
+    const hasChanges = statusResult.status === 0 && statusResult.stdout.trim().length > 0;
+    
+    if (hasChanges) {
+      childProcess.spawnSync('git', ['add', '-A'], { cwd: projectPath });
+      const commitMsg = `SoloMap pre-session auto-backup [${new Date().toISOString()}]`;
+      childProcess.spawnSync('git', ['commit', '-m', commitMsg, '--no-verify'], { cwd: projectPath });
+    }
+    
+    const revResult = childProcess.spawnSync('git', ['rev-parse', 'HEAD'], {
+      cwd: projectPath,
+      encoding: 'utf8'
+    });
+    if (revResult.status === 0) {
+      return revResult.stdout.trim();
+    }
+  } catch (err) {
+    console.error('Failed to create pre-session git commit:', err);
+  }
+  return null;
+}
+
 /**
  * Executes a CLI agent in the integrated terminal.
  */
@@ -10689,7 +10763,9 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
+  const preGitHash = createPreSessionGitCommit(workspaceRoot);
   const launchSummary = [
+    preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Agent conversation started.',
     `Run started at: ${new Date().toISOString()}`,
     nativeSessionId
@@ -11163,7 +11239,21 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         runDigestSummary = `Execution digest not saved: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
+    let preGitHash = '';
+    if (syncEngine && executionLogId) {
+      const existingLogs = (isSoloConversation && typeof syncEngine.getProjectAgentExecutions === 'function')
+        ? syncEngine.getProjectAgentExecutions()
+        : (typeof syncEngine.getAgentExecutions === 'function' ? syncEngine.getAgentExecutions(nodeId) : []);
+      const matched = existingLogs.find(log => Number(log.id) === Number(executionLogId));
+      if (matched && matched.output) {
+        const hashMatch = matched.output.match(/SoloMapPreGitHash:\s*([a-f0-9]+)/i);
+        if (hashMatch) {
+          preGitHash = hashMatch[1];
+        }
+      }
+    }
     const executionSummary = [
+      preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
       userMessage ? `User supplement:\n${userMessage}` : '',
       sessionMode ? `Native session mode: ${sessionMode}` : '',
       nativeSessionSummary,
@@ -12462,11 +12552,37 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       background: rgba(56, 189, 248, 0.08);
       color: var(--text-main);
       line-height: 1.45;
+      position: relative;
     }
 
     .conversation-outcome.failed {
       background: rgba(255, 23, 68, 0.10);
       color: #ffd7df;
+    }
+
+    .rollback-btn {
+      position: absolute;
+      top: 6px;
+      right: 8px;
+      border: 1px solid rgba(244, 67, 54, 0.4);
+      border-radius: 4px;
+      background: rgba(244, 67, 54, 0.08);
+      color: #ff8a80;
+      padding: 3px 6px;
+      font-size: 10px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      line-height: 1;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .rollback-btn:hover {
+      background: rgba(244, 67, 54, 0.18);
+      border-color: rgba(244, 67, 54, 0.6);
+    }
+    .rollback-btn .codicon {
+      font-size: 11px;
     }
 
     .conversation-detail pre {
@@ -14171,6 +14287,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
     }
 
+    document.addEventListener('click', event => {
+      const rollbackBtn = event.target.closest('.rollback-btn');
+      if (rollbackBtn) {
+        event.stopPropagation();
+        const gitHash = rollbackBtn.getAttribute('data-rollback-hash');
+        if (gitHash) {
+          vscode.postMessage({
+            command: 'rollbackChanges',
+            gitHash: gitHash,
+            projectPath: activeProjectPath
+          });
+        }
+      }
+    });
+
     // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
@@ -15329,8 +15460,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       const label = conversation.status === 'Failed' ? t('failureLabel') : t('runResult');
       const conclusion = conversation.status === 'Running' ? '' : extractAgentConclusion(output);
+      const preGitHashMatch = output.match(/SoloMapPreGitHash:\s*([a-f0-9]+)/i);
+      const preGitHash = preGitHashMatch ? preGitHashMatch[1] : '';
+      const rollbackButton = (preGitHash && conversation.status !== 'Running')
+        ? '<button class="rollback-btn" data-rollback-hash="' + preGitHash + '" title="撤销本次修改，回滚项目状态"><span class="codicon codicon-discard"></span> 撤销修改</button>'
+        : '';
       return \`
         <div class="conversation-outcome \${conversation.status === 'Failed' ? 'failed' : ''}">
+          \${rollbackButton}
           <strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}
           \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
         </div>

@@ -1000,6 +1000,7 @@ function toGithubLabel(category: string): string {
   if (category === 'feature-request') return 'feature-request';
   if (category === 'tech-debt') return 'tech-debt';
   if (category === 'documentation') return 'documentation';
+  if (category === 'quick-note') return 'quick-note';
   return 'discussion';
 }
 
@@ -1013,6 +1014,7 @@ function getGithubIssueLabelMeta(label: string): { color: string; description: s
   if (label === 'tech-debt') return { color: 'fbca04', description: 'Technical debt or maintenance work' };
   if (label === 'documentation') return { color: '0075ca', description: 'Documentation improvement' };
   if (label === 'discussion') return { color: 'd4c5f9', description: 'Open discussion or decision input' };
+  if (label === 'quick-note') return { color: '00e676', description: 'Quick note or task' };
   if (label === 'P0') return { color: 'b60205', description: 'Critical priority' };
   if (label === 'P1') return { color: 'd93f0b', description: 'High priority' };
   if (label === 'P2') return { color: 'fbca04', description: 'Medium priority' };
@@ -4899,6 +4901,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       padding: 8px;
     }
 
+    .portfolio-quick-issue-input {
+      border: 1px solid var(--border-glass);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.055);
+      color: var(--text-main);
+      font: inherit;
+      font-size: 10px;
+      padding: 4px 6px;
+      width: 120px;
+      outline: none;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .portfolio-quick-issue-input:focus {
+      border-color: rgba(255, 183, 77, 0.5);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
     .portfolio-issue-input,
     .portfolio-issue-textarea {
       width: 100%;
@@ -5642,6 +5661,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let issuePanelExpanded = false;
     let issueFormOpen = false;
     let issueDraftTitle = '';
+    let quickIssueDraftTitle = '';
     let issueDraftBody = '';
     let issueDraftCategory = 'bug';
     let issueDraftPriority = '';
@@ -5847,6 +5867,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueTotal: '总数',
         issueUnavailable: '连接 GitHub 后显示 Issues。',
         issueBug: 'Bug',
+        issueQuickNote: '快速笔记',
+        quickIssuePlaceholder: '快速新建笔记...',
         issueFeature: '需求',
         issueDebt: '技术债',
         issueDiscussion: '讨论',
@@ -6065,6 +6087,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         issueTotal: 'Total',
         issueUnavailable: 'Connect GitHub to show Issues.',
         issueBug: 'Bug',
+        issueQuickNote: 'Quick Note',
+        quickIssuePlaceholder: 'Quick new note...',
         issueFeature: 'Feature',
         issueDebt: 'Tech debt',
         issueDiscussion: 'Discussion',
@@ -6634,6 +6658,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (message.success) {
             issueFormOpen = false;
             issueDraftTitle = '';
+            quickIssueDraftTitle = '';
             issueDraftBody = '';
             issueDraftCategory = 'bug';
             issueDraftPriority = '';
@@ -7592,6 +7617,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (category === 'feature-request') return t('issueFeature');
       if (category === 'tech-debt') return t('issueDebt');
       if (category === 'documentation') return t('issueDocs');
+      if (category === 'quick-note') return t('issueQuickNote');
       return t('issueDiscussion');
     }
 
@@ -7601,7 +7627,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         { value: 'feature-request', label: t('issueFeature') },
         { value: 'tech-debt', label: t('issueDebt') },
         { value: 'discussion', label: t('issueDiscussion') },
-        { value: 'documentation', label: t('issueDocs') }
+        { value: 'documentation', label: t('issueDocs') },
+        { value: 'quick-note', label: t('issueQuickNote') }
       ];
     }
 
@@ -7930,6 +7957,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
           <div class="portfolio-issue-actions">
             <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
+            \${!expanded ? \`<input type="text" class="portfolio-quick-issue-input" placeholder="\${escapeHtml(t('quickIssuePlaceholder'))}" value="\${escapeHtml(quickIssueDraftTitle)}" data-quick-issue-input data-project-path="\${escapeHtml(project.path)}" />\` : ''}
             <button class="portfolio-issue-create" data-toggle-issue-panel data-project-path="\${escapeHtml(project.path)}">\${escapeHtml(expanded ? t('issueCollapse') : t('issueExpand'))}</button>
           </div>
         </div>
@@ -8163,10 +8191,53 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       portfolioList.querySelectorAll('[data-toggle-issue-form]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
-          issueFormOpen = !issueFormOpen;
-          issuePanelExpanded = true;
-          issueActionMessage = '';
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          const panel = button.closest('[data-issue-panel]');
+          const quickInput = panel ? panel.querySelector('[data-quick-issue-input]') : null;
+          const quickValue = quickInput ? quickInput.value.trim() : '';
+          if (quickValue) {
+            vscode.postMessage({
+              command: 'createIssue',
+              projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
+              title: quickValue,
+              body: '',
+              category: 'quick-note',
+              priority: ''
+            });
+            quickIssueDraftTitle = '';
+            if (quickInput) {
+              quickInput.value = '';
+            }
+          } else {
+            issueFormOpen = !issueFormOpen;
+            issuePanelExpanded = true;
+            issueActionMessage = '';
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          }
+        });
+      });
+      portfolioList.querySelectorAll('[data-quick-issue-input]').forEach(input => {
+        input.addEventListener('input', () => {
+          quickIssueDraftTitle = input.value;
+        });
+        input.addEventListener('click', (event) => event.stopPropagation());
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            event.stopPropagation();
+            const value = input.value.trim();
+            if (value) {
+              vscode.postMessage({
+                command: 'createIssue',
+                projectPath: input.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
+                title: value,
+                body: '',
+                category: 'quick-note',
+                priority: ''
+              });
+              quickIssueDraftTitle = '';
+              input.value = '';
+            }
+          }
         });
       });
       portfolioList.querySelectorAll('[data-toggle-issue-panel]').forEach(button => {
