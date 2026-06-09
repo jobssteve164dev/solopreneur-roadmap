@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.187 - 2026-06-09
+
+### Changed
+- Unify settings ability management (b32ada3)
+- SoloMap pre-session auto-backup [2026-06-09T23:37:54.913Z] (1e8ea50)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.186 - 2026-06-09
 
 ### Added
