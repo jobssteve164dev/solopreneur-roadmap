@@ -286,6 +286,7 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'custom', label: 'Custom...' }
   ]);
   wireSoloSelect(elements['project-select'], []);
+  wireSoloSelect(elements['setting-ability-select'], []);
   const context = {
     document: {
       getElementById: (id) => elements[id] || null,
@@ -2969,8 +2970,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /直接更新项目目录中的 `\.solopreneur\/roadmap\.csv`/);
   assert.match(revisionPrompt, /不要把本段提示词、解释文字或执行日志写进 CSV/);
   assert.match(revisionPrompt, /validate-roadmap\.cjs --mode revision/);
-  assert.match(revisionPrompt, /面向外部用户并需要获客或转化/);
-  assert.match(revisionPrompt, /不要虚构营销或销售任务/);
+  assert.match(revisionPrompt, /核心产品（商业化产品）/);
+  assert.match(revisionPrompt, /不可强行套用营销或销售任务/);
   assert.match(revisionPrompt, /Always run focused checks/);
   assert.match(revisionPrompt, /SoloMap 默认系统提示词/);
   assert.match(revisionPrompt, /\/workspace\/\.solomap-global\/memory/);
@@ -3325,8 +3326,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
   assert.match(bootstrapInstructions, /validate-roadmap\.cjs --mode bootstrap/);
   assert.match(bootstrapInstructions, /按项目真实目标选择适用的推进框架/);
-  assert.match(bootstrapInstructions, /内部工具、迁移、研究、内容或基础设施项目不得被强行改写成营销销售路线/);
-  assert.match(bootstrapInstructions, /Build -> Sell -> Learn -> Improve 作为底层审查/);
+  assert.match(bootstrapInstructions, /6 个类别/);
+  assert.match(bootstrapInstructions, /Build->Sell->Learn->Improve/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
   assert.match(extensionModule.__buildRoadmapValidationScript(), /--mode bootstrap/);
   assert.match(extensionModule.__buildRoadmapValidationScript(), /--mode revision/);

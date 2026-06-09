@@ -2657,6 +2657,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _checkEnhancement?: (enhancementId: string) => Promise<void>,
     private readonly _setEnhancementEnabled?: (enhancementId: string, enabled: boolean) => Promise<void>,
     private readonly _uninstallEnhancement?: (enhancementId: string) => Promise<void>,
+    private readonly _uninstallSkill?: (skillId: string) => Promise<void>,
+    private readonly _uninstallMcp?: (mcpId: string) => Promise<void>,
     private readonly _getFeedbackUsageSummary?: () => string,
     private readonly _stopConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>,
     private readonly _manageProAuthorization?: (action?: string) => Promise<void>
@@ -2813,6 +2815,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           case 'uninstallEnhancement':
             if (this._uninstallEnhancement) {
               await this._uninstallEnhancement(data.enhancementId || '');
+            }
+            break;
+          case 'uninstallSkill':
+            if (this._uninstallSkill) {
+              await this._uninstallSkill(data.skillId || '');
+            }
+            break;
+          case 'uninstallMcp':
+            if (this._uninstallMcp) {
+              await this._uninstallMcp(data.mcpId || '');
             }
             break;
           case 'testCli':
@@ -6322,6 +6334,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
+    function showAbilityActionMessage(message, isError = false) {
+      if (!abilityActionBadge) return;
+      abilityActionBadge.style.display = 'block';
+      abilityActionBadge.className = isError ? 'cli-badge error' : 'cli-badge';
+      abilityActionBadge.style.background = isError ? '' : 'rgba(255,255,255,0.05)';
+      abilityActionBadge.style.color = isError ? '' : 'var(--text-muted)';
+      abilityActionBadge.textContent = message;
+    }
+
     function getCliPresetFromCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
       if (!raw) return 'agy';
@@ -6427,6 +6448,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let currentAbilitySettings = null;
 
     function renderAbilitiesAndEnhancements(settings) {
+      if (!settingAbilitySelect || !settingsAbilityUrlInputContainer || !settingAbilityUrlInput || !helpAbilityUrlInput || !abilityDetailCard || !btnInstallAbility || !btnUninstallAbility) {
+        return;
+      }
       currentAbilitySettings = settings;
       const skills = Array.isArray(settings.skills) ? settings.skills : [];
       const connectors = Array.isArray(settings.connectors) ? settings.connectors : [];
@@ -6573,40 +6597,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (selectedAbilityId === 'add-new-skill') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
-            vscode.window.showWarningMessage('请先输入要安装的技能链接。');
+            showAbilityActionMessage('请先输入要安装的技能链接。', true);
             return;
           }
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在安装技能...';
-          }
+          showAbilityActionMessage('正在安装技能...');
           vscode.postMessage({ command: 'installSkill', skillInput: urlVal });
         } else if (selectedAbilityId === 'add-new-connector') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
-            vscode.window.showWarningMessage('请先输入要安装的连接器源。');
+            showAbilityActionMessage('请先输入要安装的连接器源。', true);
             return;
           }
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在安装连接器...';
-          }
+          showAbilityActionMessage('正在安装连接器...');
           vscode.postMessage({ command: 'installMcp', mcpInput: urlVal });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在安装执行增强...';
-          }
+          showAbilityActionMessage('正在安装执行增强...');
           vscode.postMessage({ command: 'installEnhancement', enhancementId: originId });
         }
       });
@@ -6618,33 +6624,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         
         if (selectedAbilityId.startsWith('skill-')) {
           const originId = selectedAbilityId.substring('skill-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在卸载技能...';
-          }
+          showAbilityActionMessage('正在卸载技能...');
           vscode.postMessage({ command: 'uninstallSkill', skillId: originId });
         } else if (selectedAbilityId.startsWith('connector-')) {
           const originId = selectedAbilityId.substring('connector-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在卸载连接器...';
-          }
+          showAbilityActionMessage('正在卸载连接器...');
           vscode.postMessage({ command: 'uninstallMcp', mcpId: originId });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在卸载执行增强...';
-          }
+          showAbilityActionMessage('正在卸载执行增强...');
           vscode.postMessage({ command: 'uninstallEnhancement', enhancementId: originId });
         }
       });

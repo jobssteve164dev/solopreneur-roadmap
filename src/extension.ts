@@ -995,6 +995,12 @@ export async function activate(context: vscode.ExtensionContext) {
     async (enhancementId) => {
       await handleUninstallSolomapEnhancement(context, enhancementId);
     },
+    async (skillId) => {
+      await handleUninstallSolomapSkill(context, skillId);
+    },
+    async (mcpId) => {
+      await handleUninstallSolomapMcp(context, mcpId);
+    },
     () => buildFeedbackUsageSummary(context),
     async (projectPath, nodeId, conversationId) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
@@ -10015,6 +10021,13 @@ function postMcpInstallResult(context: vscode.ExtensionContext, success: boolean
   vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
 }
 
+function postSkillInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
+  const settings = getPersistedSettings(context);
+  activePanel?.webview.postMessage({ command: 'skillInstallResult', success, message, settings });
+  sidebarProvider?.postSkillInstallResult(success, message);
+  vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+}
+
 function postEnhancementInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
   const settings = getPersistedSettings(context);
   activePanel?.webview.postMessage({ command: 'enhancementInstallResult', success, message, settings });
@@ -10078,14 +10091,10 @@ async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSk
     const validation = validateAndRegisterSkillInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
     if (validation.ok) {
       vscode.window.showInformationMessage(validation.message);
-      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: true, message: validation.message, settings: getPersistedSettings(context) });
-      sidebarProvider?.postSkillInstallResult(true, validation.message);
-      vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+      postSkillInstallResult(context, true, validation.message);
     } else {
       vscode.window.showErrorMessage(`SoloMap skill install failed validation: ${validation.message}`);
-      activePanel?.webview.postMessage({ command: 'skillInstallResult', success: false, message: validation.message, settings: getPersistedSettings(context) });
-      sidebarProvider?.postSkillInstallResult(false, validation.message);
-      vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+      postSkillInstallResult(context, false, validation.message);
     }
   }, 2000);
 }
@@ -10161,6 +10170,12 @@ async function handleUninstallSolomapSkill(context: vscode.ExtensionContext, ski
   
   try {
     const registry = readSolomapSkillRegistry(workspaceRoot, globalDataPath);
+    if (!registry.skills.some((skill) => skill.id === skillId)) {
+      const message = `Skill is not installed: ${skillId}`;
+      vscode.window.showWarningMessage(message);
+      postSkillInstallResult(context, false, message);
+      return;
+    }
     const nextSkills = registry.skills.filter((skill) => skill.id !== skillId);
     writeSolomapSkillRegistry(workspaceRoot, globalDataPath, { ...registry, skills: nextSkills });
     
@@ -10170,10 +10185,13 @@ async function handleUninstallSolomapSkill(context: vscode.ExtensionContext, ski
       fs.rmSync(installedPath, { recursive: true, force: true });
     }
     
-    vscode.window.showInformationMessage(`SoloMap skill uninstalled successfully: ${skillId}`);
-    vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+    const message = `SoloMap skill uninstalled successfully: ${skillId}`;
+    vscode.window.showInformationMessage(message);
+    postSkillInstallResult(context, true, message);
   } catch (error: any) {
-    vscode.window.showErrorMessage(`Failed to uninstall skill: ${error.message || error}`);
+    const message = `Failed to uninstall skill: ${error.message || error}`;
+    vscode.window.showErrorMessage(message);
+    postSkillInstallResult(context, false, message);
   }
 }
 
@@ -10184,6 +10202,12 @@ async function handleUninstallSolomapMcp(context: vscode.ExtensionContext, mcpId
   
   try {
     const registry = readSolomapMcpRegistry(workspaceRoot, globalDataPath);
+    if (!registry.connectors.some((connector) => connector.id === mcpId)) {
+      const message = `MCP connector is not installed: ${mcpId}`;
+      vscode.window.showWarningMessage(message);
+      postMcpInstallResult(context, false, message);
+      return;
+    }
     const nextConnectors = registry.connectors.filter((connector) => connector.id !== mcpId);
     writeSolomapMcpRegistry(workspaceRoot, globalDataPath, { ...registry, connectors: nextConnectors });
     
@@ -10193,10 +10217,13 @@ async function handleUninstallSolomapMcp(context: vscode.ExtensionContext, mcpId
       fs.rmSync(installedPath, { recursive: true, force: true });
     }
     
-    vscode.window.showInformationMessage(`SoloMap MCP connector uninstalled successfully: ${mcpId}`);
-    vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+    const message = `SoloMap MCP connector uninstalled successfully: ${mcpId}`;
+    vscode.window.showInformationMessage(message);
+    postMcpInstallResult(context, true, message);
   } catch (error: any) {
-    vscode.window.showErrorMessage(`Failed to uninstall MCP connector: ${error.message || error}`);
+    const message = `Failed to uninstall MCP connector: ${error.message || error}`;
+    vscode.window.showErrorMessage(message);
+    postMcpInstallResult(context, false, message);
   }
 }
 
@@ -14222,6 +14249,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     }
 
+    function showAbilityActionMessage(message, isError = false) {
+      if (!abilityActionBadge) return;
+      abilityActionBadge.style.display = 'block';
+      abilityActionBadge.className = isError ? 'cli-badge error' : 'cli-badge';
+      abilityActionBadge.style.background = isError ? '' : 'rgba(255,255,255,0.05)';
+      abilityActionBadge.style.color = isError ? '' : 'var(--text-muted)';
+      abilityActionBadge.textContent = message;
+    }
+
     function getCliPresetFromCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
       if (!raw) return 'agy';
@@ -14327,6 +14363,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let currentAbilitySettings = null;
 
     function renderAbilitiesAndEnhancements(settings) {
+      if (!settingAbilitySelect || !settingsAbilityUrlInputContainer || !settingAbilityUrlInput || !helpAbilityUrlInput || !abilityDetailCard || !btnInstallAbility || !btnUninstallAbility) {
+        return;
+      }
       currentAbilitySettings = settings;
       const skills = Array.isArray(settings.skills) ? settings.skills : [];
       const connectors = Array.isArray(settings.connectors) ? settings.connectors : [];
@@ -14473,40 +14512,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         if (selectedAbilityId === 'add-new-skill') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
-            vscode.window.showWarningMessage('请先输入要安装的技能链接。');
+            showAbilityActionMessage('请先输入要安装的技能链接。', true);
             return;
           }
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在安装技能...';
-          }
+          showAbilityActionMessage('正在安装技能...');
           vscode.postMessage({ command: 'installSkill', skillInput: urlVal });
         } else if (selectedAbilityId === 'add-new-connector') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
-            vscode.window.showWarningMessage('请先输入要安装的连接器源。');
+            showAbilityActionMessage('请先输入要安装的连接器源。', true);
             return;
           }
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在安装连接器...';
-          }
+          showAbilityActionMessage('正在安装连接器...');
           vscode.postMessage({ command: 'installMcp', mcpInput: urlVal });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在安装执行增强...';
-          }
+          showAbilityActionMessage('正在安装执行增强...');
           vscode.postMessage({ command: 'installEnhancement', enhancementId: originId });
         }
       });
@@ -14518,33 +14539,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         
         if (selectedAbilityId.startsWith('skill-')) {
           const originId = selectedAbilityId.substring('skill-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在卸载技能...';
-          }
+          showAbilityActionMessage('正在卸载技能...');
           vscode.postMessage({ command: 'uninstallSkill', skillId: originId });
         } else if (selectedAbilityId.startsWith('connector-')) {
           const originId = selectedAbilityId.substring('connector-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在卸载连接器...';
-          }
+          showAbilityActionMessage('正在卸载连接器...');
           vscode.postMessage({ command: 'uninstallMcp', mcpId: originId });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = 'cli-badge';
-            abilityActionBadge.style.background = 'rgba(255,255,255,0.05)';
-            abilityActionBadge.style.color = 'var(--text-muted)';
-            abilityActionBadge.textContent = '正在卸载执行增强...';
-          }
+          showAbilityActionMessage('正在卸载执行增强...');
           vscode.postMessage({ command: 'uninstallEnhancement', enhancementId: originId });
         }
       });
