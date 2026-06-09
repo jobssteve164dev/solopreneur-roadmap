@@ -975,6 +975,7 @@ function normalizeIssueCategory(labels: string[]): string {
   if (has(['tech debt', 'tech-debt', 'debt', 'refactor', 'cleanup', 'maintenance', 'architecture'])) return 'tech-debt';
   if (has(['feature', 'enhancement', 'request', 'feature request', 'feature-request', 'type: feature', 'customer'])) return 'feature-request';
   if (has(['docs', 'documentation', 'readme'])) return 'documentation';
+  if (has(['quick-note', 'quick note', 'note'])) return 'quick-note';
   if (has(['discussion', 'question', 'idea', 'proposal', 'rfc'])) return 'discussion';
   return 'discussion';
 }
@@ -7956,8 +7957,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         <div class="portfolio-issue-head">
           <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
           <div class="portfolio-issue-actions">
-            <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
             \${!expanded ? \`<input type="text" class="portfolio-quick-issue-input" placeholder="\${escapeHtml(t('quickIssuePlaceholder'))}" value="\${escapeHtml(quickIssueDraftTitle)}" data-quick-issue-input data-project-path="\${escapeHtml(project.path)}" />\` : ''}
+            <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
             <button class="portfolio-issue-create" data-toggle-issue-panel data-project-path="\${escapeHtml(project.path)}">\${escapeHtml(expanded ? t('issueCollapse') : t('issueExpand'))}</button>
           </div>
         </div>
