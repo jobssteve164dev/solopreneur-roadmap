@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.186 - 2026-06-09
+
+### Added
+- adjust quick-note input position, fix issue category classification, and implement category-specific roadmap templates (16b14de)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.185 - 2026-06-09
 
 ### Added
