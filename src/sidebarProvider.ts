@@ -556,9 +556,11 @@ function getAgentCliCandidates(agentCli: string, configuredCliPath: string): str
     'copilot',
     'opencode'
   ].filter(Boolean);
+  const preferredCandidates = requestedCli
+    ? [requestedCandidate, configuredCandidate]
+    : [configuredCandidate, requestedCandidate];
   const candidates = [
-    configuredCandidate,
-    requestedCandidate,
+    ...preferredCandidates,
     ...familyOrder.flatMap(getKnownAgentCliCandidates)
   ];
 
@@ -6379,6 +6381,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       ensureAgentModelsLoaded(currentCliPath, 'settings');
       syncSettingAgentModelSelect();
     });
+    if (settingCliPathCustom) {
+      const refreshCustomCliModels = () => {
+        if (getSoloSelectValue(settingCliSelect) !== 'custom') return;
+        currentCliPath = getEffectiveSettingCliPath();
+        ensureAgentModelsLoaded(currentCliPath, 'settings');
+        syncSettingAgentModelSelect();
+      };
+      settingCliPathCustom.addEventListener('input', refreshCustomCliModels);
+      settingCliPathCustom.addEventListener('change', refreshCustomCliModels);
+    }
     bindSoloSelect(settingAgentModelSelect, (value) => {
       const family = getAgentFamilyKey(getEffectiveSettingCliPath());
       if (!family) return;

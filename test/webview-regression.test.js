@@ -2135,7 +2135,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
-    JSON.stringify(['agy', 'antigravity-cli', 'antigravity', 'codex'])
+    JSON.stringify(['antigravity-cli', 'agy', 'antigravity', 'codex'])
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('codex', 'codex').slice(0, 4)),
@@ -2176,7 +2176,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     JSON.stringify(sidebarModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
-    JSON.stringify(['agy', 'antigravity-cli', 'antigravity', 'codex'])
+    JSON.stringify(['antigravity-cli', 'agy', 'antigravity', 'codex'])
   );
   assert.equal(
     JSON.stringify(sidebarModule.__getAgentCliCandidates('codex', 'codex').slice(0, 4)),
