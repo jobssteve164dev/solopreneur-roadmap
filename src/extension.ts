@@ -953,7 +953,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await handleRunSoloConversation(context, userMessage, agentCli, model, normalizeSupplementFiles(supplementFiles));
       }
     },
-    async (projectPath, goal = '', agentCli = '', model = '') => {
+    async (projectPath, goal = '', agentCli = '', model = '', supplementFiles: string[] = []) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
         vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
         return;
@@ -963,7 +963,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const ready = await ensureSyncEngine(context);
       if (ready && activeProjectRoot === projectPath) {
-        await handleRunFlow(context, goal, agentCli, model);
+        await handleRunFlow(context, goal, agentCli, model, normalizeSupplementFiles(supplementFiles));
       }
     },
     async (agentCli) => loadDiscoveredAgentModels(resolveAgentCli(agentCli || '', getPersistedSettings(context).cliPath || 'agy')),
@@ -3008,7 +3008,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           break;
 
         case 'runFlow':
-          await handleRunFlow(context, message.goal || '', message.agentCli || '', message.model || '');
+          await handleRunFlow(context, message.goal || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
         case 'rollbackChanges': {
@@ -9843,6 +9843,7 @@ function buildFlowPlannerPrompt(input: {
   loopId: string;
   relatedRoadmapStepTitle?: string;
   globalPrompt?: string;
+  supplementFiles?: string[];
 }): string {
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Planner。',
@@ -9852,6 +9853,7 @@ function buildFlowPlannerPrompt(input: {
     `Flow ID：${input.flowId}`,
     `微循环：${input.loopId}`,
     `用户目标：${input.goal}`,
+    ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.relatedRoadmapStepTitle ? [`相关路线图环节：${input.relatedRoadmapStepTitle}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
     '',
@@ -9874,6 +9876,7 @@ function buildFlowBuilderPrompt(input: {
   loopId: string;
   planner: Record<string, any>;
   globalPrompt?: string;
+  supplementFiles?: string[];
 }): string {
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Builder。',
@@ -9883,6 +9886,7 @@ function buildFlowBuilderPrompt(input: {
     `Flow ID：${input.flowId}`,
     `微循环：${input.loopId}`,
     `用户目标：${input.goal}`,
+    ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
     '',
     'Planner 结构化计划：',
@@ -9912,6 +9916,7 @@ function buildFlowVerifierPrompt(input: {
     outputTail: string;
   };
   globalPrompt?: string;
+  supplementFiles?: string[];
 }): string {
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Verifier。',
@@ -9921,6 +9926,7 @@ function buildFlowVerifierPrompt(input: {
     `Flow ID：${input.flowId}`,
     `微循环：${input.loopId}`,
     `用户目标：${input.goal}`,
+    ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
     '',
     'Planner JSON：',
@@ -11284,7 +11290,7 @@ async function startFlowRoleRun(
     return;
   }
   const settings = getPersistedSettings(context);
-  const requestedAgentCli = (input.selectedAgentCli || settings.cliPath || 'agy').trim();
+  const requestedAgentCli = (input.selectedAgentCli || input.flow.source.selectedAgentCli || settings.cliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, input.selectedAgentCli ? '' : settings.cliPath);
   if (!commandExists(agentCli)) {
     throw new Error(`Flow Agent CLI not found: ${requestedAgentCli || agentCli}`);
@@ -11314,7 +11320,8 @@ async function startFlowRoleRun(
   );
   const runDir = path.join(input.projectPath, '.solopreneur', 'flows', input.flow.flowId, loop.loopId, input.role, String(executionLogId));
   const statusFilePath = getAgentStatusFilePath(input.projectPath, executionLogId);
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), input.projectPath, settings.taskPermissionMode, input.selectedModel || '');
+  const effectiveModel = input.selectedModel || input.flow.source.selectedModel || '';
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), input.projectPath, settings.taskPermissionMode, effectiveModel);
   syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
   updateFlowTrace(input.projectPath, input.flow.flowId, (trace) => {
     const nextTrace = { ...trace, status: 'running' as const };
@@ -11342,7 +11349,7 @@ async function startFlowRoleRun(
   await postFlowStateToWebview(context);
   const { finalCommand } = buildAgentShellScript(
     agentCli,
-    input.selectedModel || '',
+    effectiveModel,
     input.prompt,
     input.projectPath,
     nodeId,
@@ -11366,7 +11373,13 @@ async function startFlowRoleRun(
   terminal.sendText(finalCommand);
 }
 
-async function handleRunFlow(context: vscode.ExtensionContext, goal: string, selectedAgentCli = '', selectedModel = ''): Promise<void> {
+async function handleRunFlow(
+  context: vscode.ExtensionContext,
+  goal: string,
+  selectedAgentCli = '',
+  selectedModel = '',
+  supplementFiles: string[] = []
+): Promise<void> {
   if (!activeProjectRoot || !syncEngine) {
     return;
   }
@@ -11384,7 +11397,11 @@ async function handleRunFlow(context: vscode.ExtensionContext, goal: string, sel
     return;
   }
   await syncEngine.initAndSync();
-  const trace = createFlowTrace(activeProjectRoot, request);
+  const trace = createFlowTrace(activeProjectRoot, request, {
+    supplementFiles,
+    selectedAgentCli,
+    selectedModel
+  });
   trace.loops = [createFlowLoop(request, 1)];
   saveFlowTrace(activeProjectRoot, trace);
   await postFlowStateToWebview(context);
@@ -11398,7 +11415,8 @@ async function handleRunFlow(context: vscode.ExtensionContext, goal: string, sel
       workspaceRoot: activeProjectRoot,
       flowId: trace.flowId,
       loopId: 'loop-1',
-      globalPrompt: getPersistedSettings(context).globalPrompt
+      globalPrompt: getPersistedSettings(context).globalPrompt,
+      supplementFiles
     }),
     selectedAgentCli,
     selectedModel
@@ -11914,7 +11932,8 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
         flowId,
         loopId,
         planner: structured || {},
-        globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt
+        globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt,
+        supplementFiles: nextFlow.source.supplementFiles || []
       })
     });
   } else if (role === 'builder' && roleExecution.status === 'completed') {
@@ -11936,7 +11955,8 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
           touchedFilesSummary,
           outputTail
         },
-        globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt
+        globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt,
+        supplementFiles: nextFlow.source.supplementFiles || []
       })
     });
   } else if (role === 'verifier' && roleExecution.status === 'completed') {
@@ -11968,7 +11988,8 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
             workspaceRoot: activeProjectRoot,
             flowId,
             loopId: `loop-${nextLoopIndex}`,
-            globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt
+            globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt,
+            supplementFiles: latest.source.supplementFiles || []
           })
         });
       }
@@ -16610,6 +16631,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       const flow = currentFlowState.flow || null;
       const hasProAccess = Boolean(currentFlowState.hasProAccess);
+      const flowTargetId = 'flow';
+      const supplementFiles = nodeSupplementFiles[flowTargetId] || [];
       if (!hasProAccess) {
         flowBody.innerHTML = \`
           <div class="conversation-panel">
@@ -16633,15 +16656,19 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       flowBody.innerHTML = \`
         <div class="conversation-composer">
           <div class="conversation-compose conversation-compose-main">
+            <button class="conversation-tool-btn" data-attach-flow title="\${escapeHtml(t('attachFiles'))}">
+              <span class="codicon codicon-attach"></span>
+            </button>
             <input type="text" class="conversation-input" data-flow-goal-input placeholder="\${escapeHtml(t('flowPlaceholder'))}">
             <button class="btn-send-conversation" data-send-flow title="\${escapeHtml(t('flowStart'))}">
-              <span class="codicon codicon-play"></span>
+              <span class="codicon codicon-send"></span>
             </button>
           </div>
           <div class="conversation-compose conversation-compose-meta">
             \${renderSoloSelect('flow-agent-select', 'data-flow-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false, selectedAgentCli)}
             \${renderModelSelect('flow-model-select', 'data-flow-model title="Model"', selectedAgentCli, 'flow')}
           </div>
+          \${renderSupplementFiles(flowTargetId, supplementFiles)}
         </div>
         <div class="conversation-panel">
           <div class="conversation-title">\${escapeHtml(t('flowHistory'))}</div>
@@ -16653,14 +16680,23 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
               <div style="padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.08);">
                 <div><strong>Loop \${escapeHtml(String(loop.index || ''))}</strong> · \${escapeHtml(loop.status || '')}</div>
                 <div style="opacity:0.85; margin-top:4px;">\${escapeHtml(loop.goal || '')}</div>
+                <div style="margin-top:6px; color: var(--text-muted);">Planner: \${escapeHtml(loop.planner?.status || 'pending')} · Builder: \${escapeHtml(loop.builder?.status || 'pending')} · Verifier: \${escapeHtml(loop.verifier?.status || 'pending')}</div>
                 \${loop.summary ? \`<div style="margin-top:6px; color: var(--text-muted);">\${escapeHtml(loop.summary)}</div>\` : ''}
+                \${loop.evidence && (loop.evidence.changedFilesSummary || loop.evidence.touchedFilesSummary) ? \`<div style="margin-top:6px; color: var(--text-muted);">Files: \${escapeHtml((loop.evidence.touchedFilesSummary || loop.evidence.changedFilesSummary || '').replace(/\\s+/g, ' ').slice(0, 180))}</div>\` : ''}
                 \${loop.scoring && Array.isArray(loop.scoring.reasons) && loop.scoring.reasons.length ? \`<div style="margin-top:6px; color: var(--text-muted);">\${escapeHtml(loop.scoring.reasons.join(' | '))}</div>\` : ''}
               </div>
             \`).join('')}</div>
+            \${currentFlowState.history && currentFlowState.history.length > 1 ? \`<div class="conversation-result" style="margin-top:12px;">Recent flows: \${escapeHtml(currentFlowState.history.slice(1, 4).map(item => item.goal).join(' | '))}</div>\` : ''}
           \` : \`<div class="empty-state">\${escapeHtml(t('flowEmpty'))}</div>\`}
         </div>
       \`;
       const sendButton = flowBody.querySelector('[data-send-flow]');
+      const attachButton = flowBody.querySelector('[data-attach-flow]');
+      if (attachButton) {
+        attachButton.addEventListener('click', () => {
+          vscode.postMessage({ command: 'chooseSupplementFiles', nodeId: flowTargetId });
+        });
+      }
       if (sendButton) {
         sendButton.addEventListener('click', () => {
           const input = flowBody.querySelector('[data-flow-goal-input]');
@@ -16672,11 +16708,23 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             command: 'runFlow',
             goal,
             agentCli: getSoloSelectValue(agentSelect),
-            model: getSoloSelectValue(modelSelect)
+            model: getSoloSelectValue(modelSelect),
+            supplementFiles: nodeSupplementFiles[flowTargetId] || []
           });
           if (input) input.value = '';
+          nodeSupplementFiles[flowTargetId] = [];
+          renderFlowPanel();
         });
       }
+      flowBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
+        item.addEventListener('click', () => {
+          const file = item.getAttribute('data-remove-supplement-file');
+          nodeSupplementFiles[flowTargetId] = (nodeSupplementFiles[flowTargetId] || []).filter(candidate => candidate !== file);
+          renderFlowPanel();
+        });
+      });
+      const flowInput = flowBody.querySelector('[data-flow-goal-input]');
+      bindPastedImageAttachments(flowInput, flowTargetId, () => renderFlowPanel());
       const flowAgentSelect = flowBody.querySelector('[data-flow-agent]');
       const flowModelSelect = flowBody.querySelector('[data-flow-model]');
       if (flowAgentSelect) {

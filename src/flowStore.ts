@@ -86,6 +86,9 @@ export interface FlowTrace {
     type: 'goal';
     userInput: string;
     roadmapStepId?: string;
+    supplementFiles?: string[];
+    selectedAgentCli?: string;
+    selectedModel?: string;
   };
   currentLoopIndex: number;
   loops: FlowLoopTrace[];
@@ -142,7 +145,16 @@ export function createFlowId(): string {
   return `flow-${Date.now()}`;
 }
 
-export function createFlowTrace(projectPath: string, goal: string, roadmapStepId = ''): FlowTrace {
+export function createFlowTrace(
+  projectPath: string,
+  goal: string,
+  input: {
+    roadmapStepId?: string;
+    supplementFiles?: string[];
+    selectedAgentCli?: string;
+    selectedModel?: string;
+  } = {}
+): FlowTrace {
   const now = new Date().toISOString();
   return {
     schemaVersion,
@@ -155,7 +167,10 @@ export function createFlowTrace(projectPath: string, goal: string, roadmapStepId
     source: {
       type: 'goal',
       userInput: goal,
-      ...(roadmapStepId ? { roadmapStepId } : {})
+      ...(input.roadmapStepId ? { roadmapStepId: input.roadmapStepId } : {}),
+      ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? { supplementFiles: input.supplementFiles } : {}),
+      ...(input.selectedAgentCli ? { selectedAgentCli: input.selectedAgentCli } : {}),
+      ...(input.selectedModel ? { selectedModel: input.selectedModel } : {})
     },
     currentLoopIndex: 1,
     loops: [],

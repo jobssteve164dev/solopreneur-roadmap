@@ -2660,7 +2660,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _selectProject: (projectPath: string) => Promise<void>,
     private readonly _addProject: () => Promise<void>,
     private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
-    private readonly _onRunFlow?: (projectPath: string, goal?: string, agentCli?: string, model?: string) => Promise<void>,
+    private readonly _onRunFlow?: (projectPath: string, goal?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
     private readonly _getAgentModels?: (agentCli: string) => Promise<AgentModelCatalog>,
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
@@ -2721,7 +2721,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'runFlow':
             if (this._onRunFlow) {
-              await this._onRunFlow(data.projectPath || '', data.goal || '', data.agentCli || '', data.model || '');
+              await this._onRunFlow(data.projectPath || '', data.goal || '', data.agentCli || '', data.model || '', data.supplementFiles || []);
             }
             break;
           case 'getAgentModels':
@@ -7906,10 +7906,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               projectPath,
               goal: userMessage,
               agentCli: getSoloSelectValue(agentSelect),
-              model: getSoloSelectValue(modelSelect)
+              model: getSoloSelectValue(modelSelect),
+              supplementFiles: projectContinueFiles['flow:' + projectPath] || []
             });
             if (input) input.value = '';
             projectContinueDrafts['flow:' + projectPath] = '';
+            projectContinueFiles['flow:' + projectPath] = [];
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
           }
