@@ -2925,11 +2925,14 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
 }
 
 async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: 'roadmap' | 'solo' | 'flow' = 'roadmap') {
+  const effectiveInitialView = initialView === 'flow' && !await hasFlowModeAccess(context)
+    ? 'roadmap'
+    : initialView;
   // If panel already exists, reveal it
   if (activePanel) {
     recordLocalUsageEvent(context, 'roadmapOpened');
     activePanel.reveal(vscode.ViewColumn.One);
-    activePanel.webview.postMessage({ command: 'setMainView', view: initialView });
+    activePanel.webview.postMessage({ command: 'setMainView', view: effectiveInitialView });
     await postFlowStateToWebview(context);
     return;
   }
@@ -2964,7 +2967,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
     command: 'projectsLoaded',
     projects: getProjectState(context)
   });
-  activePanel.webview.postMessage({ command: 'setMainView', view: initialView });
+  activePanel.webview.postMessage({ command: 'setMainView', view: effectiveInitialView });
   await postFlowStateToWebview(context);
 
   // Handle messages from Webview
@@ -14268,7 +14271,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </header>
 
     <div class="view-tabs" role="tablist">
-      <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">按环节推进</span></button>
+      <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">环节推进</span></button>
       <button class="view-tab solo-tab" id="btn-toggle-solo" type="button"><span class="codicon codicon-comment-discussion"></span><span id="solo-view-tab-label">自由研讨</span></button>
       <button class="view-tab flow-tab" id="btn-toggle-flow" type="button"><span class="codicon codicon-debug-alt-small"></span><span id="flow-view-tab-label">自动闭环</span></button>
     </div>
@@ -14761,7 +14764,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent 结论',
         failureLabel: '失败原因',
         completionCriteria: '完成标准',
-        roadmapView: '按环节推进',
+        roadmapView: '环节推进',
         soloTitle: '自由研讨',
         flowTitle: '自动闭环',
         flowPlaceholder: '描述你想让 Flow 自动推进完成的目标...',
@@ -14926,7 +14929,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent conclusion',
         failureLabel: 'Failure reason',
         completionCriteria: 'Completion criteria',
-        roadmapView: 'Step Push',
+        roadmapView: 'Step Progress',
         soloTitle: 'Free Work',
         flowTitle: 'Auto Loop',
         flowPlaceholder: 'Describe the goal you want Flow to drive to completion...',
@@ -15200,6 +15203,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         roadmapRevisionExpanded = false;
         roadmapRevisionPanel.classList.remove('open');
         btnToggleRoadmapRevision.classList.remove('active');
+        if (!currentFlowState.hasProAccess) {
+          vscode.postMessage({ command: 'openProAuthorization' });
+          return;
+        }
         setMainView('flow');
       });
     }
@@ -15775,6 +15782,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderFlowPanel();
           break;
         case 'setMainView':
+          if (message.view === 'flow' && !currentFlowState.hasProAccess) {
+            setMainView('roadmap');
+            break;
+          }
           setMainView(message.view || 'roadmap');
           break;
         case 'projectsLoaded':
