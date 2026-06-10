@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.191 - 2026-06-10
+
+### Changed
+- fix agent cli model refresh after cli switch (33b2d36)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.190 - 2026-06-10
 
 ### Fixed
