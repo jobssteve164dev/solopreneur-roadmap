@@ -10,6 +10,7 @@ import { summarizeDocumentationForReview } from './documentationManifest';
 
 interface SolopreneurSettings {
   cliPath: string;
+  agentModelPreferences?: Record<string, string>;
   language: string;
   globalPrompt: string;
   globalDataPath: string;
@@ -32,6 +33,20 @@ interface SolopreneurSettings {
     message: string;
     updatedAt: string;
   }>;
+}
+
+interface AgentModelOption {
+  value: string;
+  label: string;
+  title?: string;
+}
+
+interface AgentModelCatalog {
+  family: string;
+  command: string;
+  models: AgentModelOption[];
+  selectedValue: string;
+  supportsDiscovery: boolean;
 }
 
 interface ProAccountStatus {
@@ -2636,13 +2651,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _syncEngine: SyncEngine,
-    private readonly _onRunAgent: (nodeId: string, userMessage?: string, agentCli?: string, supplementFiles?: string[]) => Promise<void>,
+    private readonly _onRunAgent: (nodeId: string, userMessage?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
     private readonly _getSettings: () => SolopreneurSettings,
     private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>,
     private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string },
     private readonly _selectProject: (projectPath: string) => Promise<void>,
     private readonly _addProject: () => Promise<void>,
-    private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, supplementFiles?: string[]) => Promise<void>,
+    private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
+    private readonly _getAgentModels?: (agentCli: string) => Promise<AgentModelCatalog>,
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
     private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
@@ -2692,12 +2708,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             this.sendNodesToWebview();
             break;
           case 'runAgent':
-            await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
+            await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '', data.model || '', data.supplementFiles || []);
             break;
           case 'runSoloConversation':
             if (this._onRunSolo) {
-              await this._onRunSolo(data.projectPath || '', data.userMessage || '', data.agentCli || '', data.supplementFiles || []);
+              await this._onRunSolo(data.projectPath || '', data.userMessage || '', data.agentCli || '', data.model || '', data.supplementFiles || []);
               await this.sendSoloConversationHistory(data.projectPath || '');
+            }
+            break;
+          case 'getAgentModels':
+            if (this._getAgentModels) {
+              const catalog = await this._getAgentModels(data.agentCli || '');
+              this._view?.webview.postMessage({
+                command: 'agentModelsLoaded',
+                requestId: String(data.requestId || ''),
+                targetId: String(data.targetId || ''),
+                catalog
+              });
             }
             break;
           case 'chooseSoloSupplementFiles':
@@ -4744,12 +4771,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .portfolio-compose-agent {
-      width: 100%;
       min-width: 0;
     }
 
     .portfolio-compose-agent-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
       margin-bottom: 7px;
+    }
+
+    .portfolio-compose-model {
+      min-width: 0;
     }
 
     .portfolio-compose-send {
@@ -5428,6 +5461,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-agent-model">Default Model</label>
+      <div class="solo-select settings-select" id="setting-agent-model-select" data-solo-select data-value="auto">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>Auto</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="auto" aria-selected="true">Auto</button>
+        </div>
+      </div>
+      <div id="help-agent-model" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
+        Uses the selected Agent family default unless you pin a specific model.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-reviewer-cli-path">Review Agent</label>
       <div class="settings-cli-select-wrap">
         <div class="solo-select settings-select" id="setting-reviewer-cli-select" data-solo-select data-value="">
@@ -5645,6 +5694,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliSelect = document.getElementById('setting-cli-select');
+    const settingAgentModelSelect = document.getElementById('setting-agent-model-select');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
@@ -5708,6 +5758,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let currentSettings = {};
     let selectedEnhancementId = '';
     const projectConversationModes = {};
+    const agentModelCatalogs = {};
+    const agentModelPreferenceMap = {};
+    const projectConversationModelSelections = {};
+    const projectConversationAgentSelections = {};
+    let agentModelRequestSeq = 0;
     const projectContinueFiles = {};
     const projectContinueDrafts = {};
     const projectSoloFiles = {};
@@ -6187,6 +6242,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       Object.keys(projectContinueDrafts).forEach(key => delete projectContinueDrafts[key]);
       Object.keys(projectSoloFiles).forEach(key => delete projectSoloFiles[key]);
       Object.keys(projectSoloDrafts).forEach(key => delete projectSoloDrafts[key]);
+      Object.keys(projectConversationModelSelections).forEach(key => delete projectConversationModelSelections[key]);
+      Object.keys(projectConversationAgentSelections).forEach(key => delete projectConversationAgentSelections[key]);
       expandedIssueNumber = 0;
       issueDetails = null;
       issuePanelExpanded = false;
@@ -6211,6 +6268,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
+      setText('label-agent-model', currentLanguage === 'zh' ? '默认模型' : 'Default Model');
+      setText('help-agent-model', currentLanguage === 'zh'
+        ? '默认跟随当前 Agent 系列的自动模型；固定后会优先使用该模型。'
+        : 'Uses the selected Agent family default unless you pin a specific model.');
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -6313,6 +6374,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const selected = getSoloSelectValue(settingCliSelect);
       settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
       currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
+      ensureAgentModelsLoaded(currentCliPath, 'settings');
+      syncSettingAgentModelSelect();
+    });
+    bindSoloSelect(settingAgentModelSelect, (value) => {
+      const family = getAgentFamilyKey(getEffectiveSettingCliPath());
+      if (!family) return;
+      agentModelPreferenceMap[family] = value || 'auto';
     });
     bindSoloSelect(settingReviewerCliSelect, () => {
       const selected = getSoloSelectValue(settingReviewerCliSelect);
@@ -6355,6 +6423,79 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (['claude', 'claude-code', 'claude-code-cli'].includes(base)) return 'claude';
       if (['opencode', 'open-code', 'open-code-cli'].includes(base)) return 'opencode';
       return 'custom';
+    }
+
+    function getAgentFamilyKey(agentCli) {
+      const normalized = normalizeAgentOptionLabel(agentCli || getEffectiveSettingCliPath() || currentCliPath || 'agy');
+      return String(normalized || 'agy').toLowerCase();
+    }
+
+    function getAutoOnlyModelCatalog(agentCli) {
+      return {
+        agentCli: getAgentFamilyKey(agentCli),
+        supportsDiscovery: false,
+        models: [{ value: 'auto', label: 'Auto' }]
+      };
+    }
+
+    function getAgentModelCatalog(agentCli) {
+      const family = getAgentFamilyKey(agentCli);
+      return agentModelCatalogs[family] || getAutoOnlyModelCatalog(family);
+    }
+
+    function getAgentModelOptions(agentCli) {
+      const catalog = getAgentModelCatalog(agentCli);
+      const options = Array.isArray(catalog.models) && catalog.models.length
+        ? catalog.models
+        : getAutoOnlyModelCatalog(agentCli).models;
+      return options.map(option => ({
+        value: String(option.value || 'auto'),
+        label: String(option.label || option.value || 'Auto'),
+        title: String(option.description || option.label || option.value || 'Auto')
+      }));
+    }
+
+    function sanitizeModelValue(agentCli, value) {
+      const selectedValue = String(value || 'auto');
+      return getAgentModelOptions(agentCli).some(option => option.value === selectedValue) ? selectedValue : 'auto';
+    }
+
+    function getStoredModelPreference(agentCli) {
+      return sanitizeModelValue(agentCli, agentModelPreferenceMap[getAgentFamilyKey(agentCli)] || 'auto');
+    }
+
+    function getTargetModelValue(targetId, agentCli) {
+      if (targetId && projectConversationModelSelections[targetId]) {
+        return sanitizeModelValue(agentCli, projectConversationModelSelections[targetId]);
+      }
+      return getStoredModelPreference(agentCli);
+    }
+
+    function setTargetModelValue(targetId, agentCli, value, persistPreference) {
+      const nextValue = sanitizeModelValue(agentCli, value);
+      if (targetId) {
+        projectConversationModelSelections[targetId] = nextValue;
+      }
+      if (persistPreference) {
+        agentModelPreferenceMap[getAgentFamilyKey(agentCli)] = nextValue;
+      }
+      return nextValue;
+    }
+
+    function ensureAgentModelsLoaded(agentCli, targetId) {
+      const requestId = 'models-' + (++agentModelRequestSeq);
+      vscode.postMessage({
+        command: 'getAgentModels',
+        requestId,
+        targetId: targetId || '',
+        agentCli: String(agentCli || '').trim() || currentCliPath || 'agy'
+      });
+    }
+
+    function syncSettingAgentModelSelect() {
+      if (!settingAgentModelSelect) return;
+      const agentCli = getEffectiveSettingCliPath();
+      setSoloSelectOptions(settingAgentModelSelect, getAgentModelOptions(agentCli), getStoredModelPreference(agentCli));
     }
 
     function getEffectiveSettingCliPath() {
@@ -6659,17 +6800,29 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'settingsLoaded':
           currentSettings = message.settings || {};
+          Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
+          Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
           applySettingCliPath(message.settings.cliPath || 'agy');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          syncSettingAgentModelSelect();
+          ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
           renderAbilitiesAndEnhancements(message.settings);
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
           break;
+
+        case 'agentModelsLoaded': {
+          const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
+          agentModelCatalogs[getAgentFamilyKey(catalog.agentCli || '')] = catalog;
+          syncSettingAgentModelSelect();
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+        }
 
         case 'projectsLoaded':
           if (
@@ -6841,6 +6994,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({
         command: 'updateSettings',
         cliPath: effectiveCliPath,
+        agentModelPreferences: agentModelPreferenceMap,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
@@ -7466,8 +7620,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       setSoloSelectValue(select, selectedValue);
     }
 
-    function renderSoloSelect(className, attributes, options, disabled) {
-      const selected = options[0] || { value: '', label: '' };
+    function renderSoloSelect(className, attributes, options, disabled, selectedValue) {
+      const selected = options.find(option => String(option.value || '') === String(selectedValue || '')) || options[0] || { value: '', label: '' };
       const disabledClass = disabled ? ' is-disabled' : '';
       const disabledAttribute = disabled ? ' disabled' : '';
       return '<div class="solo-select ' + className + disabledClass + '" data-solo-select data-value="' + escapeHtml(selected.value) + '" ' + attributes + '>' +
@@ -7476,7 +7630,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         '<span class="codicon codicon-chevron-down solo-select-caret"></span></button>' +
         '<div class="solo-select-menu" data-solo-menu role="listbox">' +
         options.map((option, index) => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
-          '" aria-selected="' + (index === 0 ? 'true' : 'false') + '">' + escapeHtml(option.label) + '</button>').join('') +
+          '" aria-selected="' + (String(option.value || '') === String(selected.value || '') || (!selected.value && index === 0) ? 'true' : 'false') + '">' + escapeHtml(option.label) + '</button>').join('') +
         '</div></div>';
     }
 
@@ -7587,6 +7741,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const agentOptions = activeMode === 'solo'
         ? getAgentOptions({ agentCli: getEffectiveSettingCliPath() || 'agy' })
         : getAgentOptions(node);
+      const selectedAgentCli = projectConversationAgentSelections[targetId] || (activeMode === 'solo' ? (getEffectiveSettingCliPath() || 'agy') : (node?.agentCli || getEffectiveSettingCliPath() || 'agy'));
       return \`
         <div class="portfolio-compose" data-project-continue-composer>
           <div class="portfolio-mode-toggle">
@@ -7594,7 +7749,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <button class="portfolio-mode-btn \${activeMode === 'solo' ? 'active' : ''}" data-project-conversation-mode="solo" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('projectModeSolo'))}</button>
           </div>
           <div class="portfolio-compose-agent-row">
-            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent', agentOptions, disabled)}
+            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent data-conversation-target-id="' + escapeHtml(targetId) + '"', agentOptions, disabled, selectedAgentCli)}
+            \${renderSoloSelect('portfolio-compose-model', 'data-project-continue-model data-conversation-target-id="' + escapeHtml(targetId) + '"', getAgentModelOptions(selectedAgentCli), disabled, getTargetModelValue(targetId, selectedAgentCli))}
           </div>
           <div class="portfolio-compose-row">
             <button class="portfolio-compose-tool" data-project-attach-files data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" title="\${escapeHtml(t('soloAttach'))}"><span class="codicon codicon-attach"></span></button>
@@ -7625,7 +7781,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function bindProjectContinueComposer(container) {
-      bindSoloSelects(container);
       bindSidebarStepHistory(container, currentProjects.selectedProjectPath);
       container.querySelectorAll('[data-project-conversation-mode]').forEach(button => {
         button.addEventListener('click', (event) => {
@@ -7660,6 +7815,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const panel = sendButton.closest('[data-project-continue-composer]');
           const input = panel ? panel.querySelector('[data-project-conversation-input]') : null;
           const agentSelect = panel ? panel.querySelector('[data-project-continue-agent]') : null;
+          const modelSelect = panel ? panel.querySelector('[data-project-continue-model]') : null;
           const mode = sendButton.getAttribute('data-conversation-mode') || 'continue';
           const projectPath = sendButton.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
           const targetId = sendButton.getAttribute('data-conversation-target-id') || '';
@@ -7671,6 +7827,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               projectPath,
               userMessage,
               agentCli: getSoloSelectValue(agentSelect),
+              model: getSoloSelectValue(modelSelect),
               supplementFiles: projectSoloFiles[targetId] || []
             });
             if (input) input.value = '';
@@ -7681,7 +7838,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             return;
           }
           const nodeId = sendButton.getAttribute('data-next-node-id');
-          runNodeAgent(nodeId, userMessage, getSoloSelectValue(agentSelect), projectContinueFiles[nodeId] || []);
+          runNodeAgent(nodeId, userMessage, getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), projectContinueFiles[nodeId] || []);
           if (input) input.value = '';
           projectContinueDrafts[nodeId] = '';
           projectContinueFiles[nodeId] = [];
@@ -7695,6 +7852,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       container.querySelectorAll('[data-project-conversation-input], [data-project-continue-agent]').forEach(item => {
         item.addEventListener('click', (event) => event.stopPropagation());
       });
+      container.querySelectorAll('[data-project-continue-agent]').forEach(select => {
+        const targetId = select.getAttribute('data-conversation-target-id') || '';
+        bindSoloSelect(select, (value) => {
+          projectConversationAgentSelections[targetId] = value || getEffectiveSettingCliPath() || 'agy';
+          setTargetModelValue(targetId, projectConversationAgentSelections[targetId], getTargetModelValue(targetId, projectConversationAgentSelections[targetId]), false);
+          ensureAgentModelsLoaded(projectConversationAgentSelections[targetId], targetId);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      container.querySelectorAll('[data-project-continue-model]').forEach(select => {
+        const targetId = select.getAttribute('data-conversation-target-id') || '';
+        bindSoloSelect(select, (value) => {
+          const cli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
+          setTargetModelValue(targetId, cli, value, true);
+        });
+      });
+      bindSoloSelects(container);
       container.querySelectorAll('[data-project-conversation-input]').forEach(input => {
         const mode = input.getAttribute('data-conversation-mode') || 'continue';
         const projectPath = input.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
@@ -8543,7 +8717,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const runButton = card.querySelector('[data-run-node-id]');
         if (runButton) {
           runButton.addEventListener('click', () => {
-            runNodeAgent(node.id, '', node.agentCli || '');
+            runNodeAgent(node.id, '', node.agentCli || '', '', []);
           });
         }
 
@@ -8559,12 +8733,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
-    function runNodeAgent(nodeId, userMessage, agentCli, supplementFiles) {
+    function runNodeAgent(nodeId, userMessage, agentCli, model, supplementFiles) {
       vscode.postMessage({
         command: 'runAgent',
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',
+        model: model || '',
         supplementFiles: supplementFiles || []
       });
     }

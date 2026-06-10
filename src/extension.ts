@@ -22,9 +22,11 @@ let syncEngineReady = false;
 let pendingPassportAuthNonce: string | null = null;
 let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
+const agentModelCatalogCache = new Map<string, { expiresAt: number; catalog: AgentModelCatalog }>();
 
 interface SolopreneurSettings {
   cliPath: string;
+  agentModelPreferences?: Record<string, string>;
   language: string;
   globalPrompt: string;
   globalDataPath: string;
@@ -37,6 +39,20 @@ interface SolopreneurSettings {
   enhancementStatuses?: SolomapEnhancementStatusSummary[];
   skills?: any[];
   connectors?: any[];
+}
+
+interface AgentModelOption {
+  value: string;
+  label: string;
+  title?: string;
+}
+
+interface AgentModelCatalog {
+  family: string;
+  command: string;
+  models: AgentModelOption[];
+  selectedValue: string;
+  supportsDiscovery: boolean;
 }
 
 interface ProAccountStatus {
@@ -895,10 +911,10 @@ export async function activate(context: vscode.ExtensionContext) {
   sidebarProvider = new SolopreneurSidebarProvider(
     context.extensionUri,
     syncEngineWrapper,
-    async (nodeId, userMessage = '', agentCli = '', supplementFiles: string[] = []) => {
+    async (nodeId, userMessage = '', agentCli = '', model = '', supplementFiles: string[] = []) => {
       const ready = await ensureSyncEngine(context);
       if (ready) {
-        await handleRunAgent(context, nodeId, userMessage, agentCli, normalizeSupplementFiles(supplementFiles));
+        await handleRunAgent(context, nodeId, userMessage, agentCli, model, normalizeSupplementFiles(supplementFiles));
       }
     },
     () => getPersistedSettings(context),
@@ -912,7 +928,7 @@ export async function activate(context: vscode.ExtensionContext) {
     async () => {
       await addProjectFromDialog(context);
     },
-    async (projectPath, userMessage = '', agentCli = '', supplementFiles: string[] = []) => {
+    async (projectPath, userMessage = '', agentCli = '', model = '', supplementFiles: string[] = []) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
         vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
         return;
@@ -922,9 +938,10 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const ready = await ensureSyncEngine(context);
       if (ready && activeProjectRoot === projectPath) {
-        await handleRunSoloConversation(context, userMessage, agentCli, normalizeSupplementFiles(supplementFiles));
+        await handleRunSoloConversation(context, userMessage, agentCli, model, normalizeSupplementFiles(supplementFiles));
       }
     },
+    async (agentCli) => loadDiscoveredAgentModels(resolveAgentCli(agentCli || '', getPersistedSettings(context).cliPath || 'agy')),
     async (projectPath) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
         vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
@@ -1037,6 +1054,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   const settingsWorkspaceRoot = getSettingsEnhancementWorkspaceRoot();
   const baseSettings = {
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
+    agentModelPreferences: normalizeAgentModelPreferences(saved.agentModelPreferences),
     language: saved.language || config.get('language') || 'zh',
     globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
     globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
@@ -1057,6 +1075,20 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     skills: readSolomapSkillRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).skills || [],
     connectors: readSolomapMcpRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).connectors || []
   };
+}
+
+function normalizeAgentModelPreferences(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+  return Object.entries(value as Record<string, unknown>).reduce<Record<string, string>>((acc, [key, model]) => {
+    const family = String(key || '').trim();
+    const normalizedModel = String(model || '').trim();
+    if (family && normalizedModel) {
+      acc[family] = normalizedModel;
+    }
+    return acc;
+  }, {});
 }
 
 function readLocalProEntitlements(): Record<string, boolean> {
@@ -1410,6 +1442,10 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   const currentSettings = getPersistedSettings(context);
   const nextSettings: SolopreneurSettings = {
     cliPath: settings.cliPath || 'agy',
+    agentModelPreferences: {
+      ...normalizeAgentModelPreferences(currentSettings.agentModelPreferences),
+      ...normalizeAgentModelPreferences(settings.agentModelPreferences)
+    },
     language: settings.language === 'en' ? 'en' : 'zh',
     globalPrompt: String(settings.globalPrompt || '').trim(),
     globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim(),
@@ -2897,15 +2933,15 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           break;
 
         case 'runAgent':
-          await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
+          await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
         case 'runRoadmapRevision':
-          await handleRoadmapRevision(context, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
+          await handleRoadmapRevision(context, message.userMessage || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
         case 'runSoloConversation':
-          await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '', normalizeSupplementFiles(message.supplementFiles));
+          await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
         case 'rollbackChanges': {
@@ -3001,6 +3037,17 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
           }
           break;
 
+        case 'getAgentModels':
+          if (activePanel) {
+            activePanel.webview.postMessage({
+              command: 'agentModelsLoaded',
+              requestId: String(message.requestId || ''),
+              targetId: String(message.targetId || ''),
+              catalog: loadDiscoveredAgentModels(resolveAgentCli(message.agentCli || '', getPersistedSettings(context).cliPath || 'agy'))
+            });
+          }
+          break;
+
         case 'openProAuthorization':
           await handleManageProAuthorization(context, 'login');
           break;
@@ -3012,6 +3059,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
         case 'updateSettings':
           await updatePersistedSettings(context, {
             cliPath: message.cliPath,
+            agentModelPreferences: message.agentModelPreferences,
             language: message.language,
             globalPrompt: message.globalPrompt,
             globalDataPath: message.globalDataPath,
@@ -6149,6 +6197,160 @@ function getAgentCliFamily(command: string): string {
   return name;
 }
 
+function getAgentModelCacheKey(agentCli: string): string {
+  const family = getAgentCliFamily(agentCli);
+  const command = resolveExecutablePath(agentCli);
+  return `${family}::${command}`;
+}
+
+function getAgentModelFlag(agentCli: string, selectedModel = ''): string {
+  const model = String(selectedModel || '').trim();
+  if (!model || model === 'auto') {
+    return '';
+  }
+  const family = getAgentCliFamily(agentCli);
+  if (['codex', 'cursor', 'copilot', 'claude', 'opencode', 'antigravity'].includes(family)) {
+    return ` --model ${shellQuote(model)}`;
+  }
+  return '';
+}
+
+function createAutoOnlyModelCatalog(agentCli: string): AgentModelCatalog {
+  return {
+    family: getAgentCliFamily(agentCli),
+    command: resolveExecutablePath(agentCli),
+    models: [{ value: 'auto', label: 'Auto' }],
+    selectedValue: 'auto',
+    supportsDiscovery: false
+  };
+}
+
+function parseCursorModelList(output: string): AgentModelOption[] {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^([^\s]+)\s+-\s+(.+)$/);
+      if (match) {
+        return { value: match[1].trim(), label: match[2].trim(), title: line };
+      }
+      return { value: line, label: line };
+    });
+}
+
+function parseAgyModelList(output: string): AgentModelOption[] {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => ({ value: line, label: line }));
+}
+
+function parseOpencodeModelList(output: string): AgentModelOption[] {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^available models/i.test(line) && !/^tip:/i.test(line))
+    .map((line) => {
+      const match = line.match(/^([^\s]+)\s+-\s+(.+)$/);
+      if (match) {
+        return { value: match[1].trim(), label: match[2].trim(), title: line };
+      }
+      return { value: line, label: line };
+    });
+}
+
+function parseCodexModelCatalog(output: string): AgentModelOption[] {
+  try {
+    const payload = JSON.parse(output || '{}') as { models?: Array<{ slug?: string; display_name?: string; visibility?: string }> };
+    return (payload.models || [])
+      .filter((model) => String(model.visibility || '').trim() !== 'hidden')
+      .map((model) => {
+        const value = String(model.slug || '').trim();
+        const label = String(model.display_name || value).trim();
+        return value ? { value, label } : null;
+      })
+      .filter((option): option is AgentModelOption => Boolean(option));
+  } catch {
+    return [];
+  }
+}
+
+function loadDiscoveredAgentModels(agentCli: string): AgentModelCatalog {
+  const resolvedCli = resolveExecutablePath(agentCli);
+  const family = getAgentCliFamily(resolvedCli);
+  const cacheKey = getAgentModelCacheKey(resolvedCli);
+  const cached = agentModelCatalogCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.catalog;
+  }
+
+  let discovered: AgentModelOption[] = [];
+  let supportsDiscovery = false;
+  try {
+    if (family === 'codex') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['debug', 'models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseCodexModelCatalog(result.stdout);
+      }
+    } else if (family === 'cursor') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseCursorModelList(result.stdout);
+      }
+    } else if (family === 'antigravity') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseAgyModelList(result.stdout);
+      }
+    } else if (family === 'opencode') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseOpencodeModelList(result.stdout);
+      }
+    }
+  } catch (error) {
+    console.error(`SoloMap failed to discover models for ${resolvedCli}:`, error);
+  }
+
+  const models = [{ value: 'auto', label: 'Auto' }, ...discovered]
+    .filter((option, index, all) => option.value && all.findIndex((candidate) => candidate.value === option.value) === index);
+  const catalog: AgentModelCatalog = {
+    family,
+    command: resolvedCli,
+    models: models.length ? models : [{ value: 'auto', label: 'Auto' }],
+    selectedValue: 'auto',
+    supportsDiscovery: supportsDiscovery && discovered.length > 0
+  };
+  agentModelCatalogCache.set(cacheKey, {
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    catalog
+  });
+  return catalog;
+}
+
 function getKnownAgentCliCandidates(family: string): string[] {
   if (family === 'codex') return ['codex', 'codex-cli'];
   if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
@@ -6289,94 +6491,97 @@ function clearStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli
   return true;
 }
 
-function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string, nativeSessionId = '', taskPermissionMode = 'auto'): string {
+function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string, nativeSessionId = '', taskPermissionMode = 'auto', selectedModel = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPrompt = shellQuote(agentPrompt);
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
   void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment} ${quotedPrompt}`;
+    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPrompt}`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
-    return `${quotedCli} -p${permissionSegment} --output-format text ${quotedPrompt}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPrompt}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print${permissionSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p${permissionSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment} --output-format text`;
+    return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPrompt})`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPrompt})`;
   }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
-function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto'): string {
+function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
   const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
   const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment} -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
-    return `${quotedCli} -p${permissionSegment} --output-format text ${quotedPromptFileInstruction}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPromptFileInstruction}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment} --add-dir=${shellQuote(workspaceRoot)}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p${permissionSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment} --output-format text`;
+    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run ${quotedPromptFileInstruction})`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPromptFileInstruction})`;
   }
 
   return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
-function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, workspaceRoot: string, taskPermissionMode = 'auto'): string {
+function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const promptExpression = `"$${promptVarName}"`;
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment} -`;
+    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
-    return `${quotedCli} -p${permissionSegment} --output-format text ${promptExpression}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${promptExpression}`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print${permissionSegment} --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p${permissionSegment} --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment} --output-format text`;
+    return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `${quotedCli} run ${promptExpression}`;
+    return `${quotedCli} run${modelSegment} ${promptExpression}`;
   }
 
   return `${quotedCli} run --task ${promptExpression}`;
@@ -9490,6 +9695,7 @@ function buildSoloConversationPrompt(
 
 function buildAgentShellScript(
   agentCli: string,
+  selectedModel: string,
   conversationPrompt: string,
   workspaceRoot: string,
   nodeId: string,
@@ -9508,8 +9714,49 @@ function buildAgentShellScript(
   runDirOverride = '',
   statusFilePathOverride = ''
 ): { finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
-  const runDir = runDirOverride || path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId);
-  const statusFilePath = statusFilePathOverride || path.join(workspaceRoot, '.agent_status.json');
+  let effectiveSelectedModel = selectedModel;
+  let effectiveConversationPrompt = conversationPrompt;
+  let effectiveWorkspaceRoot = workspaceRoot;
+  let effectiveNodeId = nodeId;
+  let effectiveExecutionLogId = executionLogId;
+  let effectiveUserMessage = userMessage;
+  let effectiveCompletionDecisionFilePath = completionDecisionFilePath;
+  let effectiveNativeSessionId = nativeSessionId;
+  let effectiveDirectExecutionCommand = directExecutionCommand;
+  let effectiveRunKind = runKind;
+  let effectiveRoadmapBackupFilePath = roadmapBackupFilePath;
+  let effectiveGlobalDataPath = globalDataPath;
+  let effectiveTaskPermissionMode = taskPermissionMode;
+  let effectiveReviewerCliPath = reviewerCliPath;
+  let effectiveCollaborationReviewMode = collaborationReviewMode;
+  let effectiveEnabledEnhancements = enabledEnhancements;
+  let effectiveRunDirOverride = runDirOverride;
+  let effectiveStatusFilePathOverride = statusFilePathOverride;
+
+  if (typeof executionLogId !== 'number') {
+    effectiveSelectedModel = '';
+    effectiveConversationPrompt = selectedModel;
+    effectiveWorkspaceRoot = conversationPrompt;
+    effectiveNodeId = String(workspaceRoot || '');
+    effectiveExecutionLogId = Number(nodeId) || 0;
+    effectiveUserMessage = String(executionLogId || '');
+    effectiveCompletionDecisionFilePath = typeof userMessage === 'string' && userMessage ? userMessage : undefined;
+    effectiveNativeSessionId = completionDecisionFilePath || '';
+    effectiveDirectExecutionCommand = nativeSessionId || '';
+    effectiveRunKind = directExecutionCommand || 'step';
+    effectiveRoadmapBackupFilePath = runKind || '';
+    effectiveGlobalDataPath = roadmapBackupFilePath || '';
+    effectiveTaskPermissionMode = globalDataPath || 'auto';
+    effectiveReviewerCliPath = taskPermissionMode || '';
+    effectiveCollaborationReviewMode = reviewerCliPath || 'high_risk';
+    effectiveEnabledEnhancements = (collaborationReviewMode && typeof collaborationReviewMode === 'object')
+      ? collaborationReviewMode as Record<string, boolean>
+      : {};
+    effectiveRunDirOverride = typeof enabledEnhancements === 'string' ? enabledEnhancements : '';
+    effectiveStatusFilePathOverride = runDirOverride || '';
+  }
+  const runDir = effectiveRunDirOverride || path.join(effectiveWorkspaceRoot, '.solopreneur', 'agent-runs', effectiveNodeId);
+  const statusFilePath = effectiveStatusFilePathOverride || path.join(effectiveWorkspaceRoot, '.agent_status.json');
   const outputFilePath = path.join(runDir, 'output.log');
   const commandFilePath = path.join(runDir, 'command.txt');
   const promptFilePath = path.join(runDir, 'prompt.txt');
@@ -9519,27 +9766,27 @@ function buildAgentShellScript(
   const workspaceSnapshotPath = path.join(runDir, 'workspace-before.json');
   const startedAtFilePath = path.join(runDir, 'started_at');
   const sessionFilePath = path.join(runDir, 'session.json');
-  const decisionFilePath = completionDecisionFilePath || path.join(runDir, 'completion.json');
+  const decisionFilePath = effectiveCompletionDecisionFilePath || path.join(runDir, 'completion.json');
   const agentProvider = getAgentProvider(agentCli);
   const sessionKey = getAgentSessionKey(agentCli);
-  const sessionMode = nativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
+  const sessionMode = effectiveNativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
   const startedAt = new Date().toISOString();
   const commandPreview = `${agentCli} [${sessionMode}]`;
-  const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode);
-  const executionCommand = directExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode);
-  const statusBase = { nodeId, runKind, roadmapBackupFilePath, globalDataPath, agentCli, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode };
+  const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
+  const executionCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
+  const statusBase = { nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
   const noChangesStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'no_deliverable_changes', failureReason: 'Agent exited without project file changes or a completion decision.' });
-  const sessionCaptureScript = buildSessionCaptureScript(agentProvider, workspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
-  const workspaceSnapshotScript = buildWorkspaceSnapshotScript(workspaceRoot, workspaceSnapshotPath);
-  const workspaceDiffScript = buildWorkspaceDiffScript(workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
-  const enhancementRuntime = ensureSolomapEnhancementRuntime(workspaceRoot, globalDataPath, enabledEnhancements);
+  const sessionCaptureScript = buildSessionCaptureScript(agentProvider, effectiveWorkspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
+  const workspaceSnapshotScript = buildWorkspaceSnapshotScript(effectiveWorkspaceRoot, workspaceSnapshotPath);
+  const workspaceDiffScript = buildWorkspaceDiffScript(effectiveWorkspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  const enhancementRuntime = ensureSolomapEnhancementRuntime(effectiveWorkspaceRoot, effectiveGlobalDataPath, effectiveEnabledEnhancements);
   const enhancementContextFilePath = path.join(runDir, 'harness-enhancements.md');
-  const enhancementContextPreflight = buildSolomapEnhancementContextPreflight(workspaceRoot, enhancementContextFilePath, userMessage, enhancementRuntime.runtimeRoot, enabledEnhancements);
-  const enhancementRuntimeInstructions = buildSolomapEnhancementRuntimeInstructions(enhancementContextFilePath, enabledEnhancements);
-  const promptExportScript = directExecutionCommand
+  const enhancementContextPreflight = buildSolomapEnhancementContextPreflight(effectiveWorkspaceRoot, enhancementContextFilePath, effectiveUserMessage, enhancementRuntime.runtimeRoot, effectiveEnabledEnhancements);
+  const enhancementRuntimeInstructions = buildSolomapEnhancementRuntimeInstructions(enhancementContextFilePath, effectiveEnabledEnhancements);
+  const promptExportScript = effectiveDirectExecutionCommand
     ? [`agent_prompt=$(cat ${shellQuote(promptFilePath)})`, 'export agent_prompt']
     : [];
   const terminalExecutionScript = [
@@ -9548,10 +9795,10 @@ function buildAgentShellScript(
   ].join(' ');
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(promptFilePath, enhancementRuntimeInstructions ? [conversationPrompt, '', enhancementRuntimeInstructions].join('\n') : conversationPrompt, 'utf8');
+  fs.writeFileSync(promptFilePath, enhancementRuntimeInstructions ? [effectiveConversationPrompt, '', enhancementRuntimeInstructions].join('\n') : effectiveConversationPrompt, 'utf8');
   fs.writeFileSync(commandFilePath, loggedCommand, 'utf8');
   const script = [
-    `cd ${shellQuote(workspaceRoot)}`,
+    `cd ${shellQuote(effectiveWorkspaceRoot)}`,
     'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
     ...enhancementRuntime.envLines,
     `mkdir -p ${shellQuote(runDir)}`,
@@ -9564,9 +9811,9 @@ function buildAgentShellScript(
     ...promptExportScript,
     terminalExecutionScript,
     sessionCaptureScript,
-    `git -C ${shellQuote(workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
+    `git -C ${shellQuote(effectiveWorkspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
-    `if [ ${shellQuote(runKind)} != 'solo' ] && [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
+    `if [ ${shellQuote(effectiveRunKind)} != 'solo' ] && [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
 
@@ -10526,7 +10773,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   vscode.window.showInformationMessage(`Agent task [${nodeId}] was stopped.`);
 }
 
-async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', supplementFiles: string[] = []): Promise<void> {
+async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
   if (!syncEngine || !activeProjectRoot) {
     return;
   }
@@ -10592,12 +10839,13 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
   const promptFilePath = path.join(runDir, 'prompt.txt');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot, settings.taskPermissionMode);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
   postNodeConversations(roadmapRevisionId);
 
   const { finalCommand } = buildAgentShellScript(
     agentCli,
+    selectedModel,
     conversationPrompt,
     activeProjectRoot,
     roadmapRevisionId,
@@ -10621,7 +10869,7 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   terminal.sendText(finalCommand);
 }
 
-async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', supplementFiles: string[] = []): Promise<void> {
+async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
   if (!syncEngine || !activeProjectRoot) {
     return;
   }
@@ -10695,7 +10943,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
   const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(
     executionLogId,
     agentCli,
@@ -10707,6 +10955,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
 
   const { finalCommand } = buildAgentShellScript(
     agentCli,
+    selectedModel,
     conversationPrompt,
     activeProjectRoot,
     soloConversationId,
@@ -10803,7 +11052,7 @@ function createPreSessionGitCommit(projectPath: string): string | null {
 /**
  * Executes a CLI agent in the integrated terminal.
  */
-async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '', supplementFiles: string[] = []) {
+async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []) {
   if (!syncEngine) {
     return;
   }
@@ -10921,11 +11170,11 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     settings.enabledEnhancements
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
   postNodeConversations(nodeId);
 
-  const { finalCommand } = buildAgentShellScript(agentCli, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
+  const { finalCommand } = buildAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
 
   const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`, executionLogId);
   terminal.show(true);
@@ -12362,6 +12611,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       min-width: 0;
     }
 
+    .conversation-compose-main {
+      align-items: center;
+    }
+
+    .conversation-compose-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
     .conversation-compose input {
       flex: 1;
       width: auto;
@@ -12391,8 +12649,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     .conversation-agent-select {
-      width: 132px;
-      min-width: 120px;
+      width: 100%;
+      min-width: 0;
+      min-height: 34px;
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+
+    .conversation-model-select {
+      width: 100%;
+      min-width: 0;
       min-height: 34px;
       font-size: 12px;
       flex-shrink: 0;
@@ -13246,9 +13512,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         flex: 1 1 100%;
       }
 
-      .conversation-agent-select {
-        flex: 1 1 160px;
-        width: auto;
+      .conversation-compose-meta {
+        grid-template-columns: 1fr;
       }
 
       .btn-send-conversation {
@@ -13456,6 +13721,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-agent-model">Default Model</label>
+      <div class="solo-select settings-select" id="setting-agent-model-select" data-solo-select data-value="auto">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>Auto</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="auto" aria-selected="true">Auto</button>
+        </div>
+      </div>
+      <div id="help-agent-model" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
+        Uses the selected Agent family default unless you pin a specific model.
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-reviewer-cli-path">Review Agent</label>
       <div class="settings-cli-select-wrap">
         <div class="solo-select settings-select" id="setting-reviewer-cli-select" data-solo-select data-value="">
@@ -13632,6 +13913,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliSelect = document.getElementById('setting-cli-select');
+    const settingAgentModelSelect = document.getElementById('setting-agent-model-select');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
@@ -13683,6 +13965,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const nodeConversations = {};
     const nodeSupplementFiles = {};
     const conversationDrafts = {};
+    const nodeAgentSelections = {};
+    const agentModelCatalogs = {};
+    const conversationModelSelections = {};
+    const agentModelPreferenceMap = {};
+    let soloAgentSelection = '';
+    let agentModelRequestSeq = 0;
     const i18n = {
       zh: {
         title: 'SoloMap',
@@ -14054,6 +14342,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
       Object.keys(nodeSupplementFiles).forEach(key => delete nodeSupplementFiles[key]);
       Object.keys(conversationDrafts).forEach(key => delete conversationDrafts[key]);
+      Object.keys(nodeAgentSelections).forEach(key => delete nodeAgentSelections[key]);
       if (clearNodes) {
         currentNodes = [];
       }
@@ -14078,6 +14367,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
+      setText('label-agent-model', currentLanguage === 'zh' ? '默认模型' : 'Default Model');
+      setText('help-agent-model', currentLanguage === 'zh'
+        ? '默认跟随当前 Agent 系列的自动模型；固定后会优先使用该模型。'
+        : 'Uses the selected Agent family default unless you pin a specific model.');
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -14136,6 +14429,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       btnToggleSolo.classList.toggle('active', activeMainView === 'solo');
       if (activeMainView === 'solo' && !nodeConversations[soloConversationId]) {
         vscode.postMessage({ command: 'getNodeConversations', nodeId: soloConversationId });
+      }
+      if (activeMainView === 'solo') {
+        ensureAgentModelsLoaded(soloAgentSelection || currentCliPath || 'agy', soloConversationId);
       }
       renderSoloPanel(currentNodes);
     }
@@ -14228,6 +14524,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const selected = getSoloSelectValue(settingCliSelect);
       settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
       currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
+      ensureAgentModelsLoaded(currentCliPath, 'settings');
+      syncSettingAgentModelSelect();
+    });
+    bindSoloSelect(settingAgentModelSelect, (value) => {
+      const family = getAgentFamilyKey(getEffectiveSettingCliPath());
+      if (!family) return;
+      agentModelPreferenceMap[family] = value || 'auto';
+      conversationModelSelections.settings = value || 'auto';
     });
     bindSoloSelect(settingReviewerCliSelect, () => {
       const selected = getSoloSelectValue(settingReviewerCliSelect);
@@ -14270,6 +14574,97 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (['claude', 'claude-code', 'claude-code-cli'].includes(base)) return 'claude';
       if (['opencode', 'open-code', 'open-code-cli'].includes(base)) return 'opencode';
       return 'custom';
+    }
+
+    function getAgentFamilyKey(agentCli) {
+      const normalized = normalizeAgentOptionLabel(agentCli || getEffectiveSettingCliPath() || currentCliPath || 'agy');
+      return String(normalized || 'agy').toLowerCase();
+    }
+
+    function getAutoModelLabel() {
+      return 'Auto';
+    }
+
+    function getAutoOnlyModelCatalog(agentCli) {
+      return {
+        agentCli: getAgentFamilyKey(agentCli),
+        supportsDiscovery: false,
+        models: [{ value: 'auto', label: getAutoModelLabel() }]
+      };
+    }
+
+    function getAgentModelCatalog(agentCli) {
+      const family = getAgentFamilyKey(agentCli);
+      return agentModelCatalogs[family] || getAutoOnlyModelCatalog(family);
+    }
+
+    function getAgentModelOptions(agentCli) {
+      const catalog = getAgentModelCatalog(agentCli);
+      const options = Array.isArray(catalog.models) && catalog.models.length
+        ? catalog.models
+        : getAutoOnlyModelCatalog(agentCli).models;
+      return options.map(option => ({
+        value: String(option.value || 'auto'),
+        label: String(option.label || option.value || getAutoModelLabel()),
+        title: String(option.description || option.label || option.value || getAutoModelLabel())
+      }));
+    }
+
+    function sanitizeModelValue(agentCli, value) {
+      const options = getAgentModelOptions(agentCli);
+      const selectedValue = String(value || 'auto');
+      return options.some(option => option.value === selectedValue) ? selectedValue : 'auto';
+    }
+
+    function getStoredModelPreference(agentCli) {
+      const family = getAgentFamilyKey(agentCli);
+      return sanitizeModelValue(agentCli, agentModelPreferenceMap[family] || 'auto');
+    }
+
+    function getTargetModelValue(targetId, agentCli) {
+      if (targetId && conversationModelSelections[targetId]) {
+        return sanitizeModelValue(agentCli, conversationModelSelections[targetId]);
+      }
+      return getStoredModelPreference(agentCli);
+    }
+
+    function setTargetModelValue(targetId, agentCli, value, persistPreference) {
+      const nextValue = sanitizeModelValue(agentCli, value);
+      if (targetId) {
+        conversationModelSelections[targetId] = nextValue;
+      }
+      if (persistPreference) {
+        agentModelPreferenceMap[getAgentFamilyKey(agentCli)] = nextValue;
+      }
+      return nextValue;
+    }
+
+    function ensureAgentModelsLoaded(agentCli, targetId) {
+      const effectiveCli = String(agentCli || '').trim() || currentCliPath || 'agy';
+      const requestId = 'models-' + (++agentModelRequestSeq);
+      vscode.postMessage({
+        command: 'getAgentModels',
+        requestId,
+        targetId: targetId || '',
+        agentCli: effectiveCli
+      });
+    }
+
+    function renderModelSelect(className, attributes, agentCli, targetId) {
+      return renderSoloSelect(
+        className,
+        attributes,
+        getAgentModelOptions(agentCli),
+        false,
+        getTargetModelValue(targetId, agentCli)
+      );
+    }
+
+    function syncSettingAgentModelSelect() {
+      if (!settingAgentModelSelect) return;
+      const agentCli = getEffectiveSettingCliPath();
+      setSoloSelectOptions(settingAgentModelSelect, getAgentModelOptions(agentCli), getStoredModelPreference(agentCli));
+      setTargetModelValue('settings', agentCli, getSoloSelectValue(settingAgentModelSelect), true);
     }
 
     function getEffectiveSettingCliPath() {
@@ -14613,17 +15008,34 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           break;
         case 'settingsLoaded':
           currentSettings = message.settings || {};
+          Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
+          Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
           applySettingCliPath(message.settings.cliPath || 'agy');
+          soloAgentSelection = getEffectiveSettingCliPath();
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          syncSettingAgentModelSelect();
+          ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
           renderAbilitiesAndEnhancements(message.settings);
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
           break;
+        case 'agentModelsLoaded': {
+          const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
+          const family = getAgentFamilyKey(catalog.agentCli || '');
+          agentModelCatalogs[family] = catalog;
+          syncSettingAgentModelSelect();
+          if (message.targetId === soloConversationId) {
+            renderSoloPanel(currentNodes);
+          } else if (message.targetId && message.targetId !== 'settings') {
+            renderRoadmap(currentNodes);
+          }
+          break;
+        }
         case 'projectsLoaded':
           if (
             message.projects.selectedProjectPath &&
@@ -14725,6 +15137,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       vscode.postMessage({
         command: 'updateSettings',
         cliPath: effectiveCliPath,
+        agentModelPreferences: agentModelPreferenceMap,
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
@@ -14945,8 +15358,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setSoloSelectValue(select, selectedValue);
     }
 
-    function renderSoloSelect(className, attributes, options, disabled) {
-      const selected = options[0] || { value: '', label: '' };
+    function renderSoloSelect(className, attributes, options, disabled, selectedValue) {
+      const selected = options.find(option => String(option.value || '') === String(selectedValue || '')) || options[0] || { value: '', label: '' };
       const disabledClass = disabled ? ' is-disabled' : '';
       const disabledAttribute = disabled ? ' disabled' : '';
       return '<div class="solo-select ' + className + disabledClass + '" data-solo-select data-value="' + escapeHtml(selected.value) + '" ' + attributes + '>' +
@@ -14955,7 +15368,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         '<span class="codicon codicon-chevron-down solo-select-caret"></span></button>' +
         '<div class="solo-select-menu" data-solo-menu role="listbox">' +
         options.map((option, index) => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
-          '" aria-selected="' + (index === 0 ? 'true' : 'false') + '">' + escapeHtml(option.label) + '</button>').join('') +
+          '" aria-selected="' + (String(option.value || '') === String(selected.value || '') || (!selected.value && index === 0) ? 'true' : 'false') + '">' + escapeHtml(option.label) + '</button>').join('') +
         '</div></div>';
     }
 
@@ -15186,6 +15599,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const conversations = nodeConversations[node.id] || [];
         const supplementFiles = nodeSupplementFiles[node.id] || [];
         const conversationDisabled = '';
+        const selectedAgentCli = nodeAgentSelections[node.id] || node.agentCli || currentCliPath || 'agy';
         const promptHtml = expanded ? \`
           <div class="node-expanded-body">
             <div class="node-desc">\${escapeHtml(node.description)}</div>
@@ -15194,15 +15608,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             </div>
             \${renderCompletionCriteria(node)}
             <div class="conversation-composer">
-              <div class="conversation-compose">
+              <div class="conversation-compose conversation-compose-main">
                 <button class="conversation-tool-btn" data-attach-node-id="\${escapeHtml(node.id)}" title="\${t('attachFiles')}" \${conversationDisabled}>
                   <span class="codicon codicon-attach"></span>
                 </button>
                 <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" value="\${escapeHtml(conversationDrafts[node.id] || '')}" \${conversationDisabled}>
-                \${renderSoloSelect('conversation-agent-select', 'data-agent-select-id="' + escapeHtml(node.id) + '" title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions(node), false)}
                 <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" title="\${t('send')}" \${conversationDisabled}>
                   <span class="codicon codicon-send"></span>
                 </button>
+              </div>
+              <div class="conversation-compose conversation-compose-meta">
+                \${renderSoloSelect('conversation-agent-select', 'data-agent-select-id="' + escapeHtml(node.id) + '" title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions(node), false, selectedAgentCli)}
+                \${renderModelSelect('conversation-model-select', 'data-model-select-id="' + escapeHtml(node.id) + '" title="Model"', selectedAgentCli, node.id)}
               </div>
               \${renderSupplementFiles(node.id, supplementFiles)}
             </div>
@@ -15246,7 +15663,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             event.stopPropagation();
             const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
             const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
-            triggerRun(node.id, input ? input.value : '', getSoloSelectValue(agentSelect), nodeSupplementFiles[node.id] || []);
+            const modelSelect = row.querySelector('[data-model-select-id="' + cssEscape(node.id) + '"]');
+            triggerRun(node.id, input ? input.value : '', getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), nodeSupplementFiles[node.id] || []);
             if (input) input.value = '';
             conversationDrafts[node.id] = '';
             nodeSupplementFiles[node.id] = [];
@@ -15267,6 +15685,23 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         row.querySelectorAll('[data-conversation-input-id]').forEach(input => {
           bindPastedImageAttachments(input, node.id, () => renderRoadmap(currentNodes));
         });
+        const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
+        const modelSelect = row.querySelector('[data-model-select-id="' + cssEscape(node.id) + '"]');
+        if (agentSelect) {
+          bindSoloSelect(agentSelect, (value) => {
+            nodeAgentSelections[node.id] = value || currentCliPath || 'agy';
+            const nextCli = nodeAgentSelections[node.id];
+            setTargetModelValue(node.id, nextCli, getTargetModelValue(node.id, nextCli), false);
+            ensureAgentModelsLoaded(nextCli, node.id);
+            renderRoadmap(currentNodes);
+          });
+        }
+        if (modelSelect) {
+          bindSoloSelect(modelSelect, (value) => {
+            const cli = nodeAgentSelections[node.id] || node.agentCli || currentCliPath || 'agy';
+            setTargetModelValue(node.id, cli, value, true);
+          });
+        }
         row.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -15275,6 +15710,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             renderRoadmap(currentNodes);
           });
         });
+        bindSoloSelects(row);
         const completeButton = row.querySelector('[data-complete-node-id]');
         if (completeButton) {
           completeButton.addEventListener('click', (event) => {
@@ -15367,6 +15803,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const conversations = nodeConversations[soloConversationId] || [];
       const supplementFiles = nodeSupplementFiles[soloConversationId] || [];
       const disabled = '';
+      const selectedAgentCli = soloAgentSelection || currentCliPath || 'agy';
       soloPanel.classList.toggle('active', soloExpanded);
       btnToggleSolo.classList.toggle('active', soloExpanded);
       if (!soloExpanded) {
@@ -15375,15 +15812,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       soloBody.innerHTML = \`
         <div class="conversation-composer">
-          <div class="conversation-compose">
+          <div class="conversation-compose conversation-compose-main">
             <button class="conversation-tool-btn" data-attach-solo title="\${escapeHtml(t('attachFiles'))}" \${disabled}>
               <span class="codicon codicon-attach"></span>
             </button>
             <input type="text" class="conversation-input" data-solo-input placeholder="\${escapeHtml(t('soloPlaceholder'))}" \${disabled}>
-            \${renderSoloSelect('conversation-agent-select', 'data-solo-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false)}
             <button class="btn-send-conversation" data-send-solo title="\${escapeHtml(t('sendSolo'))}" \${disabled}>
               <span class="codicon codicon-send"></span>
             </button>
+          </div>
+          <div class="conversation-compose conversation-compose-meta">
+            \${renderSoloSelect('conversation-agent-select', 'data-solo-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false, selectedAgentCli)}
+            \${renderModelSelect('conversation-model-select', 'data-solo-model title="Model"', selectedAgentCli, soloConversationId)}
           </div>
           \${renderSupplementFiles(soloConversationId, supplementFiles)}
         </div>
@@ -15403,12 +15843,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         sendButton.addEventListener('click', () => {
           const input = soloBody.querySelector('[data-solo-input]');
           const agentSelect = soloBody.querySelector('[data-solo-agent]');
+          const modelSelect = soloBody.querySelector('[data-solo-model]');
           const request = input ? input.value.trim() : '';
           if (!request) return;
           vscode.postMessage({
             command: 'runSoloConversation',
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
+            model: getSoloSelectValue(modelSelect),
             supplementFiles: nodeSupplementFiles[soloConversationId] || []
           });
           input.value = '';
@@ -15425,6 +15867,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
       const soloInput = soloBody.querySelector('[data-solo-input]');
       bindPastedImageAttachments(soloInput, soloConversationId, () => renderSoloPanel(currentNodes));
+      const soloAgentSelect = soloBody.querySelector('[data-solo-agent]');
+      const soloModelSelect = soloBody.querySelector('[data-solo-model]');
+      if (soloAgentSelect) {
+        bindSoloSelect(soloAgentSelect, (value) => {
+          soloAgentSelection = value || currentCliPath || 'agy';
+          ensureAgentModelsLoaded(soloAgentSelection, soloConversationId);
+          renderSoloPanel(currentNodes);
+        });
+      }
+      if (soloModelSelect) {
+        bindSoloSelect(soloModelSelect, (value) => {
+          setTargetModelValue(soloConversationId, soloAgentSelection || currentCliPath || 'agy', value, true);
+        });
+      }
       bindSoloSelects(soloBody);
       bindConversationActions(soloBody, soloConversationId);
     }
@@ -15896,6 +16352,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (expandedNodeId && !nodeConversations[nodeId]) {
         vscode.postMessage({ command: 'getNodeConversations', nodeId });
       }
+      if (expandedNodeId) {
+        const node = (currentNodes || []).find(candidate => candidate.id === nodeId);
+        ensureAgentModelsLoaded(nodeAgentSelections[nodeId] || node?.agentCli || currentCliPath || 'agy', nodeId);
+      }
       renderRoadmap(currentNodes);
     }
 
@@ -15906,12 +16366,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return String(value).replace(/"/g, '\\"');
     }
 
-    function triggerRun(nodeId, userMessage, agentCli, supplementFiles) {
+    function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles) {
       vscode.postMessage({
         command: 'runAgent',
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',
+        model: model || '',
         supplementFiles: supplementFiles || []
       });
     }
