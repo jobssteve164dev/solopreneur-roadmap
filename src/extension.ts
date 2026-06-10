@@ -3039,11 +3039,13 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'getAgentModels':
           if (activePanel) {
+            const resolvedAgentCli = resolveAgentCli(message.agentCli || '', getPersistedSettings(context).cliPath || 'agy');
             activePanel.webview.postMessage({
               command: 'agentModelsLoaded',
               requestId: String(message.requestId || ''),
               targetId: String(message.targetId || ''),
-              catalog: loadDiscoveredAgentModels(resolveAgentCli(message.agentCli || '', getPersistedSettings(context).cliPath || 'agy'))
+              agentCli: resolvedAgentCli,
+              catalog: loadDiscoveredAgentModels(resolvedAgentCli)
             });
           }
           break;
@@ -12612,12 +12614,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     .conversation-compose-main {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto;
       align-items: center;
     }
 
     .conversation-compose-meta {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
     }
 
     .conversation-compose input {
@@ -13504,16 +13509,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         width: 100%;
       }
 
-      .conversation-compose {
-        flex-wrap: wrap;
-      }
-
       .conversation-compose input {
-        flex: 1 1 100%;
-      }
-
-      .conversation-compose-meta {
-        grid-template-columns: 1fr;
+        flex: 1 1 auto;
       }
 
       .btn-send-conversation {
@@ -15026,7 +15023,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           break;
         case 'agentModelsLoaded': {
           const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
-          const family = getAgentFamilyKey(catalog.agentCli || '');
+          const family = String(catalog.family || getAgentFamilyKey(message.agentCli || currentCliPath || 'agy')).toLowerCase();
           agentModelCatalogs[family] = catalog;
           syncSettingAgentModelSelect();
           if (message.targetId === soloConversationId) {

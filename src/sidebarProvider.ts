@@ -2718,11 +2718,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'getAgentModels':
             if (this._getAgentModels) {
-              const catalog = await this._getAgentModels(data.agentCli || '');
+              const requestedAgentCli = data.agentCli || '';
+              const catalog = await this._getAgentModels(requestedAgentCli);
               this._view?.webview.postMessage({
                 command: 'agentModelsLoaded',
                 requestId: String(data.requestId || ''),
                 targetId: String(data.targetId || ''),
+                agentCli: requestedAgentCli,
                 catalog
               });
             }
@@ -6818,7 +6820,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'agentModelsLoaded': {
           const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
-          agentModelCatalogs[getAgentFamilyKey(catalog.agentCli || '')] = catalog;
+          agentModelCatalogs[String(catalog.family || getAgentFamilyKey(message.agentCli || currentCliPath || 'agy')).toLowerCase()] = catalog;
           syncSettingAgentModelSelect();
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
