@@ -4361,6 +4361,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       color: #dfd5ff;
     }
 
+    .portfolio-mode-btn[data-project-conversation-mode="flow"].active {
+      background: rgba(245, 158, 11, 0.2);
+      border-color: rgba(245, 158, 11, 0.52);
+      color: #fff2c2;
+    }
+
     .sidebar-solo-history {
       margin-top: 10px;
       border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -5917,9 +5923,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         pinProject: '置顶项目',
         unpinProject: '取消置顶',
         checksCached: '检查缓存',
-        projectModeContinue: '推进',
-        projectModeSolo: 'Solo',
-        projectModeFlow: 'Flow',
+        projectModeContinue: '按环节推进',
+        projectModeSolo: '自由研讨',
+        projectModeFlow: '自动闭环',
         flowPlaceholder: '写下你想让 Flow 自动推进完成的目标...',
         flowLocked: 'Flow 为 Pro 用户提供自动滚动执行。',
         flowUnlock: '升级 Pro',
@@ -6142,9 +6148,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         pinProject: 'Pin project',
         unpinProject: 'Unpin project',
         checksCached: 'Checks cached',
-        projectModeContinue: 'Continue',
-        projectModeSolo: 'Solo',
-        projectModeFlow: 'Flow',
+        projectModeContinue: 'Step Push',
+        projectModeSolo: 'Free Work',
+        projectModeFlow: 'Auto Loop',
         flowPlaceholder: 'Describe the goal you want Flow to drive to completion...',
         flowLocked: 'Flow automatic execution is available for Pro users.',
         flowUnlock: 'Upgrade Pro',

@@ -905,7 +905,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
   assert.match(script, /runSoloConversation/);
   assert.match(script, /linkSoloConversation/);
-  assert.match(script, /Start directly|直接开始/);
+  assert.match(script, /soloTitle:\s*'Free Work'|soloTitle:\s*'自由研讨'/);
   assert.match(script, /This Solo conversation has finished|本次 Solo 对话已结束/);
   assert.match(script, /renderSoloPanel/);
   assert.match(script, /data-attach-solo/);

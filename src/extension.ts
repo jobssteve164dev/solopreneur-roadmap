@@ -12745,6 +12745,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       box-shadow: 0 0 12px rgba(124, 77, 255, 0.28);
     }
 
+    .view-tab.flow-tab.active {
+      color: #fff7d6;
+      background: rgba(245, 158, 11, 0.24);
+      border-color: rgba(245, 158, 11, 0.58);
+      box-shadow: 0 0 12px rgba(245, 158, 11, 0.24);
+    }
+
     .view-panel {
       display: none;
     }
@@ -14261,9 +14268,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     </header>
 
     <div class="view-tabs" role="tablist">
-      <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">路线图</span></button>
-      <button class="view-tab solo-tab" id="btn-toggle-solo" type="button"><span class="codicon codicon-comment-discussion"></span><span id="solo-view-tab-label">Solo</span></button>
-      <button class="view-tab flow-tab" id="btn-toggle-flow" type="button"><span class="codicon codicon-debug-alt-small"></span><span id="flow-view-tab-label">Flow</span></button>
+      <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">按环节推进</span></button>
+      <button class="view-tab solo-tab" id="btn-toggle-solo" type="button"><span class="codicon codicon-comment-discussion"></span><span id="solo-view-tab-label">自由研讨</span></button>
+      <button class="view-tab flow-tab" id="btn-toggle-flow" type="button"><span class="codicon codicon-debug-alt-small"></span><span id="flow-view-tab-label">自动闭环</span></button>
     </div>
 
     <div class="roadmap-canvas view-panel active" id="canvas">
@@ -14754,9 +14761,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent 结论',
         failureLabel: '失败原因',
         completionCriteria: '完成标准',
-        roadmapView: '路线图',
-        soloTitle: '直接开始',
-        flowTitle: 'Flow',
+        roadmapView: '按环节推进',
+        soloTitle: '自由研讨',
+        flowTitle: '自动闭环',
         flowPlaceholder: '描述你想让 Flow 自动推进完成的目标...',
         flowHistory: '执行轨迹',
         flowStart: '启动 Flow',
@@ -14919,9 +14926,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         agentConclusion: 'Agent conclusion',
         failureLabel: 'Failure reason',
         completionCriteria: 'Completion criteria',
-        roadmapView: 'Roadmap',
-        soloTitle: 'Start directly',
-        flowTitle: 'Flow',
+        roadmapView: 'Step Push',
+        soloTitle: 'Free Work',
+        flowTitle: 'Auto Loop',
         flowPlaceholder: 'Describe the goal you want Flow to drive to completion...',
         flowHistory: 'Execution trace',
         flowStart: 'Start Flow',
@@ -15042,7 +15049,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (btnToggleFlow) btnToggleFlow.title = t('flowTitle');
       if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
       setText('roadmap-view-tab-label', t('roadmapView'));
-      setText('solo-view-tab-label', 'Solo');
+      setText('solo-view-tab-label', t('soloTitle'));
       setText('flow-view-tab-label', t('flowTitle'));
       btnToggleRoadmapRevision.title = t('reviseRoadmap');
       setText('settings-title', t('settingsTitle'));
