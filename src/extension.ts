@@ -7,6 +7,7 @@ import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
+import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { getAgentImpactStatus, buildAgentImpactSummary } from './agentImpact';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
@@ -17,6 +18,7 @@ let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
+let extensionContextRef: vscode.ExtensionContext | null = null;
 let activeProjectRoot: string | null = null;
 let syncEngineReady = false;
 let pendingPassportAuthNonce: string | null = null;
@@ -831,6 +833,7 @@ const hiddenProjectsKey = 'solopreneur.hiddenProjects';
 const passportGrantSecretKey = 'solopreneur.passportGrant';
 const passportProduct = 'solomap';
 const strategyPyramidFeature = 'strategy_pyramid';
+const flowModeFeature = 'flow_mode';
 const passportGrantOfflineGraceMs = 14 * 24 * 60 * 60 * 1000;
 const projectRegistryFileName = 'projects.json';
 const usageStatsFileName = 'solomap-usage.json';
@@ -845,16 +848,25 @@ const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadm
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
+  extensionContextRef = context;
   recordLocalUsageEvent(context, 'activation');
 
   // Register command to show roadmap webview
   const showRoadmapDisposable = vscode.commands.registerCommand(
     'solopreneur.showRoadmap',
     async () => {
-      await openRoadmapPanel(context);
+      await openRoadmapPanel(context, 'roadmap');
     }
   );
   context.subscriptions.push(showRoadmapDisposable);
+
+  const showFlowDisposable = vscode.commands.registerCommand(
+    'solopreneur.showFlow',
+    async () => {
+      await openRoadmapPanel(context, 'flow');
+    }
+  );
+  context.subscriptions.push(showFlowDisposable);
 
   const showStrategyPyramidDisposable = vscode.commands.registerCommand(
     'solopreneur.showStrategyPyramid',
@@ -939,6 +951,19 @@ export async function activate(context: vscode.ExtensionContext) {
       const ready = await ensureSyncEngine(context);
       if (ready && activeProjectRoot === projectPath) {
         await handleRunSoloConversation(context, userMessage, agentCli, model, normalizeSupplementFiles(supplementFiles));
+      }
+    },
+    async (projectPath, goal = '', agentCli = '', model = '') => {
+      if (!getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
+        return;
+      }
+      if (getSelectedProjectPath(context) !== projectPath) {
+        await selectProject(context, projectPath);
+      }
+      const ready = await ensureSyncEngine(context);
+      if (ready && activeProjectRoot === projectPath) {
+        await handleRunFlow(context, goal, agentCli, model);
       }
     },
     async (agentCli) => loadDiscoveredAgentModels(resolveAgentCli(agentCli || '', getPersistedSettings(context).cliPath || 'agy')),
@@ -1098,7 +1123,8 @@ function readLocalProEntitlements(): Record<string, boolean> {
   }
   return {
     pro: true,
-    strategy_pyramid: true
+    strategy_pyramid: true,
+    flow_mode: true
   };
 }
 
@@ -1142,7 +1168,23 @@ async function broadcastSettings(context: vscode.ExtensionContext): Promise<void
       command: 'settingsLoaded',
       settings: getPersistedSettings(context)
     });
+    if (activeProjectRoot) {
+      activePanel.webview.postMessage({
+        command: 'flowStateLoaded',
+        state: buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context))
+      });
+    }
   }
+}
+
+async function postFlowStateToWebview(context: vscode.ExtensionContext): Promise<void> {
+  if (!activePanel || !activeProjectRoot) {
+    return;
+  }
+  activePanel.webview.postMessage({
+    command: 'flowStateLoaded',
+    state: buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context))
+  });
 }
 
 function getPassportBaseUrl(): string {
@@ -1279,6 +1321,22 @@ async function verifyPassportGrant(grant: string, options: { authNonce?: string 
 
 async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
   if (hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
+    return true;
+  }
+  const cached = await readPassportGrant(context);
+  if (!cached) {
+    return false;
+  }
+  const verified = await verifyPassportGrant(cached.grant);
+  if (verified.allowed) {
+    await writePassportGrant(context, verified, cached.grant);
+    return true;
+  }
+  return grantContainsFeature(cached);
+}
+
+async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<boolean> {
+  if (hasProEntitlement(getPersistedSettings(context), flowModeFeature)) {
     return true;
   }
   const cached = await readPassportGrant(context);
@@ -1931,6 +1989,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   void ensureSyncEngine(context).then((ready) => {
     if (ready) {
       sendNodesToWebview();
+      void postFlowStateToWebview(context);
     }
   });
 }
@@ -2865,11 +2924,13 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   return syncEngineInitPromise;
 }
 
-async function openRoadmapPanel(context: vscode.ExtensionContext) {
+async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: 'roadmap' | 'solo' | 'flow' = 'roadmap') {
   // If panel already exists, reveal it
   if (activePanel) {
     recordLocalUsageEvent(context, 'roadmapOpened');
     activePanel.reveal(vscode.ViewColumn.One);
+    activePanel.webview.postMessage({ command: 'setMainView', view: initialView });
+    await postFlowStateToWebview(context);
     return;
   }
 
@@ -2903,6 +2964,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
     command: 'projectsLoaded',
     projects: getProjectState(context)
   });
+  activePanel.webview.postMessage({ command: 'setMainView', view: initialView });
+  await postFlowStateToWebview(context);
 
   // Handle messages from Webview
   activePanel.webview.onDidReceiveMessage(
@@ -2942,6 +3005,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
 
         case 'runSoloConversation':
           await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
+          break;
+
+        case 'runFlow':
+          await handleRunFlow(context, message.goal || '', message.agentCli || '', message.model || '');
           break;
 
         case 'rollbackChanges': {
@@ -3035,6 +3102,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext) {
               settings: getPersistedSettings(context)
             });
           }
+          break;
+
+        case 'getFlowState':
+          await postFlowStateToWebview(context);
           break;
 
         case 'getAgentModels':
@@ -5691,6 +5762,9 @@ function sendNodesToWebview() {
   }
   if (sidebarProvider) {
     sidebarProvider.sendNodesToWebview();
+  }
+  if (extensionContextRef) {
+    void postFlowStateToWebview(extensionContextRef);
   }
 }
 
@@ -9697,6 +9771,213 @@ function buildSoloConversationPrompt(
   ].join('\n');
 }
 
+function buildFlowExecutionNodeId(flowId: string, loopId: string, role: FlowRole): string {
+  return `__flow__::${flowId}::${loopId}::${role}`;
+}
+
+function parseFlowExecutionNodeId(nodeId: string): { flowId: string; loopId: string; role: FlowRole } | null {
+  const match = String(nodeId || '').match(/^__flow__::([^:]+)::([^:]+)::(planner|builder|verifier)$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    flowId: match[1],
+    loopId: match[2],
+    role: match[3] as FlowRole
+  };
+}
+
+function extractFlowJsonBlock(output: string): Record<string, any> | null {
+  const match = String(output || '').match(/SOLOMAP_FLOW_JSON_START\s*([\s\S]*?)\s*SOLOMAP_FLOW_JSON_END/);
+  if (!match) {
+    return null;
+  }
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+function validateFlowPlannerResult(data: Record<string, any> | null): string[] {
+  if (!data) {
+    return ['未找到 Planner 的结构化 JSON 结果。'];
+  }
+  const errors: string[] = [];
+  if (!String(data.goal || '').trim()) errors.push('goal 不能为空。');
+  if (!Array.isArray(data.scope) || data.scope.length === 0) errors.push('scope 至少需要 1 项。');
+  if (!Array.isArray(data.successCriteria) || data.successCriteria.length === 0) errors.push('successCriteria 至少需要 1 项。');
+  if (!Array.isArray(data.plan) || data.plan.length === 0) errors.push('plan 至少需要 1 项。');
+  if (!Array.isArray(data.verificationPlan) || data.verificationPlan.length === 0) errors.push('verificationPlan 至少需要 1 项。');
+  return errors;
+}
+
+function validateFlowBuilderResult(data: Record<string, any> | null): string[] {
+  if (!data) {
+    return ['未找到 Builder 的结构化 JSON 结果。'];
+  }
+  const errors: string[] = [];
+  if (!Array.isArray(data.actions) || data.actions.length === 0) errors.push('actions 至少需要 1 项。');
+  if (!Array.isArray(data.commandsRun)) errors.push('commandsRun 必须是数组。');
+  if (!String(data.recommendedStatus || '').trim()) errors.push('recommendedStatus 不能为空。');
+  return errors;
+}
+
+function validateFlowVerifierResult(data: Record<string, any> | null): string[] {
+  if (!data) {
+    return ['未找到 Verifier 的结构化 JSON 结果。'];
+  }
+  const errors: string[] = [];
+  if (!Array.isArray(data.checks) || data.checks.length === 0) errors.push('checks 至少需要 1 项。');
+  if (!data.H || typeof data.H.pass !== 'boolean') errors.push('H.pass 必须存在。');
+  if (!data.I || typeof data.I.pass !== 'boolean') errors.push('I.pass 必须存在。');
+  if (!data.J || typeof data.J.pass !== 'boolean') errors.push('J.pass 必须存在。');
+  if (!String(data.recommendedStatus || '').trim()) errors.push('recommendedStatus 不能为空。');
+  return errors;
+}
+
+function buildFlowPlannerPrompt(input: {
+  goal: string;
+  workspaceRoot: string;
+  flowId: string;
+  loopId: string;
+  relatedRoadmapStepTitle?: string;
+  globalPrompt?: string;
+}): string {
+  return [
+    '你正在 SoloMap 的 Flow 模式中担任 Planner。',
+    '你的唯一任务是：把当前目标拆成一个可执行、可验证、可归因的微观循环计划。',
+    '',
+    `项目目录：${input.workspaceRoot}`,
+    `Flow ID：${input.flowId}`,
+    `微循环：${input.loopId}`,
+    `用户目标：${input.goal}`,
+    ...(input.relatedRoadmapStepTitle ? [`相关路线图环节：${input.relatedRoadmapStepTitle}`] : []),
+    ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
+    '',
+    '执行要求：',
+    '1. 先阅读相关代码、文档和当前项目事实，不要空想方案。',
+    '2. 严格按“五看三定”产出结构化规划：目标、范围、边界、路径、风险、验证。',
+    '3. 不要执行代码修改，不要运行会改变项目状态的命令；你只负责规划。',
+    '4. 最终只输出一个 JSON，必须包在以下标记之间：',
+    'SOLOMAP_FLOW_JSON_START',
+    '{"goal":"","scope":[],"outOfScope":[],"successCriteria":[],"plan":[],"affectedAreas":[],"constraints":[],"risks":[],"verificationPlan":[],"nextLoopGoal":""}',
+    'SOLOMAP_FLOW_JSON_END',
+    '5. 输出前自行检查 JSON 可被直接解析，字段齐全，不要夹杂额外说明。'
+  ].join('\n');
+}
+
+function buildFlowBuilderPrompt(input: {
+  goal: string;
+  workspaceRoot: string;
+  flowId: string;
+  loopId: string;
+  planner: Record<string, any>;
+  globalPrompt?: string;
+}): string {
+  return [
+    '你正在 SoloMap 的 Flow 模式中担任 Builder。',
+    '你的唯一任务是：按照 Planner 的微观循环计划直接落地实现并给出结构化实施结果。',
+    '',
+    `项目目录：${input.workspaceRoot}`,
+    `Flow ID：${input.flowId}`,
+    `微循环：${input.loopId}`,
+    `用户目标：${input.goal}`,
+    ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
+    '',
+    'Planner 结构化计划：',
+    JSON.stringify(input.planner, null, 2),
+    '',
+    '执行要求：',
+    '1. 直接修改项目文件并运行必要的最窄验证，不要停留在建议。',
+    '2. 如果发现 Planner 缺口，先在当前实现里做最小纠偏，不要擅自换目标。',
+    '3. 最终只输出一个 JSON，必须包在以下标记之间：',
+    'SOLOMAP_FLOW_JSON_START',
+    '{"actions":[],"commandsRun":[],"knownGaps":[],"recommendedStatus":"partial|ready_for_verification|needs_replan","summary":""}',
+    'SOLOMAP_FLOW_JSON_END',
+    '4. 输出前自行检查 JSON 可解析，且 actions 必须对应真实发生的实施动作。'
+  ].join('\n');
+}
+
+function buildFlowVerifierPrompt(input: {
+  goal: string;
+  workspaceRoot: string;
+  flowId: string;
+  loopId: string;
+  planner: Record<string, any>;
+  builder: Record<string, any>;
+  evidence: {
+    changedFilesSummary: string;
+    touchedFilesSummary: string;
+    outputTail: string;
+  };
+  globalPrompt?: string;
+}): string {
+  return [
+    '你正在 SoloMap 的 Flow 模式中担任 Verifier。',
+    '你的唯一任务是：基于 Planner 意图、Builder 结果和真实证据，判断这一轮微观循环是否闭环。',
+    '',
+    `项目目录：${input.workspaceRoot}`,
+    `Flow ID：${input.flowId}`,
+    `微循环：${input.loopId}`,
+    `用户目标：${input.goal}`,
+    ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
+    '',
+    'Planner JSON：',
+    JSON.stringify(input.planner, null, 2),
+    '',
+    'Builder JSON：',
+    JSON.stringify(input.builder, null, 2),
+    '',
+    '真实证据：',
+    `Workspace changes:\n${input.evidence.changedFilesSummary || '无'}`,
+    `Touched project files:\n${input.evidence.touchedFilesSummary || '无'}`,
+    `Agent output tail:\n${input.evidence.outputTail || '无'}`,
+    '',
+    '执行要求：',
+    '1. 用 H/I/J 评审：H=硬证据，I=意图与边界，J=工程判断。',
+    '2. 不要凭感觉说通过；每个 pass/fail 都要引用真实证据。',
+    '3. 最终只输出一个 JSON，必须包在以下标记之间：',
+    'SOLOMAP_FLOW_JSON_START',
+    '{"checks":[],"H":{"pass":false,"reason":""},"I":{"pass":false,"reason":""},"J":{"pass":false,"reason":""},"recommendedStatus":"completed|partial|implemented_unverified|verified_failed|deviated|needs_user_confirmation","nextLoopGoal":"","summary":""}',
+    'SOLOMAP_FLOW_JSON_END',
+    '4. 输出前自行检查 JSON 可解析，不要夹带额外正文。'
+  ].join('\n');
+}
+
+function deriveFlowLoopScoring(verifier: Record<string, any> | null, changedFilesSummary: string, touchedFilesSummary: string): FlowLoopScoring {
+  const hPass = Boolean(verifier?.H?.pass) && Boolean(changedFilesSummary.trim() || touchedFilesSummary.trim());
+  const iPass = Boolean(verifier?.I?.pass);
+  const jPass = Boolean(verifier?.J?.pass);
+  let recommendedStatus: FlowLoopStatus = 'implemented_unverified';
+  if (String(verifier?.recommendedStatus || '') === 'needs_user_confirmation') {
+    recommendedStatus = 'needs_user_confirmation';
+  } else if (!hPass && !changedFilesSummary.trim() && !touchedFilesSummary.trim()) {
+    recommendedStatus = 'no_effect';
+  } else if (!hPass) {
+    recommendedStatus = 'implemented_unverified';
+  } else if (!iPass) {
+    recommendedStatus = 'deviated';
+  } else if (String(verifier?.recommendedStatus || '') === 'verified_failed') {
+    recommendedStatus = 'verified_failed';
+  } else if (String(verifier?.recommendedStatus || '') === 'partial') {
+    recommendedStatus = 'partial';
+  } else if (String(verifier?.recommendedStatus || '') === 'completed' && hPass && iPass) {
+    recommendedStatus = 'closed';
+  }
+  return {
+    hardEvidencePass: hPass,
+    intentPass: iPass,
+    judgmentPass: jPass,
+    recommendedStatus,
+    reasons: [
+      verifier?.H?.reason ? `H: ${String(verifier.H.reason)}` : '',
+      verifier?.I?.reason ? `I: ${String(verifier.I.reason)}` : '',
+      verifier?.J?.reason ? `J: ${String(verifier.J.reason)}` : ''
+    ].filter(Boolean)
+  };
+}
+
 function buildAgentShellScript(
   agentCli: string,
   selectedModel: string,
@@ -10983,6 +11264,147 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   terminal.sendText(finalCommand);
 }
 
+function getCurrentFlowTrace(projectPath: string): FlowTrace | null {
+  return buildFlowStatePayload(projectPath, true).flow;
+}
+
+async function startFlowRoleRun(
+  context: vscode.ExtensionContext,
+  input: {
+    projectPath: string;
+    flow: FlowTrace;
+    loopIndex: number;
+    role: FlowRole;
+    prompt: string;
+    selectedAgentCli?: string;
+    selectedModel?: string;
+  }
+): Promise<void> {
+  if (!syncEngine) {
+    return;
+  }
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = (input.selectedAgentCli || settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, input.selectedAgentCli ? '' : settings.cliPath);
+  if (!commandExists(agentCli)) {
+    throw new Error(`Flow Agent CLI not found: ${requestedAgentCli || agentCli}`);
+  }
+  const automation = ensureAgentTaskAutomation(agentCli);
+  if (!automation.ok) {
+    throw new Error(automation.message);
+  }
+  const loop = input.flow.loops.find((candidate) => candidate.index === input.loopIndex);
+  if (!loop) {
+    throw new Error(`Flow loop ${input.loopIndex} not found.`);
+  }
+  const nodeId = buildFlowExecutionNodeId(input.flow.flowId, loop.loopId, input.role);
+  const launchSummary = [
+    `Flow ${input.role} started.`,
+    `Flow ID: ${input.flow.flowId}`,
+    `Loop ID: ${loop.loopId}`,
+    `Run started at: ${new Date().toISOString()}`,
+    `Goal:\n${input.flow.goal}`
+  ].join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
+    nodeId,
+    agentCli,
+    `${agentCli} [flow ${input.role}]`,
+    launchSummary,
+    'Running'
+  );
+  const runDir = path.join(input.projectPath, '.solopreneur', 'flows', input.flow.flowId, loop.loopId, input.role, String(executionLogId));
+  const statusFilePath = getAgentStatusFilePath(input.projectPath, executionLogId);
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), input.projectPath, settings.taskPermissionMode, input.selectedModel || '');
+  syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
+  updateFlowTrace(input.projectPath, input.flow.flowId, (trace) => {
+    const nextTrace = { ...trace, status: 'running' as const };
+    nextTrace.loops = trace.loops.map((candidate) => {
+      if (candidate.index !== input.loopIndex) {
+        return candidate;
+      }
+      const roleState = {
+        status: 'running' as const,
+        executionLogId,
+        startedAt: new Date().toISOString(),
+        command: agentCommand
+      };
+      return {
+        ...candidate,
+        status: input.role === 'planner' ? 'planned' : input.role === 'builder' ? 'building' : 'verifying',
+        updatedAt: new Date().toISOString(),
+        planner: input.role === 'planner' ? roleState : candidate.planner,
+        builder: input.role === 'builder' ? roleState : candidate.builder,
+        verifier: input.role === 'verifier' ? roleState : candidate.verifier
+      };
+    });
+    return nextTrace;
+  });
+  await postFlowStateToWebview(context);
+  const { finalCommand } = buildAgentShellScript(
+    agentCli,
+    input.selectedModel || '',
+    input.prompt,
+    input.projectPath,
+    nodeId,
+    executionLogId,
+    input.flow.goal,
+    undefined,
+    '',
+    '',
+    `flow_${input.role}`,
+    '',
+    settings.globalDataPath,
+    settings.taskPermissionMode,
+    '',
+    'off',
+    settings.enabledEnhancements,
+    runDir,
+    statusFilePath
+  );
+  const terminal = createAgentTerminal(input.projectPath, `flow-${input.flow.flowId}-${input.role}-${executionLogId}`, executionLogId);
+  terminal.show(true);
+  terminal.sendText(finalCommand);
+}
+
+async function handleRunFlow(context: vscode.ExtensionContext, goal: string, selectedAgentCli = '', selectedModel = ''): Promise<void> {
+  if (!activeProjectRoot || !syncEngine) {
+    return;
+  }
+  const request = String(goal || '').trim();
+  if (!request) {
+    vscode.window.showWarningMessage('先写下你想让 Flow 自动推进完成的目标。');
+    return;
+  }
+  if (!await hasFlowModeAccess(context)) {
+    const choice = await vscode.window.showInformationMessage('Flow 是 SoloMap Pro 功能。', '升级 Pro');
+    if (choice === '升级 Pro') {
+      await beginPassportAuthorizationFlow(context);
+    }
+    await postFlowStateToWebview(context);
+    return;
+  }
+  await syncEngine.initAndSync();
+  const trace = createFlowTrace(activeProjectRoot, request);
+  trace.loops = [createFlowLoop(request, 1)];
+  saveFlowTrace(activeProjectRoot, trace);
+  await postFlowStateToWebview(context);
+  await startFlowRoleRun(context, {
+    projectPath: activeProjectRoot,
+    flow: trace,
+    loopIndex: 1,
+    role: 'planner',
+    prompt: buildFlowPlannerPrompt({
+      goal: request,
+      workspaceRoot: activeProjectRoot,
+      flowId: trace.flowId,
+      loopId: 'loop-1',
+      globalPrompt: getPersistedSettings(context).globalPrompt
+    }),
+    selectedAgentCli,
+    selectedModel
+  });
+}
+
 function linkSoloConversationToNode(conversationId: number, nodeId: string): void {
   if (!syncEngine || !conversationId || !nodeId) {
     return;
@@ -11357,6 +11779,215 @@ function restoreRoadmapBackup(roadmapBackupFilePath: string, workspaceRoot: stri
   return true;
 }
 
+function readTextFileSafe(filePath: string): string {
+  try {
+    return filePath && fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+  } catch {
+    return '';
+  }
+}
+
+async function processFlowStatusFile(statusFilePath: string, statusData: any): Promise<boolean> {
+  const flowMeta = parseFlowExecutionNodeId(String(statusData.nodeId || ''));
+  if (!flowMeta || !syncEngine || !activeProjectRoot) {
+    return false;
+  }
+  const { flowId, loopId, role } = flowMeta;
+  if (String(statusData.status || '') === 'Running' || String(statusData.status || '') === 'Processed') {
+    return true;
+  }
+  const flow = readFlowTrace(activeProjectRoot, flowId);
+  if (!flow) {
+    return true;
+  }
+  const loop = flow.loops.find((candidate) => candidate.loopId === loopId);
+  if (!loop) {
+    return true;
+  }
+  const executionLogId = Number(statusData.executionLogId || 0);
+  const outputText = readTextFileSafe(String(statusData.outputFilePath || ''));
+  const outputTail = getOutputTail(String(statusData.outputFilePath || ''));
+  const changedFilesSummary = getChangedFilesSummary(String(statusData.changesFilePath || ''));
+  const touchedFilesSummary = getTouchedFilesSummary(String(statusData.touchedFilesPath || ''));
+  const resolvedCommand = String(readTextFileSafe(String(statusData.commandFilePath || '')) || statusData.commandPreview || '').trim();
+  const structured = extractFlowJsonBlock(outputText || outputTail);
+  const validationErrors = role === 'planner'
+    ? validateFlowPlannerResult(structured)
+    : role === 'builder'
+      ? validateFlowBuilderResult(structured)
+      : validateFlowVerifierResult(structured);
+  const finishedAt = new Date().toISOString();
+  const roleExecution: import('./flowStore').FlowRoleExecution = {
+    status: (String(statusData.status || '') === 'In Progress' && validationErrors.length === 0 ? 'completed' : 'failed') as 'completed' | 'failed',
+    executionLogId,
+    finishedAt,
+    command: resolvedCommand,
+    outputTail,
+    validationErrors,
+    data: structured || undefined
+  };
+  const summaryLines = [
+    `Flow ${role} finished.`,
+    `Flow ID: ${flowId}`,
+    `Loop ID: ${loopId}`,
+    `Sentinel captured state: ${String(statusData.status || '')}`,
+    validationErrors.length ? `Validation errors:\n${validationErrors.join('\n')}` : '',
+    `Workspace changes:\n${changedFilesSummary || '无'}`,
+    `Touched project files:\n${touchedFilesSummary || '无'}`,
+    outputTail ? `Agent output tail:\n${outputTail}` : ''
+  ].filter(Boolean).join('\n\n');
+  syncEngine.updateAgentExecution(
+    executionLogId,
+    String(statusData.agentCli || ''),
+    resolvedCommand,
+    summaryLines,
+    roleExecution.status === 'completed' ? 'Completed' : 'Failed'
+  );
+
+  const nextFlow = updateFlowTrace(activeProjectRoot, flowId, (trace) => {
+    trace.loops = trace.loops.map((candidate) => {
+      if (candidate.loopId !== loopId) {
+        return candidate;
+      }
+      const nextLoop: typeof candidate = {
+        ...candidate,
+        updatedAt: finishedAt,
+        summary: structured?.summary ? String(structured.summary) : candidate.summary
+      };
+      if (role === 'planner') {
+        nextLoop.planner = roleExecution;
+        nextLoop.status = roleExecution.status === 'completed' ? 'planned' : 'planning_incomplete';
+      } else if (role === 'builder') {
+        nextLoop.builder = roleExecution;
+        nextLoop.evidence = {
+          changedFilesSummary,
+          touchedFilesSummary,
+          outputTail,
+          commandFilePath: String(statusData.commandFilePath || ''),
+          outputFilePath: String(statusData.outputFilePath || ''),
+          changesFilePath: String(statusData.changesFilePath || ''),
+          touchedFilesPath: String(statusData.touchedFilesPath || '')
+        };
+        nextLoop.status = roleExecution.status === 'completed'
+          ? (changedFilesSummary.trim() || touchedFilesSummary.trim() ? 'evidence_collected' : 'no_effect')
+          : 'no_effect';
+      } else {
+        nextLoop.verifier = roleExecution;
+        nextLoop.scoring = deriveFlowLoopScoring(structured, changedFilesSummary, touchedFilesSummary);
+        nextLoop.status = roleExecution.status === 'completed' ? nextLoop.scoring.recommendedStatus : 'implemented_unverified';
+      }
+      return nextLoop;
+    });
+    const currentLoop = trace.loops.find((candidate) => candidate.loopId === loopId);
+    trace.latestSummary = currentLoop?.summary || trace.latestSummary;
+    if (role === 'verifier' && currentLoop?.scoring?.recommendedStatus === 'closed') {
+      trace.status = 'completed';
+      trace.completedAt = finishedAt;
+      trace.latestSummary = currentLoop.summary || currentLoop.scoring.reasons.join('；') || 'Flow 已完成目标。';
+    } else if (role === 'verifier' && currentLoop?.scoring?.recommendedStatus === 'needs_user_confirmation') {
+      trace.status = 'needs_user_confirmation';
+      trace.latestSummary = currentLoop.summary || 'Flow 需要用户确认后才能继续。';
+    } else if (roleExecution.status === 'failed') {
+      trace.status = 'failed';
+      trace.latestSummary = `Flow ${role} 未通过。`;
+    } else {
+      trace.status = 'running';
+    }
+    return trace;
+  });
+  if (!nextFlow) {
+    return true;
+  }
+  if (extensionContextRef) {
+    await postFlowStateToWebview(extensionContextRef);
+  }
+
+  if (role === 'planner' && roleExecution.status === 'completed') {
+    await startFlowRoleRun(extensionContextRef!, {
+      projectPath: activeProjectRoot,
+      flow: nextFlow,
+      loopIndex: loop.index,
+      role: 'builder',
+      prompt: buildFlowBuilderPrompt({
+        goal: nextFlow.goal,
+        workspaceRoot: activeProjectRoot,
+        flowId,
+        loopId,
+        planner: structured || {},
+        globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt
+      })
+    });
+  } else if (role === 'builder' && roleExecution.status === 'completed') {
+    const updatedLoop = readFlowTrace(activeProjectRoot, flowId)?.loops.find((candidate) => candidate.loopId === loopId);
+    await startFlowRoleRun(extensionContextRef!, {
+      projectPath: activeProjectRoot,
+      flow: readFlowTrace(activeProjectRoot, flowId) || nextFlow,
+      loopIndex: loop.index,
+      role: 'verifier',
+      prompt: buildFlowVerifierPrompt({
+        goal: nextFlow.goal,
+        workspaceRoot: activeProjectRoot,
+        flowId,
+        loopId,
+        planner: updatedLoop?.planner.data || {},
+        builder: structured || {},
+        evidence: {
+          changedFilesSummary,
+          touchedFilesSummary,
+          outputTail
+        },
+        globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt
+      })
+    });
+  } else if (role === 'verifier' && roleExecution.status === 'completed') {
+    const latest = readFlowTrace(activeProjectRoot, flowId);
+    const latestLoop = latest?.loops.find((candidate) => candidate.loopId === loopId);
+    const shouldSpawnFollowup = latest && latestLoop && ['partial', 'implemented_unverified', 'verified_failed', 'deviated', 'needs_review', 'no_effect'].includes(latestLoop.status);
+    if (shouldSpawnFollowup && latest && latest.currentLoopIndex < 6) {
+      const nextLoopIndex = latest.currentLoopIndex + 1;
+      const nextLoopGoal = String(structured?.nextLoopGoal || latestLoop?.summary || latest.goal).trim() || latest.goal;
+      const spawned = updateFlowTrace(activeProjectRoot, flowId, (trace) => {
+        trace.currentLoopIndex = nextLoopIndex;
+        trace.loops = [
+          ...trace.loops.map((candidate) => candidate.loopId === loopId ? { ...candidate, status: 'spawned_followup' as FlowLoopStatus, updatedAt: new Date().toISOString() } : candidate),
+          createFlowLoop(nextLoopGoal, nextLoopIndex)
+        ];
+        trace.status = 'running';
+        trace.latestSummary = `继续推进：${nextLoopGoal}`;
+        return trace;
+      });
+      if (spawned) {
+        await postFlowStateToWebview(extensionContextRef!);
+        await startFlowRoleRun(extensionContextRef!, {
+          projectPath: activeProjectRoot,
+          flow: spawned,
+          loopIndex: nextLoopIndex,
+          role: 'planner',
+          prompt: buildFlowPlannerPrompt({
+            goal: nextLoopGoal,
+            workspaceRoot: activeProjectRoot,
+            flowId,
+            loopId: `loop-${nextLoopIndex}`,
+            globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt
+          })
+        });
+      }
+    }
+  }
+  agentTerminalNamesByConversationId.delete(executionLogId);
+  setTimeout(() => {
+    const currentStatus = readAgentStatus(statusFilePath);
+    if (currentStatus && Number(currentStatus.executionLogId || 0) === executionLogId && fs.existsSync(statusFilePath)) {
+      fs.writeFileSync(statusFilePath, JSON.stringify({
+        ...currentStatus,
+        status: 'Processed',
+        processedAt: new Date().toISOString()
+      }), 'utf8');
+    }
+  }, 500);
+  return true;
+}
+
 async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   if (!fs.existsSync(statusFilePath)) {
     return;
@@ -11369,6 +12000,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const statusData = JSON.parse(fileContent);
+    if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
+      await processFlowStatusFile(statusFilePath, statusData);
+      return;
+    }
     const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
 
     if (!nodeId || !status || status === 'Running' || status === 'Processed' || !syncEngine) {
@@ -13607,6 +14242,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <div class="view-tabs" role="tablist">
       <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">路线图</span></button>
       <button class="view-tab solo-tab" id="btn-toggle-solo" type="button"><span class="codicon codicon-comment-discussion"></span><span id="solo-view-tab-label">Solo</span></button>
+      <button class="view-tab flow-tab" id="btn-toggle-flow" type="button"><span class="codicon codicon-debug-alt-small"></span><span id="flow-view-tab-label">Flow</span></button>
     </div>
 
     <div class="roadmap-canvas view-panel active" id="canvas">
@@ -13617,6 +14253,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <div class="solo-view view-panel" id="solo-panel">
       <div class="solo-view-inner">
         <div class="solo-conversation-body" id="solo-body"></div>
+      </div>
+    </div>
+
+    <div class="solo-view view-panel" id="flow-panel">
+      <div class="solo-view-inner">
+        <div class="solo-conversation-body" id="flow-body"></div>
       </div>
     </div>
   </div>
@@ -13897,8 +14539,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const btnRemoveProject = document.getElementById('btn-remove-project');
     const btnToggleRoadmapView = document.getElementById('btn-toggle-roadmap-view');
     const btnToggleSolo = document.getElementById('btn-toggle-solo');
+    const btnToggleFlow = document.getElementById('btn-toggle-flow');
     const soloPanel = document.getElementById('solo-panel');
     const soloBody = document.getElementById('solo-body');
+    const flowPanel = document.getElementById('flow-panel');
+    const flowBody = document.getElementById('flow-body');
     const btnToggleRoadmapRevision = document.getElementById('btn-toggle-roadmap-revision');
     const btnCloseRoadmapRevision = document.getElementById('btn-close-roadmap-revision');
     const roadmapRevisionPanel = document.getElementById('roadmap-revision-panel');
@@ -13961,6 +14606,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const soloConversationId = '__solo__';
     let roadmapRevisionExpanded = false;
     let soloExpanded = false;
+    let flowExpanded = false;
     const nodeConversations = {};
     const nodeSupplementFiles = {};
     const conversationDrafts = {};
@@ -13969,6 +14615,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const conversationModelSelections = {};
     const agentModelPreferenceMap = {};
     let soloAgentSelection = '';
+    let flowAgentSelection = '';
+    let currentFlowState = { hasProAccess: false, flow: null, history: [] };
     let agentModelRequestSeq = 0;
     const i18n = {
       zh: {
@@ -14087,6 +14735,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         completionCriteria: '完成标准',
         roadmapView: '路线图',
         soloTitle: '直接开始',
+        flowTitle: 'Flow',
+        flowPlaceholder: '描述你想让 Flow 自动推进完成的目标...',
+        flowHistory: '执行轨迹',
+        flowStart: '启动 Flow',
+        flowLocked: 'Flow 为 Pro 用户提供目标驱动的自动滚动执行。',
+        flowUpgrade: '登录 / 升级 Pro',
+        flowEmpty: '还没有 Flow 运行。写下目标后，系统会先规划微循环，再持续推进直到完成。',
         soloPlaceholder: '描述你现在想处理的问题或想法...',
         soloHistory: 'Solo 对话历史',
         noSoloConversations: '还没有 Solo 对话。',
@@ -14245,6 +14900,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         completionCriteria: 'Completion criteria',
         roadmapView: 'Roadmap',
         soloTitle: 'Start directly',
+        flowTitle: 'Flow',
+        flowPlaceholder: 'Describe the goal you want Flow to drive to completion...',
+        flowHistory: 'Execution trace',
+        flowStart: 'Start Flow',
+        flowLocked: 'Flow is a Pro mode for goal-driven automatic execution.',
+        flowUpgrade: 'Sign in / Upgrade Pro',
+        flowEmpty: 'No Flow run yet. Enter a goal and SoloMap will plan micro loops, then keep rolling until the task is closed.',
         soloPlaceholder: 'Describe the issue or idea you want to handle...',
         soloHistory: 'Solo conversation history',
         noSoloConversations: 'No Solo conversations yet.',
@@ -14328,13 +14990,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       activeMethodologyStage = '';
       roadmapRevisionExpanded = false;
       soloExpanded = false;
+      flowExpanded = false;
       activeConversationId = '';
       if (soloPanel) soloPanel.classList.remove('open');
       if (soloPanel) soloPanel.classList.remove('active');
+      if (flowPanel) flowPanel.classList.remove('active');
       if (canvas) canvas.classList.add('active');
       if (btnToggleRoadmapView) btnToggleRoadmapView.classList.add('active');
       if (btnToggleSolo) btnToggleSolo.classList.remove('active');
+      if (btnToggleFlow) btnToggleFlow.classList.remove('active');
       if (soloBody) soloBody.innerHTML = '';
+      if (flowBody) flowBody.innerHTML = '';
       if (roadmapRevisionPanel) roadmapRevisionPanel.classList.remove('open');
       if (btnToggleRoadmapRevision) btnToggleRoadmapRevision.classList.remove('active');
       if (roadmapRevisionBody) roadmapRevisionBody.innerHTML = '';
@@ -14352,9 +15018,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       btnAddProject.title = t('addProject');
       btnRemoveProject.title = t('removeProject');
       btnToggleSolo.title = t('soloTitle');
+      if (btnToggleFlow) btnToggleFlow.title = t('flowTitle');
       if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
       setText('roadmap-view-tab-label', t('roadmapView'));
       setText('solo-view-tab-label', 'Solo');
+      setText('flow-view-tab-label', t('flowTitle'));
       btnToggleRoadmapRevision.title = t('reviseRoadmap');
       setText('settings-title', t('settingsTitle'));
       setText('feedback-title', t('feedbackPanelTitle'));
@@ -14412,6 +15080,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderRoadmap(currentNodes);
       renderSoloPanel(currentNodes);
+      renderFlowPanel();
       renderRoadmapRevisionPanel(currentNodes);
       renderProAccount(currentSettings);
     }
@@ -14419,20 +15088,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const currentProjects = { projects: [], selectedProjectPath: '' };
 
     function setMainView(view) {
-      activeMainView = view === 'solo' ? 'solo' : 'roadmap';
+      activeMainView = view === 'solo' ? 'solo' : view === 'flow' ? 'flow' : 'roadmap';
       soloExpanded = activeMainView === 'solo';
+      flowExpanded = activeMainView === 'flow';
       activeConversationId = '';
-      canvas.classList.toggle('active', activeMainView === 'roadmap');
-      soloPanel.classList.toggle('active', activeMainView === 'solo');
-      btnToggleRoadmapView.classList.toggle('active', activeMainView === 'roadmap');
-      btnToggleSolo.classList.toggle('active', activeMainView === 'solo');
+      if (canvas) canvas.classList.toggle('active', activeMainView === 'roadmap');
+      if (soloPanel) soloPanel.classList.toggle('active', activeMainView === 'solo');
+      if (flowPanel) flowPanel.classList.toggle('active', activeMainView === 'flow');
+      if (btnToggleRoadmapView) btnToggleRoadmapView.classList.toggle('active', activeMainView === 'roadmap');
+      if (btnToggleSolo) btnToggleSolo.classList.toggle('active', activeMainView === 'solo');
+      if (btnToggleFlow) btnToggleFlow.classList.toggle('active', activeMainView === 'flow');
       if (activeMainView === 'solo' && !nodeConversations[soloConversationId]) {
         vscode.postMessage({ command: 'getNodeConversations', nodeId: soloConversationId });
       }
       if (activeMainView === 'solo') {
         ensureAgentModelsLoaded(soloAgentSelection || currentCliPath || 'agy', soloConversationId);
       }
+      if (activeMainView === 'flow') {
+        ensureAgentModelsLoaded(flowAgentSelection || currentCliPath || 'agy', 'flow');
+        vscode.postMessage({ command: 'getFlowState' });
+      }
       renderSoloPanel(currentNodes);
+      renderFlowPanel();
     }
 
     if (btnToggleFeedback) {
@@ -14487,6 +15164,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       btnToggleRoadmapRevision.classList.remove('active');
       setMainView('solo');
     });
+
+    if (btnToggleFlow) {
+      btnToggleFlow.addEventListener('click', () => {
+        settingsPanel.style.display = 'none';
+        cliTestBadge.style.display = 'none';
+        roadmapRevisionExpanded = false;
+        roadmapRevisionPanel.classList.remove('open');
+        btnToggleRoadmapRevision.classList.remove('active');
+        setMainView('flow');
+      });
+    }
 
     btnToggleRoadmapRevision.addEventListener('click', () => {
       roadmapRevisionExpanded = !roadmapRevisionExpanded;
@@ -14976,6 +15664,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'getSettings' });
     vscode.postMessage({ command: 'getProjects' });
+    vscode.postMessage({ command: 'getFlowState' });
     if (typeof setInterval === 'function') {
       setInterval(() => {
         if (expandedNodeId && currentNodes.some(node => node.status === 'Running')) {
@@ -14990,6 +15679,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           .some(conversation => conversation.status === 'Running');
         if (soloExpanded && soloRunning) {
           renderSoloPanel(currentNodes);
+        }
+        if (flowExpanded && currentFlowState.flow && currentFlowState.flow.status === 'running') {
+          renderFlowPanel();
         }
       }, 1000);
     }
@@ -15013,6 +15705,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           currentNodes = message.nodes || [];
           renderRoadmap(message.nodes);
           renderSoloPanel(currentNodes);
+          renderFlowPanel();
           renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'settingsLoaded':
@@ -15021,6 +15714,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
           applySettingCliPath(message.settings.cliPath || 'agy');
           soloAgentSelection = getEffectiveSettingCliPath();
+          flowAgentSelection = getEffectiveSettingCliPath();
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
@@ -15032,6 +15726,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
+          renderFlowPanel();
           break;
         case 'agentModelsLoaded': {
           const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
@@ -15040,11 +15735,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           syncSettingAgentModelSelect();
           if (message.targetId === soloConversationId) {
             renderSoloPanel(currentNodes);
+          } else if (message.targetId === 'flow') {
+            renderFlowPanel();
           } else if (message.targetId && message.targetId !== 'settings') {
             renderRoadmap(currentNodes);
           }
           break;
         }
+        case 'flowStateLoaded':
+          currentFlowState = message.state || { hasProAccess: false, flow: null, history: [] };
+          renderFlowPanel();
+          break;
+        case 'setMainView':
+          setMainView(message.view || 'roadmap');
+          break;
         case 'projectsLoaded':
           if (
             message.projects.selectedProjectPath &&
@@ -15059,6 +15763,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
+          vscode.postMessage({ command: 'getFlowState' });
           break;
         case 'nodeConversationsLoaded':
           if (message.projectPath && message.projectPath !== activeProjectPath) {
@@ -15892,6 +16597,101 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       bindSoloSelects(soloBody);
       bindConversationActions(soloBody, soloConversationId);
+    }
+
+    function renderFlowPanel() {
+      if (!flowPanel || !flowBody) {
+        return;
+      }
+      flowPanel.classList.toggle('active', flowExpanded);
+      if (!flowExpanded) {
+        flowBody.innerHTML = '';
+        return;
+      }
+      const flow = currentFlowState.flow || null;
+      const hasProAccess = Boolean(currentFlowState.hasProAccess);
+      if (!hasProAccess) {
+        flowBody.innerHTML = \`
+          <div class="conversation-panel">
+            <div class="conversation-title">\${escapeHtml(t('flowTitle'))}</div>
+            <div class="empty-state">\${escapeHtml(t('flowLocked'))}</div>
+            <div class="conversation-compose conversation-compose-main" style="margin-top: 12px;">
+              <button class="btn-send-conversation" data-open-flow-pro><span class="codicon codicon-lock"></span><span>\${escapeHtml(t('flowUpgrade'))}</span></button>
+            </div>
+          </div>
+        \`;
+        const upgradeButton = flowBody.querySelector('[data-open-flow-pro]');
+        if (upgradeButton) {
+          upgradeButton.addEventListener('click', () => {
+            vscode.postMessage({ command: 'openProAuthorization' });
+          });
+        }
+        return;
+      }
+      const selectedAgentCli = flowAgentSelection || currentCliPath || 'agy';
+      const latestLoops = Array.isArray(flow?.loops) ? flow.loops.slice().sort((a, b) => Number(a.index || 0) - Number(b.index || 0)) : [];
+      flowBody.innerHTML = \`
+        <div class="conversation-composer">
+          <div class="conversation-compose conversation-compose-main">
+            <input type="text" class="conversation-input" data-flow-goal-input placeholder="\${escapeHtml(t('flowPlaceholder'))}">
+            <button class="btn-send-conversation" data-send-flow title="\${escapeHtml(t('flowStart'))}">
+              <span class="codicon codicon-play"></span>
+            </button>
+          </div>
+          <div class="conversation-compose conversation-compose-meta">
+            \${renderSoloSelect('flow-agent-select', 'data-flow-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false, selectedAgentCli)}
+            \${renderModelSelect('flow-model-select', 'data-flow-model title="Model"', selectedAgentCli, 'flow')}
+          </div>
+        </div>
+        <div class="conversation-panel">
+          <div class="conversation-title">\${escapeHtml(t('flowHistory'))}</div>
+          \${flow ? \`
+            <div class="conversation-runtime">Flow: \${escapeHtml(flow.goal || '')}</div>
+            <div class="conversation-runtime">Status: \${escapeHtml(flow.status || '')}</div>
+            \${flow.latestSummary ? \`<div class="conversation-result">\${escapeHtml(flow.latestSummary)}</div>\` : ''}
+            <div class="conversation-output">\${latestLoops.map(loop => \`
+              <div style="padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.08);">
+                <div><strong>Loop \${escapeHtml(String(loop.index || ''))}</strong> · \${escapeHtml(loop.status || '')}</div>
+                <div style="opacity:0.85; margin-top:4px;">\${escapeHtml(loop.goal || '')}</div>
+                \${loop.summary ? \`<div style="margin-top:6px; color: var(--text-muted);">\${escapeHtml(loop.summary)}</div>\` : ''}
+                \${loop.scoring && Array.isArray(loop.scoring.reasons) && loop.scoring.reasons.length ? \`<div style="margin-top:6px; color: var(--text-muted);">\${escapeHtml(loop.scoring.reasons.join(' | '))}</div>\` : ''}
+              </div>
+            \`).join('')}</div>
+          \` : \`<div class="empty-state">\${escapeHtml(t('flowEmpty'))}</div>\`}
+        </div>
+      \`;
+      const sendButton = flowBody.querySelector('[data-send-flow]');
+      if (sendButton) {
+        sendButton.addEventListener('click', () => {
+          const input = flowBody.querySelector('[data-flow-goal-input]');
+          const agentSelect = flowBody.querySelector('[data-flow-agent]');
+          const modelSelect = flowBody.querySelector('[data-flow-model]');
+          const goal = input ? input.value.trim() : '';
+          if (!goal) return;
+          vscode.postMessage({
+            command: 'runFlow',
+            goal,
+            agentCli: getSoloSelectValue(agentSelect),
+            model: getSoloSelectValue(modelSelect)
+          });
+          if (input) input.value = '';
+        });
+      }
+      const flowAgentSelect = flowBody.querySelector('[data-flow-agent]');
+      const flowModelSelect = flowBody.querySelector('[data-flow-model]');
+      if (flowAgentSelect) {
+        bindSoloSelect(flowAgentSelect, (value) => {
+          flowAgentSelection = value || currentCliPath || 'agy';
+          ensureAgentModelsLoaded(flowAgentSelection, 'flow');
+          renderFlowPanel();
+        });
+      }
+      if (flowModelSelect) {
+        bindSoloSelect(flowModelSelect, (value) => {
+          setTargetModelValue('flow', flowAgentSelection || currentCliPath || 'agy', value, true);
+        });
+      }
+      bindSoloSelects(flowBody);
     }
 
     function renderRoadmapRevisionPanel(nodes) {

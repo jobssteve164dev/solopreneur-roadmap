@@ -446,7 +446,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /id="btn-open-strategy-pyramid"/);
   assert.doesNotMatch(html, /id="btn-open-full"/);
   assert.doesNotMatch(html, /id="strategy-pyramid-panel"/);
-  assert.doesNotMatch(html, /data-open-pro-upgrade/);
+  assert.match(html, /data-open-pro-upgrade/);
   assert.doesNotMatch(html, /id="label-feedback"/);
   assert.match(script, /renderProjectIssuePanel/);
   assert.match(script, /createIssue/);
@@ -669,15 +669,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     projectPath: '/workspace/second',
     nodes: []
   });
-  assert.match(elements['portfolio-list'].innerHTML, /判断首页方向/);
-  assert.match(elements['portfolio-list'].innerHTML, /codex/);
-  assert.match(elements['portfolio-list'].innerHTML, /耗时|Duration/);
-  assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-solo-id/);
-  assert.match(elements['portfolio-list'].innerHTML, /sidebar-conversation-footer/);
-  dispatchMessage({ command: 'pastedAttachmentsSaved', targetId: 'solo:/workspace/second', files: ['.solopreneur/attachments/solo/paste.png'] });
-  assert.match(elements['portfolio-list'].innerHTML, /paste\.png/);
-  const actionsHtml = elements['portfolio-list'].innerHTML.match(/<div class="sidebar-conversation-actions">([\s\S]*?)<\/div>/)[1];
-  assert.doesNotMatch(actionsHtml, /data-continue-sidebar-solo-id/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="flow"/);
+  assert.match(elements['portfolio-list'].innerHTML, /打开路线大图|Open roadmap/);
 });
 
 test('sidebar resolve survives persisted state and startup data failures', async () => {
@@ -743,6 +738,8 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /bindPastedImageAttachments/);
   assert.match(script, /savePastedAttachments/);
   assert.match(script, /runRoadmapRevision[\s\S]*supplementFiles/);
+  assert.match(html, /id="btn-toggle-flow"/);
+  assert.match(html, /id="flow-panel"/);
   assert.match(html, /id="btn-toggle-feedback"/);
   assert.match(html, /id="feedback-panel"/);
   assert.doesNotMatch(html, /id="label-feedback"/);
@@ -754,10 +751,14 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'btn-remove-project',
     'btn-toggle-roadmap-view',
     'btn-toggle-solo',
+    'btn-toggle-flow',
     'roadmap-view-tab-label',
     'solo-view-tab-label',
+    'flow-view-tab-label',
     'solo-panel',
     'solo-body',
+    'flow-panel',
+    'flow-body',
     'btn-toggle-roadmap-revision',
     'btn-close-roadmap-revision',
     'roadmap-revision-panel',

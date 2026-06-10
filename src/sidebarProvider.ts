@@ -2660,6 +2660,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _selectProject: (projectPath: string) => Promise<void>,
     private readonly _addProject: () => Promise<void>,
     private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
+    private readonly _onRunFlow?: (projectPath: string, goal?: string, agentCli?: string, model?: string) => Promise<void>,
     private readonly _getAgentModels?: (agentCli: string) => Promise<AgentModelCatalog>,
     private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
     private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
@@ -2716,6 +2717,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             if (this._onRunSolo) {
               await this._onRunSolo(data.projectPath || '', data.userMessage || '', data.agentCli || '', data.model || '', data.supplementFiles || []);
               await this.sendSoloConversationHistory(data.projectPath || '');
+            }
+            break;
+          case 'runFlow':
+            if (this._onRunFlow) {
+              await this._onRunFlow(data.projectPath || '', data.goal || '', data.agentCli || '', data.model || '');
             }
             break;
           case 'getAgentModels':
@@ -2782,6 +2788,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'showFullRoadmap':
             vscode.commands.executeCommand('solopreneur.showRoadmap');
+            break;
+          case 'showFlowView':
+            vscode.commands.executeCommand('solopreneur.showFlow');
             break;
           case 'openProAuthorization':
             if (this._manageProAuthorization) {
@@ -5910,6 +5919,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         checksCached: '检查缓存',
         projectModeContinue: '推进',
         projectModeSolo: 'Solo',
+        projectModeFlow: 'Flow',
+        flowPlaceholder: '写下你想让 Flow 自动推进完成的目标...',
+        flowLocked: 'Flow 为 Pro 用户提供自动滚动执行。',
+        flowUnlock: '升级 Pro',
+        flowOpen: '打开 Flow',
         emptyPortfolio: '还没有已登记项目。',
         noPortfolioMatch: '当前筛选下没有项目。',
         latestUpdate: '最近更新',
@@ -6130,6 +6144,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         checksCached: 'Checks cached',
         projectModeContinue: 'Continue',
         projectModeSolo: 'Solo',
+        projectModeFlow: 'Flow',
+        flowPlaceholder: 'Describe the goal you want Flow to drive to completion...',
+        flowLocked: 'Flow automatic execution is available for Pro users.',
+        flowUnlock: 'Upgrade Pro',
+        flowOpen: 'Open Flow',
         emptyPortfolio: 'No registered projects yet.',
         noPortfolioMatch: 'No projects match this filter.',
         latestUpdate: 'Updated',
@@ -6573,6 +6592,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const entitlements = (settings && settings.proEntitlements) || {};
       const account = (settings && settings.proAccount) || {};
       return Boolean(account.allowed || entitlements.strategy_pyramid || entitlements.strategyPyramid || entitlements.pro || entitlements.solomap_pro);
+    }
+
+    function hasFlowPro(settings) {
+      const entitlements = (settings && settings.proEntitlements) || {};
+      const account = (settings && settings.proAccount) || {};
+      return Boolean(account.allowed || entitlements.flow_mode || entitlements.flowMode || entitlements.pro || entitlements.solomap_pro);
     }
 
     function renderProAccount(settings) {
@@ -7747,35 +7772,56 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const projectPath = project.path || '';
       const mode = projectConversationModes[projectPath] || 'continue';
       const soloTargetId = projectSoloTargetId(projectPath);
-      const activeMode = mode === 'solo' || !node ? 'solo' : 'continue';
-      const targetId = activeMode === 'solo' ? soloTargetId : node.id;
+      const activeMode = mode === 'flow'
+        ? 'flow'
+        : (mode === 'solo' || !node ? 'solo' : 'continue');
+      const flowUnlocked = hasFlowPro(currentSettings || {});
+      const targetId = activeMode === 'solo' ? soloTargetId : activeMode === 'flow' ? ('flow:' + projectPath) : (node ? node.id : '');
       const disabled = activeMode === 'continue' && (!node || node.status === 'Running' || node.status === 'Completed');
       const files = activeMode === 'solo' ? (projectSoloFiles[soloTargetId] || []) : (projectContinueFiles[targetId] || []);
-      const draft = activeMode === 'solo' ? (projectSoloDrafts[projectPath] || '') : (projectContinueDrafts[targetId] || '');
+      const draft = activeMode === 'solo'
+        ? (projectSoloDrafts[projectPath] || '')
+        : activeMode === 'flow'
+          ? (projectContinueDrafts['flow:' + projectPath] || '')
+          : (projectContinueDrafts[targetId] || '');
       const agentOptions = activeMode === 'solo'
         ? getAgentOptions({ agentCli: getEffectiveSettingCliPath() || 'agy' })
-        : getAgentOptions(node);
-      const selectedAgentCli = projectConversationAgentSelections[targetId] || (activeMode === 'solo' ? (getEffectiveSettingCliPath() || 'agy') : (node?.agentCli || getEffectiveSettingCliPath() || 'agy'));
+        : activeMode === 'flow'
+          ? getAgentOptions({ agentCli: getEffectiveSettingCliPath() || 'agy' })
+          : getAgentOptions(node);
+      const modelTargetId = activeMode === 'flow' ? ('flow:' + projectPath) : targetId;
+      const selectedAgentCli = projectConversationAgentSelections[modelTargetId] || ((activeMode === 'solo' || activeMode === 'flow') ? (getEffectiveSettingCliPath() || 'agy') : (node?.agentCli || getEffectiveSettingCliPath() || 'agy'));
       return \`
         <div class="portfolio-compose" data-project-continue-composer>
           <div class="portfolio-mode-toggle">
             <button class="portfolio-mode-btn \${activeMode === 'continue' ? 'active' : ''}" data-project-conversation-mode="continue" data-project-path="\${escapeHtml(projectPath)}" \${node ? '' : 'disabled'}>\${escapeHtml(t('projectModeContinue'))}</button>
             <button class="portfolio-mode-btn \${activeMode === 'solo' ? 'active' : ''}" data-project-conversation-mode="solo" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('projectModeSolo'))}</button>
+            <button class="portfolio-mode-btn \${activeMode === 'flow' ? 'active' : ''}" data-project-conversation-mode="flow" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('projectModeFlow'))}</button>
           </div>
+          \${activeMode === 'flow' && !flowUnlocked ? \`
+            <div class="sidebar-solo-history">
+              <div class="sidebar-solo-empty">\${escapeHtml(t('flowLocked'))}</div>
+              <div class="portfolio-card-actions" style="margin-top: 10px;">
+                <button class="portfolio-action-btn primary" data-open-pro-upgrade>\${escapeHtml(t('flowUnlock'))}</button>
+                <button class="portfolio-action-btn" data-open-flow-view>\${escapeHtml(t('flowOpen'))}</button>
+              </div>
+            </div>
+          \` : \`
           <div class="portfolio-compose-agent-row">
-            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent data-conversation-target-id="' + escapeHtml(targetId) + '"', agentOptions, disabled, selectedAgentCli)}
-            \${renderSoloSelect('portfolio-compose-model', 'data-project-continue-model data-conversation-target-id="' + escapeHtml(targetId) + '"', getAgentModelOptions(selectedAgentCli), disabled, getTargetModelValue(targetId, selectedAgentCli))}
+            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', agentOptions, disabled, selectedAgentCli)}
+            \${renderSoloSelect('portfolio-compose-model', 'data-project-continue-model data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', getAgentModelOptions(selectedAgentCli), disabled, getTargetModelValue(modelTargetId, selectedAgentCli))}
           </div>
           <div class="portfolio-compose-row">
             <button class="portfolio-compose-tool" data-project-attach-files data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" title="\${escapeHtml(t('soloAttach'))}"><span class="codicon codicon-attach"></span></button>
-            <textarea class="portfolio-compose-input" data-project-conversation-input data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" data-project-path="\${escapeHtml(projectPath)}" placeholder="\${escapeHtml(activeMode === 'solo' ? t('soloPlaceholder') : t('continuePlaceholder'))}" \${disabled ? 'disabled' : ''}>\${escapeHtml(draft)}</textarea>
-            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${disabled ? 'disabled' : ''}>
+            <textarea class="portfolio-compose-input" data-project-conversation-input data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" data-project-path="\${escapeHtml(projectPath)}" placeholder="\${escapeHtml(activeMode === 'solo' ? t('soloPlaceholder') : activeMode === 'flow' ? t('flowPlaceholder') : t('continuePlaceholder'))}" \${disabled ? 'disabled' : ''}>\${escapeHtml(draft)}</textarea>
+            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${disabled ? 'disabled' : ''}>
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
           \${renderProjectConversationFiles(targetId, files)}
           \${activeMode === 'solo' ? \`<div class="sidebar-solo-history" data-sidebar-solo-history>\${renderSidebarSoloHistoryContent()}</div>\` : ''}
           \${activeMode === 'continue' && node ? \`<div class="sidebar-solo-history" data-sidebar-step-history>\${renderSidebarStepHistoryContent(projectPath, node)}</div>\` : ''}
+          \`}
         </div>
       \`;
     }
@@ -7806,6 +7852,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             const currentTargetId = input.getAttribute('data-conversation-target-id') || '';
             if (currentMode === 'solo') {
               projectSoloDrafts[projectPath] = input.value;
+            } else if (currentMode === 'flow') {
+              projectContinueDrafts['flow:' + projectPath] = input.value;
             } else if (currentTargetId) {
               projectContinueDrafts[currentTargetId] = input.value;
             }
@@ -7851,6 +7899,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
           }
+          if (mode === 'flow') {
+            if (!projectPath || !userMessage.trim()) return;
+            vscode.postMessage({
+              command: 'runFlow',
+              projectPath,
+              goal: userMessage,
+              agentCli: getSoloSelectValue(agentSelect),
+              model: getSoloSelectValue(modelSelect)
+            });
+            if (input) input.value = '';
+            projectContinueDrafts['flow:' + projectPath] = '';
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            return;
+          }
           const nodeId = sendButton.getAttribute('data-next-node-id');
           runNodeAgent(nodeId, userMessage, getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), projectContinueFiles[nodeId] || []);
           if (input) input.value = '';
@@ -7890,6 +7952,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         input.addEventListener('input', () => {
           if (mode === 'solo') {
             projectSoloDrafts[projectPath] = input.value;
+          } else if (mode === 'flow') {
+            projectContinueDrafts['flow:' + projectPath] = input.value;
           } else {
             projectContinueDrafts[targetId] = input.value;
           }
@@ -7917,6 +7981,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             projectContinueFiles[targetId] = (projectContinueFiles[targetId] || []).filter((_, fileIndex) => fileIndex !== index);
           }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      container.querySelectorAll('[data-open-pro-upgrade]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'openProAuthorization' });
+        });
+      });
+      container.querySelectorAll('[data-open-flow-view]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'showFlowView' });
         });
       });
       bindSidebarSoloHistory(container, currentProjects.selectedProjectPath);
