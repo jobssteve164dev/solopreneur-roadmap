@@ -3570,12 +3570,17 @@ function alternatePathFor(pathname, locale) {
   return locale === "en" ? `/zh${pathname}` : (pathname.startsWith("/zh") ? (pathname.slice(3) || "/") : pathname);
 }
 
-let statsCache = {
+const DEFAULT_STATS = {
   vscode: 40,
-  openvsx: 9326,
+  openvsx: 9326
+};
+
+let statsCache = {
+  ...DEFAULT_STATS,
   lastUpdated: 0
 };
 const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
+const STATS_REFRESH_TIMEOUT = 3500;
 
 let updateStatsPromise = null;
 
@@ -3634,8 +3639,12 @@ async function triggerStatsUpdate() {
           });
           if (res.ok) {
             const data = await res.json();
-            if (data && typeof data.downloadCount === "number") {
-              openvsxCount = data.downloadCount;
+            const downloadCount = data?.downloadCount;
+            const namespaceDownloads = data?.namespaceAccess?.downloadCount;
+            if (typeof downloadCount === "number") {
+              openvsxCount = downloadCount;
+            } else if (typeof namespaceDownloads === "number") {
+              openvsxCount = namespaceDownloads;
             }
           }
         } catch (e) {
@@ -3663,15 +3672,32 @@ async function triggerStatsUpdate() {
   return updateStatsPromise;
 }
 
-function getStats(ctx) {
+async function getStats(ctx) {
   const now = Date.now();
   if (now - statsCache.lastUpdated > CACHE_DURATION) {
     const promise = triggerStatsUpdate();
     if (ctx && typeof ctx.waitUntil === "function") {
       ctx.waitUntil(promise);
     }
+    try {
+      return await Promise.race([
+        promise,
+        new Promise(resolve => setTimeout(() => resolve(statsCache), STATS_REFRESH_TIMEOUT))
+      ]);
+    } catch (error) {
+      console.error("Error awaiting stats refresh:", error);
+      return statsCache;
+    }
   }
   return statsCache;
+}
+
+function resetStatsCacheForTest() {
+  statsCache = {
+    ...DEFAULT_STATS,
+    lastUpdated: 0
+  };
+  updateStatsPromise = null;
 }
 
 function buildPage(locale, origin, stats) {
@@ -4400,7 +4426,9 @@ Sitemap: ${origin}/sitemap.xml
       return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status, extraHeaders);
     }
 
-    const stats = getStats(ctx);
+    const stats = await getStats(ctx);
     return htmlResponse(buildPage(route.locale, origin, stats), route.status, extraHeaders);
   }
 };
+
+export { resetStatsCacheForTest };

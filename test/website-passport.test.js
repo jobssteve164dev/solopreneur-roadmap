@@ -17,6 +17,47 @@ test('website Pro CTA uses dedicated subscription page before authorization', as
   assert.doesNotMatch(html, /issues\/new[^"]*Join Pro Early Access/);
 });
 
+test('homepage install buttons render refreshed marketplace download counts', async () => {
+  const worker = await loadWebsiteWorker();
+  worker.resetStatsCacheForTest();
+
+  const originalFetch = global.fetch;
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery') {
+      assert.equal(init.method, 'POST');
+      return new Response(JSON.stringify({
+        results: [{
+          extensions: [{
+            statistics: [
+              { statisticName: 'install', value: 1234 }
+            ]
+          }]
+        }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://open-vsx.org/api/SZLK/solopreneur-roadmap') {
+      return new Response(JSON.stringify({ downloadCount: 56789 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    return originalFetch(input, init);
+  };
+
+  try {
+    const response = await worker.default.fetch(new Request('https://solomap.app/'), { SITE_ORIGIN: 'https://solomap.app' });
+    const html = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.match(html, /VS Code Marketplace \(1,234 installs\)/);
+    assert.match(html, /Open VSX \(56,789 downloads\)/);
+  } finally {
+    global.fetch = originalFetch;
+    worker.resetStatsCacheForTest();
+  }
+});
+
 test('Pro subscription page carries signed upgrade state into Passport start', async () => {
   const worker = await loadWebsiteWorker();
   const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
@@ -704,6 +745,5 @@ test('Privacy Policy and Terms of Service endpoints render correct bilingual cop
   assert.match(termsZh, /<h1>用户协议<\/h1>/);
   assert.match(termsZh, /许可授予与使用范围/);
 });
-
 
 
