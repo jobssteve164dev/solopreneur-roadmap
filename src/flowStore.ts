@@ -7,7 +7,8 @@ export type FlowLifecycleStatus =
   | 'completed'
   | 'failed'
   | 'needs_user_confirmation'
-  | 'paused';
+  | 'paused'
+  | 'abandoned';
 
 export type FlowLoopStatus =
   | 'created'
@@ -38,6 +39,7 @@ export interface FlowRoleExecution {
   outputTail?: string;
   validationErrors?: string[];
   data?: Record<string, any>;
+  retryCount?: number;
 }
 
 export interface FlowLoopEvidence {

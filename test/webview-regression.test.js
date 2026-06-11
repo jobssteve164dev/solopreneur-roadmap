@@ -148,6 +148,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './agentImpact') {
           return require(path.join(projectRoot, 'out/agentImpact.js'));
         }
+        if (id === './flowStore') {
+          return require(path.join(projectRoot, 'out/flowStore.js'));
+        }
         return {};
       }
       return require(id);
@@ -157,6 +160,10 @@ function loadCompiledModule(relativePath, exportPatch) {
     URL,
     URLSearchParams,
     Buffer,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
     fetch: (...args) => vscodeTestState.fetchImpl(...args),
     __dirname: path.dirname(filename),
     __filename: filename
@@ -4402,4 +4409,277 @@ test('project registry persists projects and pin state in the global SoloMap fil
   const sharedProjects = extensionModule.__getProjects(secondContext);
   assert.equal(sharedProjects[0].path, '/workspace/beta');
   assert.equal(sharedProjects[1].path, '/workspace/alpha');
+});
+
+test('Flow pause and abandon commands work correctly', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, context) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = context; };',
+      'module.exports.__updateFlowTrace = flowStore_1.updateFlowTrace;',
+      'module.exports.__readFlowTrace = flowStore_1.readFlowTrace;'
+    ].join('\n')
+  );
+  
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-ctrl-'));
+  const mockContext = {
+    globalState: {
+      get: (key) => ({}),
+      update: (key, val) => Promise.resolve()
+    }
+  };
+  extensionModule.__setRuntimeForTest(null, tempRoot, mockContext);
+  
+  const trace = {
+    schemaVersion: 1,
+    flowId: 'test-flow-123',
+    projectPath: tempRoot,
+    goal: 'Test flow control',
+    status: 'running',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: { type: 'goal', userInput: 'Test flow control' },
+    currentLoopIndex: 1,
+    loops: [
+      {
+        loopId: 'loop-1',
+        index: 1,
+        goal: 'Test flow control',
+        status: 'created',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        planner: { status: 'pending' },
+        builder: { status: 'pending' },
+        verifier: { status: 'pending' }
+      }
+    ]
+  };
+  
+  const flowsDir = path.join(tempRoot, '.solopreneur', 'flows');
+  fs.mkdirSync(flowsDir, { recursive: true });
+  fs.writeFileSync(path.join(flowsDir, 'test-flow-123.json'), JSON.stringify(trace), 'utf8');
+
+  extensionModule.__updateFlowTrace(tempRoot, 'test-flow-123', (t) => {
+    t.status = 'paused';
+    t.latestSummary = 'Flow 已被用户手动暂停推进。';
+    return t;
+  });
+  
+  const pausedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-123');
+  assert.equal(pausedTrace.status, 'paused');
+  assert.match(pausedTrace.latestSummary, /暂停推进/);
+
+  extensionModule.__updateFlowTrace(tempRoot, 'test-flow-123', (t) => {
+    t.status = 'abandoned';
+    t.latestSummary = 'Flow 已被用户手动放弃。';
+    if (t.loops.length > 0) {
+      t.loops[t.loops.length - 1].status = 'abandoned';
+    }
+    return t;
+  });
+
+  const abandonedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-123');
+  assert.equal(abandonedTrace.status, 'abandoned');
+  assert.equal(abandonedTrace.loops[0].status, 'abandoned');
+});
+
+test('Verifier successful close auto-attributes roadmap step status to Completed', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, context) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = context; };',
+      'module.exports.__processFlowStatusFile = processFlowStatusFile;',
+      'module.exports.__readFlowTrace = flowStore_1.readFlowTrace;'
+    ].join('\n')
+  );
+  
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-attribution-'));
+  const mockContext = {
+    globalState: {
+      get: (key) => ({}),
+      update: (key, val) => Promise.resolve()
+    }
+  };
+  extensionModule.__setRuntimeForTest(null, tempRoot, mockContext);
+  
+  const mockNodes = [
+    { id: 'step-1', title: 'Task 1', status: 'In Progress', dependencies: '' }
+  ];
+  const mockEngine = {
+    updateNode(id, fields) {
+      const node = mockNodes.find(n => n.id === id);
+      if (node) {
+        Object.assign(node, fields);
+      }
+    },
+    getNodes() {
+      return mockNodes;
+    },
+    updateAgentExecution() {},
+    logAgentExecution() {
+      return 123;
+    }
+  };
+  extensionModule.__setRuntimeForTest(mockEngine, tempRoot);
+
+  const trace = {
+    schemaVersion: 1,
+    flowId: 'test-flow-456',
+    projectPath: tempRoot,
+    goal: 'Complete Task 1',
+    status: 'running',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: { type: 'goal', userInput: 'Complete Task 1', roadmapStepId: 'step-1' },
+    currentLoopIndex: 1,
+    loops: [
+      {
+        loopId: 'loop-1',
+        index: 1,
+        goal: 'Complete Task 1',
+        status: 'verifying',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        planner: { status: 'completed' },
+        builder: { status: 'completed' },
+        verifier: { status: 'running' }
+      }
+    ]
+  };
+  
+  const flowsDir = path.join(tempRoot, '.solopreneur', 'flows');
+  fs.mkdirSync(flowsDir, { recursive: true });
+  fs.writeFileSync(path.join(flowsDir, 'test-flow-456.json'), JSON.stringify(trace), 'utf8');
+
+  const logDir = path.join(tempRoot, '.solopreneur', 'flows', 'test-flow-456', 'loop-1', 'verifier', '123');
+  fs.mkdirSync(logDir, { recursive: true });
+  
+  const verifierJson = {
+    checks: [{ criterion: 'Verify CRM', status: 'pass', evidence: [], reason: '' }],
+    H: { pass: true, reason: 'Files modified' },
+    I: { pass: true, reason: 'Aligns with goal' },
+    J: { pass: true, reason: 'Good design' },
+    recommendedStatus: 'closed',
+    summary: 'Task 1 fully closed'
+  };
+  
+  fs.writeFileSync(
+    path.join(logDir, 'output.log'),
+    `SOLOMAP_FLOW_JSON_START\n${JSON.stringify(verifierJson)}\nSOLOMAP_FLOW_JSON_END`,
+    'utf8'
+  );
+
+  const statusData = {
+    nodeId: '__flow__::test-flow-456::loop-1::verifier',
+    status: 'In Progress',
+    executionLogId: 123,
+    outputFilePath: path.join(logDir, 'output.log'),
+    changesFilePath: '',
+    touchedFilesPath: '',
+    commandFilePath: ''
+  };
+
+  await extensionModule.__processFlowStatusFile(null, statusData);
+
+  const updatedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-456');
+  assert.equal(updatedTrace.status, 'completed');
+  assert.equal(mockNodes[0].status, 'Completed');
+});
+
+test('Flow role output validation error triggers self-correction loop', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, context) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = context; };',
+      'module.exports.__processFlowStatusFile = processFlowStatusFile;',
+      'module.exports.__readFlowTrace = flowStore_1.readFlowTrace;',
+      'module.exports.__setStartFlowRoleRun = (fn) => { startFlowRoleRun = fn; };'
+    ].join('\n')
+  );
+  
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-retry-'));
+  const mockContext = {
+    globalState: {
+      get: (key) => ({}),
+      update: (key, val) => Promise.resolve()
+    }
+  };
+  extensionModule.__setRuntimeForTest(null, tempRoot, mockContext);
+  
+  let startRoleRunCalled = false;
+  let startRoleRunPayload = null;
+  extensionModule.__setStartFlowRoleRun(async (context, payload) => {
+    startRoleRunCalled = true;
+    startRoleRunPayload = payload;
+  });
+
+  const mockEngine = {
+    updateAgentExecution() {},
+    logAgentExecution() {
+      return 789;
+    }
+  };
+  extensionModule.__setRuntimeForTest(mockEngine, tempRoot);
+
+  const trace = {
+    schemaVersion: 1,
+    flowId: 'test-flow-789',
+    projectPath: tempRoot,
+    goal: 'Test validation correction',
+    status: 'running',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: { type: 'goal', userInput: 'Test validation correction' },
+    currentLoopIndex: 1,
+    loops: [
+      {
+        loopId: 'loop-1',
+        index: 1,
+        goal: 'Test validation correction',
+        status: 'created',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        planner: { status: 'running', retryCount: 0 },
+        builder: { status: 'pending' },
+        verifier: { status: 'pending' }
+      }
+    ]
+  };
+  
+  const flowsDir = path.join(tempRoot, '.solopreneur', 'flows');
+  fs.mkdirSync(flowsDir, { recursive: true });
+  fs.writeFileSync(path.join(flowsDir, 'test-flow-789.json'), JSON.stringify(trace), 'utf8');
+
+  const logDir = path.join(tempRoot, '.solopreneur', 'flows', 'test-flow-789', 'loop-1', 'planner', '789');
+  fs.mkdirSync(logDir, { recursive: true });
+  
+  const invalidPlannerJson = {
+    goal: '',
+    scope: [],
+    successCriteria: []
+  };
+  
+  fs.writeFileSync(
+    path.join(logDir, 'output.log'),
+    `SOLOMAP_FLOW_JSON_START\n${JSON.stringify(invalidPlannerJson)}\nSOLOMAP_FLOW_JSON_END`,
+    'utf8'
+  );
+
+  const statusData = {
+    nodeId: '__flow__::test-flow-789::loop-1::planner',
+    status: 'In Progress',
+    executionLogId: 789,
+    outputFilePath: path.join(logDir, 'output.log'),
+    changesFilePath: '',
+    touchedFilesPath: '',
+    commandFilePath: ''
+  };
+
+  await extensionModule.__processFlowStatusFile(null, statusData);
+
+  const updatedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-789');
+  assert.equal(updatedTrace.loops[0].planner.retryCount, 1);
+  assert.equal(startRoleRunCalled, true);
+  assert.equal(startRoleRunPayload.role, 'planner');
+  assert.match(startRoleRunPayload.prompt, /自检修正/);
 });

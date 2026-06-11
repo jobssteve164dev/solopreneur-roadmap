@@ -3014,6 +3014,32 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           await handleRunFlow(context, message.goal || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
           break;
 
+        case 'pauseFlow':
+          if (activeProjectRoot && message.flowId) {
+            updateFlowTrace(activeProjectRoot, message.flowId, (trace) => {
+              trace.status = 'paused';
+              trace.latestSummary = 'Flow 已被用户手动暂停推进。';
+              return trace;
+            });
+            await postFlowStateToWebview(context);
+          }
+          break;
+
+        case 'abandonFlow':
+          if (activeProjectRoot && message.flowId) {
+            updateFlowTrace(activeProjectRoot, message.flowId, (trace) => {
+              trace.status = 'abandoned';
+              trace.latestSummary = 'Flow 已被用户手动放弃。';
+              if (trace.loops.length > 0) {
+                const latestLoop = trace.loops[trace.loops.length - 1];
+                latestLoop.status = 'abandoned';
+              }
+              return trace;
+            });
+            await postFlowStateToWebview(context);
+          }
+          break;
+
         case 'rollbackChanges': {
           const projectPath = message.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '';
           const gitHash = message.gitHash;
@@ -9971,7 +9997,7 @@ function deriveFlowLoopScoring(verifier: Record<string, any> | null, changedFile
     recommendedStatus = 'verified_failed';
   } else if (String(verifier?.recommendedStatus || '') === 'partial') {
     recommendedStatus = 'partial';
-  } else if (String(verifier?.recommendedStatus || '') === 'completed' && hPass && iPass) {
+  } else if ((String(verifier?.recommendedStatus || '') === 'completed' || String(verifier?.recommendedStatus || '') === 'closed') && hPass && iPass) {
     recommendedStatus = 'closed';
   }
   return {
@@ -11838,6 +11864,78 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
       ? validateFlowBuilderResult(structured)
       : validateFlowVerifierResult(structured);
   const finishedAt = new Date().toISOString();
+  const currentRetryCount = Number((loop as any)[role]?.retryCount || 0);
+  if (validationErrors.length > 0 && currentRetryCount < 2) {
+    const nextRetryCount = currentRetryCount + 1;
+    const roleExecution: import('./flowStore').FlowRoleExecution = {
+      status: 'running' as const,
+      executionLogId,
+      startedAt: new Date().toISOString(),
+      command: resolvedCommand,
+      outputTail,
+      validationErrors,
+      data: structured || undefined,
+      retryCount: nextRetryCount
+    };
+
+    const feedbackPrompt = [
+      `你在上一轮执行中产出的结构化 JSON 未通过校验，请根据以下校验错误信息进行自检修正，并重新输出完整的 JSON（包在 SOLOMAP_FLOW_JSON_START 和 SOLOMAP_FLOW_JSON_END 之间）：`,
+      ...validationErrors.map(err => `- ${err}`),
+      '',
+      '你上一轮输出的日志尾部是：',
+      outputTail,
+      '',
+      '请重新输出，确保所有必填字段齐全，JSON 可被合法解析。'
+    ].join('\n');
+
+    const summaryLines = [
+      `Flow ${role} validation failed. Retrying correction (${nextRetryCount}/2).`,
+      `Flow ID: ${flowId}`,
+      `Loop ID: ${loopId}`,
+      validationErrors.length ? `Validation errors:\n${validationErrors.join('\n')}` : '',
+      `Workspace changes:\n${changedFilesSummary || '无'}`,
+      `Touched project files:\n${touchedFilesSummary || '无'}`,
+      outputTail ? `Agent output tail:\n${outputTail}` : ''
+    ].filter(Boolean).join('\n\n');
+
+    syncEngine.updateAgentExecution(
+      executionLogId,
+      String(statusData.agentCli || ''),
+      resolvedCommand,
+      summaryLines,
+      'Running'
+    );
+
+    const nextFlow = updateFlowTrace(activeProjectRoot, flowId, (trace) => {
+      trace.loops = trace.loops.map((candidate) => {
+        if (candidate.loopId !== loopId) {
+          return candidate;
+        }
+        const nextLoop = { ...candidate, updatedAt: finishedAt };
+        (nextLoop as any)[role] = roleExecution;
+        nextLoop.status = role === 'planner' ? 'created' : role === 'builder' ? 'planned' : 'evidence_collected';
+        return nextLoop;
+      });
+      trace.status = 'running';
+      trace.latestSummary = `Flow ${role} 结构校验失败，正在进行第 ${nextRetryCount} 次自检修正。`;
+      return trace;
+    });
+
+    if (nextFlow) {
+      if (extensionContextRef) {
+        await postFlowStateToWebview(extensionContextRef);
+      }
+      await startFlowRoleRun(extensionContextRef!, {
+        projectPath: activeProjectRoot,
+        flow: nextFlow,
+        loopIndex: loop.index,
+        role: role,
+        prompt: feedbackPrompt
+      });
+      return true;
+    }
+  }
+
   const roleExecution: import('./flowStore').FlowRoleExecution = {
     status: (String(statusData.status || '') === 'In Progress' && validationErrors.length === 0 ? 'completed' : 'failed') as 'completed' | 'failed',
     executionLogId,
@@ -11845,7 +11943,8 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
     command: resolvedCommand,
     outputTail,
     validationErrors,
-    data: structured || undefined
+    data: structured || undefined,
+    retryCount: currentRetryCount
   };
   const summaryLines = [
     `Flow ${role} finished.`,
@@ -11965,6 +12064,14 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
   } else if (role === 'verifier' && roleExecution.status === 'completed') {
     const latest = readFlowTrace(activeProjectRoot, flowId);
     const latestLoop = latest?.loops.find((candidate) => candidate.loopId === loopId);
+    if (latest && latestLoop?.status === 'closed' && latest.source.roadmapStepId && syncEngine) {
+      syncEngine.updateNode(latest.source.roadmapStepId, {
+        status: 'Completed',
+        completedAt: finishedAt
+      });
+      sendNodesToWebview();
+      refreshSidebarProjectCards();
+    }
     const shouldSpawnFollowup = latest && latestLoop && ['partial', 'implemented_unverified', 'verified_failed', 'deviated', 'needs_review', 'no_effect'].includes(latestLoop.status);
     if (shouldSpawnFollowup && latest && latest.currentLoopIndex < 6) {
       const nextLoopIndex = latest.currentLoopIndex + 1;
@@ -16671,6 +16778,26 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       const selectedAgentCli = flowAgentSelection || currentCliPath || 'agy';
       const latestLoops = Array.isArray(flow?.loops) ? flow.loops.slice().sort((a, b) => Number(a.index || 0) - Number(b.index || 0)) : [];
+      
+      // Helper function to render touched files in the panel
+      function getEvidenceFilesHtml(loop) {
+        if (!loop.evidence) return '';
+        const touched = loop.evidence.touchedFilesSummary || '';
+        const changed = loop.evidence.changedFilesSummary || '';
+        const files = Array.from(new Set(
+          [...touched.split('\\n'), ...changed.split('\\n')]
+            .map(f => f.trim())
+            .filter(f => f && !f.includes(':') && !f.startsWith('M ') && !f.startsWith('A ') && !f.startsWith('D '))
+        ));
+        if (files.length === 0) return '';
+        return \`
+          <div style="margin-top:6px; color: var(--text-muted);">
+            <strong>📂 Touched Files:</strong>
+            \${files.map(file => \`<span class="file-link" data-open-file-path="\${escapeHtml(file)}" style="color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; margin-right: 8px;">\${escapeHtml(file)}</span>\`).join('')}
+          </div>
+        \`;
+      }
+
       flowBody.innerHTML = \`
         <div class="conversation-composer">
           <div class="conversation-compose conversation-compose-main">
@@ -16694,14 +16821,40 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             <div class="conversation-runtime">Flow: \${escapeHtml(flow.goal || '')}</div>
             <div class="conversation-runtime">Status: \${escapeHtml(flow.status || '')}</div>
             \${flow.latestSummary ? \`<div class="conversation-result">\${escapeHtml(flow.latestSummary)}</div>\` : ''}
+            
+            \${(flow.status === 'running') ? \`
+              <div style="margin-top: 8px; margin-bottom: 8px; display: flex; gap: 8px;">
+                <button class="conversation-control-btn" data-pause-flow="\${escapeHtml(flow.flowId)}" style="background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); padding: 4px 8px; font-size: 11px;">⏸ 暂停推进</button>
+                <button class="conversation-control-btn stop" data-abandon-flow="\${escapeHtml(flow.flowId)}" style="padding: 4px 8px; font-size: 11px;">🚫 放弃 Flow</button>
+              </div>
+            \` : ''}
+
             <div class="conversation-output">\${latestLoops.map(loop => \`
               <div style="padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.08);">
                 <div><strong>Loop \${escapeHtml(String(loop.index || ''))}</strong> · \${escapeHtml(loop.status || '')}</div>
                 <div style="opacity:0.85; margin-top:4px;">\${escapeHtml(loop.goal || '')}</div>
-                <div style="margin-top:6px; color: var(--text-muted);">Planner: \${escapeHtml(loop.planner?.status || 'pending')} · Builder: \${escapeHtml(loop.builder?.status || 'pending')} · Verifier: \${escapeHtml(loop.verifier?.status || 'pending')}</div>
+                <div style="margin-top:6px; color: var(--text-muted);">
+                  Planner: <span class="role-status \${escapeHtml(loop.planner?.status || 'pending')}" data-show-audit-role="planner" data-loop-index="\${loop.index}" style="cursor: pointer; text-decoration: underline;">\${escapeHtml(loop.planner?.status || 'pending')}</span> · 
+                  Builder: <span class="role-status \${escapeHtml(loop.builder?.status || 'pending')}" data-show-audit-role="builder" data-loop-index="\${loop.index}" style="cursor: pointer; text-decoration: underline;">\${escapeHtml(loop.builder?.status || 'pending')}</span> · 
+                  Verifier: <span class="role-status \${escapeHtml(loop.verifier?.status || 'pending')}" data-show-audit-role="verifier" data-loop-index="\${loop.index}" style="cursor: pointer; text-decoration: underline;">\${escapeHtml(loop.verifier?.status || 'pending')}</span>
+                </div>
+                
+                <div id="audit-details-\${loop.index}" class="audit-details" style="display: none; margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.25); border-radius: 4px; border-left: 3px solid var(--vscode-focusBorder);">
+                  <div style="font-weight: bold; font-size: 10px; margin-bottom: 4px; color: var(--vscode-textPreformat-foreground);">📋 执行轨迹审计 (<span id="audit-role-name-\${loop.index}"></span>)</div>
+                  <pre id="audit-content-\${loop.index}" style="font-family: monospace; white-space: pre-wrap; margin: 0; font-size: 10px; max-height: 200px; overflow-y: auto; color: var(--vscode-editor-foreground);"></pre>
+                </div>
+
                 \${loop.summary ? \`<div style="margin-top:6px; color: var(--text-muted);">\${escapeHtml(loop.summary)}</div>\` : ''}
-                \${loop.evidence && (loop.evidence.changedFilesSummary || loop.evidence.touchedFilesSummary) ? \`<div style="margin-top:6px; color: var(--text-muted);">Files: \${escapeHtml((loop.evidence.touchedFilesSummary || loop.evidence.changedFilesSummary || '').replace(/\\s+/g, ' ').slice(0, 180))}</div>\` : ''}
-                \${loop.scoring && Array.isArray(loop.scoring.reasons) && loop.scoring.reasons.length ? \`<div style="margin-top:6px; color: var(--text-muted);">\${escapeHtml(loop.scoring.reasons.join(' | '))}</div>\` : ''}
+                \${getEvidenceFilesHtml(loop)}
+                \${loop.scoring && Array.isArray(loop.scoring.reasons) && loop.scoring.reasons.length ? \`
+                  <div style="margin-top:6px; color: var(--text-muted);">
+                    <strong>🎯 H/I/J 评估:</strong> 
+                    <span style="color: \${loop.scoring.hardEvidencePass ? '#388a34' : '#cf222e'}; font-weight: bold;">H:\${loop.scoring.hardEvidencePass?'Pass':'Fail'}</span> | 
+                    <span style="color: \${loop.scoring.intentPass ? '#388a34' : '#cf222e'}; font-weight: bold;">I:\${loop.scoring.intentPass?'Pass':'Fail'}</span> | 
+                    <span style="color: \${loop.scoring.judgmentPass ? '#388a34' : '#cf222e'}; font-weight: bold;">J:\${loop.scoring.judgmentPass?'Pass':'Fail'}</span>
+                    <div style="font-size: 11px; margin-top: 2px;">\${escapeHtml(loop.scoring.reasons.join(' | '))}</div>
+                  </div>
+                \` : ''}
               </div>
             \`).join('')}</div>
             \${currentFlowState.history && currentFlowState.history.length > 1 ? \`<div class="conversation-result" style="margin-top:12px;">Recent flows: \${escapeHtml(currentFlowState.history.slice(1, 4).map(item => item.goal).join(' | '))}</div>\` : ''}
@@ -16757,9 +16910,56 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           setTargetModelValue('flow', flowAgentSelection || currentCliPath || 'agy', value, true);
         });
       }
-      bindSoloSelects(flowBody);
-    }
 
+      // Bind pause and abandon action buttons
+      const pauseBtn = flowBody.querySelector('[data-pause-flow]');
+      if (pauseBtn) {
+        pauseBtn.addEventListener('click', () => {
+          const flowId = pauseBtn.getAttribute('data-pause-flow');
+          vscode.postMessage({ command: 'pauseFlow', flowId });
+        });
+      }
+      const abandonBtn = flowBody.querySelector('[data-abandon-flow]');
+      if (abandonBtn) {
+        abandonBtn.addEventListener('click', () => {
+          const flowId = abandonBtn.getAttribute('data-abandon-flow');
+          vscode.postMessage({ command: 'abandonFlow', flowId });
+        });
+      }
+
+      // Bind audit toggle buttons
+      flowBody.querySelectorAll('[data-show-audit-role]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const role = item.getAttribute('data-show-audit-role');
+          const loopIndex = Number(item.getAttribute('data-loop-index') || 0);
+          const detailsDiv = flowBody.querySelector(\`#audit-details-\${loopIndex}\`);
+          const contentPre = flowBody.querySelector(\`#audit-content-\${loopIndex}\`);
+          const roleSpan = flowBody.querySelector(\`#audit-role-name-\${loopIndex}\`);
+          if (!detailsDiv || !contentPre) return;
+          
+          const loop = latestLoops.find(l => l.index === loopIndex);
+          const roleData = loop ? loop[role] : null;
+          if (!roleData) return;
+          
+          if (detailsDiv.style.display === 'none') {
+            detailsDiv.style.display = 'block';
+            if (roleSpan) roleSpan.textContent = role.toUpperCase();
+            contentPre.textContent = JSON.stringify({
+              role: role,
+              status: roleData.status,
+              validationErrors: roleData.validationErrors || [],
+              data: roleData.data || {}
+            }, null, 2);
+          } else {
+            detailsDiv.style.display = 'none';
+          }
+        });
+      });
+
+      bindSoloSelects(flowBody);
+      bindConversationActions(flowBody, 'flow');
+    }
     function renderRoadmapRevisionPanel(nodes) {
       if (!roadmapRevisionPanel || !roadmapRevisionBody) {
         return;
