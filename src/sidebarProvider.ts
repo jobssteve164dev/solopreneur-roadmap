@@ -4838,17 +4838,320 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .portfolio-delivery-panel {
-      margin-top: 9px;
-      padding: 7px 9px;
-      border: 1px solid rgba(0, 176, 255, 0.16);
-      border-radius: 6px;
-      background: rgba(0, 176, 255, 0.05);
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid rgba(0, 176, 255, 0.18);
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(0, 176, 255, 0.04) 0%, rgba(0, 176, 255, 0.08) 100%);
+      backdrop-filter: blur(10px);
+      transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
       cursor: default;
+      position: relative;
+      overflow: hidden;
     }
 
     .portfolio-delivery-panel.is-failed {
-      border-color: rgba(255, 82, 82, 0.24);
-      background: rgba(255, 82, 82, 0.06);
+      border-color: rgba(239, 83, 80, 0.25);
+      background: linear-gradient(135deg, rgba(239, 83, 80, 0.05) 0%, rgba(239, 83, 80, 0.09) 100%);
+    }
+
+    .portfolio-delivery-panel.is-healthy {
+      border-color: rgba(102, 187, 106, 0.25);
+      background: linear-gradient(135deg, rgba(102, 187, 106, 0.05) 0%, rgba(102, 187, 106, 0.09) 100%);
+    }
+
+    .portfolio-delivery-panel:hover {
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      transform: translateY(-1px);
+    }
+
+    .delivery-collapsed-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      width: 100%;
+    }
+
+    .delivery-header-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .delivery-title-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      color: var(--vscode-foreground, #cccccc);
+    }
+
+    .delivery-rocket-icon {
+      font-size: 14px;
+      color: #64b5f6;
+    }
+
+    .is-failed .delivery-rocket-icon {
+      color: #ef5350;
+    }
+
+    .is-healthy .delivery-rocket-icon {
+      color: #66bb6a;
+    }
+
+    .delivery-panel-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 800;
+    }
+
+    .delivery-status-badge {
+      font-size: 9.5px;
+      padding: 2.5px 8px;
+      border-radius: 999px;
+      font-weight: 700;
+      white-space: nowrap;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border: 1px solid transparent;
+    }
+
+    .delivery-status-badge.status-failed {
+      background: rgba(239, 83, 80, 0.15);
+      color: #ff8a80;
+      border-color: rgba(239, 83, 80, 0.25);
+    }
+
+    .delivery-status-badge.status-healthy {
+      background: rgba(102, 187, 106, 0.15);
+      color: #b9f6ca;
+      border-color: rgba(102, 187, 106, 0.25);
+    }
+
+    .delivery-toggle-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted, #888888);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      transition: all 0.2s ease;
+      padding: 0;
+    }
+
+    .delivery-toggle-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-main, #ffffff);
+      transform: scale(1.05);
+    }
+
+    .delivery-toggle-btn:active {
+      transform: scale(0.95);
+    }
+
+    .delivery-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .delivery-card {
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 6px;
+      padding: 8px 10px;
+      background: rgba(0, 0, 0, 0.15);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: border-color 0.2s ease;
+    }
+
+    .delivery-card:hover {
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+
+    .delivery-card-title {
+      font-size: 8.5px;
+      color: var(--text-muted, #888888);
+      text-transform: uppercase;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .delivery-card-title .codicon {
+      font-size: 10px;
+    }
+
+    .delivery-card-value {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--text-main, #ffffff);
+    }
+
+    .failed-count-highlight {
+      color: #ff8a80;
+    }
+
+    .healthy-highlight {
+      color: #b9f6ca;
+    }
+
+    .release-version-highlight {
+      color: #80d8ff;
+    }
+
+    .no-release-highlight {
+      color: var(--text-muted, #888888);
+    }
+
+    .delivery-meta-info {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 8.5px;
+      color: var(--text-muted, #888888);
+      margin-bottom: 10px;
+      padding: 0 2px;
+    }
+
+    .delivery-repo-text {
+      max-width: 60%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .delivery-repo-text .codicon {
+      font-size: 9.5px;
+    }
+
+    .delivery-runs-section {
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding-top: 8px;
+      margin-bottom: 10px;
+    }
+
+    .delivery-section-title {
+      font-size: 9px;
+      font-weight: 700;
+      color: var(--text-muted, #888888);
+      margin-bottom: 6px;
+    }
+
+    .delivery-toast-message {
+      font-size: 9.5px;
+      background: rgba(0, 176, 255, 0.1);
+      border: 1px solid rgba(0, 176, 255, 0.2);
+      border-radius: 4px;
+      color: #80d8ff;
+      padding: 6px 8px;
+      margin-bottom: 10px;
+      animation: fadeIn 0.3s ease;
+    }
+
+    .delivery-footer-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .delivery-action-btn {
+      flex: 1;
+      min-width: fit-content;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      font-size: 9.5px;
+      font-weight: 700;
+      padding: 5px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: inherit;
+    }
+
+    .delivery-action-btn .codicon {
+      font-size: 11px;
+    }
+
+    .delivery-action-btn.secondary-btn {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--text-main, #ffffff);
+    }
+
+    .delivery-action-btn.secondary-btn:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .delivery-action-btn.secondary-btn:active:not(:disabled) {
+      transform: scale(0.97);
+    }
+
+    .delivery-action-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .delivery-action-btn.primary-btn {
+      background: linear-gradient(135deg, #e53935 0%, #d32f2f 100%);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #ffffff;
+      font-weight: 800;
+      box-shadow: 0 2px 6px rgba(229, 57, 53, 0.2);
+    }
+
+    .delivery-action-btn.primary-btn:hover {
+      background: linear-gradient(135deg, #ef5350 0%, #e53935 100%);
+      box-shadow: 0 4px 10px rgba(229, 57, 53, 0.4);
+      transform: translateY(-0.5px);
+    }
+
+    .delivery-action-btn.primary-btn:active {
+      transform: translateY(0.5px) scale(0.97);
+    }
+
+    .pulse-glow {
+      animation: pulseGlow 2s infinite;
+    }
+
+    @keyframes pulseGlow {
+      0% {
+        box-shadow: 0 0 0 0 rgba(229, 57, 53, 0.4);
+      }
+      70% {
+        box-shadow: 0 0 0 4px rgba(229, 57, 53, 0);
+      }
+      100% {
+        box-shadow: 0 0 0 0 rgba(229, 57, 53, 0);
+      }
+    }
+
+    @keyframes spin {
+      100% {
+        transform: rotate(360deg);
+      }
+    }
+
+    .loading-spin {
+      animation: spin 1s linear infinite;
     }
 
     .portfolio-issue-head,
@@ -8622,9 +8925,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const hasFailure = failedRuns.length > 0;
       const expanded = deliveryActionPanelExpanded;
       const refreshBusy = projectRefreshPaths.has(project.path);
-      const latestRelease = delivery.latestRelease
-        ? '<span class="portfolio-issue-pill">' + escapeHtml(t('deliveryActionLatestRelease')) + ' ' + escapeHtml(delivery.latestRelease) + '</span>'
-        : '';
+
       const runRows = failedRuns.map(run => {
         const title = run.displayTitle || run.name || '-';
         const time = formatRelativeTime(run.updatedAt || run.createdAt || '');
@@ -8636,49 +8937,105 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           + (run.url ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(run.url) + '">' + escapeHtml(t('projectOpen')) + '</button>' : '')
           + '</div>';
       }).join('');
+
       const latestRunUrl = failedRuns[0]?.url || delivery.latestWorkflowUrl || '';
-      const latestResultText = delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus || '-';
-      const latestWorkflowName = delivery.latestWorkflowName || '-';
-      const summaryText = hasFailure
-        ? (currentLanguage === 'zh'
-          ? '最近 3 次检查里有 ' + failedRuns.length + ' 次失败，先处理它再继续推进。'
-          : failedRuns.length + ' of the latest 3 checks failed. Resolve this before moving on.')
-        : (delivery.loading ? t('issueLoading') : (!delivery.available ? (delivery.message || t('deliveryActionRepoMissing')) : (delivery.stale ? t('deliveryActionCached') : t('deliveryActionHealthy'))));
-      const collapsedHead = '<div class="portfolio-issue-head">'
-        + '<span class="portfolio-delivery-summary">' + escapeHtml(summaryText) + '</span>'
-        + '<span class="portfolio-issue-actions">'
-        + '<button class="portfolio-issue-create" data-toggle-delivery-panel>' + escapeHtml(expanded ? t('deliveryActionHide') : t('deliveryActionShow')) + '</button>'
-        + '</span>'
-        + '</div>';
+
+      // 收起时的简短状态文字
+      const checksFailedLabel = currentLanguage === 'zh' ? '检查失败' : 'Checks failed';
+      const checksHealthyLabel = currentLanguage === 'zh' ? '检查正常' : 'Checks healthy';
+      
+      let miniStatusText = '';
+      if (delivery.loading) {
+        miniStatusText = t('issueLoading');
+      } else if (!delivery.available) {
+        miniStatusText = currentLanguage === 'zh' ? '暂无信号' : 'No signal';
+      } else if (hasFailure) {
+        miniStatusText = checksFailedLabel + ' ' + failedRuns.length;
+      } else {
+        const releaseStr = delivery.latestRelease ? ' · ' + delivery.latestRelease : '';
+        miniStatusText = checksHealthyLabel + releaseStr;
+      }
+
       if (!expanded) {
-        return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
-          + collapsedHead
+        return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : 'is-healthy') + '" data-delivery-action-panel>'
+          + '<div class="delivery-collapsed-row">'
+          + '<div class="delivery-title-wrapper">'
+          + '<span class="codicon codicon-rocket delivery-rocket-icon"></span>'
+          + '<span class="delivery-panel-title">' + escapeHtml(t('deliveryActionTitle')) + '</span>'
+          + '</div>'
+          + '<div class="delivery-status-badge ' + (hasFailure ? 'status-failed' : 'status-healthy') + '">'
+          + escapeHtml(miniStatusText)
+          + '</div>'
+          + '<button class="delivery-toggle-btn" data-toggle-delivery-panel title="' + escapeHtml(t('deliveryActionShow')) + '">'
+          + '<span class="codicon codicon-chevron-down"></span>'
+          + '</button>'
+          + '</div>'
           + '</div>';
       }
-      return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
-        + '<div class="portfolio-issue-head">'
-        + '<span class="portfolio-issue-title"><span class="codicon codicon-rocket"></span>' + escapeHtml(t('deliveryActionTitle')) + '</span>'
-        + '<span class="portfolio-issue-actions">'
-        + '<button class="portfolio-issue-create" data-toggle-delivery-panel>' + escapeHtml(t('deliveryActionHide')) + '</button>'
-        + '</span>'
+
+      return '<div class="portfolio-delivery-panel is-expanded ' + (hasFailure ? 'is-failed' : 'is-healthy') + '" data-delivery-action-panel>'
+        + '<div class="delivery-header-row">'
+        + '<div class="delivery-title-wrapper">'
+        + '<span class="codicon codicon-rocket delivery-rocket-icon"></span>'
+        + '<span class="delivery-panel-title">' + escapeHtml(t('deliveryActionTitle')) + '</span>'
         + '</div>'
-        + '<div class="portfolio-issue-empty">' + escapeHtml(summaryText) + '</div>'
-        + (expanded
-          ? '<div class="portfolio-issue-repo">' + escapeHtml(delivery.repo || t('deliveryActionRepoMissing')) + (delivery.syncedAt ? ' · ' + escapeHtml(delivery.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(delivery.syncedAt)) : '') + '</div>'
-            + '<div class="portfolio-issue-metrics">'
-            + (latestRelease || '<span class="portfolio-issue-pill">' + escapeHtml(t('deliveryActionLatestRelease')) + ' -</span>')
-            + '</div>'
-            + '<div class="portfolio-issue-empty">' + escapeHtml(t('deliveryActionLatestResult')) + '：' + escapeHtml(latestResultText) + '</div>'
-            + '<div class="portfolio-issue-empty">' + escapeHtml(t('deliveryActionWorkflow')) + '：' + escapeHtml(latestWorkflowName) + '</div>'
-            + (deliveryActionMessage ? '<div class="portfolio-issue-empty">' + escapeHtml(deliveryActionMessage) + '</div>' : '')
-            + (delivery.stale ? '<div class="portfolio-issue-empty">' + escapeHtml(t('deliveryActionCached')) + '</div>' : '')
-            + (hasFailure ? '<div class="portfolio-delivery-list">' + runRows + '</div>' : '')
-            + '<div class="portfolio-issue-detail-actions">'
-            + (latestRunUrl ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(latestRunUrl) + '">' + escapeHtml(t('deliveryActionOpenRun')) + '</button>' : '')
-            + '<button class="portfolio-issue-action" data-refresh-delivery-project-path="' + escapeHtml(project.path) + '"' + (refreshBusy ? ' disabled' : '') + '>' + escapeHtml(refreshBusy ? t('testing') : t('deliveryActionRefresh')) + '</button>'
-            + (hasFailure ? '<button class="portfolio-issue-action primary" data-agent-fix-delivery-project-path="' + escapeHtml(project.path) + '">' + escapeHtml(t('deliveryActionAgent')) + '</button>' : '')
+        + '<button class="delivery-toggle-btn" data-toggle-delivery-panel title="' + escapeHtml(t('deliveryActionHide')) + '">'
+        + '<span class="codicon codicon-chevron-up"></span>'
+        + '</button>'
+        + '</div>'
+        + '<div class="delivery-grid">'
+        + '<div class="delivery-card checks-card ' + (hasFailure ? 'card-failed' : 'card-healthy') + '">'
+        + '<div class="delivery-card-title"><span class="codicon codicon-tasklist"></span>' + escapeHtml(t('deliveryActionLatestChecks')) + '</div>'
+        + '<div class="delivery-card-value">'
+        + (hasFailure
+          ? '<span class="failed-count-highlight">' + failedRuns.length + ' ' + (currentLanguage === 'zh' ? '次失败' : 'failed') + '</span>'
+          : '<span class="healthy-highlight">' + (currentLanguage === 'zh' ? '全部正常' : 'Healthy') + '</span>')
+        + '</div>'
+        + '</div>'
+        + '<div class="delivery-card release-card">'
+        + '<div class="delivery-card-title"><span class="codicon codicon-tag"></span>' + escapeHtml(t('deliveryActionLatestRelease')) + '</div>'
+        + '<div class="delivery-card-value">'
+        + (delivery.latestRelease
+          ? '<span class="release-version-highlight">' + escapeHtml(delivery.latestRelease) + '</span>'
+          : '<span class="no-release-highlight">-</span>')
+        + '</div>'
+        + '</div>'
+        + '</div>'
+        + '<div class="delivery-meta-info">'
+        + '<span class="delivery-repo-text" title="' + escapeHtml(delivery.repo || '') + '">'
+        + '<span class="codicon codicon-github"></span> ' + escapeHtml(delivery.repo || t('deliveryActionRepoMissing'))
+        + '</span>'
+        + (delivery.syncedAt
+          ? '<span>' + escapeHtml(delivery.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(delivery.syncedAt)) + '</span>'
+          : '')
+        + '</div>'
+        + (hasFailure
+          ? '<div class="delivery-runs-section">'
+            + '<div class="delivery-section-title">' + (currentLanguage === 'zh' ? '未通过的检查：' : 'Failed checks:') + '</div>'
+            + '<div class="portfolio-delivery-list">' + runRows + '</div>'
             + '</div>'
           : '')
+        + (deliveryActionMessage
+          ? '<div class="delivery-toast-message">' + escapeHtml(deliveryActionMessage) + '</div>'
+          : '')
+        + '<div class="delivery-footer-actions">'
+        + '<button class="delivery-action-btn secondary-btn" data-refresh-delivery-project-path="' + escapeHtml(project.path) + '"' + (refreshBusy ? ' disabled' : '') + '>'
+        + '<span class="codicon codicon-refresh' + (refreshBusy ? ' loading-spin' : '') + '"></span>'
+        + escapeHtml(refreshBusy ? t('testing') : t('deliveryActionRefresh'))
+        + '</button>'
+        + (latestRunUrl
+          ? '<button class="delivery-action-btn secondary-btn" data-open-delivery-run="' + escapeHtml(latestRunUrl) + '">'
+            + '<span class="codicon codicon-link-external"></span>'
+            + escapeHtml(t('deliveryActionOpenRun'))
+            + '</button>'
+          : '')
+        + (hasFailure
+          ? '<button class="delivery-action-btn primary-btn pulse-glow" data-agent-fix-delivery-project-path="' + escapeHtml(project.path) + '">'
+            + '<span class="codicon codicon-tools"></span>'
+            + escapeHtml(t('deliveryActionAgent'))
+            + '</button>'
+          : '')
+        + '</div>'
         + '</div>';
     }
 
