@@ -2702,6 +2702,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _uninstallMcp?: (mcpId: string) => Promise<void>,
     private readonly _getFeedbackUsageSummary?: () => string,
     private readonly _stopConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>,
+    private readonly _rollbackChanges?: (projectPath: string, gitHash: string) => Promise<void>,
     private readonly _manageProAuthorization?: (action?: string) => Promise<void>
   ) {}
 
@@ -2794,6 +2795,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             if (this._stopConversation) {
               await this._stopConversation(data.projectPath || '', data.nodeId || '', Number(data.conversationId || 0));
               await this.sendProjectConversationHistory(data.projectPath || '');
+              await this.sendSoloConversationHistory(data.projectPath || '');
+              if (data.nodeId) {
+                await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
+              }
+            }
+            break;
+          case 'rollbackChanges':
+            if (this._rollbackChanges) {
+              await this._rollbackChanges(data.projectPath || '', data.gitHash || '');
               await this.sendSoloConversationHistory(data.projectPath || '');
               if (data.nodeId) {
                 await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
@@ -4492,9 +4502,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       white-space: nowrap;
     }
 
+    .sidebar-conversation-rollback {
+      border-color: rgba(251, 146, 60, 0.5);
+      background: rgba(251, 146, 60, 0.12);
+      color: #fdba74;
+    }
+
     .sidebar-conversation-footer {
       display: flex;
       justify-content: flex-end;
+      gap: 6px;
       margin-top: 7px;
     }
 
@@ -7944,6 +7961,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return match[1].split('\\n').map(line => line.trim()).filter(line => line && !/^No (workspace|git|project) /i.test(line)).length;
     }
 
+    function extractPreGitHash(output) {
+      const match = String(output || '').match(/SoloMapPreGitHash:\\s*([a-f0-9]+)/i);
+      return match ? match[1] : '';
+    }
+
     function stepConversationKey(projectPath, nodeId) {
       return String(projectPath || '') + '::' + String(nodeId || '');
     }
@@ -7962,6 +7984,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const duration = formatSoloDuration(conversation);
       const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
       const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
+      const preGitHash = conversation.status === 'Running' ? '' : extractPreGitHash(conversation.output);
+      const rollbackButton = preGitHash
+        ? \`<button class="sidebar-conversation-continue sidebar-conversation-rollback" data-rollback-sidebar-solo-hash="\${escapeHtml(preGitHash)}" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>\`
+        : '';
       const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
         ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-solo-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
         : '';
@@ -7992,7 +8018,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <pre>\${escapeHtml(conversation.output || '')}</pre>
             </div>
           \` : ''}
-          \${continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${continueButton}</div>\` : ''}
+          \${rollbackButton || continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${rollbackButton}\${continueButton}</div>\` : ''}
         </div>
       \`;
     }
@@ -8013,6 +8039,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
       const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
       const conversationNodeId = String(conversation.nodeId || node?.id || '');
+      const preGitHash = conversation.status === 'Running' ? '' : extractPreGitHash(conversation.output);
+      const rollbackButton = preGitHash
+        ? \`<button class="sidebar-conversation-continue sidebar-conversation-rollback" data-rollback-sidebar-step-hash="\${escapeHtml(preGitHash)}" data-rollback-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>\`
+        : '';
       const continueButton = conversation.status !== 'Running' && conversationNodeId && extractNativeSessionId(conversation.output)
         ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-step-id="\${escapeHtml(conversation.id)}" data-continue-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
         : '';
@@ -8043,7 +8073,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <pre>\${escapeHtml(conversation.output || '')}</pre>
             </div>
           \` : ''}
-          \${continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${continueButton}</div>\` : ''}
+          \${rollbackButton || continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${rollbackButton}\${continueButton}</div>\` : ''}
         </div>
       \`;
     }
@@ -8074,6 +8104,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             projectPath,
             nodeId: '__solo__',
             conversationId: item.getAttribute('data-stop-sidebar-solo-id')
+          });
+        });
+      });
+      container.querySelectorAll('[data-rollback-sidebar-solo-hash]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'rollbackChanges',
+            projectPath,
+            nodeId: '__solo__',
+            gitHash: item.getAttribute('data-rollback-sidebar-solo-hash') || ''
           });
         });
       });
@@ -8113,6 +8154,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             projectPath,
             nodeId: item.getAttribute('data-stop-sidebar-step-node-id'),
             conversationId: item.getAttribute('data-stop-sidebar-step-id')
+          });
+        });
+      });
+      container.querySelectorAll('[data-rollback-sidebar-step-hash]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'rollbackChanges',
+            projectPath,
+            nodeId: item.getAttribute('data-rollback-sidebar-step-node-id') || '',
+            gitHash: item.getAttribute('data-rollback-sidebar-step-hash') || ''
           });
         });
       });

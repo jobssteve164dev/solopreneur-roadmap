@@ -1028,6 +1028,23 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /projectPath/);
 });
 
+test('sidebar conversation result cards expose rollback actions for pre-session git hashes', () => {
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarProvider.js'), 'utf8');
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8');
+
+  assert.match(sidebarSource, /function extractPreGitHash\(output\)/);
+  assert.match(sidebarSource, /data-rollback-sidebar-solo-hash/);
+  assert.match(sidebarSource, /data-rollback-sidebar-step-hash/);
+  assert.match(sidebarSource, /command:\s*'rollbackChanges'/);
+  assert.match(sidebarSource, /this\._rollbackChanges/);
+
+  assert.match(extensionSource, /function rollbackProjectToPreSessionGitHash/);
+  assert.match(extensionSource, /rollback-safety/);
+  assert.match(extensionSource, /\['restore', '--source', verifiedHash, '--staged', '--worktree', '--', '\.'\]/);
+  assert.doesNotMatch(extensionSource, /\['reset', '--hard'/);
+  assert.doesNotMatch(extensionSource, /\['clean', '-fd'\]/);
+});
+
 test('sidebar keeps project creation focused on the project switcher', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',

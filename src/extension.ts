@@ -1057,6 +1057,9 @@ export async function activate(context: vscode.ExtensionContext) {
         await stopAgentRun(String(nodeId || ''), Number(conversationId || 0));
       }
     },
+    async (projectPath, gitHash) => {
+      await rollbackProjectToPreSessionGitHash(context, projectPath, gitHash);
+    },
     async (action) => {
       await handleManageProAuthorization(context, action);
     }
@@ -3040,42 +3043,9 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           }
           break;
 
-        case 'rollbackChanges': {
-          const projectPath = message.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '';
-          const gitHash = message.gitHash;
-          if (!projectPath || !gitHash) {
-            vscode.window.showErrorMessage('Invalid rollback request.');
-            break;
-          }
-          const confirm = await vscode.window.showWarningMessage(
-            `是否确认撤销本次修改？这将会将项目状态回退到该次对话开始之前（提交哈希：${gitHash.slice(0, 8)}），并在回滚过程中丢失在此之后的所有改动。`,
-            { modal: true },
-            '确认撤销'
-          );
-          if (confirm === '确认撤销') {
-            try {
-              const resetRes = childProcess.spawnSync('git', ['reset', '--hard', gitHash], {
-                cwd: projectPath,
-                encoding: 'utf8'
-              });
-              if (resetRes.status !== 0) {
-                vscode.window.showErrorMessage(`回滚失败：${resetRes.stderr || '未知 Git 错误'}`);
-                break;
-              }
-              childProcess.spawnSync('git', ['clean', '-fd'], { cwd: projectPath });
-              vscode.window.showInformationMessage(`项目修改已成功回滚到 ${gitHash.slice(0, 8)}`);
-              
-              if (syncEngine) {
-                await syncEngine.initAndSync();
-              }
-              sendNodesToWebview();
-              refreshSidebarProjectCards();
-            } catch (err: any) {
-              vscode.window.showErrorMessage(`执行回滚操作出错：${err.message || err}`);
-            }
-          }
+        case 'rollbackChanges':
+          await rollbackProjectToPreSessionGitHash(context, message.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '', message.gitHash);
           break;
-        }
 
         case 'linkSoloConversation':
           linkSoloConversationToNode(Number(message.conversationId || 0), String(message.nodeId || ''));
@@ -11527,6 +11497,110 @@ function createPreSessionGitCommit(projectPath: string): string | null {
     console.error('Failed to create pre-session git commit:', err);
   }
   return null;
+}
+
+function getGitCommandOutput(projectPath: string, args: string[]): string {
+  const result = childProcess.spawnSync('git', args, {
+    cwd: projectPath,
+    encoding: 'utf8'
+  });
+  if (result.status !== 0) {
+    throw new Error(String(result.stderr || result.stdout || `git ${args.join(' ')} failed`).trim());
+  }
+  return String(result.stdout || '').trim();
+}
+
+function moveUntrackedFilesToRollbackSafety(projectPath: string): string {
+  const listResult = childProcess.spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
+    cwd: projectPath,
+    encoding: 'buffer'
+  });
+  if (listResult.status !== 0) {
+    throw new Error(String(listResult.stderr || 'Could not list untracked files.'));
+  }
+  const untrackedFiles = Buffer.from(listResult.stdout || Buffer.alloc(0))
+    .toString('utf8')
+    .split('\0')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !item.startsWith('.solopreneur/rollback-safety/'));
+  if (untrackedFiles.length === 0) {
+    return '';
+  }
+
+  const safeStamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const safetyRoot = path.join(projectPath, '.solopreneur', 'rollback-safety', safeStamp);
+  for (const relativeFile of untrackedFiles) {
+    const sourcePath = path.resolve(projectPath, relativeFile);
+    if (!sourcePath.startsWith(path.resolve(projectPath) + path.sep) || !fs.existsSync(sourcePath)) {
+      continue;
+    }
+    const targetPath = path.join(safetyRoot, relativeFile);
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.renameSync(sourcePath, targetPath);
+  }
+  return path.relative(projectPath, safetyRoot);
+}
+
+async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionContext, projectPath: string, gitHash: string): Promise<void> {
+  const normalizedProjectPath = String(projectPath || '').trim();
+  const normalizedGitHash = String(gitHash || '').trim();
+  if (!normalizedProjectPath || !/^[a-f0-9]{7,40}$/i.test(normalizedGitHash)) {
+    vscode.window.showErrorMessage('Invalid rollback request.');
+    return;
+  }
+  if (!getProjects(context).some((project) => project.path === normalizedProjectPath)) {
+    vscode.window.showErrorMessage(`Project folder is not registered: ${normalizedProjectPath}`);
+    return;
+  }
+
+  try {
+    getGitCommandOutput(normalizedProjectPath, ['rev-parse', '--is-inside-work-tree']);
+    const verifiedHash = getGitCommandOutput(normalizedProjectPath, ['rev-parse', '--verify', `${normalizedGitHash}^{commit}`]);
+    const ancestorResult = childProcess.spawnSync('git', ['merge-base', '--is-ancestor', verifiedHash, 'HEAD'], {
+      cwd: normalizedProjectPath,
+      encoding: 'utf8'
+    });
+    if (ancestorResult.status !== 0 && verifiedHash !== getGitCommandOutput(normalizedProjectPath, ['rev-parse', 'HEAD'])) {
+      vscode.window.showErrorMessage('回滚失败：这次对话记录的 Git 哈希不是当前分支的祖先提交。');
+      return;
+    }
+
+    const confirm = await vscode.window.showWarningMessage(
+      `确认撤销本次修改并恢复到对话开始前？未跟踪的新文件会先转移到 .solopreneur/rollback-safety，不会直接删除。提交：${verifiedHash.slice(0, 8)}`,
+      { modal: true },
+      '确认撤销'
+    );
+    if (confirm !== '确认撤销') {
+      return;
+    }
+
+    const safetyDir = moveUntrackedFilesToRollbackSafety(normalizedProjectPath);
+    const restoreRes = childProcess.spawnSync('git', ['restore', '--source', verifiedHash, '--staged', '--worktree', '--', '.'], {
+      cwd: normalizedProjectPath,
+      encoding: 'utf8'
+    });
+    if (restoreRes.status !== 0) {
+      vscode.window.showErrorMessage(`回滚失败：${restoreRes.stderr || '未知 Git 错误'}`);
+      return;
+    }
+
+    vscode.window.showInformationMessage(
+      safetyDir
+        ? `项目已恢复到 ${verifiedHash.slice(0, 8)}；未跟踪新文件已移到 ${safetyDir}`
+        : `项目已恢复到 ${verifiedHash.slice(0, 8)}`
+    );
+    if (getSelectedProjectPath(context) !== normalizedProjectPath) {
+      await selectProject(context, normalizedProjectPath);
+    }
+    if (syncEngine) {
+      await syncEngine.initAndSync();
+    }
+    sendNodesToWebview();
+    refreshSidebarProjectCards();
+  } catch (error: any) {
+    vscode.window.showErrorMessage(`执行回滚操作出错：${error?.message || error}`);
+  }
 }
 
 /**
