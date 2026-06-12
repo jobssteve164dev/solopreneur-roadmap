@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.205 - 2026-06-12
+
+### Added
+- remove SoloMap prefix from terminal titles and configure brand SVG logo icon (89c8821)
+
+### Changed
+- Update terminal session title to use project-first name formatting, and change terminal icon to S-like ThemeIcon('symbol-string') (d6cc48e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.204 - 2026-06-12
 
 ### Changed
