@@ -13808,7 +13808,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       background: rgba(56, 189, 248, 0.08);
       color: var(--text-main);
       line-height: 1.45;
-      position: relative;
     }
 
     .conversation-outcome.failed {
@@ -13816,10 +13815,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       color: #ffd7df;
     }
 
+    .conversation-outcome-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .conversation-outcome-title {
+      min-width: 0;
+      flex: 1;
+    }
+
     .rollback-btn {
-      position: absolute;
-      top: 6px;
-      right: 8px;
       border: 1px solid rgba(244, 67, 54, 0.4);
       border-radius: 4px;
       background: rgba(244, 67, 54, 0.08);
@@ -17304,8 +17313,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         : '';
       return \`
         <div class="conversation-outcome \${conversation.status === 'Failed' ? 'failed' : ''}">
-          \${rollbackButton}
-          <strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}
+          <div class="conversation-outcome-header">
+            <div class="conversation-outcome-title"><strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}</div>
+            \${rollbackButton}
+          </div>
           \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
         </div>
       \`;

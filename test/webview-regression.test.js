@@ -1040,6 +1040,9 @@ test('sidebar conversation result cards expose rollback actions for pre-session 
 
   assert.match(extensionSource, /function rollbackProjectToPreSessionGitHash/);
   assert.match(extensionSource, /rollback-safety/);
+  assert.match(extensionSource, /conversation-outcome-header/);
+  assert.match(extensionSource, /conversation-outcome-title/);
+  assert.match(extensionSource, /data-rollback-hash/);
   assert.match(extensionSource, /\['restore', '--source', verifiedHash, '--staged', '--worktree', '--', '\.'\]/);
   assert.doesNotMatch(extensionSource, /\['reset', '--hard'/);
   assert.doesNotMatch(extensionSource, /\['clean', '-fd'\]/);
