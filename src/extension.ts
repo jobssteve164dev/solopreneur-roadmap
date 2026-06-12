@@ -25,6 +25,8 @@ let pendingPassportAuthNonce: string | null = null;
 let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
 const agentModelCatalogCache = new Map<string, { expiresAt: number; catalog: AgentModelCatalog }>();
+const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
+const solomapGitDiffContent = new Map<string, string>();
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -850,6 +852,11 @@ export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
   extensionContextRef = context;
   recordLocalUsageEvent(context, 'activation');
+  context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(SOLOMAP_GIT_DIFF_SCHEME, {
+    provideTextDocumentContent(uri: vscode.Uri) {
+      return solomapGitDiffContent.get(uri.toString()) || '';
+    }
+  }));
 
   // Register command to show roadmap webview
   const showRoadmapDisposable = vscode.commands.registerCommand(
@@ -3087,6 +3094,12 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           if (activeProjectRoot && message.relativePath) {
             const candidatePath = path.resolve(activeProjectRoot, String(message.relativePath));
             const relativeToRoot = path.relative(activeProjectRoot, candidatePath);
+            if (!relativeToRoot.startsWith('..') && !path.isAbsolute(relativeToRoot)) {
+              const openedDiff = await openProjectFileDiff(activeProjectRoot, String(message.relativePath), String(message.gitHash || ''));
+              if (openedDiff) {
+                break;
+              }
+            }
             if (!relativeToRoot.startsWith('..') && !path.isAbsolute(relativeToRoot) && fs.existsSync(candidatePath)) {
               const doc = await vscode.workspace.openTextDocument(candidatePath);
               await vscode.window.showTextDocument(doc, { preview: false });
@@ -11510,6 +11523,61 @@ function getGitCommandOutput(projectPath: string, args: string[]): string {
   return String(result.stdout || '').trim();
 }
 
+function registerSolomapGitDiffContent(label: string, content: string): vscode.Uri {
+  const safeLabel = path.basename(label || 'diff.txt') || 'diff.txt';
+  const uri = vscode.Uri.from({
+    scheme: SOLOMAP_GIT_DIFF_SCHEME,
+    path: `/${safeLabel}`,
+    query: `id=${crypto.randomUUID()}`
+  });
+  solomapGitDiffContent.set(uri.toString(), content);
+  if (solomapGitDiffContent.size > 200) {
+    const oldestKey = solomapGitDiffContent.keys().next().value;
+    if (oldestKey) {
+      solomapGitDiffContent.delete(oldestKey);
+    }
+  }
+  return uri;
+}
+
+function readGitFileAtRevision(projectPath: string, gitHash: string, relativePath: string): { exists: boolean; content: string } {
+  const gitPath = String(relativePath || '').replace(/\\/g, '/');
+  const result = childProcess.spawnSync('git', ['show', `${gitHash}:${gitPath}`], {
+    cwd: projectPath,
+    encoding: 'utf8',
+    maxBuffer: 10 * 1024 * 1024
+  });
+  if (result.status !== 0) {
+    return { exists: false, content: '' };
+  }
+  return { exists: true, content: String(result.stdout || '') };
+}
+
+async function openProjectFileDiff(projectPath: string, relativePath: string, gitHash: string): Promise<boolean> {
+  const normalizedRelativePath = String(relativePath || '').trim();
+  const normalizedGitHash = String(gitHash || '').trim();
+  if (!normalizedRelativePath || !normalizedGitHash) {
+    return false;
+  }
+  const baseline = readGitFileAtRevision(projectPath, normalizedGitHash, normalizedRelativePath);
+  const currentPath = path.resolve(projectPath, normalizedRelativePath);
+  const currentExists = fs.existsSync(currentPath);
+  if (!baseline.exists && !currentExists) {
+    return false;
+  }
+
+  const leftUri = registerSolomapGitDiffContent(
+    `${path.basename(normalizedRelativePath)}.baseline`,
+    baseline.exists ? baseline.content : ''
+  );
+  const rightUri = currentExists
+    ? vscode.Uri.file(currentPath)
+    : registerSolomapGitDiffContent(`${path.basename(normalizedRelativePath)}.working-tree`, '');
+  const title = `${normalizedRelativePath} (${normalizedGitHash.slice(0, 8)}..working tree)`;
+  await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, title, { preview: false });
+  return true;
+}
+
 function moveUntrackedFilesToRollbackSafety(projectPath: string): string {
   const listResult = childProcess.spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
     cwd: projectPath,
@@ -17195,7 +17263,11 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           event.stopPropagation();
           const relativePath = item.getAttribute('data-open-file-path');
           if (relativePath) {
-            vscode.postMessage({ command: 'openProjectFile', relativePath });
+            vscode.postMessage({
+              command: 'openProjectFile',
+              relativePath,
+              gitHash: item.getAttribute('data-open-file-hash') || ''
+            });
           }
         });
       });
@@ -17491,11 +17563,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return files;
     }
 
+    function extractConversationPreGitHash(output) {
+      const match = String(output || '').match(/SoloMapPreGitHash:\\s*([a-f0-9]+)/i);
+      return match ? match[1] : '';
+    }
+
     function renderConversationFiles(conversation) {
       const files = extractConversationFiles(conversation.output);
       if (!files.length) {
         return '';
       }
+      const preGitHash = extractConversationPreGitHash(conversation.output);
       return \`
         <strong>\${escapeHtml(t('changedFiles'))}</strong>
         <div class="conversation-files">
@@ -17503,6 +17581,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             <button
               class="conversation-file-link"
               data-open-file-path="\${escapeHtml(file.path)}"
+              data-open-file-hash="\${escapeHtml(preGitHash)}"
               title="\${escapeHtml(file.path)}"
             >
               <span>\${escapeHtml(file.label)}</span>

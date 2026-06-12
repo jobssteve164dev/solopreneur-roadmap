@@ -3631,6 +3631,7 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /Retry|重试/);
   assert.match(html, /retryConversation/);
   assert.match(html, /data-open-file-path/);
+  assert.match(html, /data-open-file-hash/);
   assert.match(html, /openProjectFile/);
   assert.match(html, /修改文件|Changed Files/);
   assert.match(html, /conversation-control-btn/);
@@ -3642,6 +3643,9 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /methodology-stage-card/);
   assert.match(html, /data-open-roadmap-revision/);
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  assert.match(source, /function extractConversationPreGitHash/);
+  assert.match(source, /openProjectFileDiff/);
+  assert.match(source, /vscode\.commands\.executeCommand\('vscode\.diff'/);
   assert.match(source, /当前项目交付信号/);
   assert.match(source, /'3'/);
   assert.match(source, /'run',\s*'list'/);
