@@ -6239,6 +6239,60 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const projectSoloDrafts = {};
     const projectRefreshPaths = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
+
+    function rememberProjectConversationInput(input) {
+      if (!input) return;
+      const mode = input.getAttribute('data-conversation-mode') || 'continue';
+      const projectPath = input.getAttribute('data-project-path') || currentProjects.selectedProjectPath || '';
+      const targetId = input.getAttribute('data-conversation-target-id') || '';
+      if (mode === 'solo') {
+        projectSoloDrafts[projectPath] = input.value || '';
+      } else if (mode === 'flow') {
+        projectContinueDrafts['flow:' + projectPath] = input.value || '';
+      } else if (targetId) {
+        projectContinueDrafts[targetId] = input.value || '';
+      }
+    }
+
+    function captureProjectConversationInputState() {
+      const input = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('[data-project-conversation-input]') : null;
+      if (!input) return null;
+      rememberProjectConversationInput(input);
+      return {
+        projectPath: input.getAttribute('data-project-path') || currentProjects.selectedProjectPath || '',
+        mode: input.getAttribute('data-conversation-mode') || 'continue',
+        targetId: input.getAttribute('data-conversation-target-id') || '',
+        value: input.value || '',
+        wasFocused: document.activeElement === input,
+        selectionStart: typeof input.selectionStart === 'number' ? input.selectionStart : null,
+        selectionEnd: typeof input.selectionEnd === 'number' ? input.selectionEnd : null,
+        scrollTop: typeof input.scrollTop === 'number' ? input.scrollTop : 0
+      };
+    }
+
+    function restoreProjectConversationInputState(state) {
+      if (!state || !portfolioList || !portfolioList.querySelectorAll) return;
+      const input = Array.from(portfolioList.querySelectorAll('[data-project-conversation-input]')).find(candidate => (
+        (candidate.getAttribute('data-project-path') || '') === state.projectPath
+        && (candidate.getAttribute('data-conversation-mode') || 'continue') === state.mode
+        && (candidate.getAttribute('data-conversation-target-id') || '') === state.targetId
+      ));
+      if (!input) return;
+      if (input.value !== state.value) {
+        input.value = state.value;
+        rememberProjectConversationInput(input);
+      }
+      if (typeof input.scrollTop === 'number') {
+        input.scrollTop = state.scrollTop || 0;
+      }
+      if (state.wasFocused && typeof input.focus === 'function') {
+        input.focus();
+        if (typeof input.setSelectionRange === 'function' && state.selectionStart !== null && state.selectionEnd !== null) {
+          input.setSelectionRange(state.selectionStart, state.selectionEnd);
+        }
+      }
+    }
+
     const i18n = {
       zh: {
         title: 'SoloMap',
@@ -8372,17 +8426,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-project-path') || '';
-          const input = container.querySelector('[data-project-conversation-input]');
-          if (input) {
-            const currentMode = input.getAttribute('data-conversation-mode') || 'continue';
-            const currentTargetId = input.getAttribute('data-conversation-target-id') || '';
-            if (currentMode === 'solo') {
-              projectSoloDrafts[projectPath] = input.value;
-            } else if (currentMode === 'flow') {
-              projectContinueDrafts['flow:' + projectPath] = input.value;
-            } else if (currentTargetId) {
-              projectContinueDrafts[currentTargetId] = input.value;
-            }
+        const input = container.querySelector('[data-project-conversation-input]');
+        if (input) {
+            rememberProjectConversationInput(input);
           }
           projectConversationModes[projectPath] = button.getAttribute('data-project-conversation-mode') || 'continue';
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
@@ -8474,18 +8520,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
       bindSoloSelects(container);
       container.querySelectorAll('[data-project-conversation-input]').forEach(input => {
-        const mode = input.getAttribute('data-conversation-mode') || 'continue';
-        const projectPath = input.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
-        const targetId = input.getAttribute('data-conversation-target-id') || '';
         input.addEventListener('input', () => {
-          if (mode === 'solo') {
-            projectSoloDrafts[projectPath] = input.value;
-          } else if (mode === 'flow') {
-            projectContinueDrafts['flow:' + projectPath] = input.value;
-          } else {
-            projectContinueDrafts[targetId] = input.value;
-          }
+          rememberProjectConversationInput(input);
         });
+        const targetId = input.getAttribute('data-conversation-target-id') || '';
         bindPastedImageAttachments(input, targetId, () => currentProjects.selectedProjectPath, targetId);
         input.addEventListener('keydown', (event) => {
           if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
@@ -9159,15 +9197,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function renderPortfolio(portfolio, selectedProjectPath) {
+      const preservedComposerState = captureProjectConversationInputState();
       if (!portfolio || portfolio.length === 0) {
         portfolioList.innerHTML = renderOnboardingPanel();
         bindOnboardingActions(portfolioList);
+        restoreProjectConversationInputState(preservedComposerState);
         return;
       }
 
       const visibleProjects = portfolio.filter(shouldShowPortfolioProject);
       if (!visibleProjects.length) {
         portfolioList.innerHTML = '<div class="empty-portfolio">' + t('noPortfolioMatch') + '</div>';
+        restoreProjectConversationInputState(preservedComposerState);
         return;
       }
 
@@ -9485,6 +9526,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         });
       });
       bindProjectContinueComposer(portfolioList);
+      restoreProjectConversationInputState(preservedComposerState);
     }
 
     function activateProjectInSidebar(projectPath) {
