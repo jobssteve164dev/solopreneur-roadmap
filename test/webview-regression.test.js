@@ -1040,9 +1040,9 @@ test('sidebar conversation result cards expose rollback actions for pre-session 
 
   assert.match(extensionSource, /function rollbackProjectToPreSessionGitHash/);
   assert.match(extensionSource, /rollback-safety/);
-  assert.match(extensionSource, /conversation-outcome-header/);
-  assert.match(extensionSource, /conversation-outcome-title/);
   assert.match(extensionSource, /data-rollback-hash/);
+  assert.match(extensionSource, /rollbackConfirm/);
+  assert.match(extensionSource, /window\.confirm\(t\('rollbackConfirm'\)\)/);
   assert.match(extensionSource, /\['restore', '--source', verifiedHash, '--staged', '--worktree', '--', '\.'\]/);
   assert.doesNotMatch(extensionSource, /\['reset', '--hard'/);
   assert.doesNotMatch(extensionSource, /\['clean', '-fd'\]/);
@@ -3646,6 +3646,7 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(source, /function extractConversationPreGitHash/);
   assert.match(source, /openProjectFileDiff/);
   assert.match(source, /vscode\.commands\.executeCommand\('vscode\.diff'/);
+  assert.match(source, /rollbackChange/);
   assert.match(source, /当前项目交付信号/);
   assert.match(source, /'3'/);
   assert.match(source, /'run',\s*'list'/);

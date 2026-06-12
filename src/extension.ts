@@ -13832,6 +13832,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       background: rgba(255, 23, 68, 0.20);
     }
 
+    .conversation-control-btn.rollback-btn {
+      background: rgba(244, 67, 54, 0.10);
+      border-color: rgba(244, 67, 54, 0.32);
+      color: #ffb4ab;
+    }
+
+    .conversation-control-btn.rollback-btn:hover {
+      background: rgba(244, 67, 54, 0.20);
+      border-color: rgba(244, 67, 54, 0.48);
+    }
+
     .conversation-cli {
       color: #38bdf8;
       font-weight: 700;
@@ -13881,19 +13892,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .conversation-outcome.failed {
       background: rgba(255, 23, 68, 0.10);
       color: #ffd7df;
-    }
-
-    .conversation-outcome-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 4px;
-    }
-
-    .conversation-outcome-title {
-      min-width: 0;
-      flex: 1;
     }
 
     .rollback-btn {
@@ -15019,6 +15017,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         continueNative: '继续',
         openTerminal: '打开终端',
         stopRun: '停止',
+        rollbackChange: '撤销修改',
+        rollbackConfirm: '确认撤销这次对话带来的项目修改吗？接下来还会有一次正式确认。',
         elapsed: '已运行',
         duration: '耗时',
         runResult: '本轮结果',
@@ -15184,6 +15184,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         continueNative: 'Continue',
         openTerminal: 'Open terminal',
         stopRun: 'Stop',
+        rollbackChange: 'Undo changes',
+        rollbackConfirm: 'Undo the project changes from this conversation? You will still see one more final confirmation.',
         elapsed: 'Elapsed',
         duration: 'Duration',
         runResult: 'Run result',
@@ -15949,6 +15951,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const rollbackBtn = event.target.closest('.rollback-btn');
       if (rollbackBtn) {
         event.stopPropagation();
+        if (typeof window.confirm === 'function' && !window.confirm(t('rollbackConfirm'))) {
+          return;
+        }
         const gitHash = rollbackBtn.getAttribute('data-rollback-hash');
         if (gitHash) {
           vscode.postMessage({
@@ -17287,6 +17292,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         const runtimeLabel = duration
           ? (conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration
           : '';
+        const preGitHash = extractConversationPreGitHash(conversation.output);
+        const rollbackButton = (preGitHash && conversation.status !== 'Running')
+          ? \`<button class="conversation-control-btn rollback-btn" data-rollback-hash="\${escapeHtml(preGitHash)}" title="\${escapeHtml(t('rollbackChange'))}"><span class="codicon codicon-discard"></span> \${escapeHtml(t('rollbackChange'))}</button>\`
+          : '';
         const retryButton = conversation.status === 'Failed'
           ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
           : '';
@@ -17312,6 +17321,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 \${runningButtons}
                 \${continueButton}
                 \${retryButton}
+                \${rollbackButton}
                 <span class="status-badge \${statusClass(conversation.status)}">\${conversationStatusText(conversation.status)}</span>
               </div>
             </div>
@@ -17378,17 +17388,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       const label = conversation.status === 'Failed' ? t('failureLabel') : t('runResult');
       const conclusion = conversation.status === 'Running' ? '' : extractAgentConclusion(output);
-      const preGitHashMatch = output.match(/SoloMapPreGitHash:\s*([a-f0-9]+)/i);
-      const preGitHash = preGitHashMatch ? preGitHashMatch[1] : '';
-      const rollbackButton = (preGitHash && conversation.status !== 'Running')
-        ? '<button class="rollback-btn" data-rollback-hash="' + preGitHash + '" title="撤销本次修改，回滚项目状态"><span class="codicon codicon-discard"></span> 撤销修改</button>'
-        : '';
       return \`
         <div class="conversation-outcome \${conversation.status === 'Failed' ? 'failed' : ''}">
-          <div class="conversation-outcome-header">
-            <div class="conversation-outcome-title"><strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}</div>
-            \${rollbackButton}
-          </div>
+          <div><strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}</div>
           \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
         </div>
       \`;
