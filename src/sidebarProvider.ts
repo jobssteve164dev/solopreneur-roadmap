@@ -4839,7 +4839,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .portfolio-delivery-panel {
       margin-top: 9px;
-      padding: 9px;
+      padding: 7px 9px;
       border: 1px solid rgba(0, 176, 255, 0.16);
       border-radius: 6px;
       background: rgba(0, 176, 255, 0.05);
@@ -4979,6 +4979,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       align-items: center;
       justify-content: space-between;
       gap: 8px;
+    }
+
+    .portfolio-delivery-summary {
+      flex: 1;
+      min-width: 0;
+      font-size: 10px;
+      color: var(--text-main);
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .portfolio-issue-main {
@@ -5965,7 +5976,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliverySignalAttention: '交付需处理',
         deliverySignalHealthy: '最近检查正常',
         deliverySignalRelease: '最近发布',
-        deliveryActionTitle: '交付 Action',
+        deliveryActionTitle: 'Action',
         deliveryActionShow: '展开',
         deliveryActionHide: '收起',
         deliveryActionOpenRun: '查看失败 Run',
@@ -5974,6 +5985,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliveryActionRepoMissing: '还没有可用的 GitHub 交付信号。',
         deliveryActionLatestChecks: '最近 3 次检查',
         deliveryActionLatestRelease: '最近发布',
+        deliveryActionLatestResult: '最近一次 Action 结果',
+        deliveryActionWorkflow: '工作流',
         deliveryActionCached: '当前显示的是缓存结果。',
         deliveryActionHealthy: '最近 3 次检查没有失败。',
         deliveryActionInvestigate: '最近检查里有异常，先处理它再继续推进。',
@@ -6209,7 +6222,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliverySignalAttention: 'Delivery needs attention',
         deliverySignalHealthy: 'Checks look healthy',
         deliverySignalRelease: 'Latest release',
-        deliveryActionTitle: 'Delivery Action',
+        deliveryActionTitle: 'Action',
         deliveryActionShow: 'Expand',
         deliveryActionHide: 'Collapse',
         deliveryActionOpenRun: 'Open failed run',
@@ -6218,6 +6231,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliveryActionRepoMissing: 'No GitHub delivery signal is available yet.',
         deliveryActionLatestChecks: 'Latest 3 checks',
         deliveryActionLatestRelease: 'Latest release',
+        deliveryActionLatestResult: 'Latest action result',
+        deliveryActionWorkflow: 'Workflow',
         deliveryActionCached: 'The current delivery state is from cache.',
         deliveryActionHealthy: 'The latest 3 checks have no failures.',
         deliveryActionInvestigate: 'A recent delivery check failed. Resolve it before pushing forward.',
@@ -8622,33 +8637,39 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           + '</div>';
       }).join('');
       const latestRunUrl = failedRuns[0]?.url || delivery.latestWorkflowUrl || '';
+      const latestResultText = delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus || '-';
+      const latestWorkflowName = delivery.latestWorkflowName || '-';
       const summaryText = hasFailure
         ? (currentLanguage === 'zh'
           ? '最近 3 次检查里有 ' + failedRuns.length + ' 次失败，先处理它再继续推进。'
           : failedRuns.length + ' of the latest 3 checks failed. Resolve this before moving on.')
         : (delivery.loading ? t('issueLoading') : (!delivery.available ? (delivery.message || t('deliveryActionRepoMissing')) : (delivery.stale ? t('deliveryActionCached') : t('deliveryActionHealthy'))));
-      const deliveryHead = '<div class="portfolio-issue-head">'
-        + '<span class="portfolio-issue-title"><span class="codicon codicon-rocket"></span>' + escapeHtml(t('deliveryActionTitle')) + '</span>'
+      const collapsedHead = '<div class="portfolio-issue-head">'
+        + '<span class="portfolio-delivery-summary">' + escapeHtml(summaryText) + '</span>'
         + '<span class="portfolio-issue-actions">'
         + '<button class="portfolio-issue-create" data-toggle-delivery-panel>' + escapeHtml(expanded ? t('deliveryActionHide') : t('deliveryActionShow')) + '</button>'
         + '</span>'
         + '</div>';
       if (!expanded) {
         return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
-          + deliveryHead
-          + '<div class="portfolio-issue-empty">' + escapeHtml(summaryText) + '</div>'
+          + collapsedHead
           + '</div>';
       }
       return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
-        + deliveryHead
+        + '<div class="portfolio-issue-head">'
+        + '<span class="portfolio-issue-title"><span class="codicon codicon-rocket"></span>' + escapeHtml(t('deliveryActionTitle')) + '</span>'
+        + '<span class="portfolio-issue-actions">'
+        + '<button class="portfolio-issue-create" data-toggle-delivery-panel>' + escapeHtml(t('deliveryActionHide')) + '</button>'
+        + '</span>'
+        + '</div>'
         + '<div class="portfolio-issue-empty">' + escapeHtml(summaryText) + '</div>'
         + (expanded
           ? '<div class="portfolio-issue-repo">' + escapeHtml(delivery.repo || t('deliveryActionRepoMissing')) + (delivery.syncedAt ? ' · ' + escapeHtml(delivery.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(delivery.syncedAt)) : '') + '</div>'
             + '<div class="portfolio-issue-metrics">'
-            + '<span class="portfolio-issue-pill">' + escapeHtml(t('deliveryActionLatestChecks')) + ' ' + escapeHtml(recentRuns.length || 0) + '</span>'
-            + (hasFailure ? '<span class="portfolio-issue-pill">' + escapeHtml(t('failures')) + ' ' + escapeHtml(failedRuns.length) + '</span>' : '')
-            + latestRelease
+            + (latestRelease || '<span class="portfolio-issue-pill">' + escapeHtml(t('deliveryActionLatestRelease')) + ' -</span>')
             + '</div>'
+            + '<div class="portfolio-issue-empty">' + escapeHtml(t('deliveryActionLatestResult')) + '：' + escapeHtml(latestResultText) + '</div>'
+            + '<div class="portfolio-issue-empty">' + escapeHtml(t('deliveryActionWorkflow')) + '：' + escapeHtml(latestWorkflowName) + '</div>'
             + (deliveryActionMessage ? '<div class="portfolio-issue-empty">' + escapeHtml(deliveryActionMessage) + '</div>' : '')
             + (delivery.stale ? '<div class="portfolio-issue-empty">' + escapeHtml(t('deliveryActionCached')) + '</div>' : '')
             + (hasFailure ? '<div class="portfolio-delivery-list">' + runRows + '</div>' : '')
