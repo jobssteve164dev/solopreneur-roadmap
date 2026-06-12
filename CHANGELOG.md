@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.201 - 2026-06-12
+
+### Changed
+- Update workflow check logic to evaluate latest run of all workflows, fix release check URL error, align Action title, align normal check badges to right, and update issue collapse button style (ff0d3b2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.200 - 2026-06-12
 
 ### Changed
