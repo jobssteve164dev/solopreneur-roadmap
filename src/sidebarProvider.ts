@@ -639,6 +639,15 @@ interface ProjectDeliverySummary {
   latestWorkflowStatus: string;
   latestWorkflowConclusion: string;
   latestWorkflowUrl: string;
+  recentWorkflowRuns: Array<{
+    name: string;
+    displayTitle: string;
+    status: string;
+    conclusion: string;
+    createdAt: string;
+    updatedAt: string;
+    url: string;
+  }>;
   message: string;
 }
 
@@ -685,6 +694,7 @@ function createEmptyDeliverySummary(message = ''): ProjectDeliverySummary {
     latestWorkflowStatus: '',
     latestWorkflowConclusion: '',
     latestWorkflowUrl: '',
+    recentWorkflowRuns: [],
     message
   };
 }
@@ -901,6 +911,7 @@ function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = 
     latestWorkflowStatus: latestRun?.status || '',
     latestWorkflowConclusion: latestRun?.conclusion || '',
     latestWorkflowUrl: latestRun?.url || '',
+    recentWorkflowRuns: recentRuns,
     message: stale ? 'Showing last synced delivery signals' : ''
   };
 }
@@ -2045,10 +2056,10 @@ function inferIssuePressure(issues: ProjectIssueSummary): string {
 
 function inferDeliverySignal(delivery: ProjectDeliverySummary): string {
   if (!delivery?.available) return '';
-  if (Number(delivery.failedWorkflowRuns || 0) > 0) return `Checks failed ${delivery.failedWorkflowRuns}`;
+  if (Number(delivery.failedWorkflowRuns || 0) > 0) return 'Delivery needs attention';
   if (delivery.latestRelease) return `Latest ${delivery.latestRelease}`;
-  if (delivery.stale && delivery.syncedAt) return 'Checks cached';
-  if (delivery.latestWorkflowStatus) return `Checks ${delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus}`;
+  if (delivery.stale && delivery.syncedAt) return 'Delivery cached';
+  if (delivery.latestWorkflowStatus) return 'Checks healthy';
   return '';
 }
 
@@ -4826,6 +4837,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       cursor: default;
     }
 
+    .portfolio-delivery-panel {
+      margin-top: 9px;
+      padding: 9px;
+      border: 1px solid rgba(0, 176, 255, 0.16);
+      border-radius: 6px;
+      background: rgba(0, 176, 255, 0.05);
+      cursor: default;
+    }
+
+    .portfolio-delivery-panel.is-failed {
+      border-color: rgba(255, 82, 82, 0.24);
+      background: rgba(255, 82, 82, 0.06);
+    }
+
     .portfolio-issue-head,
     .portfolio-issue-metrics,
     .portfolio-issue-row {
@@ -4920,6 +4945,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       margin-top: 8px;
     }
 
+    .portfolio-delivery-list {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-top: 8px;
+    }
+
     .portfolio-issue-row {
       width: 100%;
       border: 1px solid rgba(255, 255, 255, 0.07);
@@ -4934,6 +4966,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .portfolio-issue-row:hover {
       border-color: rgba(255, 183, 77, 0.32);
+    }
+
+    .portfolio-delivery-row {
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 5px;
+      background: rgba(0, 0, 0, 0.14);
+      color: var(--text-main);
+      padding: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
     }
 
     .portfolio-issue-main {
@@ -5755,6 +5800,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let expandedIssueNumber = 0;
     let issueDetails = null;
     let issuePanelExpanded = false;
+    let deliveryActionPanelExpanded = true;
     let issueFormOpen = false;
     let issueDraftTitle = '';
     let quickIssueDraftTitle = '';
@@ -5762,6 +5808,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let issueDraftCategory = 'bug';
     let issueDraftPriority = '';
     let issueActionMessage = '';
+    let deliveryActionMessage = '';
     let currentDailyReview = null;
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
@@ -5915,6 +5962,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         pinProject: '置顶项目',
         unpinProject: '取消置顶',
         checksCached: '检查缓存',
+        deliverySignalAttention: '交付需处理',
+        deliverySignalHealthy: '最近检查正常',
+        deliverySignalRelease: '最近发布',
+        deliveryActionTitle: '交付 Action',
+        deliveryActionShow: '展开',
+        deliveryActionHide: '收起',
+        deliveryActionOpenRun: '查看失败 Run',
+        deliveryActionRefresh: '刷新交付状态',
+        deliveryActionAgent: '交给 Agent 修复',
+        deliveryActionRepoMissing: '还没有可用的 GitHub 交付信号。',
+        deliveryActionLatestChecks: '最近 3 次检查',
+        deliveryActionLatestRelease: '最近发布',
+        deliveryActionCached: '当前显示的是缓存结果。',
+        deliveryActionHealthy: '最近 3 次检查没有失败。',
+        deliveryActionInvestigate: '最近检查里有异常，先处理它再继续推进。',
+        deliveryActionStarted: '已交给 Agent 检查并修复交付问题。',
+        deliveryActionFailureTag: '失败',
+        deliveryActionTimeoutTag: '超时',
+        deliveryActionRequiredTag: '需处理',
         projectModeContinue: '环节推进',
         projectModeSolo: '自由研讨',
         projectModeFlow: '自动闭环',
@@ -6140,6 +6206,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         pinProject: 'Pin project',
         unpinProject: 'Unpin project',
         checksCached: 'Checks cached',
+        deliverySignalAttention: 'Delivery needs attention',
+        deliverySignalHealthy: 'Checks look healthy',
+        deliverySignalRelease: 'Latest release',
+        deliveryActionTitle: 'Delivery Action',
+        deliveryActionShow: 'Expand',
+        deliveryActionHide: 'Collapse',
+        deliveryActionOpenRun: 'Open failed run',
+        deliveryActionRefresh: 'Refresh delivery',
+        deliveryActionAgent: 'Let Agent fix it',
+        deliveryActionRepoMissing: 'No GitHub delivery signal is available yet.',
+        deliveryActionLatestChecks: 'Latest 3 checks',
+        deliveryActionLatestRelease: 'Latest release',
+        deliveryActionCached: 'The current delivery state is from cache.',
+        deliveryActionHealthy: 'The latest 3 checks have no failures.',
+        deliveryActionInvestigate: 'A recent delivery check failed. Resolve it before pushing forward.',
+        deliveryActionStarted: 'Asked the Agent to inspect and fix the delivery issue.',
+        deliveryActionFailureTag: 'Failed',
+        deliveryActionTimeoutTag: 'Timed out',
+        deliveryActionRequiredTag: 'Needs action',
         projectModeContinue: 'Step Progress',
         projectModeSolo: 'Free Work',
         projectModeFlow: 'Auto Loop',
@@ -6268,8 +6353,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       expandedIssueNumber = 0;
       issueDetails = null;
       issuePanelExpanded = false;
+      deliveryActionPanelExpanded = true;
       issueFormOpen = false;
       issueActionMessage = '';
+      deliveryActionMessage = '';
       if (clearNodes) {
         currentNodes = [];
       }
@@ -6893,12 +6980,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
             project.path === message.projectPath ? { ...project, delivery: message.delivery, deliverySignal: deliverySignalText(message.delivery) } : project
           ));
+          if (message.projectPath === currentProjects.selectedProjectPath) {
+            deliveryActionMessage = '';
+          }
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'projectRefreshCompleted':
           projectRefreshPaths.delete(message.projectPath || '');
+          if (message.projectPath === currentProjects.selectedProjectPath) {
+            deliveryActionMessage = message.success ? t('refreshProjectDataDone') : (message.message || '');
+          }
           delete sidebarProjectConversationRequested[message.projectPath || ''];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
@@ -8045,15 +8138,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return '<span class="portfolio-updated">' + escapeHtml(t('issues')) + ': ' + escapeHtml(t('issueTotal')) + ' ' + escapeHtml(issues.total || 0) + ' · ' + escapeHtml(t('issueOpen')) + ' ' + escapeHtml(issues.open || 0) + syncText + '</span>';
     }
 
-    function deliverySignalText(delivery) {
-      if (!delivery || !delivery.available) return '';
-      if (Number(delivery.failedWorkflowRuns || 0) > 0) return 'Checks failed ' + Number(delivery.failedWorkflowRuns || 0);
-      if (delivery.latestRelease) return 'Latest ' + delivery.latestRelease;
-      if (delivery.stale && delivery.syncedAt) return t('checksCached');
-      if (delivery.latestWorkflowStatus) return 'Checks ' + (delivery.latestWorkflowConclusion || delivery.latestWorkflowStatus);
-      return '';
-    }
-
     function priorityRank(priority) {
       return ({ P0: 0, P1: 1, P2: 2, P3: 3 })[priority] ?? 4;
     }
@@ -8452,6 +8536,127 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       \`;
     }
 
+    function isFailedDeliveryConclusion(conclusion) {
+      return ['failure', 'timed_out', 'action_required'].includes(String(conclusion || '').toLowerCase());
+    }
+
+    function deliveryConclusionLabel(conclusion) {
+      const normalized = String(conclusion || '').toLowerCase();
+      if (normalized === 'failure') return t('deliveryActionFailureTag');
+      if (normalized === 'timed_out') return t('deliveryActionTimeoutTag');
+      if (normalized === 'action_required') return t('deliveryActionRequiredTag');
+      return normalized || '-';
+    }
+
+    function deliverySignalText(delivery) {
+      if (!delivery || !delivery.available) return '';
+      if (Number(delivery.failedWorkflowRuns || 0) > 0) return t('deliverySignalAttention');
+      if (delivery.latestRelease) return t('deliverySignalRelease') + ' ' + delivery.latestRelease;
+      if (delivery.stale && delivery.syncedAt) return t('checksCached');
+      if (delivery.latestWorkflowStatus) return t('deliverySignalHealthy');
+      return '';
+    }
+
+    function buildDeliveryActionPrompt(project) {
+      const delivery = project && project.delivery ? project.delivery : {};
+      const failedRuns = Array.isArray(delivery.recentWorkflowRuns)
+        ? delivery.recentWorkflowRuns.filter(run => isFailedDeliveryConclusion(run.conclusion))
+        : [];
+      const failedSummary = failedRuns.length
+        ? failedRuns.map((run, index) => {
+          const title = run.displayTitle || run.name || 'Unknown run';
+          const updated = formatRelativeTime(run.updatedAt || run.createdAt || '');
+          const suffix = updated ? ' · ' + updated : '';
+          return (index + 1) + '. ' + title + ' · ' + deliveryConclusionLabel(run.conclusion) + suffix;
+        }).join('\\n')
+        : (currentLanguage === 'zh' ? '最近 3 次检查里没有保留下来的失败明细。' : 'No failed run details were preserved from the latest 3 checks.');
+      const releaseLine = delivery.latestRelease
+        ? (currentLanguage === 'zh' ? '最近发布：' : 'Latest release: ') + delivery.latestRelease
+        : (currentLanguage === 'zh' ? '最近发布：暂无' : 'Latest release: none');
+      if (currentLanguage === 'zh') {
+        return [
+          '请检查这个项目当前的 GitHub Actions / 发布异常，并直接修复真正的根因。',
+          '已知事实：',
+          '1. 只看最近 3 次检查判断当前状态。',
+          '2. 当前项目卡片显示交付异常，需要确认失败检查是否仍然成立。',
+          '3. 失败检查：',
+          failedSummary,
+          '4. ' + releaseLine,
+          '要求：先查明是哪一个工作流失败、为什么失败、是否已经被后续成功覆盖；如果仍有问题，直接改代码并验证。'
+        ].join('\\n');
+      }
+      return [
+        'Inspect the current GitHub Actions / release issue for this project and fix the real root cause.',
+        'Known facts:',
+        '1. Only the latest 3 checks define the current delivery state.',
+        '2. The project card is showing a delivery exception that needs verification.',
+        '3. Failed checks:',
+        failedSummary,
+        '4. ' + releaseLine,
+        'Requirements: identify which workflow failed, why it failed, whether it has already been superseded by later success, and if the issue is still real, fix it in code and verify it.'
+      ].join('\\n');
+    }
+
+    function renderProjectDeliveryPanel(project) {
+      const delivery = project && project.delivery ? project.delivery : null;
+      if (!delivery || (!delivery.available && !delivery.loading && !delivery.message)) {
+        return '';
+      }
+      const recentRuns = Array.isArray(delivery.recentWorkflowRuns) ? delivery.recentWorkflowRuns : [];
+      const failedRuns = recentRuns.filter(run => isFailedDeliveryConclusion(run.conclusion));
+      const hasFailure = failedRuns.length > 0;
+      if (!hasFailure && !delivery.loading && !delivery.stale) {
+        return '';
+      }
+      const expanded = deliveryActionPanelExpanded;
+      const refreshBusy = projectRefreshPaths.has(project.path);
+      const latestRelease = delivery.latestRelease
+        ? '<span class="portfolio-issue-pill">' + escapeHtml(t('deliveryActionLatestRelease')) + ' ' + escapeHtml(delivery.latestRelease) + '</span>'
+        : '';
+      const runRows = failedRuns.map(run => {
+        const title = run.displayTitle || run.name || '-';
+        const time = formatRelativeTime(run.updatedAt || run.createdAt || '');
+        return '<div class="portfolio-delivery-row">'
+          + '<span class="portfolio-issue-main">'
+          + '<span class="portfolio-issue-name">' + escapeHtml(title) + '</span>'
+          + '<span class="portfolio-issue-sub">' + escapeHtml(deliveryConclusionLabel(run.conclusion)) + (time ? ' · ' + escapeHtml(time) : '') + '</span>'
+          + '</span>'
+          + (run.url ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(run.url) + '">' + escapeHtml(t('projectOpen')) + '</button>' : '')
+          + '</div>';
+      }).join('');
+      const latestRunUrl = failedRuns[0]?.url || delivery.latestWorkflowUrl || '';
+      const summaryText = hasFailure
+        ? (currentLanguage === 'zh'
+          ? '最近 3 次检查里有 ' + failedRuns.length + ' 次失败，先处理它再继续推进。'
+          : failedRuns.length + ' of the latest 3 checks failed. Resolve this before moving on.')
+        : (delivery.loading ? t('issueLoading') : (delivery.stale ? t('deliveryActionCached') : t('deliveryActionHealthy')));
+      return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
+        + '<div class="portfolio-issue-head">'
+        + '<span class="portfolio-issue-title"><span class="codicon codicon-rocket"></span>' + escapeHtml(t('deliveryActionTitle')) + '</span>'
+        + '<span class="portfolio-issue-actions">'
+        + '<button class="portfolio-issue-create" data-toggle-delivery-panel>' + escapeHtml(expanded ? t('deliveryActionHide') : t('deliveryActionShow')) + '</button>'
+        + '</span>'
+        + '</div>'
+        + '<div class="portfolio-issue-empty">' + escapeHtml(summaryText) + '</div>'
+        + (expanded
+          ? '<div class="portfolio-issue-repo">' + escapeHtml(delivery.repo || t('deliveryActionRepoMissing')) + (delivery.syncedAt ? ' · ' + escapeHtml(delivery.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(delivery.syncedAt)) : '') + '</div>'
+            + '<div class="portfolio-issue-metrics">'
+            + '<span class="portfolio-issue-pill">' + escapeHtml(t('deliveryActionLatestChecks')) + ' ' + escapeHtml(recentRuns.length || 0) + '</span>'
+            + (hasFailure ? '<span class="portfolio-issue-pill">' + escapeHtml(t('failures')) + ' ' + escapeHtml(failedRuns.length) + '</span>' : '')
+            + latestRelease
+            + '</div>'
+            + (deliveryActionMessage ? '<div class="portfolio-issue-empty">' + escapeHtml(deliveryActionMessage) + '</div>' : '')
+            + (delivery.stale ? '<div class="portfolio-issue-empty">' + escapeHtml(t('deliveryActionCached')) + '</div>' : '')
+            + (hasFailure ? '<div class="portfolio-delivery-list">' + runRows + '</div>' : '')
+            + '<div class="portfolio-issue-detail-actions">'
+            + (latestRunUrl ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(latestRunUrl) + '">' + escapeHtml(t('deliveryActionOpenRun')) + '</button>' : '')
+            + '<button class="portfolio-issue-action" data-refresh-delivery-project-path="' + escapeHtml(project.path) + '"' + (refreshBusy ? ' disabled' : '') + '>' + escapeHtml(refreshBusy ? t('testing') : t('deliveryActionRefresh')) + '</button>'
+            + (hasFailure ? '<button class="portfolio-issue-action primary" data-agent-fix-delivery-project-path="' + escapeHtml(project.path) + '">' + escapeHtml(t('deliveryActionAgent')) + '</button>' : '')
+            + '</div>'
+          : '')
+        + '</div>';
+    }
+
     function renderPortfolio(portfolio, selectedProjectPath) {
       if (!portfolio || portfolio.length === 0) {
         portfolioList.innerHTML = renderOnboardingPanel();
@@ -8472,6 +8677,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const recommendation = project.recommendedNodeTitle || '';
         const isRefreshing = projectRefreshPaths.has(project.path);
         const isPinned = Boolean(project.pinnedAt);
+        const deliverySignal = deliverySignalText(project.delivery) || project.deliverySignal || '';
         return \`
           <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
@@ -8487,7 +8693,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <span class="global-chip">\${escapeHtml(statusText(project.overallStatus))}</span>
               \${project.reusableSignals ? \`<span class="global-chip">\${escapeHtml(t('globalReusable'))}: \${escapeHtml(project.reusableSignals)}</span>\` : ''}
               \${project.issuePressure ? \`<span class="global-chip">\${escapeHtml(t('issues'))}: \${escapeHtml(project.issuePressure)}</span>\` : ''}
-              \${project.deliverySignal ? \`<span class="global-chip">\${escapeHtml(project.deliverySignal)}</span>\` : ''}
+              \${deliverySignal ? \`<span class="global-chip">\${escapeHtml(deliverySignal)}</span>\` : ''}
             </div>
             <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
@@ -8503,14 +8709,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
               \${isSelected ? '' : \`<button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>\`}
             </div>
-            \${isSelected ? renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
+            \${isSelected ? renderProjectDeliveryPanel(project) + renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
           </div>
         \`;
       }).join('');
 
       portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
         card.addEventListener('click', (event) => {
-          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]')) return;
+          if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]') || event.target.closest('[data-delivery-action-panel]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
           activateProjectInSidebar(projectPath);
           vscode.postMessage({
@@ -8534,10 +8740,59 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const projectPath = button.getAttribute('data-refresh-project-path') || '';
           if (!projectPath || projectRefreshPaths.has(projectPath)) return;
           projectRefreshPaths.add(projectPath);
+          deliveryActionMessage = '';
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'refreshProjectData',
             projectPath
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-toggle-delivery-panel]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          deliveryActionPanelExpanded = !deliveryActionPanelExpanded;
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      portfolioList.querySelectorAll('[data-open-delivery-run]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const url = button.getAttribute('data-open-delivery-run') || '';
+          if (!url) return;
+          vscode.postMessage({ command: 'openExternal', url });
+        });
+      });
+      portfolioList.querySelectorAll('[data-refresh-delivery-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-refresh-delivery-project-path') || '';
+          if (!projectPath || projectRefreshPaths.has(projectPath)) return;
+          projectRefreshPaths.add(projectPath);
+          deliveryActionMessage = '';
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({ command: 'refreshProjectData', projectPath });
+        });
+      });
+      portfolioList.querySelectorAll('[data-agent-fix-delivery-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-agent-fix-delivery-project-path') || '';
+          const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
+          if (!projectPath || !project) return;
+          const targetId = projectSoloTargetId(projectPath);
+          const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
+          const model = getTargetModelValue(targetId, agentCli);
+          projectConversationModes[projectPath] = 'solo';
+          deliveryActionMessage = t('deliveryActionStarted');
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'runSoloConversation',
+            projectPath,
+            userMessage: buildDeliveryActionPrompt(project),
+            agentCli,
+            model,
+            supplementFiles: []
           });
         });
       });

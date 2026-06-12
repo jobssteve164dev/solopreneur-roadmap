@@ -456,11 +456,14 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /data-open-pro-upgrade/);
   assert.doesNotMatch(html, /id="label-feedback"/);
   assert.match(script, /renderProjectIssuePanel/);
+  assert.match(script, /renderProjectDeliveryPanel/);
   assert.match(script, /createIssue/);
   assert.match(script, /closeIssue/);
   assert.match(script, /getIssueDetails/);
   assert.match(script, /refreshProjectData/);
   assert.match(script, /data-refresh-project-path/);
+  assert.match(script, /data-toggle-delivery-panel/);
+  assert.match(script, /data-agent-fix-delivery-project-path/);
   assert.match(script, /toggleProjectPinned/);
   assert.match(script, /getProjectConversationHistory/);
   assert.match(script, /checksCached/);
@@ -1960,6 +1963,32 @@ test('sidebar delivery summary ignores failures outside the most recent three ru
   const summary = sidebarModule.__summarizeDeliveryCache('owner/repo', cache, false);
   assert.equal(summary.failedWorkflowRuns, 0);
   assert.equal(summary.latestWorkflowConclusion, 'success');
+  assert.equal(summary.recentWorkflowRuns.length, 3);
+});
+
+test('sidebar delivery signal avoids raw failed-check wording', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    'module.exports.__inferDeliverySignal = inferDeliverySignal;'
+  );
+  const signal = sidebarModule.__inferDeliverySignal({
+    available: true,
+    loading: false,
+    stale: false,
+    syncedAt: '2026-06-12T00:00:00.000Z',
+    repo: 'owner/repo',
+    latestRelease: '',
+    latestReleaseAt: '',
+    latestReleaseUrl: '',
+    failedWorkflowRuns: 1,
+    latestWorkflowName: 'Deploy Website to Cloudflare',
+    latestWorkflowStatus: 'completed',
+    latestWorkflowConclusion: 'failure',
+    latestWorkflowUrl: 'https://github.com/owner/repo/actions/runs/28',
+    recentWorkflowRuns: [],
+    message: ''
+  });
+  assert.equal(signal, 'Delivery needs attention');
 });
 
 test('sidebar issue creation keeps labels auxiliary to creation', () => {
