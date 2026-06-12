@@ -5800,7 +5800,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let expandedIssueNumber = 0;
     let issueDetails = null;
     let issuePanelExpanded = false;
-    let deliveryActionPanelExpanded = true;
+    let deliveryActionPanelExpanded = false;
     let issueFormOpen = false;
     let issueDraftTitle = '';
     let quickIssueDraftTitle = '';
@@ -6353,7 +6353,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       expandedIssueNumber = 0;
       issueDetails = null;
       issuePanelExpanded = false;
-      deliveryActionPanelExpanded = true;
+      deliveryActionPanelExpanded = false;
       issueFormOpen = false;
       issueActionMessage = '';
       deliveryActionMessage = '';
@@ -8605,9 +8605,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const recentRuns = Array.isArray(delivery.recentWorkflowRuns) ? delivery.recentWorkflowRuns : [];
       const failedRuns = recentRuns.filter(run => isFailedDeliveryConclusion(run.conclusion));
       const hasFailure = failedRuns.length > 0;
-      if (!hasFailure && !delivery.loading && !delivery.stale) {
-        return '';
-      }
       const expanded = deliveryActionPanelExpanded;
       const refreshBusy = projectRefreshPaths.has(project.path);
       const latestRelease = delivery.latestRelease
@@ -8629,14 +8626,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         ? (currentLanguage === 'zh'
           ? '最近 3 次检查里有 ' + failedRuns.length + ' 次失败，先处理它再继续推进。'
           : failedRuns.length + ' of the latest 3 checks failed. Resolve this before moving on.')
-        : (delivery.loading ? t('issueLoading') : (delivery.stale ? t('deliveryActionCached') : t('deliveryActionHealthy')));
-      return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
-        + '<div class="portfolio-issue-head">'
+        : (delivery.loading ? t('issueLoading') : (!delivery.available ? (delivery.message || t('deliveryActionRepoMissing')) : (delivery.stale ? t('deliveryActionCached') : t('deliveryActionHealthy'))));
+      const deliveryHead = '<div class="portfolio-issue-head">'
         + '<span class="portfolio-issue-title"><span class="codicon codicon-rocket"></span>' + escapeHtml(t('deliveryActionTitle')) + '</span>'
         + '<span class="portfolio-issue-actions">'
         + '<button class="portfolio-issue-create" data-toggle-delivery-panel>' + escapeHtml(expanded ? t('deliveryActionHide') : t('deliveryActionShow')) + '</button>'
         + '</span>'
-        + '</div>'
+        + '</div>';
+      if (!expanded) {
+        return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
+          + deliveryHead
+          + '<div class="portfolio-issue-empty">' + escapeHtml(summaryText) + '</div>'
+          + '</div>';
+      }
+      return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : '') + '" data-delivery-action-panel>'
+        + deliveryHead
         + '<div class="portfolio-issue-empty">' + escapeHtml(summaryText) + '</div>'
         + (expanded
           ? '<div class="portfolio-issue-repo">' + escapeHtml(delivery.repo || t('deliveryActionRepoMissing')) + (delivery.syncedAt ? ' · ' + escapeHtml(delivery.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(delivery.syncedAt)) : '') + '</div>'
