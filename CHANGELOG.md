@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.202 - 2026-06-12
+
+### Changed
+- Clean up project card layout by removing always-visible issues stats line, show lightweight synced tag next to project name, only show New Issue button in expanded state, and align quick note input with toggle button (0f5386f)
+- fix website deploy workflow node runtime (70ba561)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.201 - 2026-06-12
 
 ### Changed
