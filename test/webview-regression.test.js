@@ -1961,9 +1961,9 @@ test('sidebar delivery summary ignores failures outside the most recent three ru
   };
 
   const summary = sidebarModule.__summarizeDeliveryCache('owner/repo', cache, false);
-  assert.equal(summary.failedWorkflowRuns, 0);
+  assert.equal(summary.failedWorkflowRuns, 1);
   assert.equal(summary.latestWorkflowConclusion, 'success');
-  assert.equal(summary.recentWorkflowRuns.length, 3);
+  assert.equal(summary.recentWorkflowRuns.length, 2);
 });
 
 test('sidebar delivery signal avoids raw failed-check wording', () => {

@@ -890,13 +890,25 @@ function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
 }
 
 function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = false): ProjectDeliverySummary {
-  const recentRuns = cache.workflowRuns.slice(0, DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT);
-  const latestRun = recentRuns[0] || null;
+  const allRuns = Array.isArray(cache.workflowRuns) ? cache.workflowRuns : [];
+  const latestRun = allRuns[0] || null;
+
+  // Group by workflow name and keep only the latest run for each workflow
+  const uniqueRunsMap = new Map();
+  for (const run of allRuns) {
+    const wfName = run.name || run.displayTitle || 'default';
+    if (!uniqueRunsMap.has(wfName)) {
+      uniqueRunsMap.set(wfName, run);
+    }
+  }
+  const latestRunsOfEachWorkflow = Array.from(uniqueRunsMap.values());
+
   const failedWorkflowRuns = stale
     ? 0
-    : recentRuns
+    : latestRunsOfEachWorkflow
       .filter((run) => ['failure', 'timed_out', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
       .length;
+
   return {
     available: true,
     loading: false,
@@ -911,7 +923,7 @@ function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = 
     latestWorkflowStatus: latestRun?.status || '',
     latestWorkflowConclusion: latestRun?.conclusion || '',
     latestWorkflowUrl: latestRun?.url || '',
-    recentWorkflowRuns: recentRuns,
+    recentWorkflowRuns: latestRunsOfEachWorkflow,
     message: stale ? 'Showing last synced delivery signals' : ''
   };
 }
@@ -1170,7 +1182,7 @@ function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary
     '--limit',
     '1',
     '--json',
-    'tagName,name,publishedAt,url'
+    'tagName,name,publishedAt'
   ], 4500);
   const runResult = runGhIssueCommand(projectPath, [
     'run',
@@ -1197,7 +1209,7 @@ function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary
         tagName: String(release.tagName || ''),
         name: String(release.name || ''),
         publishedAt: String(release.publishedAt || ''),
-        url: String(release.url || '')
+        url: release.url ? String(release.url) : 'https://github.com/' + repo + '/releases/tag/' + encodeURIComponent(release.tagName || '')
       }
       : null;
   } catch {}
@@ -1290,7 +1302,7 @@ async function readProjectDeliverySummaryAsync(projectPath: string): Promise<Pro
       '--limit',
       '1',
       '--json',
-      'tagName,name,publishedAt,url'
+      'tagName,name,publishedAt'
     ], 4500),
     runGhIssueCommandAsync(projectPath, [
       'run',
@@ -1318,7 +1330,7 @@ async function readProjectDeliverySummaryAsync(projectPath: string): Promise<Pro
         tagName: String(release.tagName || ''),
         name: String(release.name || ''),
         publishedAt: String(release.publishedAt || ''),
-        url: String(release.url || '')
+        url: release.url ? String(release.url) : 'https://github.com/' + repo + '/releases/tag/' + encodeURIComponent(release.tagName || '')
       }
       : null;
   } catch {}
@@ -4903,7 +4915,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .delivery-panel-title {
       font-size: 11px;
-      text-transform: uppercase;
       letter-spacing: 0.5px;
       font-weight: 800;
     }
@@ -4916,6 +4927,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       white-space: nowrap;
       max-width: 160px;
       overflow: hidden;
+      margin-left: auto;
       text-overflow: ellipsis;
       border: 1px solid transparent;
     }
@@ -8746,7 +8758,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           <div class="portfolio-issue-actions">
             \${!expanded ? \`<input type="text" class="portfolio-quick-issue-input" placeholder="\${escapeHtml(t('quickIssuePlaceholder'))}" value="\${escapeHtml(quickIssueDraftTitle)}" data-quick-issue-input data-project-path="\${escapeHtml(project.path)}" />\` : ''}
             <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
-            <button class="portfolio-issue-create" data-toggle-issue-panel data-project-path="\${escapeHtml(project.path)}">\${escapeHtml(expanded ? t('issueCollapse') : t('issueExpand'))}</button>
+            <button class="delivery-toggle-btn" data-toggle-issue-panel data-project-path="\${escapeHtml(project.path)}" title="\${escapeHtml(expanded ? t('issueCollapse') : t('issueExpand'))}">
+              <span class="codicon codicon-chevron-\${expanded ? 'up' : 'down'}"></span>
+            </button>
           </div>
         </div>
       \`;
