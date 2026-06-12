@@ -1907,6 +1907,61 @@ test('sidebar delivery summary ignores cancelled and superseded workflow runs', 
   assert.equal(summary.latestWorkflowConclusion, 'success');
 });
 
+test('sidebar delivery summary ignores failures outside the most recent three runs', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;'
+  );
+  const cache = {
+    schemaVersion: 1,
+    repo: 'owner/repo',
+    syncedAt: '2026-06-12T00:00:00.000Z',
+    latestRelease: null,
+    workflowRuns: [
+      {
+        name: 'Publish VS Code Extension',
+        displayTitle: 'latest publish 1',
+        status: 'completed',
+        conclusion: 'success',
+        createdAt: '2026-06-12T03:00:00Z',
+        updatedAt: '2026-06-12T03:01:00Z',
+        url: 'https://github.com/owner/repo/actions/runs/31'
+      },
+      {
+        name: 'Publish VS Code Extension',
+        displayTitle: 'latest publish 2',
+        status: 'completed',
+        conclusion: 'success',
+        createdAt: '2026-06-12T02:00:00Z',
+        updatedAt: '2026-06-12T02:01:00Z',
+        url: 'https://github.com/owner/repo/actions/runs/30'
+      },
+      {
+        name: 'Publish VS Code Extension',
+        displayTitle: 'latest publish 3',
+        status: 'completed',
+        conclusion: 'success',
+        createdAt: '2026-06-12T01:00:00Z',
+        updatedAt: '2026-06-12T01:01:00Z',
+        url: 'https://github.com/owner/repo/actions/runs/29'
+      },
+      {
+        name: 'Deploy Website to Cloudflare',
+        displayTitle: 'older deploy failure',
+        status: 'completed',
+        conclusion: 'failure',
+        createdAt: '2026-06-11T23:00:00Z',
+        updatedAt: '2026-06-11T23:01:00Z',
+        url: 'https://github.com/owner/repo/actions/runs/28'
+      }
+    ]
+  };
+
+  const summary = sidebarModule.__summarizeDeliveryCache('owner/repo', cache, false);
+  assert.equal(summary.failedWorkflowRuns, 0);
+  assert.equal(summary.latestWorkflowConclusion, 'success');
+});
+
 test('sidebar issue creation keeps labels auxiliary to creation', () => {
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',

@@ -882,17 +882,9 @@ function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
 function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = false): ProjectDeliverySummary {
   const recentRuns = cache.workflowRuns.slice(0, DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT);
   const latestRun = recentRuns[0] || null;
-  const latestByWorkflow = new Map<string, DeliveryCacheFile['workflowRuns'][number]>();
-  for (const run of cache.workflowRuns) {
-    const key = String(run.name || run.displayTitle || run.url || '').trim();
-    if (!key || latestByWorkflow.has(key)) {
-      continue;
-    }
-    latestByWorkflow.set(key, run);
-  }
   const failedWorkflowRuns = stale
     ? 0
-    : [...latestByWorkflow.values()]
+    : recentRuns
       .filter((run) => ['failure', 'timed_out', 'action_required'].includes(String(run.conclusion || '').toLowerCase()))
       .length;
   return {
