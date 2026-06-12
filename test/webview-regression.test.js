@@ -2212,8 +2212,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   const firstTerminalName = extensionModule.__makeAgentTerminalName('/workspace/project-a', 'step-2-42');
   const secondTerminalName = extensionModule.__makeAgentTerminalName('/workspace/project-a', 'step-2-43');
-  assert.match(firstTerminalName, /^solomap \+ project-a · step-2-42 · \d+$/);
-  assert.match(secondTerminalName, /^solomap \+ project-a · step-2-43 · \d+$/);
+  assert.match(firstTerminalName, /^project-a · step-2-42 · \d+ \(solomap\)$/);
+  assert.match(secondTerminalName, /^project-a · step-2-43 · \d+ \(solomap\)$/);
   assert.notEqual(firstTerminalName, secondTerminalName);
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('claude', 'agent_prompt', '/workspace/app'),

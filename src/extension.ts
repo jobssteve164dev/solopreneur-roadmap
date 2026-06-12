@@ -10534,7 +10534,7 @@ function makeAgentTerminalName(workspaceRoot: string, label: string): string {
   agentTerminalCounter += 1;
   const projectName = path.basename(workspaceRoot);
   const cleanLabel = String(label || 'run').replace(/[^a-zA-Z0-9_.:-]+/g, '-').slice(0, 40) || 'run';
-  return `${agentTerminalBaseName} + ${projectName} · ${cleanLabel} · ${agentTerminalCounter}`;
+  return `${projectName} · ${cleanLabel} · ${agentTerminalCounter} (${agentTerminalBaseName})`;
 }
 
 function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefined {
@@ -10552,7 +10552,7 @@ function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefine
       return active;
     }
   }
-  return terminals.reverse().find((candidate) => candidate.name.startsWith(agentTerminalBaseName));
+  return terminals.reverse().find((candidate) => candidate.name.includes(agentTerminalBaseName));
 }
 
 function createAgentTerminal(workspaceRoot: string, label: string, conversationId = 0): vscode.Terminal {
@@ -10563,7 +10563,7 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
   }
   return vscode.window.createTerminal({
     name: terminalName,
-    iconPath: new vscode.ThemeIcon('rocket'),
+    iconPath: new vscode.ThemeIcon('symbol-string'),
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
   });
