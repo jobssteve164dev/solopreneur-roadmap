@@ -839,7 +839,7 @@ const projectRegistryFileName = 'projects.json';
 const usageStatsFileName = 'solomap-usage.json';
 const roadmapRevisionId = '__roadmap_revision__';
 const soloConversationId = '__solo__';
-const agentTerminalBaseName = 'SoloMap Agent Console';
+const agentTerminalBaseName = 'solomap';
 const agentStatusDirName = 'agent-status';
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
@@ -10530,10 +10530,11 @@ function findAgentStatusForConversation(workspaceRoot: string, conversationId: n
   return null;
 }
 
-function makeAgentTerminalName(label: string): string {
+function makeAgentTerminalName(workspaceRoot: string, label: string): string {
   agentTerminalCounter += 1;
+  const projectName = path.basename(workspaceRoot);
   const cleanLabel = String(label || 'run').replace(/[^a-zA-Z0-9_.:-]+/g, '-').slice(0, 40) || 'run';
-  return `${agentTerminalBaseName} · ${cleanLabel} · ${agentTerminalCounter}`;
+  return `${agentTerminalBaseName} + ${projectName} · ${cleanLabel} · ${agentTerminalCounter}`;
 }
 
 function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefined {
@@ -10555,14 +10556,14 @@ function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefine
 }
 
 function createAgentTerminal(workspaceRoot: string, label: string, conversationId = 0): vscode.Terminal {
-  const terminalName = makeAgentTerminalName(label);
+  const terminalName = makeAgentTerminalName(workspaceRoot, label);
   activeAgentTerminalName = terminalName;
   if (conversationId) {
     agentTerminalNamesByConversationId.set(Number(conversationId), terminalName);
   }
   return vscode.window.createTerminal({
     name: terminalName,
-    iconPath: new vscode.ThemeIcon('robot'),
+    iconPath: new vscode.ThemeIcon('rocket'),
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
   });

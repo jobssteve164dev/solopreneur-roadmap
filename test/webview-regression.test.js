@@ -2210,10 +2210,10 @@ test('agent command builder uses non-interactive task runs and native continuati
     extensionModule.__buildAgentCommandForPromptFile(configuredCursorPath, '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto'),
     `'${configuredCursorPath}' -p --output-format text 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'`
   );
-  const firstTerminalName = extensionModule.__makeAgentTerminalName('step-2-42');
-  const secondTerminalName = extensionModule.__makeAgentTerminalName('step-2-43');
-  assert.match(firstTerminalName, /^SoloMap Agent Console · step-2-42 · \d+$/);
-  assert.match(secondTerminalName, /^SoloMap Agent Console · step-2-43 · \d+$/);
+  const firstTerminalName = extensionModule.__makeAgentTerminalName('/workspace/project-a', 'step-2-42');
+  const secondTerminalName = extensionModule.__makeAgentTerminalName('/workspace/project-a', 'step-2-43');
+  assert.match(firstTerminalName, /^solomap \+ project-a · step-2-42 · \d+$/);
+  assert.match(secondTerminalName, /^solomap \+ project-a · step-2-43 · \d+$/);
   assert.notEqual(firstTerminalName, secondTerminalName);
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('claude', 'agent_prompt', '/workspace/app'),

@@ -4841,19 +4841,67 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .project-synced-tag {
-      font-size: 8.5px;
-      padding: 1.5px 5px;
-      border-radius: 3px;
-      background: rgba(102, 187, 106, 0.12);
+      font-size: 8px;
+      padding: 1px 4px;
+      border-radius: 2.5px;
+      background: rgba(102, 187, 106, 0.07);
       color: #a5d6a7;
-      border: 1px solid rgba(102, 187, 106, 0.2);
-      margin-left: 6px;
-      font-weight: 700;
+      border: 1px solid rgba(102, 187, 106, 0.14);
+      margin-left: 5px;
+      font-weight: 600;
       display: inline-flex;
       align-items: center;
-      gap: 2.5px;
+      gap: 2px;
       vertical-align: middle;
       cursor: help;
+      opacity: 0.82;
+    }
+
+    .project-synced-tag .codicon {
+      font-size: 8px !important;
+    }
+
+    .feedback-rating-card {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid rgba(255, 215, 0, 0.16);
+      border-radius: 6px;
+      background: linear-gradient(135deg, rgba(255, 215, 0, 0.03) 0%, rgba(255, 215, 0, 0.06) 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .rating-card-title {
+      font-size: 10.5px;
+      font-weight: 800;
+      color: #ffd54f;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .rating-star-icon {
+      font-size: 11px;
+      color: #ffd54f;
+    }
+
+    .rating-card-desc {
+      font-size: 9px;
+      color: var(--text-muted);
+      line-height: 1.35;
+    }
+
+    .settings-action-btn.rating-btn {
+      background: linear-gradient(135deg, #ffd54f 0%, #ffb300 100%);
+      color: #000000;
+      margin-top: 2px;
+      font-weight: 800;
+      font-size: 10px;
+    }
+
+    .settings-action-btn.rating-btn:hover {
+      box-shadow: 0 0 8px rgba(255, 213, 79, 0.35);
     }
 
     .portfolio-issue-panel {
@@ -5780,6 +5828,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 78px; margin-top: 5px;"></textarea>
       <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
     </div>
+    
+    <div class="feedback-rating-card">
+      <div class="rating-card-title">
+        <span class="codicon codicon-star-full rating-star-icon"></span>
+        <span id="text-rating-title">\${escapeHtml(t('feedbackRatingTitle'))}</span>
+      </div>
+      <div class="rating-card-desc" id="text-rating-desc">\${escapeHtml(t('feedbackRatingDesc'))}</div>
+      <button class="settings-action-btn rating-btn" id="btn-rate-extension" type="button">
+        <span class="codicon codicon-heart-filled"></span>
+        <span id="text-rate-btn">\${escapeHtml(t('feedbackRatingButton'))}</span>
+      </button>
+    </div>
   </div>
 
   <div class="portfolio-panel">
@@ -6307,6 +6367,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliverySignalAttention: '交付需处理',
         deliverySignalHealthy: '最近检查正常',
         deliverySignalRelease: '最近发布',
+        feedbackRatingTitle: '觉得 SoloMap 挺好用？',
+        feedbackRatingDesc: '给个五星好评，支持我们持续更新！',
+        feedbackRatingButton: '去评五星好评',
         deliveryActionTitle: 'Action',
         deliveryActionShow: '展开',
         deliveryActionHide: '收起',
@@ -6553,6 +6616,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliverySignalAttention: 'Delivery needs attention',
         deliverySignalHealthy: 'Checks look healthy',
         deliverySignalRelease: 'Latest release',
+        feedbackRatingTitle: 'Loving SoloMap?',
+        feedbackRatingDesc: 'Give us a 5-star rating on the marketplace to support our updates!',
+        feedbackRatingButton: 'Rate on Marketplace',
         deliveryActionTitle: 'Action',
         deliveryActionShow: 'Expand',
         deliveryActionHide: 'Collapse',
@@ -7509,6 +7575,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           title: settingFeedbackTitle ? settingFeedbackTitle.value.trim() : '',
           body: settingFeedbackBody ? settingFeedbackBody.value.trim() : '',
           category: currentFeedbackType
+        });
+      });
+    }
+
+    const btnRateExtension = document.getElementById('btn-rate-extension');
+    if (btnRateExtension) {
+      btnRateExtension.addEventListener('click', () => {
+        vscode.postMessage({
+          command: 'openExternal',
+          url: 'https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap'
         });
       });
     }
