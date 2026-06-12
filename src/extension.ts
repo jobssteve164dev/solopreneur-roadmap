@@ -10561,9 +10561,15 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
   if (conversationId) {
     agentTerminalNamesByConversationId.set(Number(conversationId), terminalName);
   }
+  let iconPath: vscode.Uri | vscode.ThemeIcon;
+  if (extensionContextRef) {
+    iconPath = vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.svg');
+  } else {
+    iconPath = new vscode.ThemeIcon('symbol-string');
+  }
   return vscode.window.createTerminal({
     name: terminalName,
-    iconPath: new vscode.ThemeIcon('symbol-string'),
+    iconPath: iconPath,
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
   });

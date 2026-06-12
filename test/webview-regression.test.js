@@ -113,7 +113,7 @@ function loadCompiledModule(relativePath, exportPatch) {
             },
             createTerminal() {
               return {
-                name: 'SoloMap Agent Console · test',
+                name: 'Agent Console · test',
                 show() {},
                 sendText() {},
                 dispose() {}

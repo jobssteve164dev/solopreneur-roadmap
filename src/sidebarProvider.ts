@@ -2562,7 +2562,7 @@ function buildDailyReviewPrompt(options: {
   ].join('\n');
 }
 
-function startDailyReviewAgent(settings: SolopreneurSettings, projects: SolopreneurProject[]): DailyReviewArtifact {
+function startDailyReviewAgent(settings: SolopreneurSettings, projects: SolopreneurProject[], extensionUri?: vscode.Uri): DailyReviewArtifact {
   const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true });
   const globalStore = ensureGlobalEngineeringStore(settings.globalDataPath, portfolio);
   const dateKey = getLocalDateKey();
@@ -2653,7 +2653,14 @@ function startDailyReviewAgent(settings: SolopreneurSettings, projects: Solopren
   ].join('\n');
   fs.writeFileSync(runScriptPath, script, 'utf8');
 
-  const terminal = vscode.window.createTerminal({ name: `SoloMap Agent Review · ${dateKey}`, cwd: workspaceRoot });
+  const terminalOpts: vscode.TerminalOptions = {
+    name: `Agent Review · ${dateKey}`,
+    cwd: workspaceRoot,
+  };
+  if (extensionUri) {
+    terminalOpts.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'logo.svg');
+  }
+  const terminal = vscode.window.createTerminal(terminalOpts);
   terminal.show(true);
   terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
   return artifact;
@@ -2938,7 +2945,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             this.sendDailyReview();
             break;
           case 'runDailyReview': {
-            const review = startDailyReviewAgent(this._getSettings(), this._getProjects().projects);
+            const review = startDailyReviewAgent(this._getSettings(), this._getProjects().projects, this._extensionUri);
             this._view?.webview.postMessage({ command: 'dailyReviewLoaded', review });
             break;
           }
@@ -3376,7 +3383,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private openDependencyAction(action: string, cliPath: string) {
-    const terminal = vscode.window.createTerminal({ name: 'SoloMap Setup' });
+    const terminal = vscode.window.createTerminal({
+      name: 'Setup',
+      iconPath: vscode.Uri.joinPath(this._extensionUri, 'resources', 'logo.svg'),
+    });
     terminal.show(true);
     if (action === 'github-auth') {
       terminal.sendText('gh auth login');
