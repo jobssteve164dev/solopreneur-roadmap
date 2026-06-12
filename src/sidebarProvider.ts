@@ -4840,6 +4840,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       opacity: 0.5;
     }
 
+    .project-synced-tag {
+      font-size: 8.5px;
+      padding: 1.5px 5px;
+      border-radius: 3px;
+      background: rgba(102, 187, 106, 0.12);
+      color: #a5d6a7;
+      border: 1px solid rgba(102, 187, 106, 0.2);
+      margin-left: 6px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 2.5px;
+      vertical-align: middle;
+      cursor: help;
+    }
+
     .portfolio-issue-panel {
       margin-top: 9px;
       padding: 9px;
@@ -8757,7 +8773,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           <span class="portfolio-issue-title"><span class="codicon codicon-issues"></span>\${escapeHtml(t('issues'))}</span>
           <div class="portfolio-issue-actions">
             \${!expanded ? \`<input type="text" class="portfolio-quick-issue-input" placeholder="\${escapeHtml(t('quickIssuePlaceholder'))}" value="\${escapeHtml(quickIssueDraftTitle)}" data-quick-issue-input data-project-path="\${escapeHtml(project.path)}" />\` : ''}
-            <button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>
+            \${expanded ? \`<button class="portfolio-issue-create" data-toggle-issue-form data-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-add"></span>\${escapeHtml(t('issueCreate'))}</button>\` : ''}
             <button class="delivery-toggle-btn" data-toggle-issue-panel data-project-path="\${escapeHtml(project.path)}" title="\${escapeHtml(expanded ? t('issueCollapse') : t('issueExpand'))}">
               <span class="codicon codicon-chevron-\${expanded ? 'up' : 'down'}"></span>
             </button>
@@ -9077,7 +9093,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return \`
           <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
-              <span class="portfolio-project-name">\${escapeHtml(project.name)}</span>
+              <span class="portfolio-project-name">
+                \${escapeHtml(project.name)}
+                \${project.issues && project.issues.syncedAt
+                  ? \`<span class="project-synced-tag" title="\${escapeHtml(project.issues.stale ? t('issueCached') : t('issueSynced'))} \${escapeHtml(formatRelativeTime(project.issues.syncedAt))}"><span class="codicon codicon-sync"></span>\${escapeHtml(t('issueSynced'))}</span>\`
+                  : ''
+                }
+              </span>
               <span class="portfolio-card-controls">
                 <button class="portfolio-refresh-btn \${isRefreshing ? 'is-refreshing' : ''}" type="button" title="\${escapeHtml(t('refreshProjectData'))}" aria-label="\${escapeHtml(t('refreshProjectData'))}" data-refresh-project-path="\${escapeHtml(project.path)}" \${isRefreshing ? 'disabled' : ''}><span class="codicon codicon-refresh"></span></button>
                 <button class="portfolio-refresh-btn \${isPinned ? 'is-pinned' : ''}" type="button" title="\${escapeHtml(t(isPinned ? 'unpinProject' : 'pinProject'))}" aria-label="\${escapeHtml(t(isPinned ? 'unpinProject' : 'pinProject'))}" data-toggle-pin-project-path="\${escapeHtml(project.path)}"><span class="codicon codicon-pinned"></span></button>
@@ -9097,9 +9119,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             <div class="portfolio-card-meta">
               <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}
-            </div>
-            <div class="portfolio-card-meta">
-              \${renderIssueStatsLine(project)}
             </div>
             <div class="portfolio-card-actions">
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>

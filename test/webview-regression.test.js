@@ -608,8 +608,6 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-issue-panel/);
   assert.match(elements['portfolio-list'].innerHTML, /data-toggle-issue-panel/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /页面加载慢/);
-  assert.match(elements['portfolio-list'].innerHTML, /待关闭|Open/);
-  assert.match(elements['portfolio-list'].innerHTML, /data-toggle-issue-form/);
   assert.match(elements['portfolio-list'].innerHTML, /data-refresh-project-path="\/workspace\/second"/);
   assert.match(elements['portfolio-list'].innerHTML, /codicon-refresh/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-expand-issue-number="12"/);
