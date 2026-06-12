@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.196 - 2026-06-12
+
+### Added
+- complete Flow execution trace, micro-loop corrections, and attribution logic (ab79fa7)
+
+### Changed
+- fix sidebar delivery health signal (1979124)
+
+### Docs
+- add 10k openvsx downloads celebration poster (de7aedc)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.195 - 2026-06-10
 
 ### Fixed
