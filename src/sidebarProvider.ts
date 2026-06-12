@@ -5832,12 +5832,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     <div class="feedback-rating-card">
       <div class="rating-card-title">
         <span class="codicon codicon-star-full rating-star-icon"></span>
-        <span id="text-rating-title">\${escapeHtml(t('feedbackRatingTitle'))}</span>
+        <span id="text-rating-title">觉得 SoloMap 挺好用？</span>
       </div>
-      <div class="rating-card-desc" id="text-rating-desc">\${escapeHtml(t('feedbackRatingDesc'))}</div>
+      <div class="rating-card-desc" id="text-rating-desc">给个五星好评，支持我们持续更新！</div>
       <button class="settings-action-btn rating-btn" id="btn-rate-extension" type="button">
         <span class="codicon codicon-heart-filled"></span>
-        <span id="text-rate-btn">\${escapeHtml(t('feedbackRatingButton'))}</span>
+        <span id="text-rate-btn">去评五星好评</span>
       </button>
     </div>
   </div>
@@ -6782,6 +6782,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       btnAddProject.title = t('chooseProject');
       setText('feedback-title', t('feedbackPanelTitle'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
+      setText('text-rating-title', t('feedbackRatingTitle'));
+      setText('text-rating-desc', t('feedbackRatingDesc'));
+      setText('text-rate-btn', t('feedbackRatingButton'));
       setText('feedback-type-next-step', t('feedbackNextStep'));
       setText('feedback-type-feature', t('feedbackFeature'));
       setText('settings-title', t('settingsTitle'));
