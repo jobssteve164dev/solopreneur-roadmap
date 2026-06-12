@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.203 - 2026-06-12
+
+### Changed
+- Refactor terminal naming to use solomap + projectName pattern, change terminal icon to rocket ThemeIcon, shrink project-synced-tag styling weight, and add rating card component inside feedback overlay (a9b4d9f)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.202 - 2026-06-12
 
 ### Changed
