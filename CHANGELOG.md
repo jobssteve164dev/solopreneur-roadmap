@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.199 - 2026-06-12
+
+### Changed
+- refine sidebar action summary (b341077)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.198 - 2026-06-12
 
 ### Changed
