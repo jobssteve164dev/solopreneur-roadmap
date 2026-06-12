@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.209 - 2026-06-12
+
+### Added
+- open conversation changed files in baseline diff (a4a56e3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.208 - 2026-06-12
 
 ### Fixed
