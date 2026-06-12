@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.206 - 2026-06-12
+
+### Changed
+- SoloMap pre-session auto-backup [2026-06-12T12:43:32.654Z] (70ac8a0)
+
+### Fixed
+- preserve sidebar project selection during refresh (0f1bf31)
+
+### Docs
+- add Bilibili video cover design plan and futuristic cockpit background image (bae19a5)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.205 - 2026-06-12
 
 ### Added
