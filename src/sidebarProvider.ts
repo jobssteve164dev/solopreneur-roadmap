@@ -7428,23 +7428,27 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         }
 
         case 'projectsLoaded':
+          const incomingSelectedProjectPath = message.projects.selectedProjectPath || '';
+          const selectedProjectPath = activeProjectPath && incomingSelectedProjectPath && incomingSelectedProjectPath !== activeProjectPath
+            ? activeProjectPath
+            : incomingSelectedProjectPath;
           if (
-            message.projects.selectedProjectPath &&
+            selectedProjectPath &&
             activeProjectPath &&
-            message.projects.selectedProjectPath !== activeProjectPath
+            selectedProjectPath !== activeProjectPath
           ) {
-            resetProjectScopedState(message.projects.selectedProjectPath, true);
+            resetProjectScopedState(selectedProjectPath, true);
             renderSidebar(currentNodes);
-          } else if (message.projects.selectedProjectPath && !activeProjectPath) {
-            activeProjectPath = message.projects.selectedProjectPath;
+          } else if (selectedProjectPath && !activeProjectPath) {
+            activeProjectPath = selectedProjectPath;
           }
           currentProjects.projects = message.projects.projects || [];
-          currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
+          currentProjects.selectedProjectPath = selectedProjectPath || '';
           currentProjects.portfolio = message.projects.portfolio || [];
           currentProjects.globalStore = message.projects.globalStore || null;
-          renderProjects(message.projects.projects, message.projects.selectedProjectPath);
+          renderProjects(message.projects.projects, currentProjects.selectedProjectPath);
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolio(message.projects.portfolio || [], message.projects.selectedProjectPath || '');
+          renderPortfolio(message.projects.portfolio || [], currentProjects.selectedProjectPath || '');
           break;
 
         case 'projectIssuesLoaded':
@@ -8426,8 +8430,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-project-path') || '';
-        const input = container.querySelector('[data-project-conversation-input]');
-        if (input) {
+          const input = container.querySelector('[data-project-conversation-input]');
+          if (input) {
             rememberProjectConversationInput(input);
           }
           projectConversationModes[projectPath] = button.getAttribute('data-project-conversation-mode') || 'continue';

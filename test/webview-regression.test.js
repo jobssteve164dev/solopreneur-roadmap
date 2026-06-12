@@ -310,6 +310,8 @@ function runScriptWithMinimalDom(script, ids) {
         }
       }
     },
+    setTimeout,
+    clearTimeout,
     acquireVsCodeApi: () => ({
       postMessage: (message) => postedMessages.push(message)
     })
@@ -615,6 +617,70 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-open-pro-upgrade|了解 Pro|Unlock Pro/);
+
+  postedMessages.length = 0;
+  elements['project-select'].listeners.click({
+    target: elements['project-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === '/workspace/app'),
+    stopPropagation() {}
+  });
+  assert.equal(elements['project-select'].getAttribute('data-value'), '/workspace/app');
+  assert.ok(postedMessages.some((message) => message.command === 'selectProject' && message.projectPath === '/workspace/app'));
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'app', path: '/workspace/app' }, { name: 'second', path: '/workspace/second' }],
+      selectedProjectPath: '/workspace/second',
+      portfolio: [{
+        name: 'second',
+        path: '/workspace/second',
+        totalNodes: 1,
+        completedNodes: 0,
+        failedNodes: 0,
+        runningNodes: 0,
+        inProgressNodes: 0,
+        pendingNodes: 1,
+        progressPercent: 0,
+        currentStage: '产品',
+        recommendedNodeId: 'step-1',
+        recommendedNodeTitle: '验证首页',
+        recommendedStatus: 'Pending',
+        overallStatus: 'Pending',
+        recentActivityAt: '2026-05-26T10:00:00.000Z',
+        issues: { available: true, repo: 'owner/repo', total: 0, open: 0, byCategory: {}, byPriority: {}, items: [], message: '' }
+      }]
+    }
+  });
+  assert.equal(elements['project-select'].getAttribute('data-value'), '/workspace/app');
+  elements['project-select'].listeners.click({
+    target: elements['project-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === '/workspace/second'),
+    stopPropagation() {}
+  });
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'app', path: '/workspace/app' }, { name: 'second', path: '/workspace/second' }],
+      selectedProjectPath: '/workspace/second',
+      portfolio: [{
+        name: 'second',
+        path: '/workspace/second',
+        totalNodes: 1,
+        completedNodes: 0,
+        failedNodes: 0,
+        runningNodes: 0,
+        inProgressNodes: 0,
+        pendingNodes: 1,
+        progressPercent: 0,
+        currentStage: '产品',
+        recommendedNodeId: 'step-1',
+        recommendedNodeTitle: '验证首页',
+        recommendedStatus: 'Pending',
+        overallStatus: 'Pending',
+        recentActivityAt: '2026-05-26T10:00:00.000Z',
+        issues: { available: true, repo: 'owner/repo', total: 0, open: 0, byCategory: {}, byPriority: {}, items: [], message: '' }
+      }]
+    }
+  });
+
   dispatchMessage({
     command: 'settingsLoaded',
     settings: {
@@ -1075,6 +1141,42 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /openProjectFromPortfolio/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
+});
+
+test('sidebar portfolio refresh preserves active project composer input state', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    async () => {},
+    () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }),
+    async () => {},
+    () => ({ projects: [], selectedProjectPath: '' }),
+    async () => {},
+    async () => {}
+  );
+  const webviewView = {
+    webview: {
+      options: {},
+      html: '',
+      asWebviewUri(uri) {
+        return String(uri && (uri.fsPath || uri.path || uri));
+      },
+      postMessage() {
+        return Promise.resolve(true);
+      },
+      onDidReceiveMessage() {}
+    }
+  };
+  provider.resolveWebviewView(webviewView, {}, {});
+  const html = webviewView.webview.html;
+  assert.match(html, /function rememberProjectConversationInput\(input\)/);
+  assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?document\.activeElement === input/);
+  assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
+  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
 });
 
 test('daily review prompt switches modes by engineering rhythm and signals', () => {
