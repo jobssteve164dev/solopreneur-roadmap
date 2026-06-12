@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.208 - 2026-06-12
+
+### Fixed
+- surface rollback action in roadmap result cards (315c662)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.207 - 2026-06-12
 
 ### Fixed
