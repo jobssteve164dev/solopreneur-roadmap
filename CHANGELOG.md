@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.211 - 2026-06-13
+
+### Added
+- record codex continuation runs via app server (b4a6273)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.210 - 2026-06-12
 
 ### Fixed
