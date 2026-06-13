@@ -2317,7 +2317,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildSdkSentinelCommandLabel('codex', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
-    "'codex' app-server [resume 019dc472-6a80-7c70-99a4-b2593a641d11 @ /workspace/app]"
+    "'codex' resume [tracked 019dc472-6a80-7c70-99a4-b2593a641d11 @ /workspace/app]"
   );
   assert.equal(extensionModule.__supportsSdkContinuation('codex'), true);
   assert.equal(extensionModule.__supportsSdkContinuation('agy'), false);

@@ -6714,7 +6714,7 @@ function buildSdkSentinelCommandLabel(agentCli: string, workspaceRoot: string, s
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} app-server [resume ${sessionId} @ ${workspaceRoot}]`;
+    return `${quotedCli} resume [tracked ${sessionId} @ ${workspaceRoot}]`;
   }
   return `${quotedCli} [interactive continuation]`;
 }
@@ -10183,8 +10183,8 @@ function buildAgentShellScript(
   const sessionKey = getAgentSessionKey(agentCli);
   const sessionMode = effectiveNativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
   const startedAt = new Date().toISOString();
-  const commandPreview = `${agentCli} [${sessionMode}]`;
-  const loggedCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
+  const loggedCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
+  const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
   const statusBase = { nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
@@ -10201,10 +10201,20 @@ function buildAgentShellScript(
   const promptExportScript = effectiveDirectExecutionCommand
     ? [`agent_prompt=$(cat ${shellQuote(promptFilePath)})`, 'export agent_prompt']
     : [];
-  const terminalExecutionScript = [
-    `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
-    'status=${PIPESTATUS[0]}'
-  ].join(' ');
+  const terminalExecutionScript = (effectiveRunKind === 'solo_continue' || effectiveRunKind === 'step_continue')
+    ? [
+      'if command -v script >/dev/null 2>&1; then',
+      `script -q -f -e -c ${shellQuote(executionCommand)} ${shellQuote(outputFilePath)};`,
+      'status=$?;',
+      'else',
+      `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
+      'status=${PIPESTATUS[0]};',
+      'fi'
+    ].join(' ')
+    : [
+      `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
+      'status=${PIPESTATUS[0]}'
+    ].join(' ');
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
   fs.writeFileSync(promptFilePath, enhancementRuntimeInstructions ? [effectiveConversationPrompt, '', enhancementRuntimeInstructions].join('\n') : effectiveConversationPrompt, 'utf8');
@@ -10374,217 +10384,6 @@ rl.on('line', (line) => {
       return;
     }
     fail('Codex turn did not complete successfully: ' + status, 1);
-  }
-});
-
-send({
-  method: 'initialize',
-  id: 0,
-  params: {
-    clientInfo: {
-      name: 'solomap_vscode',
-      title: 'SoloMap VS Code Extension',
-      version: '0.1.0'
-    }
-  }
-});
-send({ method: 'initialized', params: {} });
-send({
-  method: 'thread/resume',
-  id: 1,
-  params: {
-    threadId,
-    cwd: workspaceRoot,
-    approvalPolicy: 'never',
-    sandbox: 'workspace-write',
-    ...(selectedModel ? { model: selectedModel } : {})
-  }
-});
-`;
-  fs.writeFileSync(runnerFilePath, runnerSource, { encoding: 'utf8', mode: 0o755 });
-}
-
-function buildCodexInteractiveContinuationRunnerScript(
-  runnerFilePath: string,
-  workspaceRoot: string,
-  threadId: string,
-  sessionFilePath: string,
-  selectedModel = ''
-): void {
-  const runnerSource = `
-const { spawn } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const readline = require('readline');
-
-const workspaceRoot = ${JSON.stringify(workspaceRoot)};
-const threadId = ${JSON.stringify(threadId)};
-const sessionFilePath = ${JSON.stringify(sessionFilePath)};
-const selectedModel = ${JSON.stringify(selectedModel)};
-
-const proc = spawn('codex', ['app-server'], {
-  cwd: workspaceRoot,
-  stdio: ['pipe', 'pipe', 'pipe']
-});
-
-const protocol = readline.createInterface({ input: proc.stdout });
-const terminal = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-
-let finished = false;
-let resumed = false;
-let pending = false;
-let assistantStarted = false;
-let resumedThreadId = threadId;
-let lastError = '';
-
-function send(message) {
-  proc.stdin.write(JSON.stringify(message) + '\\n');
-}
-
-function writeSession(thread) {
-  if (!thread || !thread.id) return;
-  fs.mkdirSync(path.dirname(sessionFilePath), { recursive: true });
-  fs.writeFileSync(sessionFilePath, JSON.stringify({
-    sessionId: String(thread.id),
-    source: 'codex_app_server',
-    updatedAt: new Date().toISOString()
-  }) + '\\n', 'utf8');
-}
-
-function promptUser() {
-  if (!finished && resumed && !pending) {
-    terminal.setPrompt('You> ');
-    terminal.prompt();
-  }
-}
-
-function shutdown(code = 0) {
-  if (finished) return;
-  finished = true;
-  terminal.close();
-  proc.kill('SIGTERM');
-  process.exit(code);
-}
-
-function fail(message, code = 1) {
-  if (finished) return;
-  if (message) {
-    process.stderr.write(String(message).trim() + '\\n');
-  }
-  shutdown(code);
-}
-
-function startTurn(text) {
-  const prompt = String(text || '').trim();
-  if (!prompt) {
-    promptUser();
-    return;
-  }
-  if (!resumed) {
-    process.stdout.write('SoloMap: continuation session is still attaching. Try again in a moment.\\n');
-    return;
-  }
-  if (pending) {
-    process.stdout.write('\\nSoloMap: assistant is still responding. Wait for the current turn to finish.\\n');
-    promptUser();
-    return;
-  }
-  pending = true;
-  assistantStarted = false;
-  send({
-    method: 'turn/start',
-    id: Date.now(),
-    params: {
-      threadId: resumedThreadId,
-      input: [{ type: 'text', text: prompt }],
-      ...(selectedModel ? { model: selectedModel } : {})
-    }
-  });
-}
-
-terminal.on('line', (line) => {
-  const text = String(line || '').trim();
-  if (!text) {
-    promptUser();
-    return;
-  }
-  if (/^(exit|quit)$/i.test(text)) {
-    shutdown(0);
-    return;
-  }
-  process.stdout.write('\\\\nYou> ' + text + '\\\\n');
-  startTurn(text);
-});
-
-terminal.on('SIGINT', () => {
-  process.stdout.write('\\nUse exit to finish this continuation session.\\n');
-  promptUser();
-});
-
-proc.stderr.on('data', (chunk) => {
-  process.stderr.write(chunk);
-});
-
-proc.on('error', (error) => {
-  fail(error instanceof Error ? error.message : String(error));
-});
-
-proc.on('exit', (code) => {
-  if (!finished) {
-    fail(lastError || 'Codex app-server exited before the continuation session finished.', Number(code || 1));
-  }
-});
-
-protocol.on('line', (line) => {
-  let msg;
-  try {
-    msg = JSON.parse(line);
-  } catch {
-    process.stderr.write(line + '\\n');
-    return;
-  }
-  if (msg.error) {
-    lastError = String(msg.error.message || 'Unknown Codex app-server error');
-    fail(lastError, 1);
-    return;
-  }
-  if (msg.id === 1 && msg.result && msg.result.thread) {
-    resumedThreadId = String(msg.result.thread.id || threadId);
-    resumed = true;
-    writeSession(msg.result.thread);
-    process.stdout.write('SoloMap continuation attached. Type your next message and press Enter. Type exit to finish.\\n');
-    promptUser();
-    return;
-  }
-  if (msg.method === 'item/agentMessage/delta') {
-    const delta = String(msg.params?.delta || '');
-    if (!assistantStarted) {
-      assistantStarted = true;
-      process.stdout.write('\\nAgent> ');
-    }
-    process.stdout.write(delta);
-    return;
-  }
-  if (msg.method === 'item/completed' && msg.params?.item?.type === 'agentMessage') {
-    const text = String(msg.params.item.text || '');
-    if (text && !assistantStarted) {
-      assistantStarted = true;
-      process.stdout.write('\\nAgent> ' + text);
-    }
-    return;
-  }
-  if (msg.method === 'turn/completed') {
-    const status = String(msg.params?.turn?.status || '').toLowerCase();
-    if (assistantStarted) {
-      process.stdout.write('\\n');
-    }
-    pending = false;
-    assistantStarted = false;
-    if (status !== 'completed') {
-      fail('Codex turn did not complete successfully: ' + status, 1);
-      return;
-    }
-    promptUser();
   }
 });
 
@@ -11627,11 +11426,6 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
 
   if (supportsSdkContinuation(agentCli)) {
     const settings = getPersistedSettings(context);
-    const sessionId = extractNativeSessionIdFromExecutionOutput(conversation.output || '');
-    if (!sessionId) {
-      vscode.window.showInformationMessage('No native Agent session ID was recorded for this conversation.');
-      return;
-    }
     if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
       const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
       if (currentNode && currentNode.status !== 'Completed') {
@@ -11657,11 +11451,8 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     );
     const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
     const statusFilePath = getAgentStatusFilePath(activeProjectRoot, executionLogId);
-    const sessionFilePath = path.join(runDir, 'session.json');
-    const runnerFilePath = path.join(runDir, 'run-codex-interactive-continuation.cjs');
     fs.mkdirSync(runDir, { recursive: true });
-    buildCodexInteractiveContinuationRunnerScript(runnerFilePath, activeProjectRoot, sessionId, sessionFilePath, '');
-    const directExecutionCommand = `${shellQuote(process.execPath)} ${shellQuote(runnerFilePath)}`;
+    const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot);
     const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
     syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
     postNodeConversations(nodeId);
