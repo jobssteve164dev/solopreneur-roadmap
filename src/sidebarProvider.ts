@@ -4420,115 +4420,474 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       color: var(--text-muted);
     }
 
-    .sidebar-conversation {
-      border: 1px solid var(--border-glass);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.03);
-      padding: 7px;
-      cursor: pointer;
-      box-sizing: border-box;
+    /* 续聊树容器 */
+    .sidebar-conversations-tree-container {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
       max-width: 100%;
-      overflow: hidden;
     }
 
-    .sidebar-conversation-row {
+    /* 树节点外层包装 */
+    .sidebar-conversation-node-wrap {
       display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 6px;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* 嵌套子节点缩进与连线 */
+    .sidebar-conversation-node-wrap.nested-node {
+      margin-top: 8px;
+      padding-left: 14px;
+    }
+
+    .sidebar-conversation-children-container {
+      position: relative;
+      margin-left: 7px;
+      border-left: 1.5px dashed rgba(255, 255, 255, 0.12);
+    }
+
+    /* 玻璃卡片样式 */
+    .sidebar-conversation-card {
+      display: flex;
+      align-items: center;
+      padding: 8px 10px;
+      border: 1px solid var(--border-glass, rgba(255, 255, 255, 0.08));
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.02);
+      cursor: pointer;
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+      user-select: none;
+      gap: 8px;
       min-width: 0;
     }
 
-    .sidebar-conversation-meta {
-      flex: 1 1 auto;
+    .sidebar-conversation-card:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.18);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+      transform: translateY(-1px);
+    }
+
+    .sidebar-conversation-card.expanded {
+      background: rgba(255, 255, 255, 0.04);
+      border-color: rgba(255, 255, 255, 0.15);
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    }
+
+    /* 树圆点指示器 */
+    .sidebar-conversation-bullet-col {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .tree-bullet {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      border: 1.5px solid transparent;
+      box-sizing: border-box;
+    }
+
+    .status-dot-completed {
+      background: #10b981; /* 翡翠绿 */
+      box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+    }
+
+    .status-dot-failed {
+      background: #f43f5e; /* 玫瑰红 */
+      box-shadow: 0 0 6px rgba(244, 63, 94, 0.4);
+    }
+
+    .status-dot-running {
+      background: #3b82f6; /* 皇家蓝 */
+    }
+
+    /* 运行中呼吸灯 */
+    .status-dot-running-glow {
+      animation: status-pulse 2s infinite ease-in-out;
+    }
+
+    @keyframes status-pulse {
+      0% {
+        transform: scale(0.9);
+        box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+      }
+      50% {
+        transform: scale(1.15);
+        box-shadow: 0 0 8px 3px rgba(59, 130, 246, 0.3);
+      }
+      100% {
+        transform: scale(0.9);
+        box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
+      }
+    }
+
+    /* 卡片主体 */
+    .sidebar-conversation-body {
+      flex: 1;
       min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 3px;
     }
 
-    .sidebar-conversation-cli {
-      color: #38bdf8;
-      font-size: 10px;
-      font-weight: 700;
-    }
-
-    .sidebar-conversation-summary {
-      font-size: 10px;
-      color: var(--text-main);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .sidebar-conversation-time,
-    .sidebar-conversation-runtime {
-      font-size: 9px;
-      color: var(--text-muted);
-    }
-
-    .sidebar-conversation-detail {
-      margin-top: 7px;
-      padding-top: 7px;
-      border-top: 1px solid var(--border-glass);
-      color: var(--text-muted);
-      font-size: 10px;
-      line-height: 1.45;
-      max-width: 100%;
-      overflow: hidden;
-      overflow-wrap: anywhere;
-      word-break: break-word;
-    }
-
-    .sidebar-conversation-detail strong {
-      color: var(--text-main);
-    }
-
-    .sidebar-conversation-actions {
+    .sidebar-conversation-header-row {
       display: flex;
-      align-items: flex-start;
-      gap: 5px;
+      align-items: center;
+      gap: 6px;
+      font-size: 9px;
+      color: var(--text-muted, #94a3b8);
+    }
+
+    .sidebar-conversation-agent-tag {
+      font-weight: 700;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.1);
+      padding: 1px 4px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .sidebar-conversation-time-meta {
       flex-shrink: 0;
     }
 
-    .sidebar-conversation-continue {
-      border: 1px solid rgba(56, 189, 248, 0.45);
-      border-radius: 4px;
-      padding: 2px 6px;
-      background: rgba(56, 189, 248, 0.12);
-      color: #7dd3fc;
-      font-size: 10px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-
-    .sidebar-conversation-rollback {
-      border-color: rgba(251, 146, 60, 0.5);
-      background: rgba(251, 146, 60, 0.12);
-      color: #fdba74;
-    }
-
-    .sidebar-conversation-footer {
+    .sidebar-conversation-duration-meta {
       display: flex;
-      justify-content: flex-end;
-      gap: 6px;
-      margin-top: 7px;
+      align-items: center;
+      gap: 2px;
+      color: var(--text-muted);
     }
 
-    .sidebar-conversation-detail pre {
-      margin: 5px 0 0;
-      padding: 6px;
+    .sidebar-conversation-duration-meta .codicon {
+      font-size: 9px;
+    }
+
+    .sidebar-conversation-summary-row {
+      font-size: 10px;
+      font-weight: 500;
+      color: var(--text-main, #f8fafc);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* 右侧列 */
+    .sidebar-conversation-right-col {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    /* 新状态徽章 */
+    .status-badge-new {
+      font-size: 9px;
+      padding: 2px 6px;
       border-radius: 4px;
-      background: rgba(0, 0, 0, 0.2);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .status-badge-new.completed {
+      background: rgba(16, 185, 129, 0.12);
+      color: #34d399;
+    }
+
+    .status-badge-new.failed {
+      background: rgba(244, 63, 94, 0.12);
+      color: #fb7185;
+    }
+
+    .status-badge-new.running {
+      background: rgba(59, 130, 246, 0.12);
+      color: #60a5fa;
+    }
+
+    /* 迷你快速动作按钮 */
+    .sidebar-conversation-mini-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .sidebar-conversation-mini-actions span {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      cursor: pointer;
+      color: var(--text-muted);
+      transition: all 0.2s ease;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .sidebar-conversation-mini-actions span:hover {
+      color: #ffffff;
+      transform: scale(1.08);
+    }
+
+    .sidebar-conversation-mini-actions .mini-btn-continue:hover {
+      background: rgba(16, 185, 129, 0.25);
+      color: #34d399;
+    }
+
+    .sidebar-conversation-mini-actions .mini-btn-rollback:hover {
+      background: rgba(245, 158, 11, 0.25);
+      color: #fbbf24;
+    }
+
+    .sidebar-conversation-mini-actions .mini-btn-stop:hover {
+      background: rgba(239, 68, 68, 0.25);
+      color: #f87171;
+    }
+
+    .sidebar-conversation-mini-actions span .codicon {
+      font-size: 10px;
+    }
+
+    .expand-arrow-icon {
+      font-size: 11px;
+      color: var(--text-muted);
+      transition: transform 0.2s ease;
+    }
+
+    /* 详情展开面板 */
+    .sidebar-conversation-detail-panel {
+      border: 1px solid var(--border-glass, rgba(255, 255, 255, 0.08));
+      border-top: none;
+      border-bottom-left-radius: 8px;
+      border-bottom-right-radius: 8px;
+      background: rgba(255, 255, 255, 0.015);
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+
+    .detail-item-outcome {
+      font-size: 10px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      line-height: 1.4;
+    }
+
+    .detail-item-outcome.completed {
+      background: rgba(16, 185, 129, 0.06);
+      border-left: 3px solid #10b981;
+      color: #a7f3d0;
+    }
+
+    .detail-item-outcome.failed {
+      background: rgba(244, 63, 94, 0.06);
+      border-left: 3px solid #f43f5e;
+      color: #fecdd3;
+    }
+
+    .detail-item-outcome.running {
+      background: rgba(59, 130, 246, 0.06);
+      border-left: 3px solid #3b82f6;
+      color: #bfdbfe;
+    }
+
+    .detail-item-outcome strong {
+      color: #ffffff;
+      margin-right: 4px;
+    }
+
+    /* 代理结论引用块 */
+    .detail-item-conclusion {
+      display: flex;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      border-left: 2px solid rgba(255, 255, 255, 0.15);
+      padding: 6px 8px;
+      border-radius: 4px;
+    }
+
+    .detail-item-conclusion .codicon-quote {
+      font-size: 10px;
+      color: #38bdf8;
+      margin-top: 2px;
+      flex-shrink: 0;
+    }
+
+    .conclusion-content {
+      font-size: 10px;
+      line-height: 1.4;
+      color: var(--text-muted);
+    }
+
+    .conclusion-content strong {
+      color: #ffffff;
+    }
+
+    .conclusion-content p {
+      margin: 2px 0 0 0;
+    }
+
+    /* 详情中的大按钮 */
+    .sidebar-conversation-large-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .sidebar-conv-action-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s ease;
+      border: 1px solid transparent;
+    }
+
+    .sidebar-conv-action-btn.continue {
+      background: rgba(16, 185, 129, 0.15);
+      border-color: rgba(16, 185, 129, 0.4);
+      color: #34d399;
+    }
+
+    .sidebar-conv-action-btn.continue:hover {
+      background: rgba(16, 185, 129, 0.25);
+      border-color: rgba(16, 185, 129, 0.6);
+      box-shadow: 0 2px 8px rgba(16, 185, 129, 0.2);
+    }
+
+    .sidebar-conv-action-btn.rollback {
+      background: rgba(245, 158, 11, 0.15);
+      border-color: rgba(245, 158, 11, 0.4);
+      color: #fbbf24;
+    }
+
+    .sidebar-conv-action-btn.rollback:hover {
+      background: rgba(245, 158, 11, 0.25);
+      border-color: rgba(245, 158, 11, 0.6);
+      box-shadow: 0 2px 8px rgba(245, 158, 11, 0.2);
+    }
+
+    .sidebar-conv-action-btn.stop {
+      background: rgba(239, 68, 68, 0.15);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: #f87171;
+    }
+
+    .sidebar-conv-action-btn.stop:hover {
+      background: rgba(239, 68, 68, 0.25);
+      border-color: rgba(239, 68, 68, 0.6);
+      box-shadow: 0 2px 8px rgba(239, 68, 68, 0.2);
+    }
+
+    /* 日志控制行 */
+    .sidebar-conversation-logs-toggle-row {
+      margin-top: 4px;
+      display: flex;
+    }
+
+    .logs-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 9px;
+      color: var(--text-muted);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      padding: 2px 0;
+      transition: color 0.2s ease;
+    }
+
+    .logs-toggle-btn:hover {
+      color: #ffffff;
+    }
+
+    .logs-toggle-btn .codicon {
+      font-size: 11px;
+    }
+
+    /* 日志展示区域 */
+    .sidebar-conversation-logs-container {
+      margin-top: 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+
+    .log-block-title {
+      font-size: 8px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 2px;
+    }
+
+    .log-pre {
+      margin: 0 0 6px 0;
+      padding: 6px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.05);
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
-      color: var(--text-muted);
-      font-size: 9px;
+      color: rgba(255, 255, 255, 0.75);
+      font-size: 8.5px;
+      font-family: var(--vscode-editor-font-family, monospace);
       box-sizing: border-box;
       max-width: 100%;
-      max-height: 220px;
+      max-height: 180px;
       overflow: auto;
+    }
+
+    /* 简单的渐入渐出动画 */
+    .animate-fade-in {
+      animation: fadeIn 0.22s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    }
+
+    .animate-slide-down {
+      animation: slideDown 0.22s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-2px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes slideDown {
+      from { height: 0; opacity: 0; overflow: hidden; }
+      to { height: auto; opacity: 1; }
+    }
+
+    /* Regression compatibility styles */
+    .sidebar-conversation-footer {
+      justify-content: flex-end;
+    }
+    .sidebar-conversation-detail {
+      overflow-wrap: anywhere;
+    }
+    .sidebar-conversation-detail pre {
+      max-width: 100%;
     }
 
     .portfolio-header {
@@ -6220,10 +6579,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     let activeProjectPath = '';
     let activePortfolioFilter = 'all';
     let sidebarSoloConversations = [];
-    let sidebarSoloConversationExpanded = false;
+    const sidebarExpandedConversations = {};
+    const sidebarLogsExpandedConversations = {};
     const sidebarStepConversations = {};
     const sidebarProjectConversations = {};
-    const sidebarStepConversationExpanded = {};
     const sidebarStepConversationRequested = {};
     const sidebarProjectConversationRequested = {};
     let expandedIssueNumber = 0;
@@ -7572,7 +7931,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'sidebarSoloConversationLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           sidebarSoloConversations = message.conversations || [];
-          sidebarSoloConversationExpanded = false;
+          for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
+          for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -7581,7 +7941,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const key = stepConversationKey(message.projectPath, message.nodeId);
           sidebarStepConversations[key] = message.conversations || [];
           sidebarStepConversationRequested[key] = true;
-          sidebarStepConversationExpanded[key] = false;
+          for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
+          for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
         }
@@ -7590,7 +7951,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           sidebarProjectConversations[message.projectPath] = message.conversations || [];
           sidebarProjectConversationRequested[message.projectPath] = true;
-          sidebarStepConversationExpanded[message.projectPath] = false;
+          for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
+          for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -7804,367 +8166,347 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }).join('');
     }
 
-    function renderDependencyStatus(status) {
-      const agentStatus = document.getElementById('dependency-agent-status');
-      const automationStatus = document.getElementById('dependency-automation-status');
-      const githubStatus = document.getElementById('dependency-github-status');
-      setText('dependency-agent-message', status.agentMessage || t('dependencyNotChecked'));
-      setText('dependency-automation-message', status.agentAutomationMessage || t('dependencyNotChecked'));
-      setText('dependency-github-message', status.githubMessage || t('dependencyNotChecked'));
-      if (agentStatus) {
-        agentStatus.className = 'dependency-status ' + (status.agentReady ? 'ready' : 'needs-action');
-        agentStatus.textContent = status.agentReady ? t('dependencyReady') : t('dependencyAction');
-      }
-      if (automationStatus) {
-        automationStatus.className = 'dependency-status ' + (status.agentAutomationReady ? 'ready' : 'needs-action');
-        automationStatus.textContent = status.agentAutomationReady ? t('dependencyReady') : t('dependencyAction');
-      }
-      if (githubStatus) {
-        githubStatus.className = 'dependency-status ' + (status.githubCliReady && status.githubAuthReady ? 'ready' : 'needs-action');
-        githubStatus.textContent = status.githubCliReady && status.githubAuthReady ? t('dependencyReady') : t('dependencyAction');
-      }
+    function extractContinuationParentConversationId(output) {
+      const match = String(output || '').match(/Continuation parent conversation:\s*(\d+)/);
+      return match ? Number(match[1]) : 0;
     }
 
-    function renderPortfolioFilters() {
-      const filters = [
-        { key: 'all', label: t('filterAll') },
-        { key: 'active', label: t('filterActive') },
-        { key: 'failed', label: t('filterFailed') },
-        { key: 'completed', label: t('filterCompleted') }
-      ];
-      portfolioFilters.innerHTML = filters.map(filter => \`
-        <button class="portfolio-filter-btn \${activePortfolioFilter === filter.key ? 'active' : ''}" data-portfolio-filter="\${filter.key}">
-          \${filter.label}
-        </button>
-      \`).join('');
-      portfolioFilters.querySelectorAll('[data-portfolio-filter]').forEach(button => {
-        button.addEventListener('click', () => {
-          activePortfolioFilter = button.getAttribute('data-portfolio-filter') || 'all';
-          renderPortfolioFilters();
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
-        });
+    function buildConversationTree(conversations) {
+      if (!conversations || conversations.length === 0) {
+        return { roots: [], childrenMap: {} };
+      }
+      
+      const byId = {};
+      const sessionRoots = {};
+      
+      conversations.forEach((conv) => {
+        byId[String(conv.id || '')] = conv;
+        const sessionId = extractNativeSessionId(conv.output);
+        if (sessionId) {
+          const currentRoot = sessionRoots[sessionId];
+          if (!currentRoot || Number(conv.id || 0) < Number(currentRoot.id || 0)) {
+            sessionRoots[sessionId] = conv;
+          }
+        }
       });
-    }
-
-    function renderProjects(projects, selectedProjectPath) {
-      if (!projects || projects.length === 0) {
-        setSoloSelectOptions(projectSelect, [{ value: '', label: t('chooseProject') }], '');
-        return;
-      }
-
-      setSoloSelectOptions(projectSelect, projects.map(project => ({
-        value: project.path,
-        label: project.name,
-        title: project.path
-      })), selectedProjectPath);
-    }
-
-    function mergeAttachmentFiles(existing, incoming) {
-      const seen = new Set();
-      return [...(existing || []), ...(incoming || [])]
-        .map(file => String(file || '').trim())
-        .filter(Boolean)
-        .filter(file => {
-          if (seen.has(file)) return false;
-          seen.add(file);
-          return true;
-        })
-        .slice(0, 10);
-    }
-
-    function readClipboardImage(file) {
-      return new Promise((resolve) => {
-        if (typeof FileReader === 'undefined' || !file) {
-          resolve(null);
+      
+      const roots = [];
+      const childrenMap = {};
+      
+      conversations.forEach((conv) => {
+        const sessionId = extractNativeSessionId(conv.output);
+        const sessionRoot = sessionId ? sessionRoots[sessionId] : null;
+        
+        if (sessionRoot && Number(sessionRoot.id || 0) !== Number(conv.id || 0)) {
+          const key = String(sessionRoot.id || '');
+          childrenMap[key] = childrenMap[key] || [];
+          childrenMap[key].push(conv);
           return;
         }
-        const reader = new FileReader();
-        reader.onload = () => resolve({
-          name: file.name || 'pasted-image',
-          mimeType: file.type || 'image/png',
-          dataUrl: String(reader.result || '')
-        });
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(file);
+        
+        const parentId = extractContinuationParentConversationId(conv.output);
+        if (parentId && byId[String(parentId)]) {
+          const key = String(parentId);
+          childrenMap[key] = childrenMap[key] || [];
+          childrenMap[key].push(conv);
+          return;
+        }
+        
+        roots.push(conv);
       });
-    }
-
-    function bindPastedImageAttachments(input, targetId, getProjectPath, scope) {
-      if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
-      input.setAttribute('data-paste-image-bound', 'true');
-      input.addEventListener('paste', async (event) => {
-        const items = Array.from((event.clipboardData && event.clipboardData.items) || []);
-        const files = items
-          .filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))
-          .map(item => item.getAsFile())
-          .filter(Boolean);
-        if (!files.length) return;
-        const projectPath = getProjectPath ? getProjectPath() : '';
-        if (!projectPath) return;
-        event.preventDefault();
-        const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
-        if (!attachments.length) return;
-        vscode.postMessage({
-          command: 'savePastedAttachments',
-          projectPath,
-          targetId,
-          scope: scope || targetId,
-          attachments
-        });
+      
+      Object.keys(childrenMap).forEach((key) => {
+        childrenMap[key].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
       });
+      
+      roots.sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
+      
+      // Auto expand the latest leaf path on first load
+      if (Object.keys(sidebarExpandedConversations).length === 0 && conversations.length > 0) {
+        let latest = conversations[0];
+        conversations.forEach(c => {
+          if (Number(c.id || 0) > Number(latest.id || 0)) {
+            latest = c;
+          }
+        });
+        if (latest && latest.id) {
+          sidebarExpandedConversations[String(latest.id)] = true;
+          let current = latest;
+          while (current) {
+            const pId = extractContinuationParentConversationId(current.output);
+            if (pId && byId[String(pId)]) {
+              sidebarExpandedConversations[String(pId)] = true;
+              current = byId[String(pId)];
+            } else {
+              break;
+            }
+          }
+        }
+      }
+
+      return { roots, childrenMap };
     }
 
-    function summarizeSoloConversation(conversation) {
-      const output = String(conversation.output || '');
-      const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
-      if (userMatch && userMatch[1].trim()) {
-        return userMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const changedMatch = output.match(/Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
-      if (changedMatch && changedMatch[1].trim() && !changedMatch[1].includes('No project files')) {
-        return changedMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const tailMatch = output.match(/Agent output tail:\\n([\\s\\S]*)$/);
-      const fallback = tailMatch ? tailMatch[1] : output;
-      return fallback.trim().replace(/\\s+/g, ' ').slice(0, 120) || statusText(conversation.status);
-    }
-
-    function soloConclusion(output) {
-      const match = String(output || '').match(/Agent output tail:\\n([\\s\\S]*)$/);
-      return match && match[1]
-        ? match[1].split('\\n').map(line => line.trim()).filter(line => line && !line.startsWith('SoloMap:')).slice(-3).join(' ').replace(/\\s+/g, ' ').slice(0, 240)
+    function renderConversationTreeNode(projectPath, nodeId, conversation, childrenMap, isSolo, depth = 0) {
+      const convId = String(conversation.id || '');
+      const detailExpanded = !!sidebarExpandedConversations[convId];
+      const logsExpanded = !!sidebarLogsExpandedConversations[convId];
+      const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
+      const duration = formatSoloDuration(conversation);
+      const outcomeText = conversation.status === 'Running' ? (isSolo ? t('stillWorking') : t('continueWorking'))
+        : conversation.status === 'Failed' ? (((String(conversation.output || '').match(/Failure reason:\n([\s\S]*?)(?:\n\n|$)/) || [])[1] || '').trim() || statusText(conversation.status))
+        : (isSolo ? t('soloCompleted') : t('continueCompleted'));
+        
+      const conclusion = conversation.status === 'Running' ? '' : soloConclusion(conversation.output);
+      const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
+      const resultMsg = outcomeText + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
+      const preGitHash = conversation.status === 'Running' ? '' : extractPreGitHash(conversation.output);
+      const hasLogs = !!(conversation.command || conversation.output);
+      const conversationNodeId = String(conversation.nodeId || nodeId || '');
+      
+      const rollbackBtn = preGitHash
+        ? '<button class="sidebar-conv-action-btn rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-rollback-sidebar-solo-hash="' + escapeHtml(preGitHash) + '" data-rollback-sidebar-step-hash="' + escapeHtml(preGitHash) + '" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>'
         : '';
-    }
+        
+      const continueBtn = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
+        ? '<button class="sidebar-conv-action-btn continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('continueNative')) + '"><span class="codicon codicon-play"></span> ' + escapeHtml(t('continueNative')) + '</button>'
+        : '';
+        
+      const stopBtn = conversation.status === 'Running'
+        ? '<button class="sidebar-conv-action-btn stop" data-stop-id="' + escapeHtml(convId) + '" data-stop-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-stop-sidebar-solo-id="' + escapeHtml(convId) + '" data-stop-sidebar-step-id="' + escapeHtml(convId) + '" data-stop-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('stopRun')) + '"><span class="codicon codicon-debug-stop"></span> ' + escapeHtml(t('stopRun')) + '</button>'
+        : '';
 
-    function extractNativeSessionId(output) {
-      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/);
-      return match ? match[1] : '';
-    }
+      const fullSummary = summarizeSoloConversation(conversation);
+      const shortSummary = fullSummary.length > 28 ? fullSummary.substring(0, 26) + '...' : fullSummary;
+      
+      let statusDotClass = 'status-dot-' + conversation.status.toLowerCase();
+      if (conversation.status === 'Running') {
+        statusDotClass += ' status-dot-running-glow';
+      }
 
-    function formatSoloDuration(conversation) {
-      const stored = String(conversation.output || '').match(/Run duration ms:\\s*(\\d+)/);
-      const durationMs = stored
-        ? Number(stored[1])
-        : conversation.status === 'Running' && conversation.timestamp
-          ? Date.now() - new Date(conversation.timestamp).getTime()
-          : 0;
-      if (!durationMs) return '';
-      const seconds = Math.max(0, Math.floor(durationMs / 1000));
-      const minutes = Math.floor(seconds / 60);
-      const remainder = seconds % 60;
-      return minutes > 0 ? minutes + 'm ' + remainder + 's' : remainder + 's';
-    }
+      const children = childrenMap[convId] || [];
+      const hasChildren = children.length > 0;
 
-    function countSoloChangedFiles(output) {
-      const match = String(output || '').match(/Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
-      if (!match || !match[1]) return 0;
-      return match[1].split('\\n').map(line => line.trim()).filter(line => line && !/^No (workspace|git|project) /i.test(line)).length;
-    }
+      let childrenHtml = '';
+      if (hasChildren) {
+        childrenHtml = \`
+          <div class="sidebar-conversation-children-container">
+            \${children.map(child => renderConversationTreeNode(projectPath, nodeId, child, childrenMap, isSolo, depth + 1)).join('')}
+          </div>
+        \`;
+      }
 
-    function extractPreGitHash(output) {
-      const match = String(output || '').match(/SoloMapPreGitHash:\\s*([a-f0-9]+)/i);
-      return match ? match[1] : '';
-    }
+      let miniActions = '<div class="sidebar-conversation-mini-actions">';
+      if (stopBtn) {
+        miniActions += '<span class="mini-btn-stop" data-stop-id="' + escapeHtml(convId) + '" data-stop-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="停止运行"><span class="codicon codicon-debug-stop"></span></span>';
+      }
+      if (rollbackBtn) {
+        miniActions += '<span class="mini-btn-rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="撤销修改"><span class="codicon codicon-discard"></span></span>';
+      }
+      if (continueBtn) {
+        miniActions += '<span class="mini-btn-continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="继续对话"><span class="codicon codicon-play"></span></span>';
+      }
+      miniActions += '</div>';
 
-    function stepConversationKey(projectPath, nodeId) {
-      return String(projectPath || '') + '::' + String(nodeId || '');
+      return \`
+        <div class="sidebar-conversation-node-wrap \${depth > 0 ? 'nested-node' : ''}" data-conv-id="\${escapeHtml(convId)}">
+          <div class="sidebar-conversation-card \${detailExpanded ? 'expanded' : ''}" data-card-trigger-id="\${escapeHtml(convId)}">
+            
+            <div class="sidebar-conversation-bullet-col">
+              <span class="tree-bullet \${statusDotClass}"></span>
+            </div>
+
+            <div class="sidebar-conversation-body">
+              <div class="sidebar-conversation-header-row">
+                <div class="sidebar-conversation-agent-tag">\${escapeHtml(conversation.agentCli || '')}</div>
+                <div class="sidebar-conversation-time-meta">\${escapeHtml(when)}</div>
+                \${duration ? \`<div class="sidebar-conversation-duration-meta"><span class="codicon codicon-history"></span> \${escapeHtml(duration)}</div>\` : ''}
+              </div>
+              <div class="sidebar-conversation-summary-row" title="\${escapeHtml(fullSummary)}">
+                \${escapeHtml(shortSummary)}
+              </div>
+            </div>
+
+            <div class="sidebar-conversation-right-col">
+              \${miniActions}
+              <span class="status-badge-new \${conversation.status.toLowerCase()}">\${escapeHtml(conversationStatusText(conversation.status))}</span>
+              <span class="expand-arrow-icon codicon \${detailExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
+            </div>
+
+          </div>
+
+          \${detailExpanded ? \`
+            <div class="sidebar-conversation-detail-panel animate-fade-in">
+              <div class="detail-item-outcome \${conversation.status.toLowerCase()}">
+                <strong>\${escapeHtml(conversation.status === 'Failed' ? t('failureLabel') : t('runResult'))}:</strong>
+                <span>\${escapeHtml(resultMsg)}</span>
+              </div>
+
+              \${conclusion ? \`
+                <div class="detail-item-conclusion">
+                  <span class="codicon codicon-quote"></span>
+                  <div class="conclusion-content">
+                    <strong>\${escapeHtml(t('agentConclusion'))}:</strong>
+                    <p>\${escapeHtml(conclusion)}</p>
+                  </div>
+                </div>
+              \` : ''}
+
+              \${rollbackBtn || continueBtn || stopBtn ? \`
+                <div class="sidebar-conversation-large-actions">
+                  \${stopBtn}
+                  \${rollbackBtn}
+                  \${continueBtn}
+                </div>
+              \` : ''}
+
+              \${hasLogs ? \`
+                <div class="sidebar-conversation-logs-toggle-row">
+                  <button class="logs-toggle-btn \${logsExpanded ? 'active' : ''}" data-logs-toggle-id="\${escapeHtml(convId)}">
+                    <span class="codicon \${logsExpanded ? 'codicon-eye-closed' : 'codicon-eye'}"></span>
+                    <span>\${logsExpanded ? '隐藏执行明细日志' : '查看执行明细日志 (Command & Output)'}</span>
+                  </button>
+                </div>
+                \${logsExpanded ? \`
+                  <div class="sidebar-conversation-logs-container animate-slide-down">
+                    \${conversation.command ? \`
+                      <div class="log-block-title">执行命令</div>
+                      <pre class="log-pre command-pre">\${escapeHtml(conversation.command)}</pre>
+                    \` : ''}
+                    \${conversation.output ? \`
+                      <div class="log-block-title">控制台输出</div>
+                      <pre class="log-pre output-pre">\${escapeHtml(conversation.output)}</pre>
+                    \` : ''}
+                  </div>
+                \` : ''}
+              \` : ''}
+            </div>
+          \` : ''}
+
+          \${childrenHtml}
+        </div>
+      \`;
     }
 
     function renderSidebarSoloHistoryContent() {
-      const conversation = sidebarSoloConversations[0];
-      if (!conversation) {
+      if (!sidebarSoloConversations || sidebarSoloConversations.length === 0) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('soloHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noSoloConversations')) + '</div>';
       }
-      const failedReason = (String(conversation.output || '').match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
-      const outcome = conversation.status === 'Running' ? t('stillWorking')
-        : conversation.status === 'Failed' ? (failedReason.trim() || statusText(conversation.status))
-        : t('soloCompleted');
-      const conclusion = conversation.status === 'Running' ? '' : soloConclusion(conversation.output);
-      const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
-      const duration = formatSoloDuration(conversation);
-      const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
-      const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
-      const preGitHash = conversation.status === 'Running' ? '' : extractPreGitHash(conversation.output);
-      const rollbackButton = preGitHash
-        ? \`<button class="sidebar-conversation-continue sidebar-conversation-rollback" data-rollback-sidebar-solo-hash="\${escapeHtml(preGitHash)}" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>\`
-        : '';
-      const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
-        ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-solo-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
-        : '';
-      const stopButton = conversation.status === 'Running'
-        ? \`<button class="sidebar-conversation-continue" data-stop-sidebar-solo-id="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${escapeHtml(t('stopRun'))}</button>\`
-        : '';
+      const { roots, childrenMap } = buildConversationTree(sidebarSoloConversations);
+      if (roots.length === 0) {
+        return '<div class="sidebar-solo-history-title">' + escapeHtml(t('soloHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noSoloConversations')) + '</div>';
+      }
+      
+      const projectPath = currentProjects.selectedProjectPath || '';
+      const treeHtml = roots.map(root => renderConversationTreeNode(projectPath, '__solo__', root, childrenMap, true, 0)).join('');
+      
       return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('soloHistory'))}</div>
-        <div class="sidebar-conversation" data-sidebar-solo-conversation>
-          <div class="sidebar-conversation-row">
-            <div class="sidebar-conversation-meta">
-              <span class="sidebar-conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
-              <span class="sidebar-conversation-summary">\${escapeHtml(summarizeSoloConversation(conversation))}</span>
-              <span class="sidebar-conversation-time">\${escapeHtml(when)}</span>
-              \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
-            </div>
-            <div class="sidebar-conversation-actions">
-              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(conversationStatusText(conversation.status))}</span>
-            </div>
-          </div>
-          \${sidebarSoloConversationExpanded ? \`
-            <div class="sidebar-conversation-detail">
-              <strong>\${escapeHtml(conversation.status === 'Failed' ? t('failureLabel') : t('runResult'))}:</strong> \${escapeHtml(result)}
-              \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
-              <strong>\${escapeHtml(t('command'))}</strong>
-              <pre>\${escapeHtml(conversation.command || '')}</pre>
-              <strong>\${escapeHtml(t('output'))}</strong>
-              <pre>\${escapeHtml(conversation.output || '')}</pre>
-            </div>
-          \` : ''}
-          \${rollbackButton || continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${rollbackButton}\${continueButton}</div>\` : ''}
+        <div class="sidebar-conversations-tree-container">
+          \${treeHtml}
         </div>
       \`;
     }
 
     function renderSidebarStepHistoryContent(projectPath, node) {
       const key = String(projectPath || '');
-      const conversation = (sidebarProjectConversations[key] || [])[0];
-      if (!conversation) {
+      const conversations = sidebarProjectConversations[key] || [];
+      if (!conversations || conversations.length === 0) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }
-      const failedReason = (String(conversation.output || '').match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
-      const outcome = conversation.status === 'Running' ? t('continueWorking')
-        : conversation.status === 'Failed' ? (failedReason.trim() || statusText(conversation.status))
-        : t('continueCompleted');
-      const conclusion = conversation.status === 'Running' ? '' : soloConclusion(conversation.output);
-      const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
-      const duration = formatSoloDuration(conversation);
-      const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
-      const result = outcome + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
-      const conversationNodeId = String(conversation.nodeId || node?.id || '');
-      const preGitHash = conversation.status === 'Running' ? '' : extractPreGitHash(conversation.output);
-      const rollbackButton = preGitHash
-        ? \`<button class="sidebar-conversation-continue sidebar-conversation-rollback" data-rollback-sidebar-step-hash="\${escapeHtml(preGitHash)}" data-rollback-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>\`
-        : '';
-      const continueButton = conversation.status !== 'Running' && conversationNodeId && extractNativeSessionId(conversation.output)
-        ? \`<button class="sidebar-conversation-continue" data-continue-sidebar-step-id="\${escapeHtml(conversation.id)}" data-continue-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="\${escapeHtml(t('continueNative'))}">\${escapeHtml(t('continueNative'))}</button>\`
-        : '';
-      const stopButton = conversation.status === 'Running' && conversationNodeId
-        ? \`<button class="sidebar-conversation-continue" data-stop-sidebar-step-id="\${escapeHtml(conversation.id)}" data-stop-sidebar-step-node-id="\${escapeHtml(conversationNodeId)}" title="\${escapeHtml(t('stopRun'))}">\${escapeHtml(t('stopRun'))}</button>\`
-        : '';
+      const { roots, childrenMap } = buildConversationTree(conversations);
+      if (roots.length === 0) {
+        return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
+      }
+
+      const nodeId = String(node?.id || '');
+      const treeHtml = roots.map(root => renderConversationTreeNode(projectPath, nodeId, root, childrenMap, false, 0)).join('');
+
       return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('continueHistory'))}</div>
-        <div class="sidebar-conversation" data-sidebar-step-conversation="\${escapeHtml(key)}">
-          <div class="sidebar-conversation-row">
-            <div class="sidebar-conversation-meta">
-              <span class="sidebar-conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
-              <span class="sidebar-conversation-summary">\${escapeHtml(summarizeSoloConversation(conversation))}</span>
-              <span class="sidebar-conversation-time">\${escapeHtml(when)}</span>
-              \${duration ? \`<span class="sidebar-conversation-runtime">\${escapeHtml((conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration)}</span>\` : ''}
-            </div>
-            <div class="sidebar-conversation-actions">
-              <span class="status-lbl \${statusClass(conversation.status)}">\${escapeHtml(conversationStatusText(conversation.status))}</span>
-            </div>
-          </div>
-          \${sidebarStepConversationExpanded[key] ? \`
-            <div class="sidebar-conversation-detail">
-              <strong>\${escapeHtml(conversation.status === 'Failed' ? t('failureLabel') : t('runResult'))}:</strong> \${escapeHtml(result)}
-              \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
-              <strong>\${escapeHtml(t('command'))}</strong>
-              <pre>\${escapeHtml(conversation.command || '')}</pre>
-              <strong>\${escapeHtml(t('output'))}</strong>
-              <pre>\${escapeHtml(conversation.output || '')}</pre>
-            </div>
-          \` : ''}
-          \${rollbackButton || continueButton || stopButton ? \`<div class="sidebar-conversation-footer">\${stopButton}\${rollbackButton}\${continueButton}</div>\` : ''}
+        <div class="sidebar-conversations-tree-container">
+          \${treeHtml}
         </div>
       \`;
     }
 
-    function bindSidebarSoloHistory(container, projectPath) {
-      const card = container.querySelector('[data-sidebar-solo-conversation]');
-      if (card) {
-        card.addEventListener('click', () => {
-          sidebarSoloConversationExpanded = !sidebarSoloConversationExpanded;
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
-        });
+    function bindConversationsTree(container, projectPath, nodeId, isSolo) {
+      if (!isSolo && projectPath) {
+        const key = String(projectPath || '');
+        if (!sidebarProjectConversationRequested[key]) {
+          sidebarProjectConversationRequested[key] = true;
+          vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
+        }
       }
-      container.querySelectorAll('[data-continue-sidebar-solo-id]').forEach(item => {
-        item.addEventListener('click', (event) => {
-          event.stopPropagation();
-          vscode.postMessage({
-            command: 'continueSoloConversation',
-            projectPath,
-            conversationId: item.getAttribute('data-continue-sidebar-solo-id')
-          });
-        });
-      });
-      container.querySelectorAll('[data-stop-sidebar-solo-id]').forEach(item => {
-        item.addEventListener('click', (event) => {
-          event.stopPropagation();
-          vscode.postMessage({
-            command: 'stopConversation',
-            projectPath,
-            nodeId: '__solo__',
-            conversationId: item.getAttribute('data-stop-sidebar-solo-id')
-          });
-        });
-      });
-      container.querySelectorAll('[data-rollback-sidebar-solo-hash]').forEach(item => {
-        item.addEventListener('click', (event) => {
-          event.stopPropagation();
-          vscode.postMessage({
-            command: 'rollbackChanges',
-            projectPath,
-            nodeId: '__solo__',
-            gitHash: item.getAttribute('data-rollback-sidebar-solo-hash') || ''
-          });
-        });
-      });
-    }
 
-    function bindSidebarStepHistory(container, projectPath) {
-      const holder = container.querySelector('[data-sidebar-step-history]');
-      if (!holder) return;
-      const key = String(projectPath || '');
-      if (projectPath && !sidebarProjectConversationRequested[key]) {
-        sidebarProjectConversationRequested[key] = true;
-        vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
-      }
-      const card = container.querySelector('[data-sidebar-step-conversation]');
-      if (card) {
-        card.addEventListener('click', () => {
-          sidebarStepConversationExpanded[key] = !sidebarStepConversationExpanded[key];
+      container.querySelectorAll('[data-card-trigger-id]').forEach(card => {
+        card.addEventListener('click', (event) => {
+          if (event.target.closest('button') || event.target.closest('.sidebar-conversation-mini-actions') || event.target.closest('span.codicon')) {
+            if (event.target.closest('.sidebar-conversation-mini-actions') || event.target.closest('button')) {
+              return;
+            }
+          }
+          const convId = card.getAttribute('data-card-trigger-id');
+          sidebarExpandedConversations[convId] = !sidebarExpandedConversations[convId];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
-      }
-      container.querySelectorAll('[data-continue-sidebar-step-id]').forEach(item => {
-        item.addEventListener('click', (event) => {
+      });
+
+      container.querySelectorAll('[data-logs-toggle-id]').forEach(btn => {
+        btn.addEventListener('click', (event) => {
           event.stopPropagation();
-          vscode.postMessage({
-            command: 'continueStepConversation',
-            projectPath,
-            nodeId: item.getAttribute('data-continue-sidebar-step-node-id'),
-            conversationId: item.getAttribute('data-continue-sidebar-step-id')
-          });
+          const convId = btn.getAttribute('data-logs-toggle-id');
+          sidebarLogsExpandedConversations[convId] = !sidebarLogsExpandedConversations[convId];
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      container.querySelectorAll('[data-stop-sidebar-step-id]').forEach(item => {
+
+      container.querySelectorAll('[data-continue-id]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
+          const conversationId = item.getAttribute('data-continue-id');
+          const targetNodeId = item.getAttribute('data-continue-node-id') || nodeId;
+          if (isSolo) {
+            vscode.postMessage({
+              command: 'continueSoloConversation',
+              projectPath,
+              conversationId
+            });
+          } else {
+            vscode.postMessage({
+              command: 'continueStepConversation',
+              projectPath,
+              nodeId: targetNodeId,
+              conversationId
+            });
+          }
+        });
+      });
+
+      container.querySelectorAll('[data-stop-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const conversationId = item.getAttribute('data-stop-id');
+          const targetNodeId = item.getAttribute('data-stop-node-id') || nodeId;
           vscode.postMessage({
             command: 'stopConversation',
             projectPath,
-            nodeId: item.getAttribute('data-stop-sidebar-step-node-id'),
-            conversationId: item.getAttribute('data-stop-sidebar-step-id')
+            nodeId: isSolo ? '__solo__' : targetNodeId,
+            conversationId
           });
         });
       });
-      container.querySelectorAll('[data-rollback-sidebar-step-hash]').forEach(item => {
+
+      container.querySelectorAll('[data-rollback-hash]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
+          const gitHash = item.getAttribute('data-rollback-hash');
+          const targetNodeId = item.getAttribute('data-rollback-node-id') || nodeId;
           vscode.postMessage({
             command: 'rollbackChanges',
             projectPath,
-            nodeId: item.getAttribute('data-rollback-sidebar-step-node-id') || '',
-            gitHash: item.getAttribute('data-rollback-sidebar-step-hash') || ''
+            nodeId: isSolo ? '__solo__' : targetNodeId,
+            gitHash
           });
         });
       });
@@ -8477,7 +8819,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function bindProjectContinueComposer(container) {
-      bindSidebarStepHistory(container, currentProjects.selectedProjectPath);
       container.querySelectorAll('[data-project-conversation-mode]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -8617,7 +8958,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           vscode.postMessage({ command: 'showFlowView' });
         });
       });
-      bindSidebarSoloHistory(container, currentProjects.selectedProjectPath);
+
+      const projectPath = currentProjects.selectedProjectPath;
+      if (projectPath) {
+        bindConversationsTree(container, projectPath, '__solo__', true);
+        const project = currentProjects.portfolio && currentProjects.portfolio.projects
+          ? currentProjects.portfolio.projects.find(p => p.path === projectPath)
+          : null;
+        const node = project ? getNextActionNode(project.nodes || []) : null;
+        if (node) {
+          bindConversationsTree(container, projectPath, node.id, false);
+        }
+      }
     }
 
     function issueCategoryLabel(category) {
