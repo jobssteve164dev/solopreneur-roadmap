@@ -720,7 +720,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     }]
   });
   assert.match(elements['portfolio-list'].innerHTML, /收尾另一个环节/);
-  assert.match(elements['portfolio-list'].innerHTML, /data-sidebar-step-conversation/);
+  assert.match(elements['portfolio-list'].innerHTML, /sidebar-conversation-latest-container/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /sidebar-conversations-tree-container/);
   assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-id="8"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-node-id="another-step"/);
   dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: 'step-1', files: ['docs/brief.md'] });
@@ -1084,6 +1085,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /sidebarProjectConversationLoaded/);
   assert.match(html, /renderSidebarSoloHistoryContent/);
   assert.match(html, /renderSidebarStepHistoryContent/);
+  assert.match(html, /function conversationStatusKey\(status\)/);
+  assert.match(html, /renderSidebarConversationCard/);
+  assert.doesNotMatch(html, /function buildConversationTree\(conversations\)/);
+  assert.doesNotMatch(html, /sidebar-conversations-tree-container/);
+  assert.doesNotMatch(html, /conversation\.status\.toLowerCase\(\)/);
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
   assert.match(html, /data-stop-sidebar-solo-id/);

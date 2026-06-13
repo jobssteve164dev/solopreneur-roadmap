@@ -4420,8 +4420,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       color: var(--text-muted);
     }
 
-    /* 续聊树容器 */
-    .sidebar-conversations-tree-container {
+    .sidebar-conversation-latest-container {
       margin-top: 8px;
       display: flex;
       flex-direction: column;
@@ -4429,26 +4428,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       max-width: 100%;
     }
 
-    /* 树节点外层包装 */
     .sidebar-conversation-node-wrap {
       display: flex;
       flex-direction: column;
       position: relative;
     }
 
-    /* 嵌套子节点缩进与连线 */
-    .sidebar-conversation-node-wrap.nested-node {
-      margin-top: 8px;
-      padding-left: 14px;
-    }
-
-    .sidebar-conversation-children-container {
-      position: relative;
-      margin-left: 7px;
-      border-left: 1.5px dashed rgba(255, 255, 255, 0.12);
-    }
-
-    /* 玻璃卡片样式 */
     .sidebar-conversation-card {
       display: flex;
       align-items: center;
@@ -7185,6 +7170,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return statusText(status);
     }
 
+    function conversationStatusKey(status) {
+      const value = String(status || '').trim();
+      return value || 'Completed';
+    }
+
     function statusClass(status) {
       return String(status || '').replace(/[^a-zA-Z0-9]/g, '-');
     }
@@ -8137,6 +8127,130 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    function readClipboardImage(file) {
+      return new Promise((resolve) => {
+        if (typeof FileReader === 'undefined' || !file) {
+          resolve(null);
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => resolve({
+          name: file.name || 'pasted-image',
+          mimeType: file.type || 'image/png',
+          dataUrl: String(reader.result || '')
+        });
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function bindPastedImageAttachments(input, targetId, getProjectPath, scope) {
+      if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
+      input.setAttribute('data-paste-image-bound', 'true');
+      input.addEventListener('paste', async (event) => {
+        const items = Array.from((event.clipboardData && event.clipboardData.items) || []);
+        const files = items
+          .filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))
+          .map(item => item.getAsFile())
+          .filter(Boolean);
+        if (!files.length) return;
+        event.preventDefault();
+        const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
+        if (!attachments.length) return;
+        vscode.postMessage({
+          command: 'savePastedAttachments',
+          projectPath: typeof getProjectPath === 'function' ? getProjectPath() : currentProjects.selectedProjectPath,
+          targetId,
+          scope: scope || targetId || 'conversation',
+          attachments
+        });
+      });
+    }
+
+    function mergeAttachmentFiles(existing, incoming) {
+      const seen = new Set();
+      return [...(existing || []), ...(incoming || [])]
+        .map(file => String(file || '').trim())
+        .filter(file => {
+          if (!file || seen.has(file)) return false;
+          seen.add(file);
+          return true;
+        });
+    }
+
+    function extractPreGitHash(output) {
+      const match = String(output || '').match(/SoloMapPreGitHash:\\s*([a-f0-9]+)/i);
+      return match ? match[1] : '';
+    }
+
+    function formatDurationMs(durationMs) {
+      if (!Number.isFinite(durationMs) || durationMs < 0) return '';
+      const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+      const minutes = Math.floor(totalSeconds / 60);
+      const remainder = totalSeconds % 60;
+      if (minutes > 0) return minutes + 'm ' + remainder + 's';
+      return remainder + 's';
+    }
+
+    function formatSoloDuration(conversation) {
+      const output = String(conversation.output || '');
+      const storedDuration = output.match(/Run duration ms:\\s*(\\d+)/);
+      if (storedDuration) {
+        return formatDurationMs(Number(storedDuration[1]));
+      }
+      if (conversationStatusKey(conversation.status) !== 'Running' || !conversation.timestamp) {
+        return '';
+      }
+      return formatDurationMs(Date.now() - new Date(conversation.timestamp).getTime());
+    }
+
+    function extractNativeSessionId(output) {
+      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/);
+      return match ? match[1] : '';
+    }
+
+    function soloConclusion(output) {
+      const match = String(output || '').match(/Agent output tail:\\n([\\s\\S]*)$/);
+      if (!match || !match[1]) return '';
+      return match[1]
+        .split('\\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('SoloMap:'))
+        .slice(-3)
+        .join(' ')
+        .replace(/\\s+/g, ' ')
+        .slice(0, 240);
+    }
+
+    function countSoloChangedFiles(output) {
+      const match = String(output || '').match(/Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
+      if (!match || !match[1]) return 0;
+      return match[1]
+        .split('\\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.includes('No project files') && line !== '无')
+        .length;
+    }
+
+    function summarizeSoloConversation(conversation) {
+      const output = String(conversation.output || '');
+      const continuationFirstMessage = output.match(/Continuation first message:\\n([\\s\\S]*?)(\\n\\n|$)/);
+      if (continuationFirstMessage && continuationFirstMessage[1].trim()) {
+        return continuationFirstMessage[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
+      const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(\\n\\n|$)/);
+      if (userMatch && userMatch[1].trim()) {
+        return userMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
+      const changedMatch = output.match(/Touched project files:\\n([\\s\\S]*?)(\\n\\n|$)/);
+      if (changedMatch && changedMatch[1].trim() && !changedMatch[1].includes('No project files')) {
+        return changedMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
+      const tailMatch = output.match(/Agent output tail:\\n([\\s\\S]*)$/);
+      const fallback = tailMatch ? tailMatch[1] : output;
+      return fallback.trim().replace(/\\s+/g, ' ').slice(0, 120) || statusText(conversationStatusKey(conversation.status));
+    }
+
     function renderAgentImpact(status) {
       const impact = status.impact || {};
       setText('impact-minutes', String(impact.totalMinutes || 0));
@@ -8166,101 +8280,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }).join('');
     }
 
-    function extractContinuationParentConversationId(output) {
-      const match = String(output || '').match(/Continuation parent conversation:\s*(\d+)/);
-      return match ? Number(match[1]) : 0;
-    }
-
-    function buildConversationTree(conversations) {
-      if (!conversations || conversations.length === 0) {
-        return { roots: [], childrenMap: {} };
-      }
-      
-      const byId = {};
-      const sessionRoots = {};
-      
-      conversations.forEach((conv) => {
-        byId[String(conv.id || '')] = conv;
-        const sessionId = extractNativeSessionId(conv.output);
-        if (sessionId) {
-          const currentRoot = sessionRoots[sessionId];
-          if (!currentRoot || Number(conv.id || 0) < Number(currentRoot.id || 0)) {
-            sessionRoots[sessionId] = conv;
-          }
-        }
-      });
-      
-      const roots = [];
-      const childrenMap = {};
-      
-      conversations.forEach((conv) => {
-        const sessionId = extractNativeSessionId(conv.output);
-        const sessionRoot = sessionId ? sessionRoots[sessionId] : null;
-        
-        if (sessionRoot && Number(sessionRoot.id || 0) !== Number(conv.id || 0)) {
-          const key = String(sessionRoot.id || '');
-          childrenMap[key] = childrenMap[key] || [];
-          childrenMap[key].push(conv);
-          return;
-        }
-        
-        const parentId = extractContinuationParentConversationId(conv.output);
-        if (parentId && byId[String(parentId)]) {
-          const key = String(parentId);
-          childrenMap[key] = childrenMap[key] || [];
-          childrenMap[key].push(conv);
-          return;
-        }
-        
-        roots.push(conv);
-      });
-      
-      Object.keys(childrenMap).forEach((key) => {
-        childrenMap[key].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
-      });
-      
-      roots.sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
-      
-      // Auto expand the latest leaf path on first load
-      if (Object.keys(sidebarExpandedConversations).length === 0 && conversations.length > 0) {
-        let latest = conversations[0];
-        conversations.forEach(c => {
-          if (Number(c.id || 0) > Number(latest.id || 0)) {
-            latest = c;
-          }
-        });
-        if (latest && latest.id) {
-          sidebarExpandedConversations[String(latest.id)] = true;
-          let current = latest;
-          while (current) {
-            const pId = extractContinuationParentConversationId(current.output);
-            if (pId && byId[String(pId)]) {
-              sidebarExpandedConversations[String(pId)] = true;
-              current = byId[String(pId)];
-            } else {
-              break;
-            }
-          }
-        }
-      }
-
-      return { roots, childrenMap };
-    }
-
-    function renderConversationTreeNode(projectPath, nodeId, conversation, childrenMap, isSolo, depth = 0) {
+    function renderSidebarConversationCard(projectPath, nodeId, conversation, isSolo) {
       const convId = String(conversation.id || '');
+      const statusKey = conversationStatusKey(conversation.status);
       const detailExpanded = !!sidebarExpandedConversations[convId];
       const logsExpanded = !!sidebarLogsExpandedConversations[convId];
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const duration = formatSoloDuration(conversation);
-      const outcomeText = conversation.status === 'Running' ? (isSolo ? t('stillWorking') : t('continueWorking'))
-        : conversation.status === 'Failed' ? (((String(conversation.output || '').match(/Failure reason:\n([\s\S]*?)(?:\n\n|$)/) || [])[1] || '').trim() || statusText(conversation.status))
+      const failureReasonMatch = String(conversation.output || '').match(new RegExp('Failure reason:\\\\n([\\\\s\\\\S]*?)(?:\\\\n\\\\n|$)'));
+      const outcomeText = statusKey === 'Running' ? (isSolo ? t('stillWorking') : t('continueWorking'))
+        : statusKey === 'Failed' ? (((failureReasonMatch || [])[1] || '').trim() || statusText(statusKey))
         : (isSolo ? t('soloCompleted') : t('continueCompleted'));
         
-      const conclusion = conversation.status === 'Running' ? '' : soloConclusion(conversation.output);
-      const changedCount = conversation.status === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
+      const conclusion = statusKey === 'Running' ? '' : soloConclusion(conversation.output);
+      const changedCount = statusKey === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
       const resultMsg = outcomeText + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
-      const preGitHash = conversation.status === 'Running' ? '' : extractPreGitHash(conversation.output);
+      const preGitHash = statusKey === 'Running' ? '' : extractPreGitHash(conversation.output);
       const hasLogs = !!(conversation.command || conversation.output);
       const conversationNodeId = String(conversation.nodeId || nodeId || '');
       
@@ -8268,32 +8303,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         ? '<button class="sidebar-conv-action-btn rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-rollback-sidebar-solo-hash="' + escapeHtml(preGitHash) + '" data-rollback-sidebar-step-hash="' + escapeHtml(preGitHash) + '" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>'
         : '';
         
-      const continueBtn = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
+      const continueBtn = statusKey !== 'Running' && extractNativeSessionId(conversation.output)
         ? '<button class="sidebar-conv-action-btn continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('continueNative')) + '"><span class="codicon codicon-play"></span> ' + escapeHtml(t('continueNative')) + '</button>'
         : '';
         
-      const stopBtn = conversation.status === 'Running'
+      const stopBtn = statusKey === 'Running'
         ? '<button class="sidebar-conv-action-btn stop" data-stop-id="' + escapeHtml(convId) + '" data-stop-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-stop-sidebar-solo-id="' + escapeHtml(convId) + '" data-stop-sidebar-step-id="' + escapeHtml(convId) + '" data-stop-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('stopRun')) + '"><span class="codicon codicon-debug-stop"></span> ' + escapeHtml(t('stopRun')) + '</button>'
         : '';
 
       const fullSummary = summarizeSoloConversation(conversation);
       const shortSummary = fullSummary.length > 28 ? fullSummary.substring(0, 26) + '...' : fullSummary;
       
-      let statusDotClass = 'status-dot-' + conversation.status.toLowerCase();
-      if (conversation.status === 'Running') {
+      const statusClassName = statusClass(statusKey).toLowerCase();
+      let statusDotClass = 'status-dot-' + statusClassName;
+      if (statusKey === 'Running') {
         statusDotClass += ' status-dot-running-glow';
-      }
-
-      const children = childrenMap[convId] || [];
-      const hasChildren = children.length > 0;
-
-      let childrenHtml = '';
-      if (hasChildren) {
-        childrenHtml = \`
-          <div class="sidebar-conversation-children-container">
-            \${children.map(child => renderConversationTreeNode(projectPath, nodeId, child, childrenMap, isSolo, depth + 1)).join('')}
-          </div>
-        \`;
       }
 
       let miniActions = '<div class="sidebar-conversation-mini-actions">';
@@ -8304,12 +8328,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         miniActions += '<span class="mini-btn-rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="撤销修改"><span class="codicon codicon-discard"></span></span>';
       }
       if (continueBtn) {
-        miniActions += '<span class="mini-btn-continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="继续对话"><span class="codicon codicon-play"></span></span>';
+        miniActions += '<span class="mini-btn-continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="继续对话"><span class="codicon codicon-play"></span></span>';
       }
       miniActions += '</div>';
 
       return \`
-        <div class="sidebar-conversation-node-wrap \${depth > 0 ? 'nested-node' : ''}" data-conv-id="\${escapeHtml(convId)}">
+        <div class="sidebar-conversation-node-wrap" data-conv-id="\${escapeHtml(convId)}">
           <div class="sidebar-conversation-card \${detailExpanded ? 'expanded' : ''}" data-card-trigger-id="\${escapeHtml(convId)}">
             
             <div class="sidebar-conversation-bullet-col">
@@ -8329,7 +8353,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
             <div class="sidebar-conversation-right-col">
               \${miniActions}
-              <span class="status-badge-new \${conversation.status.toLowerCase()}">\${escapeHtml(conversationStatusText(conversation.status))}</span>
+              <span class="status-badge-new \${statusClassName}">\${escapeHtml(conversationStatusText(statusKey))}</span>
               <span class="expand-arrow-icon codicon \${detailExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
             </div>
 
@@ -8337,8 +8361,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
           \${detailExpanded ? \`
             <div class="sidebar-conversation-detail-panel animate-fade-in">
-              <div class="detail-item-outcome \${conversation.status.toLowerCase()}">
-                <strong>\${escapeHtml(conversation.status === 'Failed' ? t('failureLabel') : t('runResult'))}:</strong>
+              <div class="detail-item-outcome \${statusClassName}">
+                <strong>\${escapeHtml(statusKey === 'Failed' ? t('failureLabel') : t('runResult'))}:</strong>
                 <span>\${escapeHtml(resultMsg)}</span>
               </div>
 
@@ -8383,7 +8407,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             </div>
           \` : ''}
 
-          \${childrenHtml}
         </div>
       \`;
     }
@@ -8392,18 +8415,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!sidebarSoloConversations || sidebarSoloConversations.length === 0) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('soloHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noSoloConversations')) + '</div>';
       }
-      const { roots, childrenMap } = buildConversationTree(sidebarSoloConversations);
-      if (roots.length === 0) {
+      const latest = sidebarSoloConversations[0];
+      if (!latest) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('soloHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noSoloConversations')) + '</div>';
       }
       
       const projectPath = currentProjects.selectedProjectPath || '';
-      const treeHtml = roots.map(root => renderConversationTreeNode(projectPath, '__solo__', root, childrenMap, true, 0)).join('');
+      const cardHtml = renderSidebarConversationCard(projectPath, '__solo__', latest, true);
       
       return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('soloHistory'))}</div>
-        <div class="sidebar-conversations-tree-container">
-          \${treeHtml}
+        <div class="sidebar-conversation-latest-container">
+          \${cardHtml}
         </div>
       \`;
     }
@@ -8414,18 +8437,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!conversations || conversations.length === 0) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }
-      const { roots, childrenMap } = buildConversationTree(conversations);
-      if (roots.length === 0) {
+      const latest = conversations[0];
+      if (!latest) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }
 
       const nodeId = String(node?.id || '');
-      const treeHtml = roots.map(root => renderConversationTreeNode(projectPath, nodeId, root, childrenMap, false, 0)).join('');
+      const cardHtml = renderSidebarConversationCard(projectPath, nodeId, latest, false);
 
       return \`
         <div class="sidebar-solo-history-title">\${escapeHtml(t('continueHistory'))}</div>
-        <div class="sidebar-conversations-tree-container">
-          \${treeHtml}
+        <div class="sidebar-conversation-latest-container">
+          \${cardHtml}
         </div>
       \`;
     }
@@ -8635,6 +8658,36 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         escapeHtml(option.label) + '</button>'
       )).join('');
       setSoloSelectValue(select, selectedValue);
+    }
+
+    function renderProjects(projects, selectedProjectPath) {
+      const options = (projects || []).map(project => ({
+        value: project.path || '',
+        label: project.name || project.path || t('project'),
+        title: project.path || project.name || ''
+      })).filter(option => option.value);
+      setSoloSelectOptions(projectSelect, options, selectedProjectPath || (options[0] ? options[0].value : ''));
+    }
+
+    function renderPortfolioFilters() {
+      if (!portfolioFilters) return;
+      const filters = [
+        { key: 'all', label: t('filterAll') },
+        { key: 'active', label: t('filterActive') },
+        { key: 'failed', label: t('filterFailed') },
+        { key: 'completed', label: t('filterCompleted') }
+      ];
+      portfolioFilters.innerHTML = filters.map(filter => (
+        '<button type="button" class="portfolio-filter-btn ' + (activePortfolioFilter === filter.key ? 'active' : '') +
+        '" data-portfolio-filter="' + escapeHtml(filter.key) + '">' + escapeHtml(filter.label) + '</button>'
+      )).join('');
+      portfolioFilters.querySelectorAll('[data-portfolio-filter]').forEach(button => {
+        button.addEventListener('click', () => {
+          activePortfolioFilter = button.getAttribute('data-portfolio-filter') || 'all';
+          renderPortfolioFilters();
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
     }
 
     function renderSoloSelect(className, attributes, options, disabled, selectedValue) {
