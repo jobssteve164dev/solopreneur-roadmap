@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
 import * as Papa from 'papaparse';
@@ -6724,6 +6725,82 @@ function supportsSdkContinuation(agentCli: string): boolean {
   return provider === 'codex';
 }
 
+function findCodexTranscriptFile(codexHome: string, sessionId: string): string {
+  const normalizedHome = String(codexHome || '').trim();
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedHome || !normalizedSessionId) {
+    return '';
+  }
+  const roots = [
+    path.join(normalizedHome, 'sessions'),
+    path.join(normalizedHome, 'archived_sessions')
+  ];
+  const stack = roots.filter((candidate) => fs.existsSync(candidate));
+  while (stack.length > 0) {
+    const current = stack.pop() || '';
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl') || !entry.name.includes(normalizedSessionId)) {
+        continue;
+      }
+      try {
+        const firstLine = fs.readFileSync(fullPath, 'utf8').split(/\r?\n/).find(Boolean) || '';
+        const parsed = JSON.parse(firstLine);
+        if (String(parsed?.payload?.id || '') === normalizedSessionId) {
+          return fullPath;
+        }
+      } catch {
+        // Ignore malformed or partially-written transcript files.
+      }
+    }
+  }
+  return '';
+}
+
+function extractFirstCodexUserMessageAfter(codexHome: string, sessionId: string, startedAt: string): string {
+  const transcriptFile = findCodexTranscriptFile(codexHome, sessionId);
+  if (!transcriptFile) {
+    return '';
+  }
+  const startedMs = Date.parse(String(startedAt || ''));
+  try {
+    const lines = fs.readFileSync(transcriptFile, 'utf8').split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      let parsed: any;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = parsed?.payload || {};
+      if (String(payload.type || '') !== 'user_message') {
+        continue;
+      }
+      const timestampMs = Date.parse(String(parsed.timestamp || ''));
+      if (Number.isFinite(startedMs) && Number.isFinite(timestampMs) && timestampMs < startedMs) {
+        continue;
+      }
+      const message = String(payload.message || '').trim();
+      if (message) {
+        return message;
+      }
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
 function buildContinuationMetadataBlock(parentConversationId: number, sessionId: string): string {
   return [
     `Continuation parent conversation: ${parentConversationId}`,
@@ -6890,7 +6967,7 @@ function buildSessionCaptureScript(
     `session_id=$(grep -Eo '[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | tail -1 || true)`,
     `session_source="generic-output"`,
     sessionWriter
-  ].join('; ');
+  ].filter(Boolean).join('; ');
 }
 
 function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: string): string {
@@ -10178,6 +10255,7 @@ function buildAgentShellScript(
   const workspaceSnapshotPath = path.join(runDir, 'workspace-before.json');
   const startedAtFilePath = path.join(runDir, 'started_at');
   const sessionFilePath = path.join(runDir, 'session.json');
+  const codexHomeFilePath = path.join(runDir, 'codex-home.txt');
   const decisionFilePath = effectiveCompletionDecisionFilePath || path.join(runDir, 'completion.json');
   const agentProvider = getAgentProvider(agentCli);
   const sessionKey = getAgentSessionKey(agentCli);
@@ -10186,7 +10264,7 @@ function buildAgentShellScript(
   const loggedCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
-  const statusBase = { nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
+  const statusBase = { nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
@@ -10225,6 +10303,7 @@ function buildAgentShellScript(
     ...enhancementRuntime.envLines,
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
+    agentProvider === 'codex' ? `printf '%s\\n' "\${CODEX_HOME:-$HOME/.codex}" > ${shellQuote(codexHomeFilePath)}` : '',
     workspaceSnapshotScript,
     `printf %s ${shellQuote(JSON.stringify({ markCompleted: false }))} > ${shellQuote(decisionFilePath)}`,
     `printf %s ${shellQuote(runningStatus)} > ${shellQuote(statusFilePath)}`,
@@ -10236,7 +10315,7 @@ function buildAgentShellScript(
     `git -C ${shellQuote(effectiveWorkspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
     `if [ ${shellQuote(effectiveRunKind)} != 'solo' ] && [ ${shellQuote(effectiveRunKind)} != 'solo_continue' ] && [ ${shellQuote(effectiveRunKind)} != 'step_continue' ] && [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
-  ].join('; ');
+  ].filter(Boolean).join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
 
   return {
@@ -12783,7 +12862,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       await processFlowStatusFile(statusFilePath, statusData);
       return;
     }
-    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
 
     if (!nodeId || !status || status === 'Running' || status === 'Processed' || !syncEngine) {
       return;
@@ -13025,20 +13104,37 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       }
     }
     let preGitHash = '';
+    let existingConversationOutput = '';
     if (syncEngine && executionLogId) {
       const existingLogs = (isSoloConversation && typeof syncEngine.getProjectAgentExecutions === 'function')
         ? syncEngine.getProjectAgentExecutions()
         : (typeof syncEngine.getAgentExecutions === 'function' ? syncEngine.getAgentExecutions(nodeId) : []);
       const matched = existingLogs.find(log => Number(log.id) === Number(executionLogId));
       if (matched && matched.output) {
+        existingConversationOutput = String(matched.output || '');
         const hashMatch = matched.output.match(/SoloMapPreGitHash:\s*([a-f0-9]+)/i);
         if (hashMatch) {
           preGitHash = hashMatch[1];
         }
       }
     }
+    const continuationParentId = extractContinuationParentConversationId(existingConversationOutput);
+    const continuationSessionId = String(nativeSessionId || '').trim();
+    const continuationMetadataSummary = continuationParentId && continuationSessionId
+      ? buildContinuationMetadataBlock(continuationParentId, continuationSessionId)
+      : '';
+    let codexContinuationFirstMessage = '';
+    if ((runKind === 'solo_continue' || runKind === 'step_continue') && getAgentProvider(String(agentCli || commandPreview || command || '')) === 'codex' && continuationSessionId) {
+      const recordedCodexHome = codexHomeFilePath && fs.existsSync(String(codexHomeFilePath))
+        ? fs.readFileSync(String(codexHomeFilePath), 'utf8').trim()
+        : '';
+      const codexHome = recordedCodexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+      codexContinuationFirstMessage = extractFirstCodexUserMessageAfter(codexHome, continuationSessionId, String(startedAt || ''));
+    }
     const executionSummary = [
       preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
+      continuationMetadataSummary,
+      codexContinuationFirstMessage ? `Continuation first message:\n${codexContinuationFirstMessage}` : '',
       userMessage ? `User supplement:\n${userMessage}` : '',
       sessionMode ? `Native session mode: ${sessionMode}` : '',
       nativeSessionSummary,
@@ -17899,10 +17995,26 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       conversationChildrenMap = {};
       const roots = [];
       const byId = {};
+      const sessionRoots = {};
       conversations.forEach((conversation) => {
         byId[String(conversation.id || '')] = conversation;
+        const sessionId = extractNativeSessionId(conversation.output);
+        if (sessionId) {
+          const currentRoot = sessionRoots[sessionId];
+          if (!currentRoot || Number(conversation.id || 0) < Number(currentRoot.id || 0)) {
+            sessionRoots[sessionId] = conversation;
+          }
+        }
       });
       conversations.forEach((conversation) => {
+        const sessionId = extractNativeSessionId(conversation.output);
+        const sessionRoot = sessionId ? sessionRoots[sessionId] : null;
+        if (sessionRoot && Number(sessionRoot.id || 0) !== Number(conversation.id || 0)) {
+          const key = String(sessionRoot.id || '');
+          conversationChildrenMap[key] = conversationChildrenMap[key] || [];
+          conversationChildrenMap[key].push(conversation);
+          return;
+        }
         const parentId = extractContinuationParentConversationId(conversation.output);
         if (parentId && byId[String(parentId)]) {
           const key = String(parentId);
@@ -18106,6 +18218,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     function summarizeConversation(conversation) {
       const output = String(conversation.output || '');
+      const continuationFirstMessage = output.match(/Continuation first message:\\n([\\s\\S]*?)(\\n\\n|$)/);
+      if (continuationFirstMessage && continuationFirstMessage[1].trim()) {
+        return continuationFirstMessage[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
+      }
       const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(\\n\\n|$)/);
       if (userMatch && userMatch[1].trim()) {
         return userMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);

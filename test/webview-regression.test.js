@@ -967,6 +967,8 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.doesNotMatch(script, /data-open-inline-continue-id/);
   assert.doesNotMatch(script, /data-continue-turn-send-id/);
   assert.match(script, /conversation-children-title/);
+  assert.match(script, /sessionRoots/);
+  assert.match(script, /Continuation first message/);
   assert.match(script, /showAgentTerminal/);
   assert.match(script, /stopAgentRun/);
   assert.match(script, /formatConversationDuration/);
@@ -2142,6 +2144,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildNativeContinueCommand = buildNativeContinueCommand;',
       'module.exports.__buildSdkSentinelCommandLabel = buildSdkSentinelCommandLabel;',
       'module.exports.__supportsSdkContinuation = supportsSdkContinuation;',
+      'module.exports.__findCodexTranscriptFile = findCodexTranscriptFile;',
+      'module.exports.__extractFirstCodexUserMessageAfter = extractFirstCodexUserMessageAfter;',
       'module.exports.__buildInteractiveContinuationPrompt = buildInteractiveContinuationPrompt;',
       'module.exports.__buildCodexContinuationRunnerScript = buildCodexContinuationRunnerScript;',
       'module.exports.__extractContinuationParentConversationId = extractContinuationParentConversationId;',
@@ -2321,6 +2325,21 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(extensionModule.__supportsSdkContinuation('codex'), true);
   assert.equal(extensionModule.__supportsSdkContinuation('agy'), false);
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-home-'));
+  const transcriptDir = path.join(codexHome, 'sessions', '2026', '06', '13');
+  fs.mkdirSync(transcriptDir, { recursive: true });
+  const transcriptSessionId = '019dc472-6a80-7c70-99a4-b2593a641d11';
+  const transcriptPath = path.join(transcriptDir, `rollout-2026-06-13T10-00-00-${transcriptSessionId}.jsonl`);
+  fs.writeFileSync(transcriptPath, [
+    JSON.stringify({ timestamp: '2026-06-13T10:00:00.000Z', type: 'session_meta', payload: { id: transcriptSessionId } }),
+    JSON.stringify({ timestamp: '2026-06-13T10:00:03.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'before run' } }),
+    JSON.stringify({ timestamp: '2026-06-13T10:00:11.000Z', type: 'event_msg', payload: { type: 'user_message', message: '继续修复续聊标题' } })
+  ].join('\n') + '\n', 'utf8');
+  assert.equal(extensionModule.__findCodexTranscriptFile(codexHome, transcriptSessionId), transcriptPath);
+  assert.equal(
+    extensionModule.__extractFirstCodexUserMessageAfter(codexHome, transcriptSessionId, '2026-06-13T10:00:10.000Z'),
+    '继续修复续聊标题'
+  );
   assert.equal(
     extensionModule.__extractContinuationParentConversationId('Continuation parent conversation: 42\nUser supplement:\ncontinue'),
     42
