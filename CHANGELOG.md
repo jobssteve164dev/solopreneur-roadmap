@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.215 - 2026-06-13
+
+### Fixed
+- track codex continuation terminals (588a1fb)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.214 - 2026-06-13
 
 ### Fixed
