@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.214 - 2026-06-13
+
+### Fixed
+- keep continuation UI as folded history only (79edd96)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.213 - 2026-06-13
 
 ### Fixed
