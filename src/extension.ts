@@ -11239,6 +11239,43 @@ function extractContinuationParentConversationId(output: string): number {
   return match ? Number(match[1]) : 0;
 }
 
+function resolveContinuationLeafConversationFromList(
+  conversations: AgentConversation[],
+  conversationId: number
+): AgentConversation | null {
+  if (!conversationId) {
+    return null;
+  }
+  const byParent = new Map<number, AgentConversation[]>();
+  for (const conversation of conversations) {
+    const parentId = extractContinuationParentConversationId(conversation.output || '');
+    if (!parentId) continue;
+    const siblings = byParent.get(parentId) || [];
+    siblings.push(conversation);
+    byParent.set(parentId, siblings);
+  }
+  for (const siblings of byParent.values()) {
+    siblings.sort((left, right) => Number(left.id || 0) - Number(right.id || 0));
+  }
+  let current = conversations.find((entry) => Number(entry.id) === Number(conversationId)) || null;
+  while (current) {
+    const children = byParent.get(Number(current.id || 0)) || [];
+    if (!children.length) {
+      return current;
+    }
+    current = children[children.length - 1] || null;
+  }
+  return null;
+}
+
+function resolveContinuationLeafConversation(nodeId: string, conversationId: number): AgentConversation | null {
+  if (!syncEngine || !nodeId || !conversationId) {
+    return null;
+  }
+  const conversations = syncEngine.getAgentExecutions(nodeId);
+  return resolveContinuationLeafConversationFromList(conversations, conversationId);
+}
+
 async function handleContinueConversationTurn(
   context: vscode.ExtensionContext,
   nodeId: string,
@@ -11358,7 +11395,9 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
 
-  const conversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId));
+  const conversation = resolveContinuationLeafConversation(nodeId, conversationId)
+    || syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId))
+    || null;
   if (!conversation) {
     vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
     return;
@@ -15314,7 +15353,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let expandedNodeId = '';
     let activeMethodologyStage = '';
     let activeConversationId = '';
-    let activeContinuationConversationId = '';
     let activeProjectPath = '';
     let currentCliPath = 'agy';
     let currentFeedbackType = 'not_working';
@@ -15330,7 +15368,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const nodeConversations = {};
     const nodeSupplementFiles = {};
     const conversationDrafts = {};
-    const continuationDrafts = {};
     let conversationChildrenMap = {};
     const nodeAgentSelections = {};
     const agentModelCatalogs = {};
@@ -15708,11 +15745,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function extractContinuationParentConversationId(output) {
       const match = String(output || '').match(/Continuation parent conversation:\\s*(\\d+)/);
       return match ? Number(match[1]) : 0;
-    }
-
-    function supportsInlineContinuation(conversation) {
-      const cli = String((conversation && conversation.agentCli) || '').toLowerCase();
-      return (cli.includes('codex')) && Boolean(extractNativeSessionId(conversation && conversation.output));
     }
 
     function setText(id, value) {
@@ -17691,46 +17723,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             });
           });
       });
-      container.querySelectorAll('[data-open-inline-continue-id]').forEach(item => {
-        item.addEventListener('click', (event) => {
-          event.stopPropagation();
-          const conversationId = item.getAttribute('data-open-inline-continue-id') || '';
-          activeContinuationConversationId = activeContinuationConversationId === conversationId ? '' : conversationId;
-          if (!activeConversationId && conversationId) {
-            activeConversationId = nodeId + ':' + conversationId;
-          }
-          renderRoadmap(currentNodes);
-          if (nodeId === roadmapRevisionId) {
-            renderRoadmapRevisionPanel(currentNodes);
-          } else if (nodeId === soloConversationId) {
-            renderSoloPanel(currentNodes);
-          }
-        });
-      });
-      container.querySelectorAll('[data-continue-turn-input-id]').forEach(input => {
-        input.addEventListener('input', () => {
-          continuationDrafts[String(input.getAttribute('data-continue-turn-input-id') || '')] = input.value;
-        });
-      });
-      container.querySelectorAll('[data-continue-turn-send-id]').forEach(item => {
-        item.addEventListener('click', (event) => {
-          event.stopPropagation();
-          const conversationId = String(item.getAttribute('data-continue-turn-send-id') || '');
-          const input = container.querySelector('[data-continue-turn-input-id="' + cssEscape(conversationId) + '"]');
-          const request = input ? String(input.value || '').trim() : '';
-          if (!request) return;
-          vscode.postMessage({
-            command: 'continueConversationTurn',
-            nodeId,
-            conversationId,
-            userMessage: request,
-            supplementFiles: []
-          });
-          continuationDrafts[conversationId] = '';
-          activeContinuationConversationId = '';
-          if (input) input.value = '';
-        });
-      });
       container.querySelectorAll('[data-stop-agent-run]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -17770,34 +17762,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       \`;
     }
 
-    function renderContinuationComposer(nodeId, conversation) {
-      if (String(activeContinuationConversationId || '') !== String(conversation.id || '') || conversation.status === 'Running' || !supportsInlineContinuation(conversation)) {
-        return '';
-      }
-      const draft = continuationDrafts[String(conversation.id || '')] || '';
-      return \`
-        <div class="conversation-detail conversation-detail-continue">
-          <strong>继续这轮对话</strong>
-          <div class="conversation-compose conversation-compose-main conversation-compose-inline">
-            <input
-              type="text"
-              class="conversation-input"
-              data-continue-turn-input-id="\${escapeHtml(String(conversation.id || ''))}"
-              placeholder="\${escapeHtml(t('conversationPlaceholder'))}"
-              value="\${escapeHtml(draft)}"
-            >
-            <button
-              class="btn-send-conversation"
-              data-continue-turn-send-id="\${escapeHtml(String(conversation.id || ''))}"
-              data-continue-turn-node-id="\${escapeHtml(String(nodeId || ''))}"
-            >
-              <span class="codicon codicon-send"></span>
-            </button>
-          </div>
-        </div>
-      \`;
-    }
-
     function renderConversationItem(nodeId, conversation, nested = false) {
       const conversationId = nodeId + ':' + conversation.id;
       const open = activeConversationId === conversationId;
@@ -17815,11 +17779,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
         : '';
       const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
-        ? (
-          supportsInlineContinuation(conversation)
-            ? \`<button class="conversation-control-btn" data-open-inline-continue-id="\${escapeHtml(conversation.id)}" data-open-inline-continue-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
-            : \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
-        )
+        ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
         : '';
       const runningButtons = conversation.status === 'Running'
         ? \`
@@ -17857,7 +17817,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 <strong>\${t('output')}</strong>
                 <pre>\${escapeHtml(conversation.output)}</pre>
               </div>
-              \${renderContinuationComposer(nodeId, conversation)}
               \${renderConversationChildren(nodeId, conversation, children)}
             </div>
           \` : ''}

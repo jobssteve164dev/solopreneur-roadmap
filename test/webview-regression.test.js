@@ -964,6 +964,9 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.match(script, /continueNativeConversation/);
   assert.match(script, /data-continue-native-conversation-id/);
   assert.match(script, /data-continue-native-node-id/);
+  assert.doesNotMatch(script, /data-open-inline-continue-id/);
+  assert.doesNotMatch(script, /data-continue-turn-send-id/);
+  assert.match(script, /conversation-children-title/);
   assert.match(script, /showAgentTerminal/);
   assert.match(script, /stopAgentRun/);
   assert.match(script, /formatConversationDuration/);
@@ -2142,6 +2145,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildInteractiveContinuationPrompt = buildInteractiveContinuationPrompt;',
       'module.exports.__buildCodexContinuationRunnerScript = buildCodexContinuationRunnerScript;',
       'module.exports.__extractContinuationParentConversationId = extractContinuationParentConversationId;',
+      'module.exports.__resolveContinuationLeafConversationFromList = resolveContinuationLeafConversationFromList;',
       'module.exports.__getTaskPermissionArgs = getTaskPermissionArgs;',
       'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
@@ -2321,6 +2325,13 @@ test('agent command builder uses non-interactive task runs and native continuati
     extensionModule.__extractContinuationParentConversationId('Continuation parent conversation: 42\nUser supplement:\ncontinue'),
     42
   );
+  const leafConversation = extensionModule.__resolveContinuationLeafConversationFromList([
+    { id: 10, output: 'User supplement:\nroot' },
+    { id: 11, output: 'Continuation parent conversation: 10\nUser supplement:\nchild 1' },
+    { id: 12, output: 'Continuation parent conversation: 11\nUser supplement:\nchild 2' },
+    { id: 13, output: 'Continuation parent conversation: 10\nUser supplement:\nolder sibling' }
+  ], 10);
+  assert.equal(leafConversation && leafConversation.id, 13);
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'never'),
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --add-dir='/workspace/app'"
