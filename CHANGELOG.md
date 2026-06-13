@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.219 - 2026-06-13
+
+### Fixed
+- stabilize sidebar latest conversation card (b25154f)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.218 - 2026-06-13
 
 ### Added
