@@ -2137,6 +2137,11 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentCommandForPromptFile = buildAgentCommandForPromptFile;',
       'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
       'module.exports.__buildNativeContinueCommand = buildNativeContinueCommand;',
+      'module.exports.__buildSdkSentinelCommandLabel = buildSdkSentinelCommandLabel;',
+      'module.exports.__supportsSdkContinuation = supportsSdkContinuation;',
+      'module.exports.__buildInteractiveContinuationPrompt = buildInteractiveContinuationPrompt;',
+      'module.exports.__buildCodexContinuationRunnerScript = buildCodexContinuationRunnerScript;',
+      'module.exports.__extractContinuationParentConversationId = extractContinuationParentConversationId;',
       'module.exports.__getTaskPermissionArgs = getTaskPermissionArgs;',
       'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
@@ -2307,6 +2312,16 @@ test('agent command builder uses non-interactive task runs and native continuati
     "'copilot' --connect '3350a3b7-7761-4ed5-9661-2e9c9de8f924' -C '/workspace/app' --add-dir '/workspace/app'"
   );
   assert.equal(
+    extensionModule.__buildSdkSentinelCommandLabel('codex', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
+    "'codex' app-server [resume 019dc472-6a80-7c70-99a4-b2593a641d11 @ /workspace/app]"
+  );
+  assert.equal(extensionModule.__supportsSdkContinuation('codex'), true);
+  assert.equal(extensionModule.__supportsSdkContinuation('agy'), false);
+  assert.equal(
+    extensionModule.__extractContinuationParentConversationId('Continuation parent conversation: 42\nUser supplement:\ncontinue'),
+    42
+  );
+  assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'never'),
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --add-dir='/workspace/app'"
   );
@@ -2372,6 +2387,33 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(extensionModule.__getAgentProvider('claude'), 'claude');
   assert.equal(extensionModule.__getAgentProvider('copilot'), 'copilot');
   assert.equal(extensionModule.__getAgentProvider('opencode'), 'opencode');
+  const continuationPrompt = extensionModule.__buildInteractiveContinuationPrompt(
+    { id: '2', title: 'Ship MVP', description: '', stage: 'Build', dependencies: '', agentCli: 'codex', agentPrompt: '', status: 'In Progress', createdAt: '', completedAt: '' },
+    '继续把登录态和订阅校验打通',
+    '/workspace/app',
+    '/workspace/app/.solopreneur/agent-runs/2/99/completion.json',
+    [],
+    '',
+    '/workspace/.solomap-global'
+  );
+  assert.match(continuationPrompt, /继续 SoloMap 中已经存在的一段对话/);
+  assert.match(continuationPrompt, /继续把登录态和订阅校验打通/);
+  assert.match(continuationPrompt, /completion\.json/);
+  const runnerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-runner-'));
+  const runnerPath = path.join(runnerDir, 'run-codex-continuation.cjs');
+  extensionModule.__buildCodexContinuationRunnerScript(
+    runnerPath,
+    '/workspace/app',
+    '019ec0df-b5de-78f2-a3e9-43689bc8c2ad',
+    'Continue the task',
+    '/workspace/app/.solopreneur/agent-runs/2/99/session.json',
+    'gpt-5.4'
+  );
+  const runnerSource = fs.readFileSync(runnerPath, 'utf8');
+  assert.match(runnerSource, /spawn\('codex', \['app-server'\]/);
+  assert.match(runnerSource, /method: 'thread\/resume'/);
+  assert.match(runnerSource, /method: 'turn\/start'/);
+  assert.match(runnerSource, /sessionFilePath/);
 
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',

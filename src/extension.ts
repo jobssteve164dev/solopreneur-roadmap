@@ -3086,6 +3086,17 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           await handleContinueNativeConversation(context, message.nodeId, Number(message.conversationId || 0));
           break;
 
+        case 'continueConversationTurn':
+          await handleContinueConversationTurn(
+            context,
+            String(message.nodeId || ''),
+            Number(message.conversationId || 0),
+            String(message.userMessage || ''),
+            String(message.model || ''),
+            normalizeSupplementFiles(message.supplementFiles)
+          );
+          break;
+
         case 'stopAgentRun':
           await stopAgentRun(message.nodeId, Number(message.conversationId || 0));
           break;
@@ -6699,6 +6710,104 @@ function buildNativeContinueCommand(agentCli: string, sessionId: string, workspa
   return `${quotedCli} ${quotedSessionId}`;
 }
 
+function buildSdkSentinelCommandLabel(agentCli: string, workspaceRoot: string, sessionId: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} app-server [resume ${sessionId} @ ${workspaceRoot}]`;
+  }
+  return `${quotedCli} [interactive continuation]`;
+}
+
+function supportsSdkContinuation(agentCli: string): boolean {
+  const provider = getAgentProvider(agentCli);
+  return provider === 'codex';
+}
+
+function buildContinuationMetadataBlock(parentConversationId: number, sessionId: string): string {
+  return [
+    `Continuation parent conversation: ${parentConversationId}`,
+    `Continuation session id: ${sessionId}`,
+    'Continuation source: interactive_sdk'
+  ].join('\n');
+}
+
+function buildInteractiveContinuationPrompt(
+  node: RoadmapNode | null,
+  userMessage: string,
+  workspaceRoot: string,
+  completionDecisionFilePath = '',
+  supplementFiles: string[] = [],
+  globalPrompt = '',
+  globalDataPath = ''
+): string {
+  const normalizedUserMessage = String(userMessage || '').trim();
+  const completionFile = completionDecisionFilePath
+    ? toProjectRelativeRuntimePath(workspaceRoot, completionDecisionFilePath)
+    : '';
+  const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
+  const supplementFileInstructions = attachedFiles.length > 0
+    ? [
+      '用户为这次续聊附加了补充文件，开始前先读取这些文件：',
+      ...attachedFiles.map((file) => `- ${file}`),
+      '这些文件与本轮用户最新消息一起构成最高优先级上下文。'
+    ].join('\n')
+    : '';
+  const globalPromptInstructions = globalPrompt.trim()
+    ? [
+      '用户设置的全局默认要求：',
+      globalPrompt.trim(),
+      '如果与本轮用户最新消息冲突，以本轮用户最新消息为准。'
+    ].join('\n')
+    : '';
+  const stepMemoryFilePath = node ? getStepMemoryFilePath(workspaceRoot, node.id || '') : '';
+  const completionCriteria = node ? readCompletionCriteria(workspaceRoot, node) : [];
+  const completionCriteriaInstructions = completionCriteria.length > 0
+    ? [
+      '如果这是路线图环节续聊，完成标准仍然如下：',
+      ...completionCriteria.map((criterion, index) => `${index + 1}. ${criterion}`)
+    ].join('\n')
+    : '';
+  const stepMemoryInstructions = node && node.id && node.id !== soloConversationId
+    ? [
+      '这是一个已有路线图环节的续聊。',
+      `开始前先读取环节交接文件：${toProjectRelativeRuntimePath(workspaceRoot, stepMemoryFilePath)}`,
+      '继续推进当前环节，不要切换到其他环节。'
+    ].join('\n')
+    : '这是同一项目中的续聊，请延续当前项目语境回答和行动。';
+  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  return [
+    '你正在继续 SoloMap 中已经存在的一段对话。',
+    `项目目录：${workspaceRoot}`,
+    node && node.id && node.id !== soloConversationId
+      ? `所属环节：${node.title}（${node.stage}）`
+      : '所属范围：Solo 对话',
+    '',
+    '最高优先级规则：',
+    '1. 当前这条用户最新消息是本轮唯一最高优先级要求。',
+    '2. 延续既有对话上下文，但不要被旧结论绑死；如果新消息推翻了旧方向，以新消息为准。',
+    '3. 如果需要修改项目文件或运行命令，直接完成最小闭环，不要只做口头建议。',
+    '',
+    '用户最新消息：',
+    normalizedUserMessage || '继续上一轮对话，并根据新的情况推进。',
+    ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
+    ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
+    '',
+    stepMemoryInstructions,
+    ...(completionCriteriaInstructions ? ['', completionCriteriaInstructions] : []),
+    '',
+    solomapMemoryInstructions,
+    '',
+    '闭环要求：',
+    '1. 保持这是同一次任务的续聊，不要把它改造成新的无关任务。',
+    '2. 运行必要的最窄验证；如果无法验证，要说明原因。',
+    completionDecisionFilePath
+      ? `3. 如果你判断整个任务已经达到完成标准，请向 ${completionFile} 写入 JSON：{"markCompleted":true,"reason":"一句话说明为什么已完成"}。如果仍需后续续聊，不要写入完成。`
+      : '3. 如果你判断任务已完成，请在最终回答中明确说明。',
+    '4. 完成当前这一轮后正常结束本次 turn。'
+  ].join('\n');
+}
+
 function getCliVersionArgs(agentCli: string): string[] {
   const executableName = path.basename(agentCli).toLowerCase();
   if (executableName === 'codex' || executableName === 'codex-cli') {
@@ -10130,6 +10239,171 @@ function buildAgentShellScript(
   };
 }
 
+function buildCodexContinuationRunnerScript(
+  runnerFilePath: string,
+  workspaceRoot: string,
+  threadId: string,
+  promptText: string,
+  sessionFilePath: string,
+  selectedModel = ''
+): void {
+  const runnerSource = `
+const { spawn } = require('child_process');
+const fs = require('fs');
+const readline = require('readline');
+
+const workspaceRoot = ${JSON.stringify(workspaceRoot)};
+const threadId = ${JSON.stringify(threadId)};
+const promptText = ${JSON.stringify(promptText)};
+const sessionFilePath = ${JSON.stringify(sessionFilePath)};
+const selectedModel = ${JSON.stringify(selectedModel)};
+
+const proc = spawn('codex', ['app-server'], {
+  cwd: workspaceRoot,
+  stdio: ['pipe', 'pipe', 'pipe']
+});
+
+const output = process.stdout;
+const errors = process.stderr;
+const rl = readline.createInterface({ input: proc.stdout });
+
+let finished = false;
+let resumedThreadId = threadId;
+let latestTurnId = '';
+let assistantBuffer = '';
+let lastError = '';
+
+function send(message) {
+  proc.stdin.write(JSON.stringify(message) + '\\n');
+}
+
+function writeSession(thread) {
+  if (!thread || !thread.id) return;
+  fs.mkdirSync(require('path').dirname(sessionFilePath), { recursive: true });
+  fs.writeFileSync(sessionFilePath, JSON.stringify({
+    sessionId: String(thread.id),
+    source: 'codex_app_server',
+    updatedAt: new Date().toISOString()
+  }) + '\\n', 'utf8');
+}
+
+function fail(message, code = 1) {
+  if (finished) return;
+  finished = true;
+  if (message) {
+    process.stderr.write(String(message).trim() + '\\n');
+  }
+  proc.kill('SIGTERM');
+  process.exit(code);
+}
+
+function complete() {
+  if (finished) return;
+  finished = true;
+  if (assistantBuffer.trim()) {
+    output.write('\\n');
+  }
+  proc.kill('SIGTERM');
+  process.exit(0);
+}
+
+errors.on('data', (chunk) => {
+  process.stderr.write(chunk);
+});
+
+proc.on('error', (error) => {
+  fail(error instanceof Error ? error.message : String(error));
+});
+
+proc.on('exit', (code) => {
+  if (!finished) {
+    fail(lastError || 'Codex app-server exited before turn completion.', Number(code || 1));
+  }
+});
+
+rl.on('line', (line) => {
+  let msg;
+  try {
+    msg = JSON.parse(line);
+  } catch (error) {
+    process.stderr.write(line + '\\n');
+    return;
+  }
+  if (msg.error) {
+    lastError = String(msg.error.message || 'Unknown Codex app-server error');
+    fail(lastError, 1);
+    return;
+  }
+  if (msg.id === 1 && msg.result && msg.result.thread) {
+    resumedThreadId = String(msg.result.thread.id || threadId);
+    writeSession(msg.result.thread);
+    send({
+      method: 'turn/start',
+      id: 2,
+      params: {
+        threadId: resumedThreadId,
+        input: [{ type: 'text', text: promptText }],
+        ...(selectedModel ? { model: selectedModel } : {})
+      }
+    });
+    return;
+  }
+  if (msg.id === 2 && msg.result && msg.result.turn) {
+    latestTurnId = String(msg.result.turn.id || '');
+    return;
+  }
+  if (msg.method === 'item/agentMessage/delta') {
+    const delta = String(msg.params?.delta || '');
+    assistantBuffer += delta;
+    output.write(delta);
+    return;
+  }
+  if (msg.method === 'item/completed' && msg.params?.item?.type === 'agentMessage') {
+    const text = String(msg.params.item.text || '');
+    if (text && !assistantBuffer) {
+      assistantBuffer = text;
+      output.write(text);
+    }
+    return;
+  }
+  if (msg.method === 'turn/completed') {
+    const turn = msg.params?.turn || {};
+    const status = String(turn.status || '').toLowerCase();
+    if (status === 'completed') {
+      complete();
+      return;
+    }
+    fail('Codex turn did not complete successfully: ' + status, 1);
+  }
+});
+
+send({
+  method: 'initialize',
+  id: 0,
+  params: {
+    clientInfo: {
+      name: 'solomap_vscode',
+      title: 'SoloMap VS Code Extension',
+      version: '0.1.0'
+    }
+  }
+});
+send({ method: 'initialized', params: {} });
+send({
+  method: 'thread/resume',
+  id: 1,
+  params: {
+    threadId,
+    cwd: workspaceRoot,
+    approvalPolicy: 'never',
+    sandbox: 'workspace-write',
+    ...(selectedModel ? { model: selectedModel } : {})
+  }
+});
+`;
+  fs.writeFileSync(runnerFilePath, runnerSource, { encoding: 'utf8', mode: 0o755 });
+}
+
 function isReviewableRunKind(runKind: string, nodeId: string): boolean {
   return runKind !== 'agent_review' && nodeId !== soloConversationId && runKind !== 'solo';
 }
@@ -10958,6 +11232,124 @@ function extractNativeSessionIdFromExecutionOutput(output: string): string {
   const text = String(output || '');
   const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/);
   return match ? match[1] : '';
+}
+
+function extractContinuationParentConversationId(output: string): number {
+  const match = String(output || '').match(/Continuation parent conversation:\s*(\d+)/);
+  return match ? Number(match[1]) : 0;
+}
+
+async function handleContinueConversationTurn(
+  context: vscode.ExtensionContext,
+  nodeId: string,
+  parentConversationId: number,
+  userMessage: string,
+  selectedModel = '',
+  supplementFiles: string[] = []
+): Promise<void> {
+  if (!syncEngine || !activeProjectRoot || !nodeId || !parentConversationId) {
+    return;
+  }
+  const request = String(userMessage || '').trim();
+  if (!request) {
+    vscode.window.showWarningMessage('先输入这次续聊要继续推进的内容。');
+    return;
+  }
+  const parentConversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(parentConversationId));
+  if (!parentConversation) {
+    vscode.window.showErrorMessage(`Conversation ${parentConversationId} not found for continuation.`);
+    return;
+  }
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = String(parentConversation.agentCli || settings.cliPath || '').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, requestedAgentCli ? '' : settings.cliPath);
+  if (!commandExists(agentCli)) {
+    vscode.window.showErrorMessage(`Agent CLI not found for continuation: ${requestedAgentCli || agentCli}`);
+    return;
+  }
+  if (!supportsSdkContinuation(agentCli)) {
+    await handleContinueNativeConversation(context, nodeId, parentConversationId);
+    return;
+  }
+  const sessionId = extractNativeSessionIdFromExecutionOutput(parentConversation.output || '');
+  if (!sessionId) {
+    vscode.window.showErrorMessage('No resumable Codex session ID was recorded for this conversation.');
+    return;
+  }
+
+  if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
+    const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
+    if (currentNode && currentNode.status !== 'Completed') {
+      syncEngine.updateNode(nodeId, { status: 'Running' });
+      sendNodesToWebview();
+      refreshSidebarProjectCards();
+    }
+  }
+
+  const preGitHash = createPreSessionGitCommit(activeProjectRoot);
+  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
+  const launchSummary = [
+    preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
+    'Agent continuation started.',
+    `Run started at: ${new Date().toISOString()}`,
+    buildContinuationMetadataBlock(parentConversationId, sessionId),
+    `User supplement:\n${request}`,
+    attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
+  ].filter(Boolean).join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
+    nodeId,
+    agentCli,
+    `${agentCli} [preparing interactive continuation]`,
+    launchSummary,
+    'Running'
+  );
+  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
+  const statusFilePath = getAgentStatusFilePath(activeProjectRoot, executionLogId);
+  const completionDecisionFilePath = path.join(runDir, 'completion.json');
+  const node = nodeId === soloConversationId
+    ? null
+    : syncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
+  const continuationPrompt = buildInteractiveContinuationPrompt(
+    node,
+    request,
+    activeProjectRoot,
+    completionDecisionFilePath,
+    attachedFiles,
+    settings.globalPrompt,
+    settings.globalDataPath
+  );
+  const runnerFilePath = path.join(runDir, 'run-codex-continuation.cjs');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  fs.mkdirSync(runDir, { recursive: true });
+  buildCodexContinuationRunnerScript(runnerFilePath, activeProjectRoot, sessionId, continuationPrompt, sessionFilePath, selectedModel);
+  const directExecutionCommand = `${shellQuote(process.execPath)} ${shellQuote(runnerFilePath)}`;
+  const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
+  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
+  postNodeConversations(nodeId);
+
+  const { finalCommand } = buildAgentShellScript(
+    agentCli,
+    selectedModel,
+    continuationPrompt,
+    activeProjectRoot,
+    nodeId,
+    executionLogId,
+    request,
+    completionDecisionFilePath,
+    sessionId,
+    directExecutionCommand,
+    nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
+    '',
+    settings.globalDataPath,
+    settings.taskPermissionMode,
+    settings.reviewerCliPath,
+    settings.collaborationReviewMode,
+    settings.enabledEnhancements,
+    runDir,
+    statusFilePath
+  );
+  const terminal = createAgentTerminal(activeProjectRoot, `continue-${nodeId}-${executionLogId}`, executionLogId);
+  terminal.sendText(finalCommand);
 }
 
 async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
@@ -13759,6 +14151,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       max-width: 100%;
     }
 
+    .conversation-item-child {
+      margin-left: 14px;
+      border-color: rgba(124, 77, 255, 0.24);
+      background: rgba(124, 77, 255, 0.05);
+    }
+
     .conversation-row {
       display: flex;
       justify-content: space-between;
@@ -13878,6 +14276,33 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       min-width: 0;
       max-width: 100%;
       overflow: hidden;
+    }
+
+    .conversation-detail-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .conversation-detail-continue {
+      background: rgba(0, 176, 255, 0.06);
+    }
+
+    .conversation-compose-inline {
+      margin-top: 8px;
+    }
+
+    .conversation-children {
+      border-top: 1px solid var(--border-glass);
+      padding: 10px;
+      background: rgba(7, 12, 20, 0.28);
+    }
+
+    .conversation-children-title {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      margin-bottom: 8px;
     }
 
     .conversation-outcome {
@@ -14889,6 +15314,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     let expandedNodeId = '';
     let activeMethodologyStage = '';
     let activeConversationId = '';
+    let activeContinuationConversationId = '';
     let activeProjectPath = '';
     let currentCliPath = 'agy';
     let currentFeedbackType = 'not_working';
@@ -14904,6 +15330,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const nodeConversations = {};
     const nodeSupplementFiles = {};
     const conversationDrafts = {};
+    const continuationDrafts = {};
+    let conversationChildrenMap = {};
     const nodeAgentSelections = {};
     const agentModelCatalogs = {};
     const conversationModelSelections = {};
@@ -15275,6 +15703,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function extractNativeSessionId(output) {
       const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/);
       return match ? match[1] : '';
+    }
+
+    function extractContinuationParentConversationId(output) {
+      const match = String(output || '').match(/Continuation parent conversation:\\s*(\\d+)/);
+      return match ? Number(match[1]) : 0;
+    }
+
+    function supportsInlineContinuation(conversation) {
+      const cli = String((conversation && conversation.agentCli) || '').toLowerCase();
+      return (cli.includes('codex')) && Boolean(extractNativeSessionId(conversation && conversation.output));
     }
 
     function setText(id, value) {
@@ -17253,6 +17691,46 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             });
           });
       });
+      container.querySelectorAll('[data-open-inline-continue-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const conversationId = item.getAttribute('data-open-inline-continue-id') || '';
+          activeContinuationConversationId = activeContinuationConversationId === conversationId ? '' : conversationId;
+          if (!activeConversationId && conversationId) {
+            activeConversationId = nodeId + ':' + conversationId;
+          }
+          renderRoadmap(currentNodes);
+          if (nodeId === roadmapRevisionId) {
+            renderRoadmapRevisionPanel(currentNodes);
+          } else if (nodeId === soloConversationId) {
+            renderSoloPanel(currentNodes);
+          }
+        });
+      });
+      container.querySelectorAll('[data-continue-turn-input-id]').forEach(input => {
+        input.addEventListener('input', () => {
+          continuationDrafts[String(input.getAttribute('data-continue-turn-input-id') || '')] = input.value;
+        });
+      });
+      container.querySelectorAll('[data-continue-turn-send-id]').forEach(item => {
+        item.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const conversationId = String(item.getAttribute('data-continue-turn-send-id') || '');
+          const input = container.querySelector('[data-continue-turn-input-id="' + cssEscape(conversationId) + '"]');
+          const request = input ? String(input.value || '').trim() : '';
+          if (!request) return;
+          vscode.postMessage({
+            command: 'continueConversationTurn',
+            nodeId,
+            conversationId,
+            userMessage: request,
+            supplementFiles: []
+          });
+          continuationDrafts[conversationId] = '';
+          activeContinuationConversationId = '';
+          if (input) input.value = '';
+        });
+      });
       container.querySelectorAll('[data-stop-agent-run]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -17278,54 +17756,98 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     }
 
-    function renderConversations(nodeId, conversations, emptyLabel = t('noConversations')) {
-      if (!conversations || conversations.length === 0) {
-        return '<div class="conversation-empty">' + escapeHtml(emptyLabel) + '</div>';
+    function renderConversationChildren(nodeId, conversation, children) {
+      if (!children || children.length === 0) {
+        return '';
       }
+      return \`
+        <div class="conversation-children">
+          <div class="conversation-children-title">续聊记录</div>
+          <div class="conversation-list conversation-list-children">
+            \${children.map(child => renderConversationItem(nodeId, child, true)).join('')}
+          </div>
+        </div>
+      \`;
+    }
 
-      const items = conversations.map(conversation => {
-        const conversationId = nodeId + ':' + conversation.id;
-        const open = activeConversationId === conversationId;
-        const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
-        const summary = summarizeConversation(conversation);
-        const duration = formatConversationDuration(conversation);
-        const runtimeLabel = duration
-          ? (conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration
-          : '';
-        const preGitHash = extractConversationPreGitHash(conversation.output);
-        const rollbackButton = (preGitHash && conversation.status !== 'Running')
-          ? \`<button class="conversation-control-btn rollback-btn" data-rollback-hash="\${escapeHtml(preGitHash)}" title="\${escapeHtml(t('rollbackChange'))}"><span class="codicon codicon-discard"></span> \${escapeHtml(t('rollbackChange'))}</button>\`
-          : '';
-        const retryButton = conversation.status === 'Failed'
-          ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
-          : '';
-        const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
-          ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
-          : '';
-        const runningButtons = conversation.status === 'Running'
-          ? \`
-            <button class="conversation-control-btn" data-show-agent-terminal="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('openTerminal'))}">\${t('openTerminal')}</button>
-            <button class="conversation-control-btn stop" data-stop-agent-run="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${t('stopRun')}</button>
-          \`
-          : '';
-        return \`
-          <div class="conversation-item" data-conversation-id="\${escapeHtml(conversationId)}">
-            <div class="conversation-row">
-              <div class="conversation-meta">
-                <span class="conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
-                <span class="conversation-summary">\${escapeHtml(summary)}</span>
-                <span class="conversation-time">\${escapeHtml(when)}</span>
-                \${runtimeLabel ? \`<span class="conversation-runtime">\${escapeHtml(runtimeLabel)}</span>\` : ''}
-              </div>
-              <div class="conversation-actions">
-                \${runningButtons}
-                \${continueButton}
-                \${retryButton}
-                \${rollbackButton}
-                <span class="status-badge \${statusClass(conversation.status)}">\${conversationStatusText(conversation.status)}</span>
-              </div>
+    function renderContinuationComposer(nodeId, conversation) {
+      if (String(activeContinuationConversationId || '') !== String(conversation.id || '') || conversation.status === 'Running' || !supportsInlineContinuation(conversation)) {
+        return '';
+      }
+      const draft = continuationDrafts[String(conversation.id || '')] || '';
+      return \`
+        <div class="conversation-detail conversation-detail-continue">
+          <strong>继续这轮对话</strong>
+          <div class="conversation-compose conversation-compose-main conversation-compose-inline">
+            <input
+              type="text"
+              class="conversation-input"
+              data-continue-turn-input-id="\${escapeHtml(String(conversation.id || ''))}"
+              placeholder="\${escapeHtml(t('conversationPlaceholder'))}"
+              value="\${escapeHtml(draft)}"
+            >
+            <button
+              class="btn-send-conversation"
+              data-continue-turn-send-id="\${escapeHtml(String(conversation.id || ''))}"
+              data-continue-turn-node-id="\${escapeHtml(String(nodeId || ''))}"
+            >
+              <span class="codicon codicon-send"></span>
+            </button>
+          </div>
+        </div>
+      \`;
+    }
+
+    function renderConversationItem(nodeId, conversation, nested = false) {
+      const conversationId = nodeId + ':' + conversation.id;
+      const open = activeConversationId === conversationId;
+      const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
+      const summary = summarizeConversation(conversation);
+      const duration = formatConversationDuration(conversation);
+      const runtimeLabel = duration
+        ? (conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration
+        : '';
+      const preGitHash = extractConversationPreGitHash(conversation.output);
+      const rollbackButton = (preGitHash && conversation.status !== 'Running')
+        ? \`<button class="conversation-control-btn rollback-btn" data-rollback-hash="\${escapeHtml(preGitHash)}" title="\${escapeHtml(t('rollbackChange'))}"><span class="codicon codicon-discard"></span> \${escapeHtml(t('rollbackChange'))}</button>\`
+        : '';
+      const retryButton = conversation.status === 'Failed'
+        ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
+        : '';
+      const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
+        ? (
+          supportsInlineContinuation(conversation)
+            ? \`<button class="conversation-control-btn" data-open-inline-continue-id="\${escapeHtml(conversation.id)}" data-open-inline-continue-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
+            : \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
+        )
+        : '';
+      const runningButtons = conversation.status === 'Running'
+        ? \`
+          <button class="conversation-control-btn" data-show-agent-terminal="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('openTerminal'))}">\${t('openTerminal')}</button>
+          <button class="conversation-control-btn stop" data-stop-agent-run="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${t('stopRun')}</button>
+        \`
+        : '';
+      const children = (conversationChildrenMap[String(conversation.id || '')] || []);
+      return \`
+        <div class="conversation-item \${nested ? 'conversation-item-child' : ''}" data-conversation-id="\${escapeHtml(conversationId)}">
+          <div class="conversation-row">
+            <div class="conversation-meta">
+              <span class="conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
+              <span class="conversation-summary">\${escapeHtml(summary)}</span>
+              <span class="conversation-time">\${escapeHtml(when)}</span>
+              \${runtimeLabel ? \`<span class="conversation-runtime">\${escapeHtml(runtimeLabel)}</span>\` : ''}
+              \${children.length > 0 ? \`<span class="conversation-runtime">续聊 \${children.length}</span>\` : ''}
             </div>
-            \${open ? \`
+            <div class="conversation-actions">
+              \${runningButtons}
+              \${continueButton}
+              \${retryButton}
+              \${rollbackButton}
+              <span class="status-badge \${statusClass(conversation.status)}">\${conversationStatusText(conversation.status)}</span>
+            </div>
+          </div>
+          \${open ? \`
+            <div class="conversation-detail-wrap">
               <div class="conversation-detail">
                 \${renderConversationOutcome(conversation, nodeId)}
                 \${renderConversationFiles(conversation)}
@@ -17335,10 +17857,38 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 <strong>\${t('output')}</strong>
                 <pre>\${escapeHtml(conversation.output)}</pre>
               </div>
-            \` : ''}
-          </div>
-        \`;
-      }).join('');
+              \${renderContinuationComposer(nodeId, conversation)}
+              \${renderConversationChildren(nodeId, conversation, children)}
+            </div>
+          \` : ''}
+        </div>
+      \`;
+    }
+
+    function renderConversations(nodeId, conversations, emptyLabel = t('noConversations')) {
+      if (!conversations || conversations.length === 0) {
+        return '<div class="conversation-empty">' + escapeHtml(emptyLabel) + '</div>';
+      }
+      conversationChildrenMap = {};
+      const roots = [];
+      const byId = {};
+      conversations.forEach((conversation) => {
+        byId[String(conversation.id || '')] = conversation;
+      });
+      conversations.forEach((conversation) => {
+        const parentId = extractContinuationParentConversationId(conversation.output);
+        if (parentId && byId[String(parentId)]) {
+          const key = String(parentId);
+          conversationChildrenMap[key] = conversationChildrenMap[key] || [];
+          conversationChildrenMap[key].push(conversation);
+          return;
+        }
+        roots.push(conversation);
+      });
+      Object.keys(conversationChildrenMap).forEach((key) => {
+        conversationChildrenMap[key].sort((a, b) => Number(a.id || 0) - Number(b.id || 0));
+      });
+      const items = roots.map(conversation => renderConversationItem(nodeId, conversation, false)).join('');
       return '<div class="conversation-list">' + items + '</div>';
     }
 
