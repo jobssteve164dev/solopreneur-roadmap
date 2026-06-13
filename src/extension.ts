@@ -994,7 +994,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const ready = await ensureSyncEngine(context);
       if (ready && activeProjectRoot === projectPath) {
-        await openContinuationComposerInRoadmap(context, soloConversationId, Number(conversationId || 0));
+        await handleContinueNativeConversation(context, soloConversationId, Number(conversationId || 0));
       }
     },
     async (projectPath, nodeId, conversationId) => {
@@ -1007,7 +1007,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       const ready = await ensureSyncEngine(context);
       if (ready && activeProjectRoot === projectPath) {
-        await openContinuationComposerInRoadmap(context, String(nodeId || ''), Number(conversationId || 0));
+        await handleContinueNativeConversation(context, String(nodeId || ''), Number(conversationId || 0));
       }
     },
     async (projectPath, nodeId) => {
@@ -11381,24 +11381,6 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   terminal.sendText(buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot));
 }
 
-async function openContinuationComposerInRoadmap(
-  context: vscode.ExtensionContext,
-  nodeId: string,
-  conversationId: number
-): Promise<void> {
-  if (!activeProjectRoot || !syncEngine || !nodeId || !conversationId) {
-    return;
-  }
-  const targetView = nodeId === soloConversationId ? 'solo' : 'roadmap';
-  await openRoadmapPanel(context, targetView);
-  postNodeConversations(nodeId);
-  activePanel?.webview.postMessage({
-    command: 'openContinuationComposer',
-    nodeId,
-    conversationId
-  });
-}
-
 function readAgentStatus(statusFilePath: string): any | null {
   if (!fs.existsSync(statusFilePath)) {
     return null;
@@ -16539,9 +16521,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderSoloPanel(currentNodes);
           renderRoadmapRevisionPanel(currentNodes);
           break;
-        case 'openContinuationComposer':
-          openContinuationComposer(String(message.nodeId || ''), String(message.conversationId || ''));
-          break;
         case 'supplementFilesSelected':
           const soloDraft = message.nodeId === soloConversationId
             ? (soloBody.querySelector('[data-solo-input]')?.value || '')
@@ -18174,27 +18153,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (expandedNodeId) {
         const node = (currentNodes || []).find(candidate => candidate.id === nodeId);
         ensureAgentModelsLoaded(nodeAgentSelections[nodeId] || node?.agentCli || currentCliPath || 'agy', nodeId);
-      }
-      renderRoadmap(currentNodes);
-    }
-
-    function openContinuationComposer(nodeId, conversationId) {
-      const conversationKey = nodeId + ':' + conversationId;
-      activeConversationId = conversationKey;
-      activeContinuationConversationId = String(conversationId || '');
-      if (nodeId === soloConversationId) {
-        soloExpanded = true;
-        setMainView('solo');
-        if (!nodeConversations[soloConversationId]) {
-          vscode.postMessage({ command: 'getNodeConversations', nodeId: soloConversationId });
-        }
-        renderSoloPanel(currentNodes);
-        return;
-      }
-      setMainView('roadmap');
-      expandedNodeId = nodeId;
-      if (!nodeConversations[nodeId]) {
-        vscode.postMessage({ command: 'getNodeConversations', nodeId });
       }
       renderRoadmap(currentNodes);
     }
