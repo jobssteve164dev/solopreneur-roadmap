@@ -655,6 +655,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     target: elements['project-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === '/workspace/second'),
     stopPropagation() {}
   });
+  assert.ok(postedMessages.some((message) => message.command === 'getProjectConversationHistory' && message.projectPath === '/workspace/second'));
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {
@@ -724,6 +725,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /sidebar-conversations-tree-container/);
   assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-id="8"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-node-id="another-step"/);
+  assert.match(elements['portfolio-list'].innerHTML, /sidebar-conversation-mini-actions[\s\S]*data-continue-sidebar-step-id="8"/);
   dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: 'step-1', files: ['docs/brief.md'] });
   assert.match(elements['portfolio-list'].innerHTML, /docs\/brief\.md/);
 
@@ -812,6 +814,11 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /renderSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
   assert.match(script, /savePastedAttachments/);
+  assert.match(script, /conversation-log-pre/);
+  assert.ok(script.includes("querySelectorAll('[data-conversation-id] .conversation-row')"));
+  assert.match(script, /pointerdown[\s\S]*stopPropagation/);
+  assert.match(html, /\.conversation-children::before/);
+  assert.match(html, /\.conversation-list-children/);
   assert.match(script, /runRoadmapRevision[\s\S]*supplementFiles/);
   assert.match(html, /id="btn-toggle-flow"/);
   assert.match(html, /id="flow-panel"/);
@@ -1087,6 +1094,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /renderSidebarStepHistoryContent/);
   assert.match(html, /function conversationStatusKey\(status\)/);
   assert.match(html, /renderSidebarConversationCard/);
+  assert.match(html, /line-height:\s*1/);
+  assert.match(html, /if \(!detailExpanded && rollbackBtn\)/);
+  assert.match(html, /if \(!detailExpanded && continueBtn\)/);
   assert.doesNotMatch(html, /function buildConversationTree\(conversations\)/);
   assert.doesNotMatch(html, /sidebar-conversations-tree-container/);
   assert.doesNotMatch(html, /conversation\.status\.toLowerCase\(\)/);

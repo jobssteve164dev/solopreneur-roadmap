@@ -4611,6 +4611,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       justify-content: center;
       width: 18px;
       height: 18px;
+      line-height: 1;
       border-radius: 4px;
       cursor: pointer;
       color: var(--text-muted);
@@ -4640,6 +4641,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     .sidebar-conversation-mini-actions span .codicon {
       font-size: 10px;
+      display: block;
+      line-height: 1;
     }
 
     .expand-arrow-icon {
@@ -8089,7 +8092,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         command: 'selectProject',
         projectPath: value
       });
-      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: value });
     });
 
     btnAddProject.addEventListener('click', () => {
@@ -8324,10 +8326,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (stopBtn) {
         miniActions += '<span class="mini-btn-stop" data-stop-id="' + escapeHtml(convId) + '" data-stop-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="停止运行"><span class="codicon codicon-debug-stop"></span></span>';
       }
-      if (rollbackBtn) {
+      if (!detailExpanded && rollbackBtn) {
         miniActions += '<span class="mini-btn-rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="撤销修改"><span class="codicon codicon-discard"></span></span>';
       }
-      if (continueBtn) {
+      if (!detailExpanded && continueBtn) {
         miniActions += '<span class="mini-btn-continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="继续对话"><span class="codicon codicon-play"></span></span>';
       }
       miniActions += '</div>';
@@ -9249,7 +9251,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!projectPath) return;
       activateProjectInSidebar(projectPath);
       vscode.postMessage({ command: 'selectProject', projectPath });
-      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
       if (item.nodeId) {
         vscode.postMessage({ command: 'showFullRoadmap' });
       }
@@ -9317,7 +9318,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             command: 'selectProject',
             projectPath
           });
-          vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
         });
       });
       globalFocusPanel.querySelectorAll('[data-daily-review-index]').forEach(item => {
@@ -10002,6 +10002,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, projectPath);
       renderPortfolio(currentProjects.portfolio, projectPath);
+      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
+      vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
       setTimeout(() => {
         const selectedCard = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('.portfolio-card.is-selected') : null;
         if (selectedCard && typeof selectedCard.scrollIntoView === 'function') {

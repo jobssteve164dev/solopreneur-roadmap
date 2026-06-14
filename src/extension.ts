@@ -14352,6 +14352,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       overflow: hidden;
       min-width: 0;
       max-width: 100%;
+      position: relative;
     }
 
     .conversation-item-child {
@@ -14497,15 +14498,53 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     .conversation-children {
       border-top: 1px solid var(--border-glass);
-      padding: 10px;
-      background: rgba(7, 12, 20, 0.28);
+      padding: 12px 10px 10px 18px;
+      background:
+        linear-gradient(90deg, rgba(56, 189, 248, 0.14), transparent 42px),
+        rgba(7, 12, 20, 0.32);
+      position: relative;
+    }
+
+    .conversation-children::before {
+      content: '';
+      position: absolute;
+      top: 36px;
+      bottom: 12px;
+      left: 18px;
+      width: 1px;
+      background: linear-gradient(to bottom, rgba(56, 189, 248, 0.5), rgba(56, 189, 248, 0.04));
     }
 
     .conversation-children-title {
-      color: var(--text-muted);
+      color: #93c5fd;
       font-size: 11px;
       font-weight: 700;
-      margin-bottom: 8px;
+      margin: 0 0 10px 14px;
+      letter-spacing: 0.04em;
+    }
+
+    .conversation-list-children {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      position: relative;
+    }
+
+    .conversation-item-child {
+      margin-left: 14px;
+      border: 1px solid rgba(56, 189, 248, 0.18);
+      background: rgba(15, 23, 42, 0.46);
+      border-radius: 10px;
+    }
+
+    .conversation-item-child::before {
+      content: '';
+      position: absolute;
+      top: 20px;
+      left: -14px;
+      width: 14px;
+      height: 1px;
+      background: rgba(56, 189, 248, 0.42);
     }
 
     .conversation-outcome {
@@ -14544,16 +14583,18 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       font-size: 11px;
     }
 
-    .conversation-detail pre {
-      white-space: pre-wrap;
-      word-break: break-word;
-      overflow-wrap: anywhere;
+    .conversation-log-pre {
+      white-space: pre;
+      word-break: normal;
+      overflow-wrap: normal;
       max-height: 260px;
       overflow: auto;
+      overscroll-behavior: contain;
       margin: 6px 0 0;
       font-size: 11px;
       color: #cbd5e1;
       max-width: 100%;
+      cursor: text;
     }
 
     .conversation-files {
@@ -17375,14 +17416,21 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             vscode.postMessage({ command: 'completeNode', nodeId: node.id });
           });
         }
-        row.querySelectorAll('[data-conversation-id]').forEach(item => {
+        row.querySelectorAll('[data-conversation-id] .conversation-row').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
-            activeConversationId = activeConversationId === item.getAttribute('data-conversation-id')
+            const conversationItem = item.closest('[data-conversation-id]');
+            const conversationId = conversationItem ? conversationItem.getAttribute('data-conversation-id') : '';
+            activeConversationId = activeConversationId === conversationId
               ? ''
-              : item.getAttribute('data-conversation-id');
+              : conversationId;
             renderRoadmap(currentNodes);
           });
+        });
+        row.querySelectorAll('.conversation-detail, .conversation-log-pre').forEach(item => {
+          item.addEventListener('click', (event) => event.stopPropagation());
+          item.addEventListener('pointerdown', (event) => event.stopPropagation());
+          item.addEventListener('wheel', (event) => event.stopPropagation(), { passive: true });
         });
         row.querySelectorAll('[data-retry-conversation-id]').forEach(item => {
           item.addEventListener('click', (event) => {
@@ -17977,9 +18025,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 \${renderConversationFiles(conversation)}
                 \${nodeId === soloConversationId && conversation.status !== 'Running' ? renderSoloClosure(conversation) : ''}
                 <strong>\${t('command')}</strong>
-                <pre>\${escapeHtml(conversation.command)}</pre>
+                <pre class="conversation-log-pre">\${escapeHtml(conversation.command)}</pre>
                 <strong>\${t('output')}</strong>
-                <pre>\${escapeHtml(conversation.output)}</pre>
+                <pre class="conversation-log-pre">\${escapeHtml(conversation.output)}</pre>
               </div>
               \${renderConversationChildren(nodeId, conversation, children)}
             </div>
