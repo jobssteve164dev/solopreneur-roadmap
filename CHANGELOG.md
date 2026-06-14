@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.222 - 2026-06-14
+
+### Fixed
+- flatten continuations and cache sidebar refreshes (f2a8989)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.221 - 2026-06-14
 
 ### Fixed
