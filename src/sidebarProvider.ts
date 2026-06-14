@@ -6915,7 +6915,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         testing: '正在测试连接...',
         connectionOk: '连接正常：',
         connectionFailed: '连接失败：',
-        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败' }
+        linkedFromSolo: '这是从 Solo 关联来的参考记录。',
+        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败', Linked: '已关联' }
       },
       en: {
         title: 'SoloMap',
@@ -7164,7 +7165,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         testing: 'Testing connection...',
         connectionOk: 'Connection OK: ',
         connectionFailed: 'Connection Failed: ',
-        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed' }
+        linkedFromSolo: 'This is a reference linked from Solo.',
+        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed', Linked: 'Linked' }
       }
     };
 
@@ -8328,6 +8330,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const failureReasonMatch = String(conversation.output || '').match(new RegExp('Failure reason:\\\\n([\\\\s\\\\S]*?)(?:\\\\n\\\\n|$)'));
       const outcomeText = statusKey === 'Running' ? (isSolo ? t('stillWorking') : t('continueWorking'))
         : statusKey === 'Failed' ? (((failureReasonMatch || [])[1] || '').trim() || statusText(statusKey))
+        : statusKey === 'Linked' ? t('linkedFromSolo')
         : (isSolo ? t('soloCompleted') : t('continueCompleted'));
         
       const conclusion = statusKey === 'Running' ? '' : soloConclusion(conversation.output);

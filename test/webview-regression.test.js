@@ -1154,6 +1154,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /renderSidebarSoloHistoryContent/);
   assert.match(html, /renderSidebarStepHistoryContent/);
   assert.match(html, /function conversationStatusKey\(status\)/);
+  assert.match(html, /Linked:\s*'已关联'/);
+  assert.match(html, /linkedFromSolo:\s*'这是从 Solo 关联来的参考记录。'/);
+  assert.match(html, /statusKey === 'Linked' \? t\('linkedFromSolo'\)/);
   assert.match(html, /renderSidebarConversationCard/);
   assert.match(html, /\.sidebar-conversation-mini-actions > span\s*\{/);
   assert.match(html, /place-items:\s*center/);
