@@ -4596,21 +4596,38 @@ test('linking a Solo conversation records a reference without changing the step 
     'out/extension.js',
     [
       'module.exports.__linkSoloConversationToNode = linkSoloConversationToNode;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, panel) => { syncEngine = engine; activeProjectRoot = projectRoot; activePanel = panel; };'
     ].join('\n')
   );
   let linkedRecord = null;
+  const postedMessages = [];
+  let stepConversationReadCount = 0;
   extensionModule.__setRuntimeForTest({
     getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
     updateNode: () => { throw new Error('linking a Solo reference must not change step status'); },
-    getAgentExecutions: (nodeId) => nodeId === '__solo__'
-      ? [{ id: 12, nodeId, agentCli: 'codex', command: 'codex exec', output: '结论：关联实现 MVP。', status: 'Completed' }]
-      : [],
+    getAgentExecutions: (nodeId) => {
+      if (nodeId === '__solo__') {
+        return [{ id: 12, nodeId, agentCli: 'codex', command: 'codex exec', output: '结论：关联实现 MVP。', status: 'Completed' }];
+      }
+      if (nodeId === '2') {
+        stepConversationReadCount += 1;
+        return stepConversationReadCount === 1
+          ? [{ id: 7, nodeId, agentCli: 'agy', command: 'agy run', output: '既有环节对话。', status: 'Completed' }]
+          : [];
+      }
+      return [];
+    },
     logAgentExecution: (nodeId, agentCli, command, output, status) => {
       linkedRecord = { nodeId, agentCli, command, output, status };
       return 88;
     }
-  }, '/workspace/app');
+  }, '/workspace/app', {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+      }
+    }
+  });
 
   extensionModule.__linkSoloConversationToNode(12, '2');
 
@@ -4618,6 +4635,11 @@ test('linking a Solo conversation records a reference without changing the step 
   assert.equal(linkedRecord.status, 'Linked');
   assert.match(linkedRecord.output, /Linked from Solo conversation/);
   assert.match(linkedRecord.output, /Solo reference ID: 12/);
+  const stepRefresh = postedMessages.find((message) => message.command === 'nodeConversationsLoaded' && message.nodeId === '2');
+  assert.equal(stepRefresh.conversations.length, 2);
+  assert.equal(stepRefresh.conversations[0].id, 88);
+  assert.equal(stepRefresh.conversations[0].status, 'Linked');
+  assert.equal(stepRefresh.conversations[1].id, 7);
 });
 
 test('stopping an Agent run records the user decision on the active conversation', async () => {

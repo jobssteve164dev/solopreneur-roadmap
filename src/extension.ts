@@ -10831,12 +10831,13 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
   ];
 }
 
-function postNodeConversations(nodeId: string): void {
+function postNodeConversations(nodeId: string, fallbackConversations: import('./db/types').AgentConversation[] = []): void {
   if (syncEngine && activePanel) {
+    const conversations = syncEngine.getAgentExecutions(nodeId);
     activePanel.webview.postMessage({
       command: 'nodeConversationsLoaded',
       nodeId,
-      conversations: syncEngine.getAgentExecutions(nodeId),
+      conversations: conversations.length > 0 ? conversations : fallbackConversations,
       projectPath: activeProjectRoot || ''
     });
   }
@@ -12085,25 +12086,36 @@ function linkSoloConversationToNode(conversationId: number, nodeId: string): voi
     return;
   }
   const marker = `Solo reference ID: ${conversationId}`;
-  if (syncEngine.getAgentExecutions(nodeId).some((entry) => String(entry.output || '').includes(marker))) {
+  const existingStepConversations = syncEngine.getAgentExecutions(nodeId);
+  if (existingStepConversations.some((entry) => String(entry.output || '').includes(marker))) {
     vscode.window.showInformationMessage('This Solo conversation is already associated with that step.');
     return;
   }
-  syncEngine.logAgentExecution(
+  const linkedAt = new Date().toISOString();
+  const linkedOutput = [
+    'Linked from Solo conversation.',
+    marker,
+    `Linked at: ${linkedAt}`,
+    `Original Solo status: ${conversation.status}`,
+    '',
+    conversation.output
+  ].join('\n');
+  const linkedLogId = syncEngine.logAgentExecution(
     nodeId,
     conversation.agentCli,
     conversation.command,
-    [
-      'Linked from Solo conversation.',
-      marker,
-      `Linked at: ${new Date().toISOString()}`,
-      `Original Solo status: ${conversation.status}`,
-      '',
-      conversation.output
-    ].join('\n'),
+    linkedOutput,
     'Linked'
   );
-  postNodeConversations(nodeId);
+  postNodeConversations(nodeId, [{
+    id: linkedLogId,
+    nodeId,
+    timestamp: linkedAt,
+    agentCli: conversation.agentCli,
+    command: conversation.command,
+    output: linkedOutput,
+    status: 'Linked'
+  }, ...existingStepConversations]);
   postNodeConversations(soloConversationId);
   vscode.window.showInformationMessage(`Solo conversation associated with step: ${node.title}`);
 }
