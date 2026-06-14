@@ -15548,6 +15548,32 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installingMcp: '正在启动安装...',
         enhancementToggles: '执行增强',
         enhancementTogglesHelp: '选择一个执行增强后安装或卸载。SoloMap 会让 Agent CLI 完成用户环境里的真实安装和彻底卸载；状态会自动检测。',
+        abilityManagerLabel: '能力扩展与执行增强',
+        abilityManagerHelp: '在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。',
+        abilitySelectPlaceholder: '请选择能力或增强...',
+        abilityGroupSkills: '技能 (Skills)',
+        abilityGroupConnectors: '连接器 (MCP Connectors)',
+        abilityGroupEnhancements: '执行增强 (Enhancements)',
+        addSkill: '➕ 新增技能...',
+        addSkillDescription: '安装外部技能以扩展能力',
+        addConnector: '➕ 新增连接器...',
+        addConnectorDescription: '集成外部 MCP 服务生态',
+        installedStatus: '已安装',
+        readyStatus: '已就绪',
+        notInstalledStatus: '未安装',
+        skillMetaPrefix: '技能路径：',
+        connectorMetaPrefix: '连接器类型：',
+        enhancementMetaPrefix: '内置增强 · 版本：',
+        skillInstallInputHelp: '粘贴 skills.sh 或 GitHub 技能仓库链接。SoloMap 会将其安装到全局技能库中。',
+        mcpInstallInputHelp: '粘贴 MCP 连接器源。SoloMap 将其注册为全局连接器。',
+        skillInputRequired: '请先输入要安装的技能链接。',
+        mcpInputRequired: '请先输入要安装的连接器源。',
+        installingSkillMessage: '正在安装技能...',
+        installingMcpMessage: '正在安装连接器...',
+        installingEnhancementMessage: '正在安装执行增强...',
+        uninstallingSkillMessage: '正在卸载技能...',
+        uninstallingMcpMessage: '正在卸载连接器...',
+        uninstallingEnhancementMessage: '正在卸载执行增强...',
         selectEnhancement: '选择增强功能',
         installingEnhancement: '正在启动安装...',
         uninstallingEnhancement: '正在启动卸载...',
@@ -15723,6 +15749,32 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         installingMcp: 'Starting install...',
         enhancementToggles: 'Harness Enhancements',
         enhancementTogglesHelp: 'Choose one enhancement, then install or uninstall it. SoloMap asks the Agent CLI to perform the real user-environment install or full uninstall; status is detected automatically.',
+        abilityManagerLabel: 'Ability Extensions & Execution Enhancements',
+        abilityManagerHelp: 'Manage installed Skills, MCP Connectors, and built-in execution enhancements here.',
+        abilitySelectPlaceholder: 'Select an ability or enhancement...',
+        abilityGroupSkills: 'Skills',
+        abilityGroupConnectors: 'MCP Connectors',
+        abilityGroupEnhancements: 'Execution Enhancements',
+        addSkill: '➕ Add Skill...',
+        addSkillDescription: 'Install an external skill to extend SoloMap.',
+        addConnector: '➕ Add Connector...',
+        addConnectorDescription: 'Connect an external MCP service.',
+        installedStatus: 'Installed',
+        readyStatus: 'Ready',
+        notInstalledStatus: 'Not installed',
+        skillMetaPrefix: 'Skill path: ',
+        connectorMetaPrefix: 'Connector type: ',
+        enhancementMetaPrefix: 'Built-in enhancement · Version: ',
+        skillInstallInputHelp: 'Paste a skills.sh or GitHub skill repository link. SoloMap installs it into the global skill library.',
+        mcpInstallInputHelp: 'Paste an MCP connector source. SoloMap registers it as a global connector.',
+        skillInputRequired: 'Enter a skill link before installing.',
+        mcpInputRequired: 'Enter a connector source before installing.',
+        installingSkillMessage: 'Installing skill...',
+        installingMcpMessage: 'Installing connector...',
+        installingEnhancementMessage: 'Installing execution enhancement...',
+        uninstallingSkillMessage: 'Uninstalling skill...',
+        uninstallingMcpMessage: 'Uninstalling connector...',
+        uninstallingEnhancementMessage: 'Uninstalling execution enhancement...',
         selectEnhancement: 'Select enhancement',
         installingEnhancement: 'Starting install...',
         uninstallingEnhancement: 'Starting uninstall...',
@@ -15954,10 +16006,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
       setText('text-open-pro-authorization', t('proLogin'));
       setText('text-paste-pro-code', t('proPasteCode'));
-      setText('label-enhancement-toggles', '能力扩展与执行增强');
-      setText('help-enhancement-toggles', '在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。');
-      setText('text-install-ability', '安装');
-      setText('text-uninstall-ability', '卸载');
+      setText('label-enhancement-toggles', t('abilityManagerLabel'));
+      setText('help-enhancement-toggles', t('abilityManagerHelp'));
+      setText('text-install-ability', t('installEnhancement'));
+      setText('text-uninstall-ability', t('uninstallEnhancement'));
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -16383,16 +16435,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           title: s.title || s.id,
           description: s.description || '',
           installed: true,
-          statusLabel: '已安装',
+          statusLabel: t('installedStatus'),
           statusClass: 'ready',
-          meta: '技能路径：' + (s.entry || '')
+          meta: t('skillMetaPrefix') + (s.entry || '')
         });
       });
       items.push({
         id: 'add-new-skill',
         type: 'add-new-skill',
-        title: '➕ 新增技能...',
-        description: '安装外部技能以扩展能力',
+        title: t('addSkill'),
+        description: t('addSkillDescription'),
         installed: false
       });
 
@@ -16404,16 +16456,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           title: c.title || c.id,
           description: c.description || '',
           installed: true,
-          statusLabel: '已安装',
+          statusLabel: t('installedStatus'),
           statusClass: 'ready',
-          meta: '连接器类型：' + (c.type || 'mcp')
+          meta: t('connectorMetaPrefix') + (c.type || 'mcp')
         });
       });
       items.push({
         id: 'add-new-connector',
         type: 'add-new-connector',
-        title: '➕ 新增连接器...',
-        description: '集成外部 MCP 服务生态',
+        title: t('addConnector'),
+        description: t('addConnectorDescription'),
         installed: false
       });
 
@@ -16426,9 +16478,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           title: e.title || e.id,
           description: e.description || '',
           installed: isInstalled,
-          statusLabel: e.statusLabel || (isInstalled ? '已就绪' : '未安装'),
+          statusLabel: e.statusLabel || (isInstalled ? t('readyStatus') : t('notInstalledStatus')),
           statusClass: e.status || (isInstalled ? 'ready' : 'missing'),
-          meta: '内置增强 · 版本：' + (e.version || 'unknown')
+          meta: t('enhancementMetaPrefix') + (e.version || 'unknown')
         });
       });
 
@@ -16439,17 +16491,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
       let optionsHtml = '';
       
-      optionsHtml += '<div class="solo-select-group-header">技能 (Skills)</div>';
+      optionsHtml += '<div class="solo-select-group-header">' + escapeHtml(t('abilityGroupSkills')) + '</div>';
       optionsHtml += items.filter(i => i.type === 'skill' || i.type === 'add-new-skill').map(item => 
         '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
       ).join('');
 
-      optionsHtml += '<div class="solo-select-group-header">连接器 (MCP Connectors)</div>';
+      optionsHtml += '<div class="solo-select-group-header">' + escapeHtml(t('abilityGroupConnectors')) + '</div>';
       optionsHtml += items.filter(i => i.type === 'connector' || i.type === 'add-new-connector').map(item => 
         '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
       ).join('');
 
-      optionsHtml += '<div class="solo-select-group-header">执行增强 (Enhancements)</div>';
+      optionsHtml += '<div class="solo-select-group-header">' + escapeHtml(t('abilityGroupEnhancements')) + '</div>';
       optionsHtml += items.filter(i => i.type === 'enhancement').map(item => 
         '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
       ).join('');
@@ -16468,14 +16520,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (selectedItem.type === 'add-new-skill') {
         settingsAbilityUrlInputContainer.style.display = 'block';
         settingAbilityUrlInput.placeholder = 'e.g. https://skills.sh/owner/repo or owner/repo@skill';
-        helpAbilityUrlInput.textContent = '粘贴 skills.sh 或 GitHub 技能仓库链接。SoloMap 会将其安装到全局技能库中。';
+        helpAbilityUrlInput.textContent = t('skillInstallInputHelp');
         abilityDetailCard.style.display = 'none';
         btnInstallAbility.removeAttribute('disabled');
         btnUninstallAbility.setAttribute('disabled', 'true');
       } else if (selectedItem.type === 'add-new-connector') {
         settingsAbilityUrlInputContainer.style.display = 'block';
         settingAbilityUrlInput.placeholder = 'e.g. GitHub MCP server URL, npm package, or config snippet';
-        helpAbilityUrlInput.textContent = '粘贴 MCP 连接器源。SoloMap 将其注册为全局连接器。';
+        helpAbilityUrlInput.textContent = t('mcpInstallInputHelp');
         abilityDetailCard.style.display = 'none';
         btnInstallAbility.removeAttribute('disabled');
         btnUninstallAbility.setAttribute('disabled', 'true');
@@ -16515,22 +16567,22 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         if (selectedAbilityId === 'add-new-skill') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
-            showAbilityActionMessage('请先输入要安装的技能链接。', true);
+            showAbilityActionMessage(t('skillInputRequired'), true);
             return;
           }
-          showAbilityActionMessage('正在安装技能...');
+          showAbilityActionMessage(t('installingSkillMessage'));
           vscode.postMessage({ command: 'installSkill', skillInput: urlVal });
         } else if (selectedAbilityId === 'add-new-connector') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
-            showAbilityActionMessage('请先输入要安装的连接器源。', true);
+            showAbilityActionMessage(t('mcpInputRequired'), true);
             return;
           }
-          showAbilityActionMessage('正在安装连接器...');
+          showAbilityActionMessage(t('installingMcpMessage'));
           vscode.postMessage({ command: 'installMcp', mcpInput: urlVal });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
-          showAbilityActionMessage('正在安装执行增强...');
+          showAbilityActionMessage(t('installingEnhancementMessage'));
           vscode.postMessage({ command: 'installEnhancement', enhancementId: originId });
         }
       });
@@ -16542,15 +16594,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         
         if (selectedAbilityId.startsWith('skill-')) {
           const originId = selectedAbilityId.substring('skill-'.length);
-          showAbilityActionMessage('正在卸载技能...');
+          showAbilityActionMessage(t('uninstallingSkillMessage'));
           vscode.postMessage({ command: 'uninstallSkill', skillId: originId });
         } else if (selectedAbilityId.startsWith('connector-')) {
           const originId = selectedAbilityId.substring('connector-'.length);
-          showAbilityActionMessage('正在卸载连接器...');
+          showAbilityActionMessage(t('uninstallingMcpMessage'));
           vscode.postMessage({ command: 'uninstallMcp', mcpId: originId });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
-          showAbilityActionMessage('正在卸载执行增强...');
+          showAbilityActionMessage(t('uninstallingEnhancementMessage'));
           vscode.postMessage({ command: 'uninstallEnhancement', enhancementId: originId });
         }
       });

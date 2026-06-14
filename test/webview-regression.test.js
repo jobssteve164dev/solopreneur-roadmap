@@ -362,6 +362,37 @@ test('extension manifest uses SoloMap visible branding', () => {
   assert.equal(manifest.contributes.configuration.properties['solopreneur.taskPermissionMode'], undefined);
 });
 
+test('ability settings copy is localized in English webviews', () => {
+  const sources = [
+    fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8'),
+    fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8')
+  ];
+
+  for (const source of sources) {
+    assert.match(source, /abilityManagerLabel:\s*'Ability Extensions & Execution Enhancements'/);
+    assert.match(source, /abilityGroupSkills:\s*'Skills'/);
+    assert.match(source, /abilityGroupConnectors:\s*'MCP Connectors'/);
+    assert.match(source, /abilityGroupEnhancements:\s*'Execution Enhancements'/);
+    assert.match(source, /skillInputRequired:\s*'Enter a skill link before installing\.'/);
+    assert.match(source, /showAbilityActionMessage\(t\('installingEnhancementMessage'\)\)/);
+    assert.doesNotMatch(source, /setText\('label-enhancement-toggles',\s*'能力扩展与执行增强'\)/);
+    assert.doesNotMatch(source, /setText\('text-install-ability',\s*'安装'\)/);
+    assert.doesNotMatch(source, /statusLabel:\s*'已安装'/);
+    assert.doesNotMatch(source, /showAbilityActionMessage\('正在安装/);
+  }
+});
+
+test('website-only changes do not trigger extension publishing', () => {
+  const publishWorkflow = fs.readFileSync(path.join(projectRoot, '.github', 'workflows', 'publish.yml'), 'utf8');
+  const websiteWorkflow = fs.readFileSync(path.join(projectRoot, '.github', 'workflows', 'deploy-website.yml'), 'utf8');
+
+  assert.doesNotMatch(publishWorkflow, /-\s*'website\/\*\*'/);
+  assert.doesNotMatch(publishWorkflow, /-\s*'\.github\/workflows\/deploy-website\.yml'/);
+  assert.match(publishWorkflow, /id:\s*extension_changes/);
+  assert.match(publishWorkflow, /should_publish=false/);
+  assert.match(websiteWorkflow, /-\s*'website\/\*\*'/);
+});
+
 test('readme uses bilingual marketplace copy and marketplace-compatible remote logo', () => {
   const readme = fs.readFileSync(path.join(projectRoot, 'README.md'), 'utf8');
 
