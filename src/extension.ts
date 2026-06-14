@@ -72,6 +72,8 @@ interface SolopreneurProject {
   path: string;
   type?: string;
   priority?: string;
+  description?: string;
+  notes?: string;
   pinnedAt?: string;
 }
 
@@ -1669,6 +1671,8 @@ function normalizeProjectsForStorage(projects: SolopreneurProject[]): Solopreneu
       path: String(project.path || '').trim(),
       ...(project.type ? { type: String(project.type) } : {}),
       ...(project.priority ? { priority: String(project.priority) } : {}),
+      ...(project.description ? { description: String(project.description) } : {}),
+      ...(project.notes ? { notes: String(project.notes) } : {}),
       ...(project.pinnedAt ? { pinnedAt: String(project.pinnedAt) } : {})
     }))
     .filter((project) => {
@@ -2006,7 +2010,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   });
 }
 
-async function updateProjectMetadata(context: vscode.ExtensionContext, projectPath: string, updates: Partial<Pick<SolopreneurProject, 'type' | 'priority'>>): Promise<void> {
+async function updateProjectMetadata(context: vscode.ExtensionContext, projectPath: string, updates: Partial<Pick<SolopreneurProject, 'name' | 'type' | 'priority' | 'description' | 'notes'>>): Promise<void> {
   const projects = getProjects(context);
   const nextProjects = projects.map((project) => {
     if (project.path !== projectPath) {
@@ -2014,8 +2018,11 @@ async function updateProjectMetadata(context: vscode.ExtensionContext, projectPa
     }
     return {
       ...project,
+      ...(updates.name !== undefined ? { name: String(updates.name || projectName(project.path || '')) } : {}),
       ...(updates.type !== undefined ? { type: String(updates.type || '') } : {}),
-      ...(updates.priority !== undefined ? { priority: String(updates.priority || '') } : {})
+      ...(updates.priority !== undefined ? { priority: String(updates.priority || '') } : {}),
+      ...(updates.description !== undefined ? { description: String(updates.description || '') } : {}),
+      ...(updates.notes !== undefined ? { notes: String(updates.notes || '') } : {})
     };
   });
   await saveProjects(context, nextProjects);
@@ -3229,8 +3236,11 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
 
         case 'updateProjectMetadata':
           await updateProjectMetadata(context, message.projectPath, {
+            name: message.name,
             type: message.projectType,
-            priority: message.priority
+            priority: message.priority,
+            description: message.description,
+            notes: message.notes
           });
           break;
 
@@ -14716,9 +14726,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     .roadmap-revision-popover {
       position: absolute;
       top: 75px;
-      right: 68px;
+      right: 24px;
       width: clamp(340px, 42vw, 560px);
       max-width: calc(100vw - 32px);
+      box-sizing: border-box;
       background: rgba(15, 17, 26, 0.96);
       backdrop-filter: blur(16px);
       border: 1px solid var(--border-glass);
@@ -14731,7 +14742,24 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       gap: 12px;
       max-height: calc(100vh - 110px);
       overflow-y: auto;
+      overflow-x: hidden;
       animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .roadmap-revision-body {
+      min-width: 0;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
+
+    .roadmap-revision-body .conversation-compose {
+      min-width: 0;
+      max-width: 100%;
+      flex-wrap: wrap;
+    }
+
+    .roadmap-revision-body .conversation-input {
+      min-width: 0;
     }
 
     .roadmap-revision-popover.open {
@@ -14923,6 +14951,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       min-height: 76px;
       resize: vertical;
       line-height: 1.45;
+    }
+
+    .project-description-input {
+      min-height: 68px;
+    }
+
+    .project-notes-input {
+      min-height: 92px;
     }
 
     .settings-input:focus, .settings-textarea:focus {
@@ -15226,25 +15262,10 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           </button>
           <div class="solo-select-menu" data-solo-menu role="listbox"></div>
         </div>
-        <div class="solo-select project-property-select" id="project-type-select" data-solo-select data-value="">
-          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-            <span class="solo-select-trigger-label" data-solo-label></span>
-            <span class="codicon codicon-chevron-down solo-select-caret"></span>
-          </button>
-          <div class="solo-select-menu" data-solo-menu role="listbox"></div>
-        </div>
-        <div class="solo-select project-property-select" id="project-priority-select" data-solo-select data-value="">
-          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-            <span class="solo-select-trigger-label" data-solo-label></span>
-            <span class="codicon codicon-chevron-down solo-select-caret"></span>
-          </button>
-          <div class="solo-select-menu" data-solo-menu role="listbox"></div>
-        </div>
-        <button class="btn-project-add" id="btn-add-project" title="Add project folder"><span class="codicon codicon-add"></span></button>
         <button class="btn-project-remove" id="btn-remove-project" title="Remove project"><span class="codicon codicon-trash"></span></button>
         <button class="btn-roadmap-revision" id="btn-toggle-roadmap-revision" title="Revise Roadmap"><span class="codicon codicon-git-compare"></span></button>
         <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
-        <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
+        <button class="btn-gear" id="btn-toggle-settings" title="Project Settings"><span class="codicon codicon-settings-gear"></span></button>
       </div>
     </header>
 
@@ -15305,236 +15326,51 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
   <!-- Settings Panel Overlay -->
   <div class="settings-overlay" id="settings-panel">
     <div class="settings-header">
-      <h3><span class="codicon codicon-settings-gear"></span> <span id="settings-title">SoloMap Settings</span></h3>
+      <h3><span class="codicon codicon-settings-gear"></span> <span id="settings-title">Project Settings</span></h3>
       <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
     <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-globe"></span><span id="settings-section-basic">Basics</span></div>
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-language">Language</label>
-      <div class="solo-select settings-select" id="setting-language" data-solo-select data-value="zh">
-        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label>中文</span>
-          <span class="codicon codicon-chevron-down solo-select-caret"></span>
-        </button>
-        <div class="solo-select-menu" data-solo-menu role="listbox">
-          <button type="button" class="solo-select-option" data-solo-option-value="zh" aria-selected="true">中文</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="en" aria-selected="false">English</button>
-        </div>
-      </div>
-    </div>
-    </div>
-
-    <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-account"></span><span id="settings-section-account">SoloMap Pro</span></div>
+      <div class="settings-card-title"><span class="codicon codicon-folder"></span><span id="settings-section-basic">Project Profile</span></div>
       <div class="settings-field">
-        <div class="dependency-panel" id="pro-account-panel"></div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px;">
-          <button class="settings-action-btn save-btn" id="btn-open-pro-authorization"><span class="codicon codicon-lock"></span><span id="text-open-pro-authorization">登录 / 升级 Pro</span></button>
-          <button class="settings-action-btn test-btn" id="btn-paste-pro-code"><span class="codicon codicon-key"></span><span id="text-paste-pro-code">粘贴授权码</span></button>
-        </div>
+        <label class="settings-lbl-title" id="label-project-name">Project Name</label>
+        <input type="text" class="settings-input" id="project-name-input" placeholder="Project name">
       </div>
-    </div>
-
-    <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-robot"></span><span id="settings-section-agent">Agent Collaboration</span></div>
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-cli-path">CLI Command or Path</label>
-      <div class="settings-cli-select-wrap">
-        <div class="solo-select settings-select" id="setting-cli-select" data-solo-select data-value="agy">
-          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-            <span class="solo-select-trigger-label" data-solo-label>agy</span>
-            <span class="codicon codicon-chevron-down solo-select-caret"></span>
-          </button>
-          <div class="solo-select-menu" data-solo-menu role="listbox">
-            <button type="button" class="solo-select-option" data-solo-option-value="agy" aria-selected="true">agy</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="codex" aria-selected="false">codex</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="cursor" aria-selected="false">cursor</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="copilot" aria-selected="false">copilot</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="claude" aria-selected="false">claude</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="opencode" aria-selected="false">opencode</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="custom" aria-selected="false">Custom...</button>
-          </div>
-        </div>
-        <input
-          type="text"
-          class="settings-input"
-          id="setting-clipath-custom"
-          placeholder="e.g. /usr/local/bin/cursor-cli or my-copilot"
-          style="display:none; margin-top: 6px;"
-        >
-      </div>
-      <div id="help-cli-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Name of globally installed CLI (e.g. <code>agy</code>, <code>codex</code>, <code>cursor</code>, <code>claude</code>, <code>copilot</code>, <code>opencode</code>) or the absolute path to its executable.
-      </div>
-    </div>
-
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-agent-model">Default Model</label>
-      <div class="solo-select settings-select" id="setting-agent-model-select" data-solo-select data-value="auto">
-        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label>Auto</span>
-          <span class="codicon codicon-chevron-down solo-select-caret"></span>
-        </button>
-        <div class="solo-select-menu" data-solo-menu role="listbox">
-          <button type="button" class="solo-select-option" data-solo-option-value="auto" aria-selected="true">Auto</button>
-        </div>
-      </div>
-      <div id="help-agent-model" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Uses the selected Agent family default unless you pin a specific model.
-      </div>
-    </div>
-
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-reviewer-cli-path">Review Agent</label>
-      <div class="settings-cli-select-wrap">
-        <div class="solo-select settings-select" id="setting-reviewer-cli-select" data-solo-select data-value="">
-          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-            <span class="solo-select-trigger-label" data-solo-label>Same as main Agent</span>
-            <span class="codicon codicon-chevron-down solo-select-caret"></span>
-          </button>
-          <div class="solo-select-menu" data-solo-menu role="listbox">
-            <button type="button" class="solo-select-option" data-solo-option-value="" aria-selected="true" id="option-reviewer-same">Same as main Agent</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="agy" aria-selected="false">agy</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="codex" aria-selected="false">codex</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="cursor" aria-selected="false">cursor</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="copilot" aria-selected="false">copilot</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="claude" aria-selected="false">claude</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="opencode" aria-selected="false">opencode</button>
-            <button type="button" class="solo-select-option" data-solo-option-value="custom" aria-selected="false">Custom...</button>
-          </div>
-        </div>
-        <input
-          type="text"
-          class="settings-input"
-          id="setting-reviewer-clipath-custom"
-          placeholder="e.g. /usr/local/bin/codex"
-          style="display:none; margin-top: 6px;"
-        >
-      </div>
-      <div id="help-reviewer-cli-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Optional secondary CLI for read-only review after task runs.
-      </div>
-    </div>
-
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-collaboration-review-mode">Auto Review</label>
-      <div class="solo-select settings-select" id="setting-collaboration-review-mode" data-solo-select data-value="high_risk">
-        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label>High-risk tasks</span>
-          <span class="codicon codicon-chevron-down solo-select-caret"></span>
-        </button>
-        <div class="solo-select-menu" data-solo-menu role="listbox">
-          <button type="button" class="solo-select-option" data-solo-option-value="high_risk" aria-selected="true" id="option-review-high-risk">High-risk tasks</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="all" aria-selected="false" id="option-review-all">Every task</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="off" aria-selected="false" id="option-review-off">Off</button>
-        </div>
-      </div>
-      <div id="help-collaboration-review-mode" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Review runs are read-only and appear as a separate conversation in the same step.
-      </div>
-    </div>
-    </div>
-
-    <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-database"></span><span id="settings-section-data">Project Data</span></div>
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-global-data-path">Global Data Directory</label>
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-global-data-path"
-        placeholder="e.g. /home/ubuntu/project/.solomap-global"
-      >
-      <div id="help-global-data-path" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Directory used to store cross-project SoloMap data such as portfolio, dependencies, learning candidates, and metrics.
-      </div>
-    </div>
-
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-agent-impact">Agent Impact</label>
-      <div class="impact-panel" id="agent-impact-panel">
-        <div class="impact-summary">
-          <div class="impact-metric">
-            <div class="impact-metric-value" id="impact-minutes">0</div>
-            <div class="impact-metric-label" id="impact-minutes-label">Minutes</div>
-          </div>
-          <div class="impact-metric">
-            <div class="impact-metric-value" id="impact-files">0</div>
-            <div class="impact-metric-label" id="impact-files-label">Files changed</div>
-          </div>
-          <div class="impact-metric">
-            <div class="impact-metric-value" id="impact-progress">0</div>
-            <div class="impact-metric-label" id="impact-progress-label">Project progress</div>
-          </div>
-        </div>
-        <div class="agent-impact-list" id="agent-impact-list"></div>
-        <button class="settings-action-btn test-btn" id="btn-refresh-agent-impact" style="width: 100%;"><span class="codicon codicon-refresh"></span><span id="text-refresh-agent-impact">Refresh Impact</span></button>
-      </div>
-    </div>
-    </div>
-
-    <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-edit"></span><span id="settings-section-instructions">Instructions</span></div>
-    <div class="settings-field">
-      <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
-      <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Always keep changes minimal and run the narrowest relevant test."></textarea>
-      <div id="help-global-prompt" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-        Injected into every task conversation. Instructions added in a step conversation take priority.
-      </div>
-    </div>
-    </div>
-
-    <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-extensions"></span><span id="settings-section-abilities">Abilities</span></div>
       <div class="settings-field">
-        <label class="settings-lbl-title" id="label-enhancement-toggles">能力扩展与执行增强</label>
-        <div id="help-enhancement-toggles" style="font-size: 9px; color: var(--text-muted); margin-top: 2px;">
-          在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。
-        </div>
-        
-        <div id="settings-ability-url-input-container" style="display: none; margin-bottom: 6px; margin-top: 6px;">
-          <input
-            type="text"
-            class="settings-input"
-            id="setting-ability-url-input"
-            placeholder=""
-          >
-          <div id="help-ability-url-input" style="font-size: 8px; color: var(--text-muted); margin-top: 2px;"></div>
-        </div>
+        <label class="settings-lbl-title" id="label-project-description">One-line Description</label>
+        <textarea class="settings-input settings-textarea project-description-input" id="project-description-input" placeholder="What is this project for?"></textarea>
+      </div>
+      <div class="settings-field">
+        <label class="settings-lbl-title" id="label-project-notes">Notes</label>
+        <textarea class="settings-input settings-textarea project-notes-input" id="project-notes-input" placeholder="Useful context, constraints, or reminders."></textarea>
+      </div>
+    </div>
 
-        <div class="solo-select settings-select" id="setting-ability-select" data-solo-select data-value="" style="margin-top: 6px;">
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-symbol-class"></span><span id="settings-section-data">Project Shape</span></div>
+      <div class="settings-field">
+        <label class="settings-lbl-title" id="label-project-type">Category</label>
+        <div class="solo-select settings-select" id="project-type-select" data-solo-select data-value="">
           <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-            <span class="solo-select-trigger-label" data-solo-label>请选择能力或增强...</span>
+            <span class="solo-select-trigger-label" data-solo-label></span>
             <span class="codicon codicon-chevron-down solo-select-caret"></span>
           </button>
-          <div class="solo-select-menu" data-solo-menu role="listbox" style="max-height: 250px; overflow-y: auto;">
-          </div>
+          <div class="solo-select-menu" data-solo-menu role="listbox"></div>
         </div>
-
-        <div class="enhancement-card" id="ability-detail-card" style="margin-top: 8px; display: none;">
-          <div class="enhancement-card-head">
-            <div>
-              <div class="enhancement-title" id="ability-detail-title"></div>
-              <div class="enhancement-desc" id="ability-detail-desc" style="white-space: pre-wrap; font-size: 11px;"></div>
-            </div>
-            <span class="enhancement-status" id="ability-detail-status"></span>
-          </div>
-          <div class="enhancement-meta" id="ability-detail-meta"></div>
+      </div>
+      <div class="settings-field">
+        <label class="settings-lbl-title" id="label-project-priority">Priority</label>
+        <div class="solo-select settings-select" id="project-priority-select" data-solo-select data-value="">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+            <span class="solo-select-trigger-label" data-solo-label></span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox"></div>
         </div>
-
-        <div class="enhancement-actions" style="margin-top: 8px;">
-          <button class="settings-action-btn test-btn" id="btn-install-ability" disabled><span class="codicon codicon-cloud-download"></span><span id="text-install-ability">安装</span></button>
-          <button class="settings-action-btn test-btn" id="btn-uninstall-ability" disabled><span class="codicon codicon-trash"></span><span id="text-uninstall-ability">卸载</span></button>
-        </div>
-        
-        <div class="cli-badge" id="ability-action-badge" style="display:none; margin-top: 6px;"></div>
       </div>
     </div>
 
     <div class="settings-actions">
-      <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
     </div>
     <div class="cli-badge" id="cli-test-badge" style="display:none;"></div>
@@ -15544,7 +15380,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const vscode = acquireVsCodeApi();
     const canvas = document.getElementById('canvas');
     const projectSelect = document.getElementById('project-select');
-    const btnAddProject = document.getElementById('btn-add-project');
     const btnRemoveProject = document.getElementById('btn-remove-project');
     const btnToggleRoadmapView = document.getElementById('btn-toggle-roadmap-view');
     const btnToggleSolo = document.getElementById('btn-toggle-solo');
@@ -15599,6 +15434,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const agentImpactList = document.getElementById('agent-impact-list');
     const projectTypeSelect = document.getElementById('project-type-select');
     const projectPrioritySelect = document.getElementById('project-priority-select');
+    const projectNameInput = document.getElementById('project-name-input');
+    const projectDescriptionInput = document.getElementById('project-description-input');
+    const projectNotesInput = document.getElementById('project-notes-input');
     let currentLanguage = 'zh';
     let currentNodes = [];
     let expandedNodeId = '';
@@ -15633,9 +15471,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       zh: {
         title: 'SoloMap',
         addProject: '添加项目文件夹',
-        settingsTitle: 'SoloMap 设置',
+        settingsTitle: '项目设置',
         language: '界面语言',
         removeProject: '删除项目',
+        projectName: '项目名称',
+        projectNamePlaceholder: '用于在项目列表里识别这个项目',
+        projectDescription: '一句话简介',
+        projectDescriptionPlaceholder: '这个项目服务谁，解决什么问题？',
+        projectNotes: '备注',
+        projectNotesPlaceholder: '补充边界、目标、提醒或协作上下文...',
+        projectType: '项目类别',
+        projectPriority: '项目优先级',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode）或可执行文件绝对路径。',
         globalPrompt: '全局默认提示词',
@@ -15800,9 +15646,17 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       en: {
         title: 'SoloMap',
         addProject: 'Add project folder',
-        settingsTitle: 'SoloMap Settings',
+        settingsTitle: 'Project Settings',
         language: 'Language',
         removeProject: 'Remove project',
+        projectName: 'Project name',
+        projectNamePlaceholder: 'Name used to recognize this project',
+        projectDescription: 'One-line description',
+        projectDescriptionPlaceholder: 'Who is this for, and what problem does it solve?',
+        projectNotes: 'Notes',
+        projectNotesPlaceholder: 'Add boundaries, goals, reminders, or collaboration context...',
+        projectType: 'Category',
+        projectPriority: 'Priority',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, or opencode, or an absolute executable path.',
         globalPrompt: 'Default Agent Instructions',
@@ -16035,15 +15889,15 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     function applyLanguage() {
       setText('app-title', t('title'));
-      btnAddProject.title = t('addProject');
-      btnRemoveProject.title = t('removeProject');
-      btnToggleSolo.title = t('soloTitle');
+      if (btnRemoveProject) btnRemoveProject.title = t('removeProject');
+      if (btnToggleSolo) btnToggleSolo.title = t('soloTitle');
       if (btnToggleFlow) btnToggleFlow.title = t('flowTitle');
       if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
+      if (btnToggleSettings) btnToggleSettings.title = t('settingsTitle');
       setText('roadmap-view-tab-label', t('roadmapView'));
       setText('solo-view-tab-label', t('soloTitle'));
       setText('flow-view-tab-label', t('flowTitle'));
-      btnToggleRoadmapRevision.title = t('reviseRoadmap');
+      if (btnToggleRoadmapRevision) btnToggleRoadmapRevision.title = t('reviseRoadmap');
       setText('settings-title', t('settingsTitle'));
       setText('feedback-title', t('feedbackPanelTitle'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
@@ -16059,7 +15913,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         ? '默认跟随当前 Agent 系列的自动模型；固定后会优先使用该模型。'
         : 'Uses the selected Agent family default unless you pin a specific model.');
       setText('label-global-prompt', t('globalPrompt'));
-      settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
+      if (settingGlobalPrompt) settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
       setText('label-global-data-path', t('globalDataPath'));
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
@@ -16097,6 +15951,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       setText('text-open-feedback', t('openFeedback'));
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
+      setText('label-project-name', t('projectName'));
+      setText('label-project-description', t('projectDescription'));
+      setText('label-project-notes', t('projectNotes'));
+      setText('label-project-type', t('projectType'));
+      setText('label-project-priority', t('projectPriority'));
+      if (projectNameInput) projectNameInput.placeholder = t('projectNamePlaceholder');
+      if (projectDescriptionInput) projectDescriptionInput.placeholder = t('projectDescriptionPlaceholder');
+      if (projectNotesInput) projectNotesInput.placeholder = t('projectNotesPlaceholder');
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderRoadmap(currentNodes);
       renderSoloPanel(currentNodes);
@@ -16162,14 +16024,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         btnToggleRoadmapRevision.classList.remove('active');
         feedbackPanel.style.display = 'none';
         settingsPanel.style.display = 'flex';
-        vscode.postMessage({ command: 'getSettings' });
-        requestAgentImpact();
+        renderProjectSettings();
       }
     });
 
     btnCloseSettings.addEventListener('click', () => {
       settingsPanel.style.display = 'none';
-      cliTestBadge.style.display = 'none';
+      if (cliTestBadge) cliTestBadge.style.display = 'none';
     });
 
     btnToggleRoadmapView.addEventListener('click', () => {
@@ -16178,7 +16039,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     btnToggleSolo.addEventListener('click', () => {
       settingsPanel.style.display = 'none';
-      cliTestBadge.style.display = 'none';
+      if (cliTestBadge) cliTestBadge.style.display = 'none';
       roadmapRevisionExpanded = false;
       roadmapRevisionPanel.classList.remove('open');
       btnToggleRoadmapRevision.classList.remove('active');
@@ -16188,7 +16049,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     if (btnToggleFlow) {
       btnToggleFlow.addEventListener('click', () => {
         settingsPanel.style.display = 'none';
-        cliTestBadge.style.display = 'none';
+        if (cliTestBadge) cliTestBadge.style.display = 'none';
         roadmapRevisionExpanded = false;
         roadmapRevisionPanel.classList.remove('open');
         btnToggleRoadmapRevision.classList.remove('active');
@@ -16208,7 +16069,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       if (roadmapRevisionExpanded) {
         settingsPanel.style.display = 'none';
         feedbackPanel.style.display = 'none';
-        cliTestBadge.style.display = 'none';
+        if (cliTestBadge) cliTestBadge.style.display = 'none';
         setMainView('roadmap');
         if (!nodeConversations[roadmapRevisionId]) {
           vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
@@ -16233,7 +16094,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     bindSoloSelect(settingCliSelect, () => {
       // Toggle custom input visibility; the label is handled by solo-select itself.
       const selected = getSoloSelectValue(settingCliSelect);
-      settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
+      if (settingCliPathCustom) settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
       currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
       ensureAgentModelsLoaded(currentCliPath, 'settings');
       syncSettingAgentModelSelect();
@@ -16389,9 +16250,12 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     function getEffectiveSettingCliPath() {
+      if (!settingCliSelect) {
+        return currentCliPath || 'agy';
+      }
       const selected = getSoloSelectValue(settingCliSelect);
       if (selected === 'custom') {
-        return (settingCliPathCustom.value || '').trim() || 'agy';
+        return (settingCliPathCustom && settingCliPathCustom.value || '').trim() || 'agy';
       }
       if (currentCliPath && getCliPresetFromCliPath(currentCliPath) === selected) {
         return currentCliPath;
@@ -16403,27 +16267,38 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const raw = String(cliPath || '').trim() || 'agy';
       const preset = getCliPresetFromCliPath(raw);
       currentCliPath = raw;
+      if (!settingCliSelect) {
+        return;
+      }
       setSoloSelectValue(settingCliSelect, preset);
       if (preset === 'custom') {
-        settingCliPathCustom.value = raw;
-        settingCliPathCustom.style.display = 'block';
+        if (settingCliPathCustom) {
+          settingCliPathCustom.value = raw;
+          settingCliPathCustom.style.display = 'block';
+        }
       } else {
-        settingCliPathCustom.value = '';
-        settingCliPathCustom.style.display = 'none';
+        if (settingCliPathCustom) {
+          settingCliPathCustom.value = '';
+          settingCliPathCustom.style.display = 'none';
+        }
       }
     }
 
     function getEffectiveReviewerCliPath() {
+      if (!settingReviewerCliSelect) return '';
       const selected = getSoloSelectValue(settingReviewerCliSelect);
       if (!selected) return '';
       if (selected === 'custom') {
-        return (settingReviewerCliPathCustom.value || '').trim();
+        return (settingReviewerCliPathCustom && settingReviewerCliPathCustom.value || '').trim();
       }
       return selected;
     }
 
     function applyReviewerCliPath(cliPath) {
       const raw = String(cliPath || '').trim();
+      if (!settingReviewerCliSelect) {
+        return;
+      }
       if (!raw) {
         setSoloSelectValue(settingReviewerCliSelect, '');
         if (settingReviewerCliPathCustom) {
@@ -16742,7 +16617,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           applySettingCliPath(message.settings.cliPath || 'agy');
           soloAgentSelection = getEffectiveSettingCliPath();
           flowAgentSelection = getEffectiveSettingCliPath();
-          settingGlobalPrompt.value = message.settings.globalPrompt || '';
+          if (settingGlobalPrompt) settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
@@ -16750,8 +16625,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
           renderAbilitiesAndEnhancements(message.settings);
-          setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
-          currentLanguage = getSoloSelectValue(settingLanguage);
+          if (settingLanguage) setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
+          currentLanguage = getSoloSelectValue(settingLanguage) || currentLanguage;
           applyLanguage();
           renderFlowPanel();
           break;
@@ -16878,23 +16753,23 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     // Save configurations
     btnSaveSettings.addEventListener('click', () => {
-      const effectiveCliPath = getEffectiveSettingCliPath();
+      const projectPath = getSoloSelectValue(projectSelect);
+      if (!projectPath) return;
       vscode.postMessage({
-        command: 'updateSettings',
-        cliPath: effectiveCliPath,
-        agentModelPreferences: agentModelPreferenceMap,
-        language: getSoloSelectValue(settingLanguage),
-        globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
-        reviewerCliPath: getEffectiveReviewerCliPath(),
-        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk'
+        command: 'updateProjectMetadata',
+        projectPath,
+        name: projectNameInput ? projectNameInput.value.trim() : '',
+        description: projectDescriptionInput ? projectDescriptionInput.value.trim() : '',
+        notes: projectNotesInput ? projectNotesInput.value.trim() : '',
+        projectType: getSoloSelectValue(projectTypeSelect),
+        priority: getSoloSelectValue(projectPrioritySelect)
       });
       settingsPanel.style.display = 'none';
-      cliTestBadge.style.display = 'none';
+      if (cliTestBadge) cliTestBadge.style.display = 'none';
     });
 
     // Test CLI path
-    btnTestCli.addEventListener('click', () => {
+    if (btnTestCli) btnTestCli.addEventListener('click', () => {
       cliTestBadge.style.display = 'block';
       cliTestBadge.className = 'cli-badge';
       cliTestBadge.style.background = 'rgba(255,255,255,0.05)';
@@ -16987,31 +16862,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
     });
 
-    bindSoloSelect(projectTypeSelect, (value) => {
-      const projectPath = getSoloSelectValue(projectSelect);
-      if (!projectPath) return;
-      vscode.postMessage({
-        command: 'updateProjectMetadata',
-        projectPath,
-        projectType: value,
-        priority: getSoloSelectValue(projectPrioritySelect)
-      });
-    });
-
-    bindSoloSelect(projectPrioritySelect, (value) => {
-      const projectPath = getSoloSelectValue(projectSelect);
-      if (!projectPath) return;
-      vscode.postMessage({
-        command: 'updateProjectMetadata',
-        projectPath,
-        projectType: getSoloSelectValue(projectTypeSelect),
-        priority: value
-      });
-    });
-
-    btnAddProject.addEventListener('click', () => {
-      vscode.postMessage({ command: 'addProject' });
-    });
+    bindSoloSelect(projectTypeSelect, () => {});
+    bindSoloSelect(projectPrioritySelect, () => {});
 
     btnRemoveProject.addEventListener('click', () => {
       const projectPath = getSoloSelectValue(projectSelect);
@@ -17024,6 +16876,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         setSoloSelectOptions(projectSelect, [{ value: '', label: t('chooseProject') }], '');
         setSoloSelectOptions(projectTypeSelect, [{ value: '', label: 'Type' }], '');
         setSoloSelectOptions(projectPrioritySelect, [{ value: '', label: 'Priority' }], '');
+        renderProjectSettings(null);
         return;
       }
 
@@ -17035,6 +16888,28 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       })), selectedProjectPath);
       setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), selectedProject && selectedProject.type ? selectedProject.type : 'core_product');
       setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), selectedProject && selectedProject.priority ? selectedProject.priority : '');
+      renderProjectSettings(selectedProject);
+    }
+
+    function getSelectedProject() {
+      const selectedPath = getSoloSelectValue(projectSelect) || currentProjects.selectedProjectPath || '';
+      return (currentProjects.projects || []).find(project => project.path === selectedPath) || (currentProjects.projects || [])[0] || null;
+    }
+
+    function renderProjectSettings(project = getSelectedProject()) {
+      if (!project) {
+        if (projectNameInput) projectNameInput.value = '';
+        if (projectDescriptionInput) projectDescriptionInput.value = '';
+        if (projectNotesInput) projectNotesInput.value = '';
+        setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), 'core_product');
+        setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), '');
+        return;
+      }
+      if (projectNameInput) projectNameInput.value = project.name || '';
+      if (projectDescriptionInput) projectDescriptionInput.value = project.description || '';
+      if (projectNotesInput) projectNotesInput.value = project.notes || '';
+      setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), project.type || 'core_product');
+      setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), project.priority || '');
     }
 
     function getProjectTypeOptions() {

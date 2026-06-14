@@ -293,6 +293,20 @@ function runScriptWithMinimalDom(script, ids) {
     { value: 'custom', label: 'Custom...' }
   ]);
   wireSoloSelect(elements['project-select'], []);
+  wireSoloSelect(elements['project-type-select'], [
+    { value: 'core_product', label: '核心产品' },
+    { value: 'content_product', label: '内容产品' },
+    { value: 'infrastructure', label: '基础设施' },
+    { value: 'research', label: '试验研究' },
+    { value: 'tooling', label: '工具脚手架' },
+    { value: 'maintenance', label: '归档维护' }
+  ]);
+  wireSoloSelect(elements['project-priority-select'], [
+    { value: 'P0', label: 'P0' },
+    { value: 'P1', label: 'P1' },
+    { value: 'P2', label: 'P2' },
+    { value: 'P3', label: 'P3' }
+  ]);
   wireSoloSelect(elements['setting-ability-select'], []);
   const context = {
     document: {
@@ -843,7 +857,6 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'canvas',
     'project-select',
-    'btn-add-project',
     'btn-remove-project',
     'btn-toggle-roadmap-view',
     'btn-toggle-solo',
@@ -869,30 +882,65 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'btn-toggle-settings',
     'btn-close-settings',
     'settings-panel',
-    'setting-language',
-    'setting-cli-select',
-    'setting-clipath-custom',
-    'setting-global-prompt',
+    'project-name-input',
+    'project-description-input',
+    'project-notes-input',
+    'project-type-select',
+    'project-priority-select',
     'setting-feedback-title',
     'setting-feedback-body',
     'btn-open-feedback',
-    'btn-test-cli',
     'btn-save-settings',
     'cli-test-badge'
   ]);
   elements.canvas.querySelector = () => createElement('flow-line');
 
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      selectedProjectPath: '/workspace/app',
+      projects: [{
+        name: 'App',
+        path: '/workspace/app',
+        type: 'core_product',
+        priority: 'P1',
+        description: 'Old desc',
+        notes: 'Old notes'
+      }]
+    }
+  });
+  postedMessages.length = 0;
+
   elements['btn-toggle-settings'].listeners.click();
   assert.equal(elements['settings-panel'].style.display, 'flex');
-  elements['setting-language'].listeners.click({
-    target: elements['setting-language'].__options[1],
+  assert.equal(elements['project-name-input'].value, 'App');
+  assert.equal(elements['project-description-input'].value, 'Old desc');
+  assert.equal(elements['project-notes-input'].value, 'Old notes');
+  elements['project-name-input'].value = 'New App';
+  elements['project-description-input'].value = 'Project intro';
+  elements['project-notes-input'].value = 'Project notes';
+  elements['project-type-select'].listeners.click({
+    target: elements['project-type-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'content'),
+    stopPropagation() {}
+  });
+  elements['project-priority-select'].listeners.click({
+    target: elements['project-priority-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'P0'),
     stopPropagation() {}
   });
   elements['btn-save-settings'].listeners.click();
 
   assert.equal(elements['settings-panel'].style.display, 'none');
-  assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
+  assert.ok(postedMessages.some((message) =>
+    message.command === 'updateProjectMetadata'
+    && message.projectPath === '/workspace/app'
+    && message.name === 'New App'
+    && message.description === 'Project intro'
+    && message.notes === 'Project notes'
+    && message.projectType === 'content'
+    && message.priority === 'P0'
+  ));
+  assert.ok(!postedMessages.some((message) => message.command === 'getSettings'));
+  assert.ok(!postedMessages.some((message) => message.command === 'updateSettings'));
   elements['btn-toggle-feedback'].listeners.click();
   assert.equal(elements['feedback-panel'].style.display, 'flex');
   elements['setting-feedback-title'].value = '看不懂下一步';
@@ -927,7 +975,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__roadmap_revision__'));
 });
 
-test('full roadmap webview exposes node conversation history and language setting', () => {
+test('full roadmap webview exposes node conversation history and project settings', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     'module.exports.__getWebviewHtml = getWebviewHtml;'
@@ -935,30 +983,27 @@ test('full roadmap webview exposes node conversation history and language settin
   const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const script = extractLastScript(html);
 
-  assert.match(html, /id="setting-language"/);
-  assert.match(html, /id="setting-global-prompt"/);
-  assert.match(html, /id="agent-impact-panel"/);
-  assert.match(html, /id="btn-refresh-agent-impact"/);
-  assert.match(script, /getAgentImpact/);
-  assert.match(script, /agentImpactLoaded/);
+  assert.match(html, /id="project-name-input"/);
+  assert.match(html, /id="project-description-input"/);
+  assert.match(html, /id="project-notes-input"/);
+  assert.match(html, /id="project-type-select"/);
+  assert.match(html, /id="project-priority-select"/);
+  assert.match(script, /renderProjectSettings/);
+  assert.match(script, /updateProjectMetadata/);
+  assert.doesNotMatch(html, /id="btn-add-project"/);
+  assert.doesNotMatch(html, /id="setting-language"/);
+  assert.doesNotMatch(html, /id="setting-global-prompt"/);
+  assert.doesNotMatch(html, /id="setting-global-data-path"/);
+  assert.doesNotMatch(html, /id="agent-impact-panel"/);
+  assert.doesNotMatch(html, /id="btn-refresh-agent-impact"/);
   assert.match(html, /id="btn-open-feedback"/);
   assert.match(script, /openFeedbackIssue/);
-  assert.match(html, /id="setting-ability-select"/);
-  assert.match(html, /id="setting-ability-url-input"/);
-  assert.match(html, /id="btn-install-ability"/);
-  assert.match(html, /id="btn-uninstall-ability"/);
-  assert.match(html, /id="ability-detail-card"/);
-  assert.match(html, /id="ability-action-badge"/);
-  assert.match(script, /installSkill/);
-  assert.match(script, /installMcp/);
-  assert.match(script, /installEnhancement/);
-  assert.match(script, /uninstallSkill/);
-  assert.match(script, /uninstallMcp/);
-  assert.match(script, /uninstallEnhancement/);
-  assert.match(script, /setting-ability-select/);
-  assert.match(script, /btn-install-ability/);
-  assert.match(script, /btn-uninstall-ability/);
-  assert.match(script, /abilityActionBadge/);
+  assert.doesNotMatch(html, /id="setting-ability-select"/);
+  assert.doesNotMatch(html, /id="setting-ability-url-input"/);
+  assert.doesNotMatch(html, /id="btn-install-ability"/);
+  assert.doesNotMatch(html, /id="btn-uninstall-ability"/);
+  assert.doesNotMatch(html, /id="ability-detail-card"/);
+  assert.doesNotMatch(html, /id="ability-action-badge"/);
   assert.match(html, /id="btn-remove-project"/);
   assert.match(html, /removeProject/);
   assert.doesNotMatch(html, /id="setting-provider"/);
