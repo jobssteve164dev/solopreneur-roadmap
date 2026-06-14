@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.221 - 2026-06-14
+
+### Fixed
+- close sidebar and continuation card regressions (1517e05)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.220 - 2026-06-14
 
 ### Fixed
