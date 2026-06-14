@@ -816,7 +816,12 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /savePastedAttachments/);
   assert.match(script, /conversation-log-pre/);
   assert.ok(script.includes("querySelectorAll('[data-conversation-id] .conversation-row')"));
+  assert.match(script, /hasActiveConversationDescendant/);
+  assert.match(script, /mousedown[\s\S]*stopPropagation/);
+  assert.match(script, /touchstart[\s\S]*stopPropagation/);
   assert.match(script, /pointerdown[\s\S]*stopPropagation/);
+  assert.match(html, /overflow:\s*auto !important/);
+  assert.match(html, /touch-action:\s*pan-x pan-y/);
   assert.match(html, /\.conversation-children::before/);
   assert.match(html, /\.conversation-list-children/);
   assert.match(script, /runRoadmapRevision[\s\S]*supplementFiles/);
@@ -1077,6 +1082,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
     async () => {}
   );
   const html = provider._getHtmlForWebview(createWebviewStub());
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
 
   assert.match(html, /id="project-select"/);
   assert.match(html, /id="btn-add-project"/);
@@ -1094,9 +1100,13 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /renderSidebarStepHistoryContent/);
   assert.match(html, /function conversationStatusKey\(status\)/);
   assert.match(html, /renderSidebarConversationCard/);
-  assert.match(html, /line-height:\s*1/);
+  assert.match(html, /\.sidebar-conversation-mini-actions > span\s*\{/);
+  assert.match(html, /place-items:\s*center/);
+  assert.match(html, /\.sidebar-conversation-mini-actions > span \.codicon/);
   assert.match(html, /if \(!detailExpanded && rollbackBtn\)/);
   assert.match(html, /if \(!detailExpanded && continueBtn\)/);
+  assert.match(sidebarSource, /sendProjectConversationHistory\(projectState\.selectedProjectPath\)/);
+  assert.match(html, /latestSidebarProjectConversation/);
   assert.doesNotMatch(html, /function buildConversationTree\(conversations\)/);
   assert.doesNotMatch(html, /sidebar-conversations-tree-container/);
   assert.doesNotMatch(html, /conversation\.status\.toLowerCase\(\)/);
@@ -4614,6 +4624,7 @@ test('agent execution log updates one conversation instead of creating a duplica
 });
 
 test('project-level execution history returns latest roadmap run across nodes', async () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-project-history-'));
   const store = new SqliteStore(path.join(tempRoot, 'journal.db'), projectRoot);
@@ -4627,6 +4638,9 @@ test('project-level execution history returns latest roadmap run across nodes', 
   assert.equal(logs[0].id, latestRoadmapLogId);
   assert.equal(logs[0].nodeId, '3');
   assert.match(logs[0].output, /Latest roadmap run/);
+  assert.match(extensionSource, /const sidebarProjectConversationHistoryLimit = 10/);
+  assert.match(extensionSource, /getProjectAgentExecutions\(\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
+  assert.match(extensionSource, /getAllExecutionLogs\(\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
   store.close();
 });
 

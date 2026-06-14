@@ -842,6 +842,7 @@ const projectRegistryFileName = 'projects.json';
 const usageStatsFileName = 'solomap-usage.json';
 const roadmapRevisionId = '__roadmap_revision__';
 const soloConversationId = '__solo__';
+const sidebarProjectConversationHistoryLimit = 10;
 const agentTerminalBaseName = 'solomap';
 const agentStatusDirName = 'agent-status';
 let activeAgentTerminalName = '';
@@ -2854,7 +2855,7 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
   if (syncEngine && activeProjectRoot === projectPath) {
     return syncEngine.getProjectAgentExecutions()
       .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
-      .slice(0, 1);
+      .slice(0, sidebarProjectConversationHistoryLimit);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -2865,7 +2866,7 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
   try {
     return store.getAllExecutionLogs()
       .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
-      .slice(0, 1);
+      .slice(0, sidebarProjectConversationHistoryLimit);
   } finally {
     store.close();
   }
@@ -14587,13 +14588,16 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       white-space: pre;
       word-break: normal;
       overflow-wrap: normal;
-      max-height: 260px;
-      overflow: auto;
+      max-height: 320px;
+      overflow: auto !important;
       overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-x pan-y;
       margin: 6px 0 0;
       font-size: 11px;
       color: #cbd5e1;
       max-width: 100%;
+      display: block;
       cursor: text;
     }
 
@@ -17429,6 +17433,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         });
         row.querySelectorAll('.conversation-detail, .conversation-log-pre').forEach(item => {
           item.addEventListener('click', (event) => event.stopPropagation());
+          item.addEventListener('mousedown', (event) => event.stopPropagation());
+          item.addEventListener('touchstart', (event) => event.stopPropagation(), { passive: true });
           item.addEventListener('pointerdown', (event) => event.stopPropagation());
           item.addEventListener('wheel', (event) => event.stopPropagation(), { passive: true });
         });
@@ -17892,12 +17898,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           renderRoadmapRevisionPanel(currentNodes);
         });
       });
-      container.querySelectorAll('[data-conversation-id]').forEach(item => {
+      container.querySelectorAll('[data-conversation-id] .conversation-row').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
-          activeConversationId = activeConversationId === item.getAttribute('data-conversation-id')
+          const conversationItem = item.closest('[data-conversation-id]');
+          const conversationId = conversationItem ? conversationItem.getAttribute('data-conversation-id') : '';
+          activeConversationId = activeConversationId === conversationId
             ? ''
-            : item.getAttribute('data-conversation-id');
+            : conversationId;
           renderRoadmap(currentNodes);
           if (nodeId === roadmapRevisionId) {
             renderRoadmapRevisionPanel(currentNodes);
@@ -17905,6 +17913,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             renderSoloPanel(currentNodes);
           }
         });
+      });
+      container.querySelectorAll('.conversation-detail, .conversation-log-pre').forEach(item => {
+        item.addEventListener('click', (event) => event.stopPropagation());
+        item.addEventListener('mousedown', (event) => event.stopPropagation());
+        item.addEventListener('touchstart', (event) => event.stopPropagation(), { passive: true });
+        item.addEventListener('pointerdown', (event) => event.stopPropagation());
+        item.addEventListener('wheel', (event) => event.stopPropagation(), { passive: true });
       });
       container.querySelectorAll('[data-retry-conversation-id]').forEach(item => {
         item.addEventListener('click', (event) => {
@@ -17976,7 +17991,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
 
     function renderConversationItem(nodeId, conversation, nested = false) {
       const conversationId = nodeId + ':' + conversation.id;
-      const open = activeConversationId === conversationId;
+      const children = (conversationChildrenMap[String(conversation.id || '')] || []);
+      const open = activeConversationId === conversationId || hasActiveConversationDescendant(nodeId, conversation);
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const summary = summarizeConversation(conversation);
       const duration = formatConversationDuration(conversation);
@@ -17999,7 +18015,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           <button class="conversation-control-btn stop" data-stop-agent-run="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${t('stopRun')}</button>
         \`
         : '';
-      const children = (conversationChildrenMap[String(conversation.id || '')] || []);
       return \`
         <div class="conversation-item \${nested ? 'conversation-item-child' : ''}" data-conversation-id="\${escapeHtml(conversationId)}">
           <div class="conversation-row">
@@ -18077,6 +18092,14 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       });
       const items = roots.map(conversation => renderConversationItem(nodeId, conversation, false)).join('');
       return '<div class="conversation-list">' + items + '</div>';
+    }
+
+    function hasActiveConversationDescendant(nodeId, conversation) {
+      const children = conversationChildrenMap[String(conversation.id || '')] || [];
+      return children.some(child => {
+        const childId = nodeId + ':' + child.id;
+        return activeConversationId === childId || hasActiveConversationDescendant(nodeId, child);
+      });
     }
 
     function formatDurationMs(durationMs) {

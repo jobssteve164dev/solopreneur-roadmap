@@ -3150,6 +3150,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         }
       });
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
+      void this.sendProjectConversationHistory(projectState.selectedProjectPath);
       this.sendDailyReview();
       this.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
       this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
@@ -4605,13 +4606,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       gap: 4px;
     }
 
-    .sidebar-conversation-mini-actions span {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
+    .sidebar-conversation-mini-actions > span {
+      display: inline-grid;
+      place-items: center;
       width: 18px;
       height: 18px;
       line-height: 1;
+      padding: 0;
       border-radius: 4px;
       cursor: pointer;
       color: var(--text-muted);
@@ -4619,7 +4620,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       background: rgba(255, 255, 255, 0.05);
     }
 
-    .sidebar-conversation-mini-actions span:hover {
+    .sidebar-conversation-mini-actions > span:hover {
       color: #ffffff;
       transform: scale(1.08);
     }
@@ -4639,10 +4640,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       color: #f87171;
     }
 
-    .sidebar-conversation-mini-actions span .codicon {
-      font-size: 10px;
-      display: block;
+    .sidebar-conversation-mini-actions > span .codicon {
+      width: 1em;
+      height: 1em;
+      font-size: 11px;
+      display: inline-grid;
+      place-items: center;
       line-height: 1;
+      background: transparent;
+      color: inherit;
+      cursor: inherit;
     }
 
     .expand-arrow-icon {
@@ -8439,7 +8446,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!conversations || conversations.length === 0) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }
-      const latest = conversations[0];
+      const latest = latestSidebarProjectConversation(conversations);
       if (!latest) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }
@@ -8453,6 +8460,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           \${cardHtml}
         </div>
       \`;
+    }
+
+    function latestSidebarProjectConversation(conversations) {
+      return (conversations || [])
+        .filter(conversation => {
+          const nodeId = String(conversation.nodeId || '');
+          return nodeId && nodeId !== '__solo__' && nodeId !== '__roadmap_revision__';
+        })
+        .sort((a, b) => {
+          const idDiff = Number(b.id || 0) - Number(a.id || 0);
+          if (idDiff) return idDiff;
+          return Date.parse(String(b.timestamp || '')) - Date.parse(String(a.timestamp || ''));
+        })[0] || null;
     }
 
     function bindConversationsTree(container, projectPath, nodeId, isSolo) {
