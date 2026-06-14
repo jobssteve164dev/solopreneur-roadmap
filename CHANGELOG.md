@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.225 - 2026-06-14
+
+### Fixed
+- preserve step conversations when linking solo (b5d76e9)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.224 - 2026-06-14
 
 ### Fixed
