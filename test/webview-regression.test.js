@@ -807,6 +807,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   );
   const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const script = extractLastScript(html);
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
 
   assert.doesNotThrow(() => new vm.Script(script));
   assert.doesNotMatch(html, /<select\b|<option\b/);
@@ -817,6 +818,14 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /conversation-log-pre/);
   assert.ok(script.includes("querySelectorAll('[data-conversation-id] .conversation-row')"));
   assert.match(script, /hasActiveConversationDescendant/);
+  assert.match(script, /findConversationRootId/);
+  assert.match(script, /findRootByParent/);
+  assert.match(script, /data-log-scroll-key/);
+  assert.match(script, /captureConversationLogScrollPositions/);
+  assert.match(script, /restoreConversationLogScrollPositions/);
+  assert.match(script, /conversationLogScrollPositions/);
+  assert.match(extensionSource, /resolveContinuationRootConversationFromList/);
+  assert.match(extensionSource, /buildContinuationMetadataBlock\(rootConversationId, sessionId\)/);
   assert.match(script, /mousedown[\s\S]*stopPropagation/);
   assert.match(script, /touchstart[\s\S]*stopPropagation/);
   assert.match(script, /pointerdown[\s\S]*stopPropagation/);
@@ -981,6 +990,7 @@ test('full roadmap webview exposes node conversation history and language settin
   assert.doesNotMatch(script, /data-continue-turn-send-id/);
   assert.match(script, /conversation-children-title/);
   assert.match(script, /sessionRoots/);
+  assert.match(script, /const rootConversationId = findConversationRootId\(conversation\)/);
   assert.match(script, /Continuation first message/);
   assert.match(script, /showAgentTerminal/);
   assert.match(script, /stopAgentRun/);
@@ -1107,6 +1117,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /if \(!detailExpanded && continueBtn\)/);
   assert.match(sidebarSource, /sendProjectConversationHistory\(projectState\.selectedProjectPath\)/);
   assert.match(html, /latestSidebarProjectConversation/);
+  assert.match(html, /sidebarConversationRefreshTtlMs\s*=\s*30000/);
+  assert.match(html, /requestSidebarSoloConversationHistory/);
+  assert.match(html, /requestSidebarProjectConversationHistory/);
+  assert.match(html, /shouldRefreshSidebarProjectData/);
+  assert.match(html, /projectPath === currentProjects\.selectedProjectPath\) return/);
   assert.doesNotMatch(html, /function buildConversationTree\(conversations\)/);
   assert.doesNotMatch(html, /sidebar-conversations-tree-container/);
   assert.doesNotMatch(html, /conversation\.status\.toLowerCase\(\)/);

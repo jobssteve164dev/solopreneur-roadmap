@@ -6580,6 +6580,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const sidebarProjectConversations = {};
     const sidebarStepConversationRequested = {};
     const sidebarProjectConversationRequested = {};
+    const sidebarSoloConversationRequestedAt = {};
+    const sidebarProjectConversationRequestedAt = {};
+    const sidebarConversationRefreshTtlMs = 30000;
     let expandedIssueNumber = 0;
     let issueDetails = null;
     let issuePanelExpanded = false;
@@ -7212,6 +7215,33 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (clearNodes) {
         currentNodes = [];
       }
+    }
+
+    function shouldRefreshSidebarProjectData(projectPath, cache, force) {
+      const key = String(projectPath || '');
+      if (!key) return false;
+      if (force) return true;
+      const lastRequestedAt = Number(cache[key] || 0);
+      return !lastRequestedAt || Date.now() - lastRequestedAt > sidebarConversationRefreshTtlMs;
+    }
+
+    function requestSidebarSoloConversationHistory(projectPath, force = false) {
+      const key = String(projectPath || '');
+      if (!shouldRefreshSidebarProjectData(key, sidebarSoloConversationRequestedAt, force)) {
+        return;
+      }
+      sidebarSoloConversationRequestedAt[key] = Date.now();
+      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: key });
+    }
+
+    function requestSidebarProjectConversationHistory(projectPath, force = false) {
+      const key = String(projectPath || '');
+      if (!shouldRefreshSidebarProjectData(key, sidebarProjectConversationRequestedAt, force)) {
+        return;
+      }
+      sidebarProjectConversationRequested[key] = true;
+      sidebarProjectConversationRequestedAt[key] = Date.now();
+      vscode.postMessage({ command: 'getProjectConversationHistory', projectPath: key });
     }
 
     function applyLanguage() {
@@ -7851,7 +7881,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (message.projectPath === currentProjects.selectedProjectPath) {
             deliveryActionMessage = message.success ? t('refreshProjectDataDone') : (message.message || '');
           }
-          delete sidebarProjectConversationRequested[message.projectPath || ''];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -8477,11 +8506,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function bindConversationsTree(container, projectPath, nodeId, isSolo) {
       if (!isSolo && projectPath) {
-        const key = String(projectPath || '');
-        if (!sidebarProjectConversationRequested[key]) {
-          sidebarProjectConversationRequested[key] = true;
-          vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
-        }
+        requestSidebarProjectConversationHistory(projectPath);
       }
 
       container.querySelectorAll('[data-card-trigger-id]').forEach(card => {
@@ -8939,7 +8964,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             if (input) input.value = '';
             projectSoloDrafts[projectPath] = '';
             projectSoloFiles[targetId] = [];
-            vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
+            requestSidebarSoloConversationHistory(projectPath, true);
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
           }
@@ -8965,8 +8990,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           projectContinueDrafts[nodeId] = '';
           projectContinueFiles[nodeId] = [];
           if (projectPath && nodeId) {
-            delete sidebarProjectConversationRequested[projectPath];
-            vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
+            requestSidebarProjectConversationHistory(projectPath, true);
           }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
@@ -9333,6 +9357,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {
         item.addEventListener('click', () => {
           const projectPath = item.getAttribute('data-global-focus-project') || '';
+          if (projectPath === currentProjects.selectedProjectPath) return;
           activateProjectInSidebar(projectPath);
           vscode.postMessage({
             command: 'selectProject',
@@ -9744,12 +9769,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         card.addEventListener('click', (event) => {
           if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]') || event.target.closest('[data-delivery-action-panel]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
+          if (projectPath === currentProjects.selectedProjectPath) return;
           activateProjectInSidebar(projectPath);
           vscode.postMessage({
             command: 'selectProject',
             projectPath
           });
-          vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
         });
       });
       portfolioList.querySelectorAll('[data-open-project-path]').forEach(button => {
@@ -9772,6 +9797,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             command: 'refreshProjectData',
             projectPath
           });
+          requestSidebarSoloConversationHistory(projectPath, true);
+          requestSidebarProjectConversationHistory(projectPath, true);
         });
       });
       portfolioList.querySelectorAll('[data-toggle-delivery-panel]').forEach(button => {
@@ -9798,6 +9825,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           deliveryActionMessage = '';
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({ command: 'refreshProjectData', projectPath });
+          requestSidebarProjectConversationHistory(projectPath, true);
         });
       });
       portfolioList.querySelectorAll('[data-agent-fix-delivery-project-path]').forEach(button => {
@@ -10022,8 +10050,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, projectPath);
       renderPortfolio(currentProjects.portfolio, projectPath);
-      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath });
-      vscode.postMessage({ command: 'getProjectConversationHistory', projectPath });
+      requestSidebarSoloConversationHistory(projectPath);
+      requestSidebarProjectConversationHistory(projectPath);
       setTimeout(() => {
         const selectedCard = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('.portfolio-card.is-selected') : null;
         if (selectedCard && typeof selectedCard.scrollIntoView === 'function') {

@@ -11366,6 +11366,44 @@ function resolveContinuationLeafConversation(nodeId: string, conversationId: num
   return resolveContinuationLeafConversationFromList(conversations, conversationId);
 }
 
+function resolveContinuationRootConversationFromList(conversations: AgentConversation[], conversationId: number): AgentConversation | null {
+  const byId = new Map<number, AgentConversation>();
+  conversations.forEach((conversation) => byId.set(Number(conversation.id || 0), conversation));
+  const start = byId.get(Number(conversationId));
+  if (!start) {
+    return null;
+  }
+  const sessionId = extractNativeSessionIdFromExecutionOutput(start.output || '');
+  if (sessionId) {
+    return conversations
+      .filter((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || '') === sessionId)
+      .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))[0] || start;
+  }
+  let current = start;
+  const seen = new Set<number>();
+  while (current) {
+    const currentId = Number(current.id || 0);
+    if (seen.has(currentId)) {
+      return current;
+    }
+    seen.add(currentId);
+    const parentId = extractContinuationParentConversationId(current.output || '');
+    const parent = parentId ? byId.get(Number(parentId)) : null;
+    if (!parent) {
+      return current;
+    }
+    current = parent;
+  }
+  return start;
+}
+
+function resolveContinuationRootConversation(nodeId: string, conversationId: number): AgentConversation | null {
+  if (!syncEngine || !nodeId || !conversationId) {
+    return null;
+  }
+  return resolveContinuationRootConversationFromList(syncEngine.getAgentExecutions(nodeId), conversationId);
+}
+
 async function handleContinueConversationTurn(
   context: vscode.ExtensionContext,
   nodeId: string,
@@ -11387,6 +11425,8 @@ async function handleContinueConversationTurn(
     vscode.window.showErrorMessage(`Conversation ${parentConversationId} not found for continuation.`);
     return;
   }
+  const rootConversation = resolveContinuationRootConversation(nodeId, parentConversationId) || parentConversation;
+  const rootConversationId = Number(rootConversation.id || parentConversationId);
   const settings = getPersistedSettings(context);
   const requestedAgentCli = String(parentConversation.agentCli || settings.cliPath || '').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, requestedAgentCli ? '' : settings.cliPath);
@@ -11395,7 +11435,7 @@ async function handleContinueConversationTurn(
     return;
   }
   if (!supportsSdkContinuation(agentCli)) {
-    await handleContinueNativeConversation(context, nodeId, parentConversationId);
+    await handleContinueNativeConversation(context, nodeId, rootConversationId);
     return;
   }
   const sessionId = extractNativeSessionIdFromExecutionOutput(parentConversation.output || '');
@@ -11419,7 +11459,7 @@ async function handleContinueConversationTurn(
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Agent continuation started.',
     `Run started at: ${new Date().toISOString()}`,
-    buildContinuationMetadataBlock(parentConversationId, sessionId),
+    buildContinuationMetadataBlock(rootConversationId, sessionId),
     `User supplement:\n${request}`,
     attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
@@ -11506,6 +11546,8 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
 
   if (supportsSdkContinuation(agentCli)) {
     const settings = getPersistedSettings(context);
+    const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
+    const rootConversationId = Number(rootConversation.id || conversationId);
     if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
       const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
       if (currentNode && currentNode.status !== 'Completed') {
@@ -11519,7 +11561,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
       preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
       'Agent continuation started.',
       `Run started at: ${new Date().toISOString()}`,
-      buildContinuationMetadataBlock(Number(conversation.id || conversationId), sessionId),
+      buildContinuationMetadataBlock(rootConversationId, sessionId),
       'Continuation mode: direct terminal with tracked sentinel recording.'
     ].filter(Boolean).join('\n\n');
     const executionLogId = syncEngine.logAgentExecution(
@@ -15578,6 +15620,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     const nodeSupplementFiles = {};
     const conversationDrafts = {};
     let conversationChildrenMap = {};
+    const conversationLogScrollPositions = {};
     const nodeAgentSelections = {};
     const agentModelCatalogs = {};
     const conversationModelSelections = {};
@@ -17269,6 +17312,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     function renderRoadmap(nodes) {
+      captureConversationLogScrollPositions();
       // Clear canvas keeping the flow line
       const flowLine = canvas.querySelector('.flow-line');
       canvas.innerHTML = '';
@@ -17490,6 +17534,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         bindSoloSelects(row);
         canvas.appendChild(row);
       });
+      restoreConversationLogScrollPositions();
     }
 
     function renderSoloClosure(conversation) {
@@ -17992,6 +18037,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function renderConversationItem(nodeId, conversation, nested = false) {
       const conversationId = nodeId + ':' + conversation.id;
       const children = (conversationChildrenMap[String(conversation.id || '')] || []);
+      const rootConversationId = findConversationRootId(conversation);
       const open = activeConversationId === conversationId || hasActiveConversationDescendant(nodeId, conversation);
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const summary = summarizeConversation(conversation);
@@ -18007,7 +18053,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
         : '';
       const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
-        ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
+        ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(rootConversationId)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
         : '';
       const runningButtons = conversation.status === 'Running'
         ? \`
@@ -18040,9 +18086,9 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
                 \${renderConversationFiles(conversation)}
                 \${nodeId === soloConversationId && conversation.status !== 'Running' ? renderSoloClosure(conversation) : ''}
                 <strong>\${t('command')}</strong>
-                <pre class="conversation-log-pre">\${escapeHtml(conversation.command)}</pre>
+                <pre class="conversation-log-pre" data-log-scroll-key="\${escapeHtml(conversationId + ':command')}">\${escapeHtml(conversation.command)}</pre>
                 <strong>\${t('output')}</strong>
-                <pre class="conversation-log-pre">\${escapeHtml(conversation.output)}</pre>
+                <pre class="conversation-log-pre" data-log-scroll-key="\${escapeHtml(conversationId + ':output')}">\${escapeHtml(conversation.output)}</pre>
               </div>
               \${renderConversationChildren(nodeId, conversation, children)}
             </div>
@@ -18069,6 +18115,20 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           }
         }
       });
+      function findRootByParent(conversation) {
+        let current = conversation;
+        const seen = {};
+        while (current) {
+          const currentId = String(current.id || '');
+          if (!currentId || seen[currentId]) return current;
+          seen[currentId] = true;
+          const parentId = extractContinuationParentConversationId(current.output);
+          const parent = parentId ? byId[String(parentId)] : null;
+          if (!parent) return current;
+          current = parent;
+        }
+        return conversation;
+      }
       conversations.forEach((conversation) => {
         const sessionId = extractNativeSessionId(conversation.output);
         const sessionRoot = sessionId ? sessionRoots[sessionId] : null;
@@ -18080,7 +18140,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         }
         const parentId = extractContinuationParentConversationId(conversation.output);
         if (parentId && byId[String(parentId)]) {
-          const key = String(parentId);
+          const root = findRootByParent(conversation);
+          const key = String(root.id || parentId);
           conversationChildrenMap[key] = conversationChildrenMap[key] || [];
           conversationChildrenMap[key].push(conversation);
           return;
@@ -18094,12 +18155,52 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return '<div class="conversation-list">' + items + '</div>';
     }
 
+    function findConversationRootId(conversation) {
+      const currentId = String(conversation && conversation.id || '');
+      if (!currentId) return '';
+      const rootId = Object.keys(conversationChildrenMap).find(key => {
+        if (key === currentId) return true;
+        return (conversationChildrenMap[key] || []).some(child => String(child.id || '') === currentId);
+      });
+      return rootId || currentId;
+    }
+
     function hasActiveConversationDescendant(nodeId, conversation) {
       const children = conversationChildrenMap[String(conversation.id || '')] || [];
       return children.some(child => {
         const childId = nodeId + ':' + child.id;
         return activeConversationId === childId || hasActiveConversationDescendant(nodeId, child);
       });
+    }
+
+    function captureConversationLogScrollPositions() {
+      document.querySelectorAll('.conversation-log-pre[data-log-scroll-key]').forEach(item => {
+        const key = item.getAttribute('data-log-scroll-key') || '';
+        if (key) {
+          conversationLogScrollPositions[key] = {
+            top: item.scrollTop || 0,
+            left: item.scrollLeft || 0
+          };
+        }
+      });
+    }
+
+    function restoreConversationLogScrollPositions() {
+      const restore = () => {
+        document.querySelectorAll('.conversation-log-pre[data-log-scroll-key]').forEach(item => {
+          const key = item.getAttribute('data-log-scroll-key') || '';
+          const position = key ? conversationLogScrollPositions[key] : null;
+          if (position) {
+            item.scrollTop = position.top || 0;
+            item.scrollLeft = position.left || 0;
+          }
+        });
+      };
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(restore);
+      } else {
+        setTimeout(restore, 0);
+      }
     }
 
     function formatDurationMs(durationMs) {
