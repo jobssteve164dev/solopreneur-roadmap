@@ -1860,6 +1860,9 @@ function buildStyles() {
     
     /* --- CSS Agent Loop Simulator --- */
     .product-preview {
+      width: 100%;
+      max-width: 100%;
+      margin: 0;
       border: 1px solid var(--line);
       border-radius: 12px;
       background: #0b0d0f;
