@@ -6882,6 +6882,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         continueCompleted: '本次推进已结束。',
         continueWorking: 'Agent 正在执行这次推进。',
         soloCompleted: '本次 Solo 对话已结束。',
+        continuationRecorded: '续聊已记录。',
         stillWorking: 'Agent 正在执行这次对话。',
         runResult: '本轮结果',
         failureLabel: '失败原因',
@@ -7018,7 +7019,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         connectionOk: '连接正常：',
         connectionFailed: '连接失败：',
         linkedFromSolo: '这是从 Solo 关联来的参考记录。',
-        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败', Linked: '已关联' }
+        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败', Linked: '已关联', Recorded: '已记录' }
       },
       en: {
         title: 'SoloMap',
@@ -7158,6 +7159,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         continueCompleted: 'This run has finished.',
         continueWorking: 'The Agent is running this step.',
         soloCompleted: 'This Solo conversation has finished.',
+        continuationRecorded: 'Continuation recorded.',
         stillWorking: 'The Agent is running this conversation.',
         runResult: 'Run result',
         failureLabel: 'Failure reason',
@@ -7294,7 +7296,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         connectionOk: 'Connection OK: ',
         connectionFailed: 'Connection Failed: ',
         linkedFromSolo: 'This is a reference linked from Solo.',
-        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed', Linked: 'Linked' }
+        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed', Linked: 'Linked', Recorded: 'Recorded' }
       }
     };
 
@@ -8456,6 +8458,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const outcomeText = statusKey === 'Running' ? (isSolo ? t('stillWorking') : t('continueWorking'))
         : statusKey === 'Failed' ? (((failureReasonMatch || [])[1] || '').trim() || statusText(statusKey))
         : statusKey === 'Linked' ? t('linkedFromSolo')
+        : statusKey === 'Recorded' ? t('continuationRecorded')
         : (isSolo ? t('soloCompleted') : t('continueCompleted'));
         
       const conclusion = statusKey === 'Running' ? '' : soloConclusion(conversation.output);

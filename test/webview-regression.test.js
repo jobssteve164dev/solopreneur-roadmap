@@ -4869,6 +4869,68 @@ test('Solo completion stays project-scoped and preserves the existing roadmap', 
   assert.equal(fs.readFileSync(path.join(solopreneurDir, 'roadmap.csv'), 'utf8'), originalCsv);
 });
 
+test('continuation runs are recorded without task status judgment while preserving file changes', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-continuation-recorded-'));
+  const runDir = path.join(root, '.solopreneur', 'agent-runs', '2', '88');
+  fs.mkdirSync(runDir, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  fs.writeFileSync(outputFilePath, 'User continued the native session.\n', 'utf8');
+  fs.writeFileSync(changesFilePath, ' M src/extension.ts\n', 'utf8');
+  fs.writeFileSync(touchedFilesPath, 'src/extension.ts\n', 'utf8');
+  const statusFilePath = path.join(root, '.solopreneur', 'agent-status', '88.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '2',
+    runKind: 'step_continue',
+    status: 'Failed',
+    failureCode: 'agent_exit_failed',
+    failureReason: 'Native terminal closed.',
+    agentCli: 'codex',
+    command: 'codex resume',
+    executionLogId: 88,
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    nativeSessionId: '019dc472-6a80-7c70-99a4-b2593a641d11',
+    startedAt: '2026-06-15T00:00:00.000Z'
+  }), 'utf8');
+
+  let updateNodeCalled = false;
+  let loggedOutput = '';
+  let loggedStatus = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
+    updateNode: () => { updateNodeCalled = true; },
+    getAgentExecutions: () => [{ id: 88, nodeId: '2', agentCli: 'codex', command: 'codex resume', output: 'Agent continuation started.\n\nContinuation parent conversation: 12', status: 'Running' }],
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      loggedOutput = output;
+      loggedStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 88,
+    initAndSync: async () => {}
+  }, root);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(updateNodeCalled, false);
+  assert.equal(loggedStatus, 'Recorded');
+  assert.match(loggedOutput, /Continuation record state: Recorded/);
+  assert.match(loggedOutput, /续聊已记录；不参与任务完成、失败或进行中判断。/);
+  assert.match(loggedOutput, /Workspace changes:\n\nM src\/extension\.ts/);
+  assert.doesNotMatch(loggedOutput, /Failure category: agent_exit_failed/);
+  assert.ok(fs.existsSync(path.join(root, '.solopreneur', 'run-digests', '2-88.json')));
+});
+
 test('linking a Solo conversation records a reference without changing the step state', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
@@ -4960,6 +5022,54 @@ test('stopping an Agent run records the user decision on the active conversation
   assert.equal(updatedStatus, 'Failed');
   assert.match(updatedOutput, /Failure category: stopped_by_user/);
   assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Task stopped by user/);
+});
+
+test('stopping a continuation records it without marking the task failed', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__stopAgentRun = stopAgentRun;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stop-continuation-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '3', '31');
+  fs.mkdirSync(runDir, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  fs.writeFileSync(outputFilePath, 'Working inside native continuation.\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '31.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '3',
+    runKind: 'step_continue',
+    status: 'Running',
+    executionLogId: 31,
+    agentCli: 'codex',
+    outputFilePath,
+    startedAt: '2026-05-24T00:00:00.000Z'
+  }), 'utf8');
+  let nodeUpdated = false;
+  let updatedStatus = '';
+  let updatedOutput = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '3', title: '完善体验', status: 'Running' }],
+    updateNode: () => { nodeUpdated = true; },
+    getAgentExecutions: () => [{ id: 31, nodeId: '3', agentCli: 'codex', command: 'codex resume', output: 'Agent continuation started.', status: 'Running' }],
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      updatedOutput = output;
+      updatedStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 31
+  }, tempRoot);
+
+  await extensionModule.__stopAgentRun('3', 31);
+
+  assert.equal(nodeUpdated, false);
+  assert.equal(updatedStatus, 'Recorded');
+  assert.match(updatedOutput, /Continuation record state: Recorded/);
+  assert.doesNotMatch(updatedOutput, /Failure category: stopped_by_user/);
+  assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Continuation terminal stopped by user/);
 });
 
 test('agent execution log updates one conversation instead of creating a duplicate', async () => {

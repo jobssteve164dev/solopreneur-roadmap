@@ -6908,6 +6908,10 @@ function buildContinuationMetadataBlock(parentConversationId: number, sessionId:
   ].join('\n');
 }
 
+function isContinuationRunKind(runKind: string): boolean {
+  return runKind === 'solo_continue' || runKind === 'step_continue';
+}
+
 function buildInteractiveContinuationPrompt(
   node: RoadmapNode | null,
   userMessage: string,
@@ -11865,18 +11869,23 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
 
   const terminal = findActiveAgentTerminal(conversationId);
   terminal?.dispose();
+  const isContinuationRun = isContinuationRunKind(String(runningStatus?.runKind || ''))
+    || /Agent continuation started\.|Continuation mode:/i.test(String(conversation.output || ''));
   const failureReason = 'Stopped by user.';
   const finishedAt = new Date().toISOString();
   if (runningStatus && runningStatus.nodeId === nodeId && Number(runningStatus.executionLogId) === Number(conversationId)) {
     if (runningStatus.outputFilePath) {
-      fs.appendFileSync(runningStatus.outputFilePath, '\nSoloMap: Task stopped by user.\n', 'utf8');
+      fs.appendFileSync(
+        runningStatus.outputFilePath,
+        isContinuationRun ? '\nSoloMap: Continuation terminal stopped by user.\n' : '\nSoloMap: Task stopped by user.\n',
+        'utf8'
+      );
     }
     fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
     fs.writeFileSync(statusFilePath, JSON.stringify({
       ...runningStatus,
-      status: 'Failed',
-      failureCode: 'stopped_by_user',
-      failureReason,
+      status: isContinuationRun ? 'In Progress' : 'Failed',
+      ...(isContinuationRun ? {} : { failureCode: 'stopped_by_user', failureReason }),
       finishedAt
     }), 'utf8');
     await processAgentStatusFile(statusFilePath);
@@ -11884,20 +11893,22 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     return;
   }
 
-  if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
+  if (!isContinuationRun && nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
     syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
   }
   syncEngine.updateAgentExecution(
     conversationId,
     conversation.agentCli,
     conversation.command,
-    `${conversation.output}\n\nFailure category: stopped_by_user\n\nFailure reason:\n${failureReason}\n\nRun finished at: ${finishedAt}`,
-    'Failed'
+    isContinuationRun
+      ? `${conversation.output}\n\nContinuation recording stopped by user.\n\nRun finished at: ${finishedAt}`
+      : `${conversation.output}\n\nFailure category: stopped_by_user\n\nFailure reason:\n${failureReason}\n\nRun finished at: ${finishedAt}`,
+    isContinuationRun ? 'Recorded' : 'Failed'
   );
   agentTerminalNamesByConversationId.delete(Number(conversationId));
   sendNodesToWebview();
   postNodeConversations(nodeId);
-  vscode.window.showInformationMessage(`Agent task [${nodeId}] was stopped.`);
+  vscode.window.showInformationMessage(isContinuationRun ? 'Continuation conversation was recorded.' : `Agent task [${nodeId}] was stopped.`);
 }
 
 async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
@@ -13169,8 +13180,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const isReviewRun = runKind === 'agent_review';
+    const isContinuationRun = isContinuationRunKind(String(runKind || ''));
     const isSoloConversation = runKind === 'solo' || nodeId === soloConversationId;
-    let nextStatus = status as RoadmapNode['status'];
+    let nextStatus = String(status || '');
     let completionReason = '';
     let failureCode = String(statusData.failureCode || '').trim();
     let failureReason = String(statusData.failureReason || '').trim();
@@ -13226,6 +13238,13 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       if (reviewResult?.status === 'pass' && String(reviewTargetStatus || '') !== 'Completed') {
         shouldWriteNodeStatus = false;
       }
+    } else if (workspaceRoot && isContinuationRun) {
+      shouldWriteNodeStatus = false;
+      nextStatus = 'Recorded';
+      completionReason = '续聊已记录；不参与任务完成、失败或进行中判断。';
+      failureCode = '';
+      failureReason = '';
+      shouldRefreshRoadmap = roadmapCsvChanged;
     } else if (workspaceRoot && isSoloConversation) {
       shouldWriteNodeStatus = false;
       if (status === 'In Progress') {
@@ -13296,6 +13315,13 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       changedFilesSummary,
       touchedFilesSummary
     );
+    if (isContinuationRun) {
+      shouldWriteNodeStatus = false;
+      nextStatus = 'Recorded';
+      completionReason = '续聊已记录；不参与任务完成、失败或进行中判断。';
+      failureCode = '';
+      failureReason = '';
+    }
     if (shouldStartReview && shouldWriteNodeStatus && nextStatus === 'Completed') {
       reviewDeferredCompletion = true;
       nextStatus = 'In Progress';
@@ -13313,7 +13339,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       }
       const completedAt = nodeStatus === 'Completed' ? new Date().toISOString() : '';
       syncEngine.updateNode(nodeId, {
-        status: nodeStatus,
+        status: nodeStatus as RoadmapNode['status'],
         completedAt,
       });
       refreshSidebarProjectCards();
@@ -13341,7 +13367,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const finishedAt = new Date().toISOString();
     const startedTime = startedAt ? Date.parse(String(startedAt)) : NaN;
     const runDurationMs = Number.isFinite(startedTime) ? Math.max(0, Date.now() - startedTime) : 0;
-    const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation && !isReviewRun
+    const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation && !isReviewRun && !isContinuationRun
       ? buildRunHandoffEntry(
         nextStatus,
         [changedFilesSummary, touchedFilesSummary].filter(Boolean).join('\n'),
@@ -13352,7 +13378,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const stepHandoffSummary = workspaceRoot && handoffEntry
       ? updateStepHandoffSummary(getStepMemoryFilePath(workspaceRoot, nodeId), handoffEntry)
       : '';
-    if (workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation && !isReviewRun) {
+    if (workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation && !isReviewRun && !isContinuationRun) {
       recordSolomapLearningCycle(
         workspaceRoot,
         String(globalDataPath || ''),
@@ -13365,7 +13391,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         finishedAt
       );
     }
-    const documentationAudit = workspaceRoot && !isReviewRun
+    const documentationAudit = workspaceRoot && !isReviewRun && !isContinuationRun
       ? auditDocumentationAfterRun(workspaceRoot, {
         nodeId,
         runKind,
@@ -13405,7 +13431,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         runDigestSummary = `Execution digest not saved: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
-    if (workspaceRoot) {
+    if (workspaceRoot && !isContinuationRun) {
       const verificationSignals = extractVerificationSignals(outputTail, resolvedCommand, nextStatus);
       const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus);
       const sourceType = isReviewRun
@@ -13491,7 +13517,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       sessionMode ? `Native session mode: ${sessionMode}` : '',
       nativeSessionSummary,
       `Sentinel captured state: ${status}`,
-      isSoloConversation ? `Solo conversation state: ${nextStatus}` : `Roadmap step state: ${nextStatus}`,
+      isContinuationRun
+        ? `Continuation record state: ${nextStatus}`
+        : isSoloConversation ? `Solo conversation state: ${nextStatus}` : `Roadmap step state: ${nextStatus}`,
       startedAt ? `Run started at: ${startedAt}` : '',
       `Run finished at: ${finishedAt}`,
       startedAt ? `Run duration ms: ${runDurationMs}` : '',
@@ -13531,7 +13559,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       );
     }
 
-    if (shouldStartReview) {
+    if (shouldStartReview && !isContinuationRun) {
       const requestedReviewerCli = String(reviewerCliPath || agentCli || '').trim();
       const reviewerCli = resolveAgentCli(requestedReviewerCli || String(agentCli || 'agy'), requestedReviewerCli ? '' : String(agentCli || 'agy'));
       if (commandExists(reviewerCli)) {
@@ -13583,7 +13611,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     sendNodesToWebview();
     refreshSidebarProjectCards();
     postNodeConversations(nodeId);
-    if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
+    if (isContinuationRun) {
+      vscode.window.showInformationMessage('Continuation conversation was recorded.');
+    } else if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
     } else if (isSoloConversation) {
       vscode.window.showInformationMessage(`Solo conversation finished with state: ${nextStatus}`);
@@ -15911,6 +15941,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         duration: '耗时',
         runResult: '本轮结果',
         stillWorking: 'Agent 正在执行这次对话。',
+        continuationRecorded: '续聊已记录。',
         awaitingNextConversation: '本轮已结束，环节仍可继续推进。',
         stepCompleted: 'Agent 判断该环节已完成。',
         changedCount: '本轮修改文件数',
@@ -15966,7 +15997,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         methodologyImprove: '改进',
         methodologyMissing: '缺少对应环节',
         methodologyCompleted: '已完成',
-        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败', Linked: '已关联' }
+        status: { Pending: '待处理', 'In Progress': '推进中', Running: '对话中', Completed: '已完成', Failed: '失败', Linked: '已关联', Recorded: '已记录' }
       },
       en: {
         title: 'SoloMap',
@@ -16112,6 +16143,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         duration: 'Duration',
         runResult: 'Run result',
         stillWorking: 'The Agent is running this conversation.',
+        continuationRecorded: 'Continuation recorded.',
         awaitingNextConversation: 'This run ended; the step can continue.',
         stepCompleted: 'The Agent marked this step complete.',
         changedCount: 'Files changed in this run',
@@ -16167,7 +16199,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         methodologyImprove: 'Improve',
         methodologyMissing: 'Missing step',
         methodologyCompleted: 'completed',
-        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed', Linked: 'Linked' }
+        status: { Pending: 'Pending', 'In Progress': 'In Progress', Running: 'Running', Completed: 'Completed', Failed: 'Failed', Linked: 'Linked', Recorded: 'Recorded' }
       }
     };
 
@@ -18459,6 +18491,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       let result = '';
       if (conversation.status === 'Running') {
         result = t('stillWorking');
+      } else if (conversation.status === 'Recorded') {
+        result = t('continuationRecorded');
       } else if (conversation.status === 'Failed') {
         result = failureCategoryText(failureCategory.trim()) || failureReason.trim() || statusText(conversation.status);
       } else if (conversation.status === 'Linked') {
