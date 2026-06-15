@@ -2669,6 +2669,7 @@ function startDailyReviewAgent(settings: SolopreneurSettings, projects: Solopren
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'solopreneur.sidebar';
   private _view?: vscode.WebviewView;
+  private _portfolioLoadRequest = 0;
   private _issueLoadRequest = 0;
   private _deliveryLoadRequest = 0;
 
@@ -3179,6 +3180,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!this._view) {
         return;
       }
+      this._portfolioLoadRequest += 1;
+      this._issueLoadRequest += 1;
+      this._deliveryLoadRequest += 1;
       const projectState = this._getProjects();
       const portfolio = buildProjectPortfolioSummaries(projectState.projects);
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
@@ -3196,9 +3200,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private schedulePortfolioEnrichment(projects: SolopreneurProject[], selectedProjectPath: string) {
+    const requestId = ++this._portfolioLoadRequest;
     setTimeout(() => {
       try {
-        if (!this._view) {
+        if (!this._view || requestId !== this._portfolioLoadRequest) {
           return;
         }
         const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true });
@@ -4438,6 +4443,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     .sidebar-conversation-card {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       padding: 8px 10px;
       border: 1px solid var(--border-glass, rgba(255, 255, 255, 0.08));
       border-radius: 8px;
@@ -4518,7 +4524,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     /* 卡片主体 */
     .sidebar-conversation-body {
-      flex: 1;
+      flex: 1 1 130px;
       min-width: 0;
       display: flex;
       flex-direction: column;
@@ -4531,19 +4537,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       gap: 6px;
       font-size: 9px;
       color: var(--text-muted, #94a3b8);
+      min-width: 0;
+      flex-wrap: wrap;
     }
 
     .sidebar-conversation-agent-tag {
+      max-width: 100%;
       font-weight: 700;
       color: #38bdf8;
       background: rgba(56, 189, 248, 0.1);
       padding: 1px 4px;
       border-radius: 4px;
       text-transform: uppercase;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .sidebar-conversation-time-meta {
-      flex-shrink: 0;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .sidebar-conversation-duration-meta {
@@ -4571,11 +4586,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: flex;
       align-items: center;
       gap: 6px;
-      flex-shrink: 0;
+      flex: 0 1 auto;
+      min-width: 0;
+      margin-left: auto;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     /* 新状态徽章 */
     .status-badge-new {
+      flex-shrink: 0;
       font-size: 9px;
       padding: 2px 6px;
       border-radius: 4px;
@@ -4604,6 +4624,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       display: flex;
       align-items: center;
       gap: 4px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     .sidebar-conversation-mini-actions > span {
@@ -4653,9 +4675,26 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     .expand-arrow-icon {
+      flex-shrink: 0;
       font-size: 11px;
       color: var(--text-muted);
       transition: transform 0.2s ease;
+    }
+
+    @media (max-width: 330px) {
+      .sidebar-conversation-card {
+        align-items: flex-start;
+        gap: 7px;
+      }
+
+      .sidebar-conversation-body {
+        flex-basis: calc(100% - 24px);
+      }
+
+      .sidebar-conversation-right-col {
+        width: 100%;
+        margin-left: 16px;
+      }
     }
 
     /* 详情展开面板 */
@@ -7253,12 +7292,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function resetProjectScopedState(projectPath, clearNodes) {
       activeProjectPath = projectPath || '';
-      Object.keys(projectContinueFiles).forEach(key => delete projectContinueFiles[key]);
-      Object.keys(projectContinueDrafts).forEach(key => delete projectContinueDrafts[key]);
-      Object.keys(projectSoloFiles).forEach(key => delete projectSoloFiles[key]);
-      Object.keys(projectSoloDrafts).forEach(key => delete projectSoloDrafts[key]);
-      Object.keys(projectConversationModelSelections).forEach(key => delete projectConversationModelSelections[key]);
-      Object.keys(projectConversationAgentSelections).forEach(key => delete projectConversationAgentSelections[key]);
       expandedIssueNumber = 0;
       issueDetails = null;
       issuePanelExpanded = false;
@@ -7853,8 +7886,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const message = event.data;
       switch (message.command) {
         case 'nodesUpdated':
-          if (message.projectPath && message.projectPath !== activeProjectPath) {
-            resetProjectScopedState(message.projectPath, false);
+          if (message.projectPath && activeProjectPath && message.projectPath !== activeProjectPath) {
+            return;
+          }
+          if (message.projectPath && !activeProjectPath) {
+            activeProjectPath = message.projectPath;
           }
           currentNodes = message.nodes || [];
           renderSidebar(message.nodes);

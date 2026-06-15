@@ -2003,7 +2003,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     activePanel.webview.postMessage({ command: 'roadmapLoading', projectPath });
   }
   void ensureSyncEngine(context).then((ready) => {
-    if (ready) {
+    if (ready && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
       sendNodesToWebview();
       void postFlowStateToWebview(context);
     }

@@ -1209,6 +1209,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /data-stop-sidebar-solo-id/);
   assert.match(html, /data-stop-sidebar-step-id/);
   assert.match(html, /stopConversation/);
+  assert.match(html, /\.sidebar-conversation-card\s*\{[\s\S]*?flex-wrap:\s*wrap/);
+  assert.match(html, /\.sidebar-conversation-body\s*\{[\s\S]*?flex:\s*1 1 130px/);
+  assert.match(html, /@media \(max-width:\s*330px\)[\s\S]*?\.sidebar-conversation-right-col\s*\{[\s\S]*?width:\s*100%/);
   assert.match(html, /\.portfolio-compose-row\s*\{[\s\S]*?align-items:\s*stretch/);
   assert.match(html, /\.portfolio-compose-input\s*\{[\s\S]*?min-height:\s*44px/);
   assert.match(html, /\.portfolio-action-zone\s*\{[\s\S]*?margin-top:\s*4px[\s\S]*?padding-top:\s*0/);
@@ -1322,6 +1325,9 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?document\.activeElement === input/);
   assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
+  assert.match(html, /case 'nodesUpdated':[\s\S]*?message\.projectPath !== activeProjectPath\) \{[\s\S]*?return;/);
+  assert.doesNotMatch(html, /Object\.keys\(projectSoloDrafts\)\.forEach\(key => delete projectSoloDrafts\[key\]\)/);
+  assert.doesNotMatch(html, /Object\.keys\(projectConversationAgentSelections\)\.forEach\(key => delete projectConversationAgentSelections\[key\]\)/);
 });
 
 test('daily review prompt switches modes by engineering rhythm and signals', () => {
@@ -1448,6 +1454,9 @@ test('sidebar local project refresh does not schedule external data loads', () =
   provider.sendLocalProjects();
 
   assert.equal(externalLoads, 0);
+  assert.equal(provider._portfolioLoadRequest, 1);
+  assert.equal(provider._issueLoadRequest, 1);
+  assert.equal(provider._deliveryLoadRequest, 1);
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].command, 'projectsLoaded');
   assert.equal(postedMessages[0].projects.portfolio[0].pinnedAt, '2026-01-01T00:00:00.000Z');
