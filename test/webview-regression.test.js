@@ -1685,13 +1685,29 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     '2,Implement,,产品与 MVP,1,agy,,In Progress,2026-01-01T00:00:00.000Z,',
     '3,Grow,,营销与增长,2,agy,,Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'));
+  const projectRootC = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-portfolio-c-'));
+  const solopreneurC = path.join(projectRootC, '.solopreneur');
+  fs.mkdirSync(solopreneurC, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurC, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Backlog task,,产品与 MVP,,agy,,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n'));
+  const projectRootD = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-portfolio-d-'));
+  const solopreneurD = path.join(projectRootD, '.solopreneur');
+  fs.mkdirSync(solopreneurD, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurD, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Done,,产品与 MVP,,agy,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z'
+  ].join('\n'));
 
   const summaries = sidebarModule.__buildProjectPortfolioSummaries([
     { name: 'Novel', path: projectRootA, type: 'content' },
-    { name: 'CRM', path: projectRootB }
+    { name: 'CRM', path: projectRootB },
+    { name: 'Backlog', path: projectRootC },
+    { name: 'Done', path: projectRootD }
   ]);
 
-  assert.equal(summaries.length, 2);
+  assert.equal(summaries.length, 4);
   assert.equal(summaries[0].failedNodes, 1);
   assert.equal(summaries[0].overallStatus, 'Failed');
   assert.equal(summaries[0].recommendedNodeTitle, 'Build MVP');
@@ -1702,6 +1718,9 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].projectType, 'content');
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
+  assert.equal(summaries.find((summary) => summary.name === 'CRM')?.globalPriority, 'P1');
+  assert.equal(summaries.find((summary) => summary.name === 'Backlog')?.globalPriority, 'P2');
+  assert.equal(summaries.find((summary) => summary.name === 'Done')?.globalPriority, 'P3');
   assert.equal(sidebarModule.__getRecommendedNode([
     { id: '1', title: 'Failed step', status: 'Failed', stage: '产品与 MVP', dependencies: '' },
     { id: '2', title: 'Running step', status: 'Running', stage: '产品与 MVP', dependencies: '' }

@@ -2060,8 +2060,8 @@ function inferGlobalPriority(summary: Pick<ProjectPortfolioSummary, 'failedNodes
   const failedWorkflowRuns = Number(summary.delivery?.failedWorkflowRuns || 0);
   if (p0Issues > 0 || failedWorkflowRuns > 0 || Number(summary.failedNodes || 0) > 0) return 'P0';
   if (Number(summary.runningNodes || 0) > 0 || Number(summary.inProgressNodes || 0) > 0) return 'P1';
-  if (summary.overallStatus === 'Completed') return 'P2';
-  return Number(summary.pendingNodes || 0) > 0 ? 'P1' : 'P2';
+  if (Number(summary.pendingNodes || 0) > 0) return 'P2';
+  return 'P3';
 }
 
 function inferIssuePressure(issues: ProjectIssueSummary): string {
