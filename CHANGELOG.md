@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.231 - 2026-06-15
+
+### Fixed
+- preserve native session for continuation cards (9f9f7fb)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.230 - 2026-06-15
 
 ### Fixed
