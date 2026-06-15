@@ -1210,6 +1210,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /conversation\.status\.toLowerCase\(\)/);
   assert.match(html, /continueSoloConversation/);
   assert.match(html, /data-continue-sidebar-solo-id/);
+  assert.match(html, /Continuation session id/);
   assert.match(html, /data-stop-sidebar-solo-id/);
   assert.match(html, /data-stop-sidebar-step-id/);
   assert.match(html, /stopConversation/);
@@ -2702,6 +2703,10 @@ test('agent command builder uses non-interactive task runs and native continuati
     '继续修复续聊标题'
   );
   assert.equal(
+    extensionModule.__extractNativeSessionIdFromExecutionOutput('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11'),
+    '019dc472-6a80-7c70-99a4-b2593a641d11'
+  );
+  assert.equal(
     extensionModule.__extractContinuationParentConversationId('Continuation parent conversation: 42\nUser supplement:\ncontinue'),
     42
   );
@@ -2937,6 +2942,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   const coloredOutputPath = path.join(os.tmpdir(), 'solopreneur-colored-output.log');
   fs.writeFileSync(coloredOutputPath, '\u001b[32mDone\u001b[0m', 'utf8');
   assert.equal(extensionModule.__getOutputTail(coloredOutputPath), 'Done');
+  const ttyOutputPath = path.join(os.tmpdir(), 'solopreneur-tty-output.log');
+  fs.writeFileSync(ttyOutputPath, '\u001b]0;⠦ solopreneur-roadmap\u0007Done\n0;⠧ solopreneur-roadmap\u0007\nFinished', 'utf8');
+  assert.equal(extensionModule.__getOutputTail(ttyOutputPath), 'Done\nFinished');
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
 
   const memoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-'));
@@ -5070,6 +5078,63 @@ test('stopping a continuation records it without marking the task failed', async
   assert.match(updatedOutput, /Continuation record state: Recorded/);
   assert.doesNotMatch(updatedOutput, /Failure category: stopped_by_user/);
   assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Continuation terminal stopped by user/);
+});
+
+test('closing a continuation terminal records the conversation as stopped', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-continuation-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '41');
+  fs.mkdirSync(runDir, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  fs.writeFileSync(outputFilePath, 'Working inside native continuation.\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '41.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '__solo__',
+    runKind: 'solo_continue',
+    status: 'Running',
+    executionLogId: 41,
+    agentCli: 'codex',
+    outputFilePath,
+    nativeSessionId: '019dc472-6a80-7c70-99a4-b2593a641d11',
+    startedAt: '2026-05-24T00:00:00.000Z'
+  }), 'utf8');
+  let updatedStatus = '';
+  let updatedOutput = '';
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    updateNode: () => { throw new Error('closing a continuation terminal must not update roadmap node state'); },
+    getAgentExecutions: () => [{
+      id: 41,
+      nodeId: '__solo__',
+      agentCli: 'codex',
+      command: 'codex resume',
+      output: 'Agent continuation started.\n\nContinuation parent conversation: 39',
+      status: 'Running'
+    }],
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      updatedOutput = output;
+      updatedStatus = status;
+      return true;
+    },
+    logAgentExecution: () => 41
+  }, tempRoot);
+  extensionModule.__setAgentTerminalForTest(41, 'solomap close test', tempRoot);
+
+  const handled = await extensionModule.__handleAgentTerminalClosed('solomap close test');
+
+  assert.equal(handled, true);
+  assert.equal(updatedStatus, 'Recorded');
+  assert.match(updatedOutput, /Continuation record state: Recorded/);
+  assert.match(updatedOutput, /Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11/);
+  assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Continuation terminal closed/);
 });
 
 test('agent execution log updates one conversation instead of creating a duplicate', async () => {

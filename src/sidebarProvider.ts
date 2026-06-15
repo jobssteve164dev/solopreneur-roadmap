@@ -8372,7 +8372,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function extractNativeSessionId(output) {
-      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/);
+      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/)
+        || String(output || '').match(/Continuation session id:\\s*([0-9a-fA-F-]{36})/);
       return match ? match[1] : '';
     }
 

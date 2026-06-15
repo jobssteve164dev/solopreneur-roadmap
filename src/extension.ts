@@ -864,6 +864,7 @@ const agentStatusDirName = 'agent-status';
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
 const agentTerminalNamesByConversationId = new Map<number, string>();
+const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -914,6 +915,11 @@ export async function activate(context: vscode.ExtensionContext) {
       await handlePassportUri(context, uri);
     }
   }));
+  if (typeof vscode.window.onDidCloseTerminal === 'function') {
+    context.subscriptions.push(vscode.window.onDidCloseTerminal((terminal) => {
+      void handleAgentTerminalClosed(terminal.name);
+    }));
+  }
 
   // Register settings saved broadcast command to keep Sidebar and Webview synced
   const settingsSavedDisposable = vscode.commands.registerCommand(
@@ -10891,14 +10897,22 @@ function getOutputTail(filePath: string): string {
     return '';
   }
 
-  const content = fs.readFileSync(filePath, 'utf8')
-    .replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, '')
+  const content = cleanTerminalControlSequences(fs.readFileSync(filePath, 'utf8'))
     .trim();
   if (content.length <= 4000) {
     return content;
   }
 
   return content.slice(-4000);
+}
+
+function cleanTerminalControlSequences(value: string): string {
+  return String(value || '')
+    .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\)/g, '')
+    .replace(/(?:^|[\r\n])?0;[^\x07\r\n]{0,160}\x07/g, '')
+    .replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|[@-_])/g, '')
+    .replace(/\x07/g, '')
+    .replace(/\r(?!\n)/g, '\n');
 }
 
 function getChangedFilesSummary(filePath: string): string {
@@ -11068,6 +11082,7 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
   activeAgentTerminalName = terminalName;
   if (conversationId) {
     agentTerminalNamesByConversationId.set(Number(conversationId), terminalName);
+    agentTerminalProjectRootsByConversationId.set(Number(conversationId), workspaceRoot);
   }
   let iconPath: vscode.Uri | vscode.ThemeIcon;
   if (extensionContextRef) {
@@ -11081,6 +11096,47 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
   });
+}
+
+async function handleAgentTerminalClosed(terminalName: string): Promise<boolean> {
+  const matched = [...agentTerminalNamesByConversationId.entries()]
+    .find(([, name]) => name === terminalName);
+  if (!matched) {
+    return false;
+  }
+  const [conversationId] = matched;
+  const workspaceRoot = agentTerminalProjectRootsByConversationId.get(Number(conversationId)) || activeProjectRoot || '';
+  agentTerminalNamesByConversationId.delete(Number(conversationId));
+  agentTerminalProjectRootsByConversationId.delete(Number(conversationId));
+  if (!workspaceRoot) {
+    return false;
+  }
+  const runningStatus = findAgentStatusForConversation(workspaceRoot, Number(conversationId));
+  if (!runningStatus || String(runningStatus.status || '') !== 'Running') {
+    return false;
+  }
+  const statusFilePath = getAgentStatusFilePath(workspaceRoot, Number(runningStatus.executionLogId || conversationId));
+  const isContinuationRun = isContinuationRunKind(String(runningStatus.runKind || ''));
+  const finishedAt = new Date().toISOString();
+  if (runningStatus.outputFilePath) {
+    fs.appendFileSync(
+      runningStatus.outputFilePath,
+      isContinuationRun ? '\nSoloMap: Continuation terminal closed.\n' : '\nSoloMap: Agent terminal closed.\n',
+      'utf8'
+    );
+  }
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    ...runningStatus,
+    status: isContinuationRun ? 'In Progress' : 'Failed',
+    ...(isContinuationRun ? {} : {
+      failureCode: 'terminal_closed',
+      failureReason: 'Agent terminal was closed before the task finished.'
+    }),
+    finishedAt
+  }), 'utf8');
+  await processAgentStatusFile(statusFilePath);
+  return true;
 }
 
 function showAgentTerminal(conversationId = 0): void {
@@ -11481,7 +11537,8 @@ async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContex
 
 function extractNativeSessionIdFromExecutionOutput(output: string): string {
   const text = String(output || '');
-  const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/);
+  const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/)
+    || text.match(/Continuation session id:\s*([0-9a-fA-F-]{36})/);
   return match ? match[1] : '';
 }
 
