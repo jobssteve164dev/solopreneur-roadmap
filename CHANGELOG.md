@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.227 - 2026-06-15
+
+### Fixed
+- keep sidebar project refresh local first (84ee9f5)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.226 - 2026-06-14
 
 ### Changed
