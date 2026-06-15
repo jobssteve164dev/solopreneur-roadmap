@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.230 - 2026-06-15
+
+### Fixed
+- infer portfolio priorities by active state (8550675)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.229 - 2026-06-15
 
 ### Added
