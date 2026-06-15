@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.233 - 2026-06-15
+
+### Fixed
+- keep continuation cards resumable (5fae76e)
+
+### Docs
+- document learning pipeline methodology (5063986)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.232 - 2026-06-15
 
 ### Fixed
