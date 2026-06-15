@@ -11523,6 +11523,44 @@ function resolveContinuationLeafConversation(nodeId: string, conversationId: num
   return resolveContinuationLeafConversationFromList(conversations, conversationId);
 }
 
+function resolveContinuationSessionConversationFromList(
+  conversations: AgentConversation[],
+  conversationId: number
+): AgentConversation | null {
+  if (!conversationId) {
+    return null;
+  }
+  const byId = new Map<number, AgentConversation>();
+  conversations.forEach((conversation) => byId.set(Number(conversation.id || 0), conversation));
+  const start = byId.get(Number(conversationId));
+  const leaf = resolveContinuationLeafConversationFromList(conversations, conversationId);
+  const candidates: AgentConversation[] = [];
+  const pushLineage = (conversation: AgentConversation | null) => {
+    let current = conversation;
+    const seen = new Set<number>();
+    while (current) {
+      const currentId = Number(current.id || 0);
+      if (!currentId || seen.has(currentId)) {
+        return;
+      }
+      seen.add(currentId);
+      candidates.push(current);
+      const parentId = extractContinuationParentConversationId(current.output || '');
+      current = parentId ? byId.get(Number(parentId)) || null : null;
+    }
+  };
+  pushLineage(leaf);
+  pushLineage(start || null);
+  return candidates.find((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || '')) || null;
+}
+
+function resolveContinuationSessionConversation(nodeId: string, conversationId: number): AgentConversation | null {
+  if (!syncEngine || !nodeId || !conversationId) {
+    return null;
+  }
+  return resolveContinuationSessionConversationFromList(syncEngine.getAgentExecutions(nodeId), conversationId);
+}
+
 function resolveContinuationRootConversationFromList(conversations: AgentConversation[], conversationId: number): AgentConversation | null {
   const byId = new Map<number, AgentConversation>();
   conversations.forEach((conversation) => byId.set(Number(conversation.id || 0), conversation));
@@ -11689,13 +11727,14 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
 
-  const sessionId = extractNativeSessionIdFromExecutionOutput(conversation.output || '');
+  const sessionConversation = resolveContinuationSessionConversation(nodeId, conversationId) || conversation;
+  const sessionId = extractNativeSessionIdFromExecutionOutput(sessionConversation.output || '');
   if (!sessionId) {
     vscode.window.showInformationMessage('No native Agent session ID was recorded for this conversation.');
     return;
   }
 
-  const agentCli = resolveAgentCli(conversation.agentCli || '', '');
+  const agentCli = resolveAgentCli(sessionConversation.agentCli || conversation.agentCli || '', '');
   if (!commandExists(agentCli)) {
     vscode.window.showErrorMessage(`Agent CLI not found for native continuation: ${conversation.agentCli || agentCli}`);
     return;

@@ -2510,6 +2510,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildCodexContinuationRunnerScript = buildCodexContinuationRunnerScript;',
       'module.exports.__extractContinuationParentConversationId = extractContinuationParentConversationId;',
       'module.exports.__resolveContinuationLeafConversationFromList = resolveContinuationLeafConversationFromList;',
+      'module.exports.__resolveContinuationSessionConversationFromList = resolveContinuationSessionConversationFromList;',
       'module.exports.__getTaskPermissionArgs = getTaskPermissionArgs;',
       'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
@@ -2711,6 +2712,12 @@ test('agent command builder uses non-interactive task runs and native continuati
     { id: 13, output: 'Continuation parent conversation: 10\nUser supplement:\nolder sibling' }
   ], 10);
   assert.equal(leafConversation && leafConversation.id, 13);
+  const sessionConversation = extensionModule.__resolveContinuationSessionConversationFromList([
+    { id: 20, output: 'Native Agent session saved: /workspace/app/.solopreneur/session.json (019dc472-6a80-7c70-99a4-b2593a641d11)' },
+    { id: 21, output: 'Continuation parent conversation: 20\nUser supplement:\nfirst continue' },
+    { id: 22, output: 'Continuation parent conversation: 21\nUser supplement:\nsecond continue' }
+  ], 20);
+  assert.equal(sessionConversation && sessionConversation.id, 20);
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'never'),
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --add-dir='/workspace/app'"
