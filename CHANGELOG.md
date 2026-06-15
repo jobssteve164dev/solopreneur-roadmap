@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.232 - 2026-06-15
+
+### Fixed
+- record continuations without task status judgment (82434e6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.231 - 2026-06-15
 
 ### Fixed
