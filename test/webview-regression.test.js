@@ -234,7 +234,7 @@ function createElement(id) {
   };
 }
 
-function runScriptWithMinimalDom(script, ids) {
+function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
   const elements = Object.fromEntries(ids.map((id) => [id, createElement(id)]));
   const postedMessages = [];
 
@@ -331,10 +331,11 @@ function runScriptWithMinimalDom(script, ids) {
     })
   };
 
-  vm.runInNewContext(script, context);
+  vm.runInNewContext(script + '\n' + scriptSuffix, context);
   return {
     elements,
     postedMessages,
+    context,
     dispatchMessage(message) {
       context.__messageListener({ data: message });
     }
@@ -1328,6 +1329,125 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /case 'nodesUpdated':[\s\S]*?message\.projectPath !== activeProjectPath\) \{[\s\S]*?return;/);
   assert.doesNotMatch(html, /Object\.keys\(projectSoloDrafts\)\.forEach\(key => delete projectSoloDrafts\[key\]\)/);
   assert.doesNotMatch(html, /Object\.keys\(projectConversationAgentSelections\)\.forEach\(key => delete projectConversationAgentSelections\[key\]\)/);
+});
+
+test('sidebar keeps solo composer active when nodes load after the user starts typing', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    async () => {},
+    () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }),
+    async () => {},
+    () => ({ projects: [], selectedProjectPath: '' }),
+    async () => {},
+    async () => {}
+  );
+  const webviewView = {
+    webview: {
+      options: {},
+      html: '',
+      asWebviewUri(uri) {
+        return String(uri && (uri.fsPath || uri.path || uri));
+      },
+      postMessage() {
+        return Promise.resolve(true);
+      },
+      onDidReceiveMessage() {}
+    }
+  };
+  provider.resolveWebviewView(webviewView, {}, {});
+  const script = extractLastScript(webviewView.webview.html);
+  const suffix = `
+    window.__soloModeAfterNodesLoaded = (() => {
+      const projectPath = '/workspace/app';
+      const project = { name: 'app', path: projectPath, nodes: [] };
+      currentSettings = { cliPath: 'codex', language: 'zh' };
+      currentProjects.selectedProjectPath = projectPath;
+      currentProjects.portfolio = [project];
+      activeProjectPath = projectPath;
+      currentNodes = [];
+      const beforeNodes = renderProjectConversationComposer(project, currentNodes);
+      const input = {
+        value: '正在输入 Solo 草稿',
+        getAttribute(name) {
+          if (name === 'data-conversation-mode') return 'solo';
+          if (name === 'data-project-path') return projectPath;
+          if (name === 'data-conversation-target-id') return 'solo:' + projectPath;
+          return '';
+        }
+      };
+      rememberProjectConversationInput(input);
+      currentNodes = [{ id: '1', title: '下一步', status: 'Pending', dependencies: '', agentCli: 'codex' }];
+      const afterNodes = renderProjectConversationComposer(project, currentNodes);
+      return {
+        beforeWasSolo: /data-conversation-mode="solo"/.test(beforeNodes),
+        rememberedMode: projectConversationModes[projectPath],
+        rememberedDraft: projectSoloDrafts[projectPath],
+        afterStillSolo: /data-conversation-mode="solo"/.test(afterNodes),
+        afterSoloButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="solo"/.test(afterNodes),
+        afterContinueInput: /data-conversation-mode="continue"/.test(afterNodes)
+      };
+    })();
+  `;
+  const { context } = runScriptWithMinimalDom(script, [
+    'tasks-list',
+    'progress-bar',
+    'progress-text',
+    'btn-open-strategy-pyramid',
+    'project-select',
+    'btn-add-project',
+    'global-focus-panel',
+    'portfolio-title',
+    'portfolio-list',
+    'portfolio-filters',
+    'btn-toggle-feedback',
+    'btn-close-feedback',
+    'feedback-panel',
+    'feedback-title',
+    'feedback-type-not-working',
+    'feedback-type-next-step',
+    'feedback-type-feature',
+    'btn-toggle-settings',
+    'btn-close-settings',
+    'settings-panel',
+    'setting-language',
+    'setting-cli-select',
+    'setting-clipath-custom',
+    'setting-global-prompt',
+    'setting-global-data-path',
+    'pro-account-panel',
+    'btn-open-pro-authorization',
+    'btn-paste-pro-code',
+    'setting-feedback-title',
+    'setting-feedback-body',
+    'btn-open-feedback',
+    'btn-test-cli',
+    'btn-save-settings',
+    'btn-check-dependencies',
+    'btn-open-agent-install',
+    'btn-prepare-agent-automation',
+    'btn-open-agent-check',
+    'btn-open-github-auth',
+    'dependency-agent-status',
+    'dependency-agent-message',
+    'dependency-automation-status',
+    'dependency-automation-message',
+    'dependency-github-status',
+    'dependency-github-message',
+    'cli-test-badge'
+  ], suffix);
+
+  const result = context.window.__soloModeAfterNodesLoaded;
+  assert.equal(result.beforeWasSolo, true);
+  assert.equal(result.rememberedMode, 'solo');
+  assert.equal(result.rememberedDraft, '正在输入 Solo 草稿');
+  assert.equal(result.afterStillSolo, true);
+  assert.equal(result.afterSoloButtonActive, true);
+  assert.equal(result.afterContinueInput, false);
 });
 
 test('daily review prompt switches modes by engineering rhythm and signals', () => {

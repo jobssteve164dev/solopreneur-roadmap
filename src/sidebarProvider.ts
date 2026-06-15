@@ -6658,6 +6658,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const mode = input.getAttribute('data-conversation-mode') || 'continue';
       const projectPath = input.getAttribute('data-project-path') || currentProjects.selectedProjectPath || '';
       const targetId = input.getAttribute('data-conversation-target-id') || '';
+      if (projectPath && (mode === 'solo' || mode === 'flow')) {
+        projectConversationModes[projectPath] = mode;
+      }
       if (mode === 'solo') {
         projectSoloDrafts[projectPath] = input.value || '';
       } else if (mode === 'flow') {
@@ -8939,7 +8942,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function renderProjectConversationComposer(project, nodes) {
       const node = getNextActionNode(nodes || []);
       const projectPath = project.path || '';
-      const mode = projectConversationModes[projectPath] || 'continue';
+      const mode = projectConversationModes[projectPath] || (projectSoloDrafts[projectPath] ? 'solo' : 'continue');
       const soloTargetId = projectSoloTargetId(projectPath);
       const activeMode = mode === 'flow'
         ? 'flow'
