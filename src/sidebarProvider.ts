@@ -7,6 +7,7 @@ import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { getAgentImpactStatus } from './agentImpact';
 import { summarizeDocumentationForReview } from './documentationManifest';
+import { readLearningSummary } from './learningLedger';
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -143,6 +144,9 @@ interface DailyReviewArtifact {
   inputSnapshot: {
     projectCount: number;
     learningCandidateCount: number;
+    ledgerEventCount?: number;
+    ledgerCandidateCount?: number;
+    confirmedLearningCount?: number;
     blockedDependencyCount: number;
     reviewMode?: string;
   };
@@ -1813,6 +1817,9 @@ function normalizeDailyReviewArtifact(value: any, resultPath = ''): DailyReviewA
     inputSnapshot: {
       projectCount: Number(value.inputSnapshot?.projectCount || 0),
       learningCandidateCount: Number(value.inputSnapshot?.learningCandidateCount || 0),
+      ledgerEventCount: Number(value.inputSnapshot?.ledgerEventCount || 0),
+      ledgerCandidateCount: Number(value.inputSnapshot?.ledgerCandidateCount || 0),
+      confirmedLearningCount: Number(value.inputSnapshot?.confirmedLearningCount || 0),
       blockedDependencyCount: Number(value.inputSnapshot?.blockedDependencyCount || 0),
       reviewMode: String(value.inputSnapshot?.reviewMode || value.reviewMode || '')
     },
@@ -2075,18 +2082,30 @@ function inferDeliverySignal(delivery: ProjectDeliverySummary): string {
   return '';
 }
 
-function countReusableSignals(projectPath: string): number {
+function countReusableSignals(projectPath: string, globalDataPath = ''): number {
   const candidates = [
     path.join(projectPath, '.solopreneur', 'step-memory'),
     path.join(projectPath, '.solopreneur', 'agent-runs')
   ];
-  return candidates.reduce((count, candidate) => {
+  const legacyCount = candidates.reduce((count, candidate) => {
     try {
       return count + (fs.existsSync(candidate) ? fs.readdirSync(candidate).length : 0);
     } catch {
       return count;
     }
   }, 0);
+  const ledgerSignalCount = (() => {
+    try {
+      const summary = readLearningSummary(projectPath, globalDataPath);
+      const projectSignal = summary.projectSignals.find((item) => item.projectPath === projectPath);
+      return projectSignal
+        ? Number(projectSignal.candidateCount || 0) + Number(projectSignal.promotedCount || 0) + Number(projectSignal.riskSignals || 0) + Number(projectSignal.verificationSignals || 0)
+        : 0;
+    } catch {
+      return 0;
+    }
+  })();
+  return legacyCount + ledgerSignalCount;
 }
 
 function createGlobalEngineeringSnapshotPlaceholder(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
@@ -2209,7 +2228,7 @@ function getProjectRecentActivityAt(projectPath: string): string {
   return latestMtime ? new Date(latestMtime).toISOString() : '';
 }
 
-function buildProjectPortfolioSummary(project: SolopreneurProject, options: { includeReusableSignals?: boolean } = {}): ProjectPortfolioSummary {
+function buildProjectPortfolioSummary(project: SolopreneurProject, options: { includeReusableSignals?: boolean; globalDataPath?: string } = {}): ProjectPortfolioSummary {
   const nodes = readProjectRoadmapNodes(project.path);
   const stageSummary = summarizeMethodologyStages(nodes);
   const totalNodes = nodes.length;
@@ -2261,7 +2280,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject, options: { in
     globalNextAction: baseSummary.delivery.failedWorkflowRuns > 0
       ? '修复发布检查'
       : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap')),
-    reusableSignals: options.includeReusableSignals ? countReusableSignals(project.path) : 0,
+    reusableSignals: options.includeReusableSignals ? countReusableSignals(project.path, options.globalDataPath || '') : 0,
     issuePressure: inferIssuePressure(baseSummary.issues),
     stageGap: stageSummary.gap,
     delivery: baseSummary.delivery,
@@ -2272,7 +2291,7 @@ function buildProjectPortfolioSummary(project: SolopreneurProject, options: { in
   };
 }
 
-function buildProjectPortfolioSummaries(projects: SolopreneurProject[], options: { includeReusableSignals?: boolean } = {}): ProjectPortfolioSummary[] {
+function buildProjectPortfolioSummaries(projects: SolopreneurProject[], options: { includeReusableSignals?: boolean; globalDataPath?: string } = {}): ProjectPortfolioSummary[] {
   return projects
     .map((project) => buildProjectPortfolioSummary(project, options))
     .sort((a, b) => {
@@ -2446,13 +2465,19 @@ function buildDailyReviewPrompt(options: {
   reviewMode: string;
   portfolio: ProjectPortfolioSummary[];
   globalStore: GlobalEngineeringSnapshot;
+  learningSummary?: ReturnType<typeof readLearningSummary>;
 }): string {
   const mode = describeDailyReviewMode(options.reviewMode);
+  const learningSummary = options.learningSummary;
   const snapshot = {
     date: options.dateKey,
     rhythm: options.rhythm,
     reviewMode: options.reviewMode,
     learningCandidateCount: options.globalStore.learningCandidateCount || 0,
+    ledgerEventCount: learningSummary?.eventCount || 0,
+    ledgerCandidateCount: learningSummary?.candidateCount || 0,
+    confirmedLearningCount: (learningSummary?.approvedCount || 0) + (learningSummary?.promotedCount || 0),
+    projectLearningSignals: (learningSummary?.projectSignals || []).slice(0, 8),
     blockedDependencyCount: (options.globalStore.dependencies || []).length,
     projects: options.portfolio.map((project) => ({
       name: project.name,
@@ -2492,6 +2517,7 @@ function buildDailyReviewPrompt(options: {
     '- 最多输出 5 条 todos，最多 3 条 needsConfirmation。',
     '- 文案用用户行动语言，避免工程自描述。',
     '- needsConfirmation 只放确实需要用户确认的学习、优先级或阻断判断；不要把后台归档动作包装成用户任务。',
+    '- 学习账本只作为行动证据：不能改变今天动作、验证或优先级的经验，不要输出给用户。',
     '- 如果项目有文档待确认，只在周五、月末、日常学习或异常相关时放入 needsConfirmation；普通推进日不要让文档整理压过主行动。',
     '- action 只能使用 open_project、continue_step、adjust_roadmap、confirm_learning、ignore_suggestion、open_issue。',
     '',
@@ -2552,6 +2578,9 @@ function buildDailyReviewPrompt(options: {
       inputSnapshot: {
         projectCount: snapshot.projects.length,
         learningCandidateCount: snapshot.learningCandidateCount,
+        ledgerEventCount: snapshot.ledgerEventCount,
+        ledgerCandidateCount: snapshot.ledgerCandidateCount,
+        confirmedLearningCount: snapshot.confirmedLearningCount,
         blockedDependencyCount: snapshot.blockedDependencyCount,
         reviewMode: options.reviewMode
       }
@@ -2563,8 +2592,9 @@ function buildDailyReviewPrompt(options: {
 }
 
 function startDailyReviewAgent(settings: SolopreneurSettings, projects: SolopreneurProject[], extensionUri?: vscode.Uri): DailyReviewArtifact {
-  const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true });
+  const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true, globalDataPath: settings.globalDataPath });
   const globalStore = ensureGlobalEngineeringStore(settings.globalDataPath, portfolio);
+  const learningSummary = readLearningSummary(projects[0]?.path || process.cwd(), settings.globalDataPath);
   const dateKey = getLocalDateKey();
   const rhythm = getDailyWorkRhythm();
   const reviewMode = getDailyReviewMode(rhythm, portfolio, globalStore);
@@ -2590,6 +2620,9 @@ function startDailyReviewAgent(settings: SolopreneurSettings, projects: Solopren
     inputSnapshot: {
       projectCount: projects.length,
       learningCandidateCount: globalStore.learningCandidateCount || 0,
+      ledgerEventCount: learningSummary.eventCount || 0,
+      ledgerCandidateCount: learningSummary.candidateCount || 0,
+      confirmedLearningCount: (learningSummary.approvedCount || 0) + (learningSummary.promotedCount || 0),
       blockedDependencyCount: (globalStore.dependencies || []).length,
       reviewMode
     },
@@ -2599,7 +2632,7 @@ function startDailyReviewAgent(settings: SolopreneurSettings, projects: Solopren
   };
   fs.writeFileSync(resultPath, JSON.stringify(artifact, null, 2), 'utf8');
 
-  const prompt = buildDailyReviewPrompt({ resultPath, dateKey, rhythm, reviewMode, portfolio, globalStore });
+  const prompt = buildDailyReviewPrompt({ resultPath, dateKey, rhythm, reviewMode, portfolio, globalStore, learningSummary });
   fs.writeFileSync(promptPath, prompt, 'utf8');
 
   const requestedAgentCli = (settings.cliPath || 'agy').trim();
@@ -3194,6 +3227,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           globalStore
         }
       });
+      this.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
     } catch (error) {
       console.error('SoloMap sidebar failed to send local projects:', error);
     }
@@ -3206,7 +3240,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!this._view || requestId !== this._portfolioLoadRequest) {
           return;
         }
-        const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true });
+        const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true, globalDataPath: this._getSettings().globalDataPath });
         let globalStore: GlobalEngineeringSnapshot;
         try {
           globalStore = ensureGlobalEngineeringStore(this._getSettings().globalDataPath, portfolio);

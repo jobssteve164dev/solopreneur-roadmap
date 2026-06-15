@@ -151,6 +151,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './flowStore') {
           return require(path.join(projectRoot, 'out/flowStore.js'));
         }
+        if (id === './learningLedger') {
+          return require(path.join(projectRoot, 'out/learningLedger.js'));
+        }
         return {};
       }
       return require(id);
@@ -1500,13 +1503,82 @@ test('daily review prompt switches modes by engineering rhythm and signals', () 
     rhythm: 'monday',
     reviewMode: 'weekly_planning',
     portfolio: [baseProject],
-    globalStore
+    globalStore,
+    learningSummary: {
+      eventCount: 2,
+      candidateCount: 1,
+      approvedCount: 1,
+      promotedCount: 0,
+      projectSignals: [{
+        projectName: 'ME',
+        projectPath: '/workspace/ME',
+        candidateCount: 1,
+        promotedCount: 0,
+        riskSignals: 1,
+        verificationSignals: 1,
+        strategySignals: 0,
+        eventCount: 2,
+        latestAt: '2026-06-01T00:00:00.000Z'
+      }],
+      recentEvents: [],
+      recentCandidates: [],
+      globalRoot: '/workspace/.solomap-global'
+    }
   });
   assert.match(prompt, /审视模式是：周一重点校准/);
   assert.match(prompt, /先检查 P0；确认本周 P1；保留 P2 备选；扫描外部变化和跨项目模式/);
+  assert.match(prompt, /ledgerEventCount/);
+  assert.match(prompt, /projectLearningSignals/);
+  assert.match(prompt, /学习账本只作为行动证据/);
   assert.match(prompt, /reviewMode/);
   assert.match(prompt, /confirm_learning/);
   assert.doesNotMatch(prompt, /portfolio\.csv|dependencies\.csv/);
+});
+
+test('learning ledger writes events, extracts candidates, and retrieves reusable context', () => {
+  const ledger = require(path.join(projectRoot, 'out', 'learningLedger.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-learning-ledger-'));
+  const projectPath = path.join(root, 'app');
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(projectPath, { recursive: true });
+
+  const event = ledger.appendLearningEvent(projectPath, globalRoot, {
+    sourceType: 'flow_loop',
+    sourceRef: 'flow-1:loop-1:verifier:1',
+    eventType: 'deviated',
+    summary: 'Verifier found implemented_unverified because final UI was not rendered.',
+    evidenceRefs: [{ type: 'trace', ref: 'implemented_unverified', summary: 'H/I/J scoring reason' }],
+    tags: ['flow', 'verifier'],
+    metadata: {
+      role: 'verifier',
+      recommendedStatus: 'implemented_unverified',
+      failures: ['final UI was not rendered'],
+      verification: []
+    }
+  });
+
+  const eventsPath = path.join(globalRoot, 'learning', 'ledger', 'events.jsonl');
+  const candidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  assert.ok(fs.existsSync(eventsPath));
+  assert.match(fs.readFileSync(eventsPath, 'utf8'), new RegExp(event.id));
+  const candidateFiles = fs.readdirSync(candidatesDir).filter((name) => name.endsWith('.json'));
+  assert.ok(candidateFiles.length >= 1);
+
+  const summary = ledger.readLearningSummary(projectPath, globalRoot);
+  assert.equal(summary.eventCount, 1);
+  assert.equal(summary.candidateCount >= 1, true);
+  assert.equal(summary.projectSignals[0].riskSignals >= 1, true);
+
+  const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
+    projectPath,
+    runKind: 'flow',
+    role: 'planner',
+    contextText: 'implemented_unverified final UI rendered verifier',
+    files: [],
+    limit: 3
+  });
+  assert.match(retrieval, /统一学习账本召回/);
+  assert.match(retrieval, /Flow 验证暴露未闭环风险/);
 });
 
 test('adding a project asks for a global methodology project type', () => {
@@ -1539,7 +1611,7 @@ test('local project actions use local refresh instead of external portfolio refr
   });
 });
 
-test('sidebar local project refresh does not schedule external data loads', () => {
+test('sidebar local project refresh keeps reusable signal enrichment without external data loads', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     ''
@@ -1558,6 +1630,7 @@ test('sidebar local project refresh does not schedule external data loads', () =
     async () => {},
     async () => {}
   );
+  let portfolioEnrichments = 0;
   let externalLoads = 0;
   provider._view = {
     webview: {
@@ -1567,12 +1640,13 @@ test('sidebar local project refresh does not schedule external data loads', () =
       }
     }
   };
-  provider.schedulePortfolioEnrichment = () => { externalLoads += 1; };
+  provider.schedulePortfolioEnrichment = () => { portfolioEnrichments += 1; };
   provider.scheduleIssueSummaryLoads = () => { externalLoads += 1; };
   provider.scheduleDeliverySummaryLoads = () => { externalLoads += 1; };
 
   provider.sendLocalProjects();
 
+  assert.equal(portfolioEnrichments, 1);
   assert.equal(externalLoads, 0);
   assert.equal(provider._portfolioLoadRequest, 1);
   assert.equal(provider._issueLoadRequest, 1);
@@ -1818,6 +1892,21 @@ test('strategy pyramid snapshot aggregates portfolio signals and writes a reusab
       { name: 'Content Engine', path: contentProject, type: 'content' }
     ]
   }, null, 2), 'utf8');
+  const ledger = require(path.join(projectRoot, 'out', 'learningLedger.js'));
+  ledger.appendLearningEvent(coreProject, globalRoot, {
+    sourceType: 'flow_loop',
+    sourceRef: 'flow-1:loop-1:verifier:1',
+    eventType: 'verified',
+    summary: 'Verifier closed the checkout flow after running the final UI test.',
+    evidenceRefs: [{ type: 'command', ref: 'node --test checkout-flow.test.js', summary: 'Verification signal' }],
+    tags: ['flow', 'verifier'],
+    metadata: {
+      role: 'verifier',
+      recommendedStatus: 'closed',
+      verification: ['node --test checkout-flow.test.js'],
+      failures: []
+    }
+  });
 
   const context = {
     globalState: {
@@ -1843,9 +1932,12 @@ test('strategy pyramid snapshot aggregates portfolio signals and writes a reusab
   assert.match(snapshot.mainJudgment, /组合|项目|Build|收入|反馈|核心/);
   assert.match(snapshot.strategicAction, /商业化|核心产品|销售|反馈|收入/);
   assert.equal(snapshot.layers.length, 5);
-  assert.equal(snapshot.structureSignals.length, 4);
+  assert.equal(snapshot.structureSignals.length, 5);
+  assert.ok(snapshot.structureSignals.some((signal) => signal.key === 'learning'));
   assert.ok(snapshot.riskSignals.length >= 1);
   assert.ok(snapshot.opportunitySignals.length >= 1);
+  assert.ok(snapshot.opportunitySignals.some((signal) => /学习复利机会/.test(signal.title)));
+  assert.ok(snapshot.learningSignals.some((signal) => signal.projectName === 'app' || signal.projectPath === coreProject));
   assert.equal(snapshot.scenarios.length, 3);
   assert.match(snapshot.recommendedScenarioPath, /推荐路径/);
   assert.ok(snapshot.loops.some((loop) => loop.key === 'sell' && loop.count >= 1));

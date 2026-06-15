@@ -12,6 +12,7 @@ import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring
 import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { getAgentImpactStatus, buildAgentImpactSummary } from './agentImpact';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
+import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
@@ -218,6 +219,18 @@ interface StrategyPyramidRiskSignal {
   evidence: string[];
 }
 
+interface StrategyPyramidLearningSignal {
+  projectName: string;
+  projectPath: string;
+  eventCount: number;
+  candidateCount: number;
+  promotedCount: number;
+  latestAt: string;
+  riskSignals: number;
+  verificationSignals: number;
+  strategySignals: number;
+}
+
 interface StrategyPyramidScenario {
   key: string;
   title: string;
@@ -250,6 +263,7 @@ interface StrategyPyramidSnapshot {
   structureSignals: StrategyPyramidStructureSignal[];
   riskSignals: StrategyPyramidRiskSignal[];
   opportunitySignals: StrategyPyramidRiskSignal[];
+  learningSignals: StrategyPyramidLearningSignal[];
   scenarios: StrategyPyramidScenario[];
   recommendedScenarioPath: string;
   projects: StrategyPyramidProjectSummary[];
@@ -3912,6 +3926,54 @@ function buildOpportunitySignals(projects: StrategyPyramidProjectSummary[], abil
   return signals.slice(0, 3);
 }
 
+function buildLearningStructureSignal(learningSignals: StrategyPyramidLearningSignal[]): StrategyPyramidStructureSignal {
+  const riskCount = learningSignals.reduce((sum, item) => sum + Number(item.riskSignals || 0), 0);
+  const verificationCount = learningSignals.reduce((sum, item) => sum + Number(item.verificationSignals || 0), 0);
+  const promotedCount = learningSignals.reduce((sum, item) => sum + Number(item.promotedCount || 0), 0);
+  const candidateCount = learningSignals.reduce((sum, item) => sum + Number(item.candidateCount || 0), 0);
+  return {
+    key: 'learning',
+    title: '学习闭环',
+    health: riskCount > promotedCount + verificationCount ? 'risk' : verificationCount + promotedCount > 0 ? 'strong' : candidateCount > 0 ? 'watch' : 'risk',
+    summary: riskCount > promotedCount + verificationCount
+      ? '学习线索里未收口风险偏多，加码前应先确认哪些会影响本周动作。'
+      : verificationCount + promotedCount > 0
+        ? '已有验证或已确认经验进入组合判断，可以支撑下一轮加码/收缩。'
+        : candidateCount > 0
+          ? '学习线索已出现，但还缺少已验证或已确认的复用结论。'
+          : '尚未读取到可进入战略判断的学习线索。',
+    evidence: learningSignals.length
+      ? learningSignals.slice(0, 4).map((item) => `${item.projectName}: ${item.candidateCount} 候选 / ${item.riskSignals} 风险 / ${item.verificationSignals} 验证`)
+      : ['统一学习主线尚无项目级信号']
+  };
+}
+
+function buildLearningRiskSignals(learningSignals: StrategyPyramidLearningSignal[]): StrategyPyramidRiskSignal[] {
+  const riskProjects = learningSignals.filter((item) => Number(item.riskSignals || 0) > Number(item.verificationSignals || 0) + Number(item.promotedCount || 0));
+  if (!riskProjects.length) {
+    return [];
+  }
+  return [{
+    severity: 'medium',
+    title: '学习未收口风险',
+    summary: '部分项目的失败、偏航或待确认经验还没有被验证经验抵消，加码前应先收口。',
+    evidence: riskProjects.slice(0, 4).map((item) => `${item.projectName}: ${item.riskSignals} 个风险信号，${item.verificationSignals} 个验证信号`)
+  }];
+}
+
+function buildLearningOpportunitySignals(learningSignals: StrategyPyramidLearningSignal[]): StrategyPyramidRiskSignal[] {
+  const verifiedProjects = learningSignals.filter((item) => Number(item.verificationSignals || 0) + Number(item.promotedCount || 0) > 0);
+  if (!verifiedProjects.length) {
+    return [];
+  }
+  return [{
+    severity: 'healthy',
+    title: '学习复利机会',
+    summary: '已有验证过的执行经验可以反哺路线图、项目优先级和下一轮执行计划。',
+    evidence: verifiedProjects.slice(0, 4).map((item) => `${item.projectName}: ${item.verificationSignals} 个验证信号，${item.promotedCount} 个已确认经验`)
+  }];
+}
+
 function buildStrategyScenarios(projects: StrategyPyramidProjectSummary[], abilities: StrategyPyramidAbilitySummary[]): StrategyPyramidScenario[] {
   const core = projects.find((project) => project.role === '核心产品') || projects[0];
   const reusable = abilities.find((ability) => ability.projectCount >= 2);
@@ -4125,6 +4187,7 @@ function writeStrategyPyramidSnapshot(context: vscode.ExtensionContext, snapshot
 
 function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): StrategyPyramidSnapshot {
   const savedStrategies = readProjectStrategyCsv(context);
+  const settings = getPersistedSettings(context);
 
   const projects = getProjects(context)
     .filter((project) => project && project.path)
@@ -4213,16 +4276,40 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
   const sellCount = countLoop('sell');
   const learnCount = countLoop('learn');
   const improveCount = countLoop('improve');
+  const learningSummary = readLearningSummary(projects[0]?.path || process.cwd(), settings.globalDataPath);
+  const learningSignals: StrategyPyramidLearningSignal[] = learningSummary.projectSignals.slice(0, 8).map((item) => ({
+    projectName: item.projectName,
+    projectPath: item.projectPath,
+    eventCount: item.eventCount,
+    candidateCount: item.candidateCount,
+    promotedCount: item.promotedCount,
+    latestAt: item.latestAt,
+    riskSignals: item.riskSignals,
+    verificationSignals: item.verificationSignals,
+    strategySignals: item.strategySignals
+  }));
   const risks: string[] = [];
   if (projects.length > 0 && sellCount === 0) risks.push('组合缺少 Sell 信号，容易只 Build 不卖。');
   if (projects.length > 0 && learnCount === 0) risks.push('组合缺少 Learn 信号，下一轮改进依据不足。');
   if (projects.some((project) => project.failedNodes > 0)) risks.push('存在失败环节，应先收口再继续加码。');
   if (projects.length > 1 && !projects.some((project) => project.type === 'core_product' || project.role === '核心产品')) risks.push('组合缺少明确核心产品。');
   if (projects.filter((project) => project.totalNodes === 0).length > 0) risks.push('部分项目缺少路线图信号，容易形成低复利库存。');
+  if (learningSignals.some((item) => item.riskSignals > item.verificationSignals + item.promotedCount)) risks.push('学习线索存在未收口风险，加码前应确认是否影响本周动作。');
   const loops = buildLoopSummaries(projects, allNodes);
   const abilities = buildAbilitySummaries(projects);
   const stageTitle = inferStrategyStage(projects, buildCount, sellCount, learnCount);
-  const riskSignals = buildRiskSignals(projects, sellCount, learnCount, buildCount);
+  const riskSignals = [
+    ...buildRiskSignals(projects, sellCount, learnCount, buildCount),
+    ...buildLearningRiskSignals(learningSignals)
+  ].slice(0, 5);
+  const structureSignals = [
+    ...buildStructureSignals(projects, loops, abilities),
+    buildLearningStructureSignal(learningSignals)
+  ];
+  const opportunitySignals = [
+    ...buildOpportunitySignals(projects, abilities),
+    ...buildLearningOpportunitySignals(learningSignals)
+  ].slice(0, 4);
   const snapshot: StrategyPyramidSnapshot = {
     generatedAt: new Date().toISOString(),
     confidence: allNodes.length >= 4 ? 'medium' : 'low',
@@ -4241,9 +4328,10 @@ function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext): Strateg
     layers: buildStrategyLayers(projects, buildCount, sellCount, learnCount, improveCount, abilities),
     moves: buildStrategyMoves(projects, sellCount, learnCount, abilities),
     abilities,
-    structureSignals: buildStructureSignals(projects, loops, abilities),
+    structureSignals,
     riskSignals,
-    opportunitySignals: buildOpportunitySignals(projects, abilities),
+    opportunitySignals,
+    learningSignals,
     scenarios: buildStrategyScenarios(projects, abilities),
     recommendedScenarioPath: inferRecommendedScenarioPath(projects, sellCount, learnCount),
     projects
@@ -8210,6 +8298,7 @@ function buildSolomapLearningContext(workspaceRoot: string, globalDataPath = '')
   const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
   const metricsDir = path.join(globalRoot, 'metrics');
   const candidateCount = countMarkdownFiles(learningCandidatesDir);
+  const ledgerSummary = readLearningSummary(workspaceRoot, globalDataPath);
   const readTail = (fileName: string) => {
     const filePath = path.join(metricsDir, fileName);
     try {
@@ -8222,7 +8311,10 @@ function buildSolomapLearningContext(workspaceRoot: string, globalDataPath = '')
   const reuseTail = readTail('reuse-rate.csv');
   return [
     'SoloMap 跨项目学习信号：',
-    `- 待审核学习候选：${candidateCount}`,
+    `- 待审核学习候选：${Math.max(candidateCount, ledgerSummary.candidateCount)}`,
+    `- 统一学习账本事件：${ledgerSummary.eventCount}`,
+    `- 已确认/已晋升经验：${ledgerSummary.approvedCount + ledgerSummary.promotedCount}`,
+    ledgerSummary.projectSignals.length ? `- 最近项目学习信号：${ledgerSummary.projectSignals.slice(0, 4).map((item) => `${item.projectName}: ${item.candidateCount}候选/${item.riskSignals}风险/${item.verificationSignals}验证`).join('；')}` : '',
     executionTail ? `- 最近执行速度记录：\n${executionTail}` : '',
     reuseTail ? `- 最近复用记录：\n${reuseTail}` : '',
     '- 如果当前环节属于 Improve / 复盘 / 调整路线图，应优先参考这些信号来提出下一轮路线图调整。'
@@ -9776,6 +9868,12 @@ function buildAgentConversationPrompt(
   );
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
+  const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
+    projectPath: workspaceRoot,
+    runKind: 'step',
+    contextText: [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n'),
+    files: attachedFiles
+  });
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
     nodeId: node.id || '',
     runKind: 'step',
@@ -9817,6 +9915,7 @@ function buildAgentConversationPrompt(
     '',
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
+    ...(solomapLearningRetrievalContext ? ['', solomapLearningRetrievalContext] : []),
     ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     '',
     crossAgentHandoffInstructions,
@@ -9869,6 +9968,12 @@ function buildRoadmapRevisionPrompt(
   const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage, enabledEnhancements);
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
+  const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
+    projectPath: workspaceRoot,
+    runKind: 'roadmap_revision',
+    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    files: attachedFiles
+  });
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
     nodeId: roadmapRevisionId,
     runKind: 'roadmap_revision',
@@ -9890,6 +9995,7 @@ function buildRoadmapRevisionPrompt(
     '',
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
+    ...(solomapLearningRetrievalContext ? ['', solomapLearningRetrievalContext] : []),
     ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     '',
     crossAgentHandoffInstructions,
@@ -9942,6 +10048,12 @@ function buildSoloConversationPrompt(
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage, enabledEnhancements);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
+  const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
+    projectPath: workspaceRoot,
+    runKind: 'solo',
+    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    files: attachedFiles
+  });
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
     nodeId: soloConversationId,
     runKind: 'solo',
@@ -9963,6 +10075,7 @@ function buildSoloConversationPrompt(
     '',
     solomapDocumentationInstructions,
     ...(solomapLearningContext ? ['', solomapLearningContext] : []),
+    ...(solomapLearningRetrievalContext ? ['', solomapLearningRetrievalContext] : []),
     ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     '',
     crossAgentHandoffInstructions,
@@ -10052,8 +10165,16 @@ function buildFlowPlannerPrompt(input: {
   loopId: string;
   relatedRoadmapStepTitle?: string;
   globalPrompt?: string;
+  globalDataPath?: string;
   supplementFiles?: string[];
 }): string {
+  const learningContext = buildLearningRetrievalContext(input.workspaceRoot, input.globalDataPath || '', {
+    projectPath: input.workspaceRoot,
+    runKind: 'flow',
+    role: 'planner',
+    contextText: [input.goal, input.relatedRoadmapStepTitle || '', (input.supplementFiles || []).join('\n')].join('\n'),
+    files: input.supplementFiles || []
+  });
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Planner。',
     '你的唯一任务是：把当前目标拆成一个可执行、可验证、可归因的微观循环计划。',
@@ -10065,6 +10186,7 @@ function buildFlowPlannerPrompt(input: {
     ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.relatedRoadmapStepTitle ? [`相关路线图环节：${input.relatedRoadmapStepTitle}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
+    ...(learningContext ? ['', learningContext] : []),
     '',
     '执行要求：',
     '1. 先阅读相关代码、文档和当前项目事实，不要空想方案。',
@@ -10085,8 +10207,16 @@ function buildFlowBuilderPrompt(input: {
   loopId: string;
   planner: Record<string, any>;
   globalPrompt?: string;
+  globalDataPath?: string;
   supplementFiles?: string[];
 }): string {
+  const learningContext = buildLearningRetrievalContext(input.workspaceRoot, input.globalDataPath || '', {
+    projectPath: input.workspaceRoot,
+    runKind: 'flow',
+    role: 'builder',
+    contextText: [input.goal, JSON.stringify(input.planner), (input.supplementFiles || []).join('\n')].join('\n'),
+    files: input.supplementFiles || []
+  });
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Builder。',
     '你的唯一任务是：按照 Planner 的微观循环计划直接落地实现并给出结构化实施结果。',
@@ -10097,6 +10227,7 @@ function buildFlowBuilderPrompt(input: {
     `用户目标：${input.goal}`,
     ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
+    ...(learningContext ? ['', learningContext] : []),
     '',
     'Planner 结构化计划：',
     JSON.stringify(input.planner, null, 2),
@@ -10125,8 +10256,22 @@ function buildFlowVerifierPrompt(input: {
     outputTail: string;
   };
   globalPrompt?: string;
+  globalDataPath?: string;
   supplementFiles?: string[];
 }): string {
+  const learningContext = buildLearningRetrievalContext(input.workspaceRoot, input.globalDataPath || '', {
+    projectPath: input.workspaceRoot,
+    runKind: 'flow',
+    role: 'verifier',
+    contextText: [
+      input.goal,
+      JSON.stringify(input.planner),
+      JSON.stringify(input.builder),
+      input.evidence.changedFilesSummary,
+      input.evidence.touchedFilesSummary
+    ].join('\n'),
+    files: (input.evidence.touchedFilesSummary || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  });
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Verifier。',
     '你的唯一任务是：基于 Planner 意图、Builder 结果和真实证据，判断这一轮微观循环是否闭环。',
@@ -10137,6 +10282,7 @@ function buildFlowVerifierPrompt(input: {
     `用户目标：${input.goal}`,
     ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
+    ...(learningContext ? ['', learningContext] : []),
     '',
     'Planner JSON：',
     JSON.stringify(input.planner, null, 2),
@@ -12067,6 +12213,7 @@ async function handleRunFlow(
       flowId: trace.flowId,
       loopId: 'loop-1',
       globalPrompt: getPersistedSettings(context).globalPrompt,
+      globalDataPath: getPersistedSettings(context).globalDataPath,
       supplementFiles
     }),
     selectedAgentCli,
@@ -12810,6 +12957,52 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
   if (!nextFlow) {
     return true;
   }
+  const latestLearningFlow = readFlowTrace(activeProjectRoot, flowId) || nextFlow;
+  const latestLearningLoop = latestLearningFlow.loops.find((candidate) => candidate.loopId === loopId);
+  const learningStatus = latestLearningLoop?.scoring?.recommendedStatus || latestLearningLoop?.status || roleExecution.status;
+  const flowEventType = roleExecution.status === 'failed'
+    ? 'failed'
+    : role === 'verifier' && learningStatus === 'closed'
+      ? 'verified'
+      : ['deviated', 'partial', 'verified_failed', 'implemented_unverified', 'no_effect'].includes(String(learningStatus))
+        ? 'deviated'
+        : learningStatus === 'needs_user_confirmation'
+          ? 'needs_confirmation'
+          : 'completed';
+  try {
+    const flowGlobalDataPath = String(statusData.globalDataPath || (extensionContextRef ? getPersistedSettings(extensionContextRef).globalDataPath : '') || '');
+    appendLearningEvent(activeProjectRoot, flowGlobalDataPath, {
+      sourceType: 'flow_loop',
+      sourceRef: `${flowId}:${loopId}:${role}:${executionLogId || 0}`,
+      eventType: flowEventType,
+      summary: latestLearningLoop?.summary || `${role} finished with ${String(learningStatus)}`,
+      evidenceRefs: ([
+        { type: 'flow' as const, ref: toProjectRelativeRuntimePath(activeProjectRoot, path.join(activeProjectRoot, '.solopreneur', 'flows', `${flowId}.json`)), summary: 'Flow trace' },
+        statusData.outputFilePath ? { type: 'file' as const, ref: toProjectRelativeRuntimePath(activeProjectRoot, String(statusData.outputFilePath)), summary: 'Flow role output' } : null,
+        statusData.changesFilePath ? { type: 'file' as const, ref: toProjectRelativeRuntimePath(activeProjectRoot, String(statusData.changesFilePath)), summary: 'Workspace changes' } : null,
+        ...(latestLearningLoop?.scoring?.reasons || []).map((reason) => ({ type: 'trace' as const, ref: reason, summary: 'H/I/J scoring reason' }))
+      ].filter(Boolean) as LearningEvidenceRef[]),
+      tags: ['flow', role, flowId, loopId, String(learningStatus)],
+      metadata: {
+        flowId,
+        loopId,
+        role,
+        status: roleExecution.status,
+        recommendedStatus: learningStatus,
+        validationErrors,
+        scoring: latestLearningLoop?.scoring || null,
+        planner: latestLearningLoop?.planner?.data || null,
+        builder: latestLearningLoop?.builder?.data || null,
+        verifier: latestLearningLoop?.verifier?.data || null,
+        changedFiles: parseFileSummaryLines(changedFilesSummary),
+        touchedFiles: parseFileSummaryLines(touchedFilesSummary),
+        failures: validationErrors
+      },
+      sourcePayload: latestLearningLoop || undefined
+    });
+  } catch (error) {
+    console.warn('Failed to append Flow learning event:', error);
+  }
   if (extensionContextRef) {
     await postFlowStateToWebview(extensionContextRef);
   }
@@ -12827,6 +13020,7 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
         loopId,
         planner: structured || {},
         globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt,
+        globalDataPath: getPersistedSettings(extensionContextRef!).globalDataPath,
         supplementFiles: nextFlow.source.supplementFiles || []
       })
     });
@@ -12850,6 +13044,7 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
           outputTail
         },
         globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt,
+        globalDataPath: getPersistedSettings(extensionContextRef!).globalDataPath,
         supplementFiles: nextFlow.source.supplementFiles || []
       })
     });
@@ -12891,6 +13086,7 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
             flowId,
             loopId: `loop-${nextLoopIndex}`,
             globalPrompt: getPersistedSettings(extensionContextRef!).globalPrompt,
+            globalDataPath: getPersistedSettings(extensionContextRef!).globalDataPath,
             supplementFiles: latest.source.supplementFiles || []
           })
         });
@@ -13142,6 +13338,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       })
       : null;
     let runDigestSummary = '';
+    let runDigestPath = '';
     if (workspaceRoot) {
       try {
         const runDigest = buildRunDigest({
@@ -13163,9 +13360,60 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           failureCode,
           failureReason
         });
-        runDigestSummary = `Execution digest saved: ${toProjectRelativeRuntimePath(workspaceRoot, writeRunDigest(workspaceRoot, runDigest))}`;
+        runDigestPath = writeRunDigest(workspaceRoot, runDigest);
+        runDigestSummary = `Execution digest saved: ${toProjectRelativeRuntimePath(workspaceRoot, runDigestPath)}`;
       } catch (error) {
         runDigestSummary = `Execution digest not saved: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    if (workspaceRoot) {
+      const verificationSignals = extractVerificationSignals(outputTail, resolvedCommand, nextStatus);
+      const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus);
+      const sourceType = isReviewRun
+        ? 'review'
+        : isSoloConversation
+          ? 'solo'
+          : runKind === 'roadmap_revision'
+            ? 'roadmap_revision'
+            : 'step_run';
+      const eventType = nextStatus === 'Completed'
+        ? (verificationSignals.length > 0 ? 'verified' : 'completed')
+        : nextStatus === 'Failed'
+          ? 'failed'
+          : nextStatus === 'In Progress'
+            ? 'partial'
+            : 'blocked';
+      try {
+        appendLearningEvent(workspaceRoot, String(globalDataPath || ''), {
+          sourceType,
+          sourceRef: `${nodeId}:${executionLogId || 0}`,
+          eventType,
+          summary: completionReason || failureReason || `${sourceType} finished with ${nextStatus}`,
+          evidenceRefs: ([
+            runDigestPath ? { type: 'run_digest' as const, ref: toProjectRelativeRuntimePath(workspaceRoot, runDigestPath), summary: 'Execution digest' } : null,
+            outputFilePath ? { type: 'file' as const, ref: toProjectRelativeRuntimePath(workspaceRoot, String(outputFilePath)), summary: 'Agent output' } : null,
+            changesFilePath ? { type: 'file' as const, ref: toProjectRelativeRuntimePath(workspaceRoot, String(changesFilePath)), summary: 'Workspace changes' } : null,
+            ...verificationSignals.slice(0, 3).map((signal) => ({ type: 'command' as const, ref: signal, summary: 'Verification signal' }))
+          ].filter(Boolean) as LearningEvidenceRef[]),
+          tags: [
+            String(runKind || ''),
+            String(nodeId || ''),
+            currentNode?.stage || '',
+            currentNode?.title || '',
+            nextStatus
+          ],
+          metadata: {
+            nodeId,
+            runKind,
+            status: nextStatus,
+            verification: verificationSignals,
+            failures: failureSignals,
+            changedFiles: parseFileSummaryLines(changedFilesSummary),
+            touchedFiles: parseFileSummaryLines(touchedFilesSummary)
+          }
+        });
+      } catch (error) {
+        console.warn('Failed to append learning event:', error);
       }
     }
     let preGitHash = '';
