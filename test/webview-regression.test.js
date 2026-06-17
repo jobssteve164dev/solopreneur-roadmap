@@ -2538,6 +2538,9 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;',
       'module.exports.__buildSdkSentinelCommandLabel = buildSdkSentinelCommandLabel;',
       'module.exports.__supportsSdkContinuation = supportsSdkContinuation;',
+      'module.exports.__extractCodexSessionIdFromOutputText = extractCodexSessionIdFromOutputText;',
+      'module.exports.__resolveNativeSessionIdForConversation = resolveNativeSessionIdForConversation;',
+      'module.exports.__setActiveProjectRootForSessionTest = (projectRoot) => { activeProjectRoot = projectRoot; };',
       'module.exports.__findCodexTranscriptFile = findCodexTranscriptFile;',
       'module.exports.__extractFirstCodexUserMessageAfter = extractFirstCodexUserMessageAfter;',
       'module.exports.__buildInteractiveContinuationPrompt = buildInteractiveContinuationPrompt;',
@@ -2866,6 +2869,26 @@ test('agent command builder uses non-interactive task runs and native continuati
   });
   assert.equal(
     JSON.parse(fs.readFileSync(sessionFilePath, 'utf8')).sessionId,
+    '019ecd99-4325-7050-8e71-7def92359c9f'
+  );
+  assert.equal(
+    extensionModule.__extractCodexSessionIdFromOutputText('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11\nsession id: 019ecd99-4325-7050-8e71-7def92359c9f'),
+    '019ecd99-4325-7050-8e71-7def92359c9f'
+  );
+  const recoveryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-recover-'));
+  const recoveryRunDir = path.join(recoveryRoot, '.solopreneur', 'agent-runs', '__solo__', '20');
+  fs.mkdirSync(recoveryRunDir, { recursive: true });
+  fs.writeFileSync(path.join(recoveryRunDir, 'output.log'), [
+    'OpenAI Codex v0.140.0',
+    'session id: 019ecd99-4325-7050-8e71-7def92359c9f'
+  ].join('\n'), 'utf8');
+  extensionModule.__setActiveProjectRootForSessionTest(recoveryRoot);
+  assert.equal(
+    extensionModule.__resolveNativeSessionIdForConversation('__solo__', {
+      id: 20,
+      agentCli: 'codex',
+      output: 'Native Agent session saved: .solopreneur/step-sessions/__solo__.json (019dc472-6a80-7c70-99a4-b2593a641d11)'
+    }),
     '019ecd99-4325-7050-8e71-7def92359c9f'
   );
 

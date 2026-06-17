@@ -6872,6 +6872,21 @@ function findCodexTranscriptFile(codexHome: string, sessionId: string): string {
   return '';
 }
 
+function stripAnsiControlCodes(text: string): string {
+  return String(text || '').replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function extractCodexSessionIdFromOutputText(output: string): string {
+  const lines = stripAnsiControlCodes(output).split(/\r?\n/);
+  for (const line of lines) {
+    const match = line.match(/^\s*session id:\s*([0-9a-fA-F-]{36})\s*$/i);
+    if (match) {
+      return match[1];
+    }
+  }
+  return '';
+}
+
 function extractFirstCodexUserMessageAfter(codexHome: string, sessionId: string, startedAt: string): string {
   const transcriptFile = findCodexTranscriptFile(codexHome, sessionId);
   if (!transcriptFile) {
@@ -7087,6 +7102,46 @@ function buildSessionCaptureScript(
     `session_source="generic-output"`,
     sessionWriter
   ].filter(Boolean).join('; ');
+}
+
+function getConversationRunDir(workspaceRoot: string, nodeId: string, conversationId: number): string {
+  return path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(conversationId || ''));
+}
+
+function readRunTextFile(workspaceRoot: string, nodeId: string, conversationId: number, fileName: string): string {
+  const candidates = [
+    path.join(getConversationRunDir(workspaceRoot, nodeId, conversationId), fileName),
+    path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, fileName)
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) {
+        return fs.readFileSync(candidate, 'utf8');
+      }
+    } catch {
+      // Ignore stale or partially-written run files.
+    }
+  }
+  return '';
+}
+
+function resolveNativeSessionIdForConversation(nodeId: string, conversation: AgentConversation | null): string {
+  if (!conversation) {
+    return '';
+  }
+  const recordedSessionId = extractNativeSessionIdFromExecutionOutput(conversation.output || '');
+  if (getAgentProvider(conversation.agentCli || '') !== 'codex' || !activeProjectRoot) {
+    return recordedSessionId;
+  }
+  const conversationId = Number(conversation.id || 0);
+  const recordedCodexHome = readRunTextFile(activeProjectRoot, nodeId, conversationId, 'codex-home.txt').trim();
+  const codexHome = recordedCodexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  if (recordedSessionId && findCodexTranscriptFile(codexHome, recordedSessionId)) {
+    return recordedSessionId;
+  }
+  const outputText = readRunTextFile(activeProjectRoot, nodeId, conversationId, 'output.log');
+  const recoveredSessionId = extractCodexSessionIdFromOutputText(outputText);
+  return recoveredSessionId || recordedSessionId;
 }
 
 function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: string): string {
@@ -11704,7 +11759,7 @@ async function handleContinueConversationTurn(
     await handleContinueNativeConversation(context, nodeId, rootConversationId);
     return;
   }
-  const sessionId = extractNativeSessionIdFromExecutionOutput(parentConversation.output || '');
+  const sessionId = resolveNativeSessionIdForConversation(nodeId, parentConversation);
   if (!sessionId) {
     vscode.window.showErrorMessage('No resumable Codex session ID was recorded for this conversation.');
     return;
@@ -11799,7 +11854,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   }
 
   const sessionConversation = resolveContinuationSessionConversation(nodeId, conversationId) || conversation;
-  const sessionId = extractNativeSessionIdFromExecutionOutput(sessionConversation.output || '');
+  const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
   if (!sessionId) {
     vscode.window.showInformationMessage('No native Agent session ID was recorded for this conversation.');
     return;
