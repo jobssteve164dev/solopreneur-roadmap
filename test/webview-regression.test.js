@@ -2611,6 +2611,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__getStoredAgentSession = getStoredAgentSession;',
       'module.exports.__updateStoredAgentSession = updateStoredAgentSession;',
       'module.exports.__clearStoredAgentSession = clearStoredAgentSession;',
+      'module.exports.__extractSavedNativeSessionIdFromExecutionOutput = extractSavedNativeSessionIdFromExecutionOutput;',
       'module.exports.__extractNativeSessionIdFromExecutionOutput = extractNativeSessionIdFromExecutionOutput;',
       'module.exports.__extractUserSupplementFromExecutionOutput = extractUserSupplementFromExecutionOutput;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
@@ -2743,6 +2744,10 @@ test('agent command builder uses non-interactive task runs and native continuati
     '019dc472-6a80-7c70-99a4-b2593a641d11'
   );
   assert.equal(
+    extensionModule.__extractSavedNativeSessionIdFromExecutionOutput('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11'),
+    ''
+  );
+  assert.equal(
     extensionModule.__extractContinuationParentConversationId('Continuation parent conversation: 42\nUser supplement:\ncontinue'),
     42
   );
@@ -2759,6 +2764,11 @@ test('agent command builder uses non-interactive task runs and native continuati
     { id: 22, output: 'Continuation parent conversation: 21\nUser supplement:\nsecond continue' }
   ], 20);
   assert.equal(sessionConversation && sessionConversation.id, 20);
+  const failedChildSessionConversation = extensionModule.__resolveContinuationSessionConversationFromList([
+    { id: 30, output: 'Native Agent session saved: /workspace/app/.solopreneur/session.json (019ecd99-4325-7050-8e71-7def92359c9f)' },
+    { id: 31, output: 'Continuation parent conversation: 30\nContinuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11\nFailure reason:\nNo saved session found.' }
+  ], 30);
+  assert.equal(failedChildSessionConversation && failedChildSessionConversation.id, 30);
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'never'),
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --add-dir='/workspace/app'"
@@ -2878,10 +2888,26 @@ test('agent command builder uses non-interactive task runs and native continuati
   const recoveryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-recover-'));
   const recoveryRunDir = path.join(recoveryRoot, '.solopreneur', 'agent-runs', '__solo__', '20');
   fs.mkdirSync(recoveryRunDir, { recursive: true });
+  const recoveredSessionId = '019ecd99-4325-7050-8e71-7def92359c9f';
+  const recoveredTranscriptDir = path.join(codexHome, 'sessions', '2026', '06', '17');
+  fs.mkdirSync(recoveredTranscriptDir, { recursive: true });
+  fs.writeFileSync(path.join(recoveredTranscriptDir, `rollout-2026-06-17T00-00-00-${recoveredSessionId}.jsonl`), [
+    JSON.stringify({ timestamp: '2026-06-17T00:00:00.000Z', type: 'session_meta', payload: { id: recoveredSessionId } }),
+    JSON.stringify({ timestamp: '2026-06-17T00:00:01.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'recover exact run' } })
+  ].join('\n') + '\n', 'utf8');
+  fs.writeFileSync(path.join(recoveryRunDir, 'codex-home.txt'), codexHome, 'utf8');
   fs.writeFileSync(path.join(recoveryRunDir, 'output.log'), [
     'OpenAI Codex v0.140.0',
-    'session id: 019ecd99-4325-7050-8e71-7def92359c9f'
+    `session id: ${recoveredSessionId}`
   ].join('\n'), 'utf8');
+  fs.writeFileSync(path.join(recoveryRunDir, 'session.json'), JSON.stringify({
+    sessionId: recoveredSessionId,
+    source: 'codex-output'
+  }), 'utf8');
+  fs.writeFileSync(path.join(recoveryRoot, '.solopreneur', 'agent-runs', '__solo__', 'session.json'), JSON.stringify({
+    sessionId: '019dc472-6a80-7c70-99a4-b2593a641d11',
+    source: 'legacy-shared-node-run'
+  }), 'utf8');
   extensionModule.__setActiveProjectRootForSessionTest(recoveryRoot);
   assert.equal(
     extensionModule.__resolveNativeSessionIdForConversation('__solo__', {
@@ -2889,7 +2915,25 @@ test('agent command builder uses non-interactive task runs and native continuati
       agentCli: 'codex',
       output: 'Native Agent session saved: .solopreneur/step-sessions/__solo__.json (019dc472-6a80-7c70-99a4-b2593a641d11)'
     }),
-    '019ecd99-4325-7050-8e71-7def92359c9f'
+    recoveredSessionId
+  );
+  const missingTranscriptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-missing-transcript-'));
+  const missingRunDir = path.join(missingTranscriptRoot, '.solopreneur', 'agent-runs', '__solo__', '21');
+  const emptyCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-empty-codex-home-'));
+  fs.mkdirSync(missingRunDir, { recursive: true });
+  fs.writeFileSync(path.join(missingRunDir, 'codex-home.txt'), emptyCodexHome, 'utf8');
+  fs.writeFileSync(path.join(missingRunDir, 'session.json'), JSON.stringify({
+    sessionId: '019dc472-6a80-7c70-99a4-b2593a641d11',
+    source: 'old-missing-transcript'
+  }), 'utf8');
+  extensionModule.__setActiveProjectRootForSessionTest(missingTranscriptRoot);
+  assert.equal(
+    extensionModule.__resolveNativeSessionIdForConversation('__solo__', {
+      id: 21,
+      agentCli: 'codex',
+      output: 'Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11'
+    }),
+    ''
   );
 
   const sidebarModule = loadCompiledModule(

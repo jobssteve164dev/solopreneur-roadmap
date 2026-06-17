@@ -7108,11 +7108,11 @@ function getConversationRunDir(workspaceRoot: string, nodeId: string, conversati
   return path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(conversationId || ''));
 }
 
-function readRunTextFile(workspaceRoot: string, nodeId: string, conversationId: number, fileName: string): string {
-  const candidates = [
-    path.join(getConversationRunDir(workspaceRoot, nodeId, conversationId), fileName),
-    path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, fileName)
-  ];
+function readRunTextFile(workspaceRoot: string, nodeId: string, conversationId: number, fileName: string, includeLegacyNodeRun = false): string {
+  const candidates = [path.join(getConversationRunDir(workspaceRoot, nodeId, conversationId), fileName)];
+  if (includeLegacyNodeRun) {
+    candidates.push(path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, fileName));
+  }
   for (const candidate of candidates) {
     try {
       if (fs.existsSync(candidate)) {
@@ -7125,23 +7125,44 @@ function readRunTextFile(workspaceRoot: string, nodeId: string, conversationId: 
   return '';
 }
 
+function readRunSessionId(workspaceRoot: string, nodeId: string, conversationId: number): string {
+  const sessionText = readRunTextFile(workspaceRoot, nodeId, conversationId, 'session.json');
+  if (!sessionText) {
+    return '';
+  }
+  try {
+    const parsed = JSON.parse(sessionText);
+    return String(parsed?.sessionId || '').trim();
+  } catch {
+    return '';
+  }
+}
+
 function resolveNativeSessionIdForConversation(nodeId: string, conversation: AgentConversation | null): string {
   if (!conversation) {
     return '';
   }
-  const recordedSessionId = extractNativeSessionIdFromExecutionOutput(conversation.output || '');
+  const savedSessionId = extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '');
+  const continuationSessionId = extractContinuationSessionIdFromExecutionOutput(conversation.output || '');
   if (getAgentProvider(conversation.agentCli || '') !== 'codex' || !activeProjectRoot) {
-    return recordedSessionId;
+    return savedSessionId || continuationSessionId;
   }
   const conversationId = Number(conversation.id || 0);
   const recordedCodexHome = readRunTextFile(activeProjectRoot, nodeId, conversationId, 'codex-home.txt').trim();
   const codexHome = recordedCodexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  if (recordedSessionId && findCodexTranscriptFile(codexHome, recordedSessionId)) {
-    return recordedSessionId;
-  }
+  const runSessionId = readRunSessionId(activeProjectRoot, nodeId, conversationId);
   const outputText = readRunTextFile(activeProjectRoot, nodeId, conversationId, 'output.log');
-  const recoveredSessionId = extractCodexSessionIdFromOutputText(outputText);
-  return recoveredSessionId || recordedSessionId;
+  const outputSessionId = extractCodexSessionIdFromOutputText(outputText);
+  const candidates = [runSessionId, outputSessionId, savedSessionId, continuationSessionId]
+    .map((sessionId) => String(sessionId || '').trim())
+    .filter(Boolean)
+    .filter((sessionId, index, all) => all.indexOf(sessionId) === index);
+  for (const sessionId of candidates) {
+    if (findCodexTranscriptFile(codexHome, sessionId)) {
+      return sessionId;
+    }
+  }
+  return '';
 }
 
 function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: string): string {
@@ -11600,11 +11621,20 @@ async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContex
   }, 2000);
 }
 
-function extractNativeSessionIdFromExecutionOutput(output: string): string {
+function extractSavedNativeSessionIdFromExecutionOutput(output: string): string {
   const text = String(output || '');
-  const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/)
-    || text.match(/Continuation session id:\s*([0-9a-fA-F-]{36})/);
+  const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/);
   return match ? match[1] : '';
+}
+
+function extractContinuationSessionIdFromExecutionOutput(output: string): string {
+  const match = String(output || '').match(/Continuation session id:\s*([0-9a-fA-F-]{36})/);
+  return match ? match[1] : '';
+}
+
+function extractNativeSessionIdFromExecutionOutput(output: string): string {
+  return extractSavedNativeSessionIdFromExecutionOutput(output)
+    || extractContinuationSessionIdFromExecutionOutput(output);
 }
 
 function extractContinuationParentConversationId(output: string): number {
@@ -11677,7 +11707,9 @@ function resolveContinuationSessionConversationFromList(
   };
   pushLineage(leaf);
   pushLineage(start || null);
-  return candidates.find((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || '')) || null;
+  return candidates.find((conversation) => extractSavedNativeSessionIdFromExecutionOutput(conversation.output || ''))
+    || candidates.find((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || ''))
+    || null;
 }
 
 function resolveContinuationSessionConversation(nodeId: string, conversationId: number): AgentConversation | null {
@@ -11694,10 +11726,10 @@ function resolveContinuationRootConversationFromList(conversations: AgentConvers
   if (!start) {
     return null;
   }
-  const sessionId = extractNativeSessionIdFromExecutionOutput(start.output || '');
+  const sessionId = extractSavedNativeSessionIdFromExecutionOutput(start.output || '');
   if (sessionId) {
     return conversations
-      .filter((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || '') === sessionId)
+      .filter((conversation) => extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '') === sessionId)
       .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))[0] || start;
   }
   let current = start;
@@ -11759,7 +11791,8 @@ async function handleContinueConversationTurn(
     await handleContinueNativeConversation(context, nodeId, rootConversationId);
     return;
   }
-  const sessionId = resolveNativeSessionIdForConversation(nodeId, parentConversation);
+  const sessionConversation = resolveContinuationSessionConversation(nodeId, parentConversationId) || parentConversation;
+  const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
   if (!sessionId) {
     vscode.window.showErrorMessage('No resumable Codex session ID was recorded for this conversation.');
     return;
