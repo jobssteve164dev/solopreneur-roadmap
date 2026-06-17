@@ -1136,6 +1136,38 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /projectPath/);
 });
 
+test('full roadmap conversation history keeps failed continuations under the main conversation', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
+
+  const rendered = context.__renderConversationsForTest('__solo__', [
+    {
+      id: 12,
+      status: 'Recorded',
+      agentCli: 'codex',
+      command: 'codex resume',
+      output: 'Continuation parent conversation: 20\nContinuation session id: 019ecd99-4325-7050-8e71-7def92359c9f\nERROR: No saved session found'
+    },
+    {
+      id: 20,
+      status: 'Completed',
+      agentCli: 'codex',
+      command: 'codex exec',
+      output: 'User supplement:\n主对话\n\nNative Agent session saved: .solopreneur/step-sessions/__solo__.json (019ecd99-4325-7050-8e71-7def92359c9f)'
+    }
+  ], 'empty');
+
+  assert.match(rendered, /data-conversation-id="__solo__:20"/);
+  assert.doesNotMatch(rendered, /data-conversation-id="__solo__:12"/);
+  assert.match(rendered, /续聊 1|Continuation/);
+});
+
 test('sidebar conversation result cards expose rollback actions for pre-session git hashes', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarProvider.js'), 'utf8');
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8');
@@ -2503,6 +2535,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentCommandForPromptFile = buildAgentCommandForPromptFile;',
       'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
       'module.exports.__buildNativeContinueCommand = buildNativeContinueCommand;',
+      'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;',
       'module.exports.__buildSdkSentinelCommandLabel = buildSdkSentinelCommandLabel;',
       'module.exports.__supportsSdkContinuation = supportsSdkContinuation;',
       'module.exports.__findCodexTranscriptFile = findCodexTranscriptFile;',
@@ -2667,7 +2700,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('codex', '019dc472-6a80-7c70-99a4-b2593a641d11', '/workspace/app'),
-    "'codex' resume --include-non-interactive -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
+    "'codex' resume --include-non-interactive --all -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('cursor-agent', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
@@ -2816,6 +2849,25 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(runnerSource, /method: 'thread\/resume'/);
   assert.match(runnerSource, /method: 'turn\/start'/);
   assert.match(runnerSource, /sessionFilePath/);
+
+  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-capture-'));
+  const outputFilePath = path.join(captureDir, 'output.log');
+  const startedAtFilePath = path.join(captureDir, 'started_at');
+  const sessionFilePath = path.join(captureDir, 'session.json');
+  fs.writeFileSync(startedAtFilePath, '', 'utf8');
+  fs.writeFileSync(outputFilePath, [
+    '用户本次要求：继续旧对话',
+    'Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11',
+    '\u001b[1msession id:\u001b[0m 019ecd99-4325-7050-8e71-7def92359c9f'
+  ].join('\n'), 'utf8');
+  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript('codex', '/workspace/app', startedAtFilePath, outputFilePath, sessionFilePath)], {
+    cwd: captureDir,
+    env: { ...process.env, HOME: captureDir }
+  });
+  assert.equal(
+    JSON.parse(fs.readFileSync(sessionFilePath, 'utf8')).sessionId,
+    '019ecd99-4325-7050-8e71-7def92359c9f'
+  );
 
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',

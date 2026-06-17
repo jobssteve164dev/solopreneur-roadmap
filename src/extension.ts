@@ -6800,7 +6800,7 @@ function buildNativeContinueCommand(agentCli: string, sessionId: string, workspa
   const quotedSessionId = shellQuote(sessionId);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} resume --include-non-interactive -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
+    return `${quotedCli} resume --include-non-interactive --all -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} resume ${quotedSessionId})`;
@@ -7052,10 +7052,22 @@ function buildSessionCaptureScript(
   }
 
   if (provider === 'codex') {
+    const codexOutputSessionExtractor = [
+      'const fs=require("fs");',
+      'const file=process.argv[1];',
+      'try {',
+      'const text=fs.readFileSync(file,"utf8").replace(/\\x1b\\[[0-9;]*m/g,"");',
+      'const lines=text.split(/\\r?\\n/);',
+      'for (const line of lines) {',
+      'const match=line.match(/^\\s*session id:\\s*([0-9a-fA-F-]{36})\\s*$/i);',
+      'if (match) { process.stdout.write(match[1]); process.exit(0); }',
+      '}',
+      '} catch {}'
+    ].join('');
     return [
       `session_id=""`,
       `session_source=""`,
-      `session_id=$(grep -Eo '"id"[[:space:]]*:[[:space:]]*"[0-9a-fA-F-]{36}"|session[_ -]?id[^0-9a-fA-F]*[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | grep -Eo '[0-9a-fA-F-]{36}' | tail -1 || true)`,
+      `session_id=$(node -e ${shellQuote(codexOutputSessionExtractor)} ${shellQuote(outputFilePath)})`,
       `if [ -n "$session_id" ]; then session_source="codex-output"; fi`,
       `if [ -z "$session_id" ]; then latest_session=$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -newer ${shellQuote(startedAtFilePath)} -print 2>/dev/null | sort | tail -1 || true); if [ -n "$latest_session" ]; then session_id=$(node -e ${shellQuote([
         'const fs=require("fs");',
@@ -7066,8 +7078,6 @@ function buildSessionCaptureScript(
         'process.stdout.write((parsed.payload && parsed.payload.id) || "");',
         '} catch {}'
       ].join(''))} "$latest_session"); session_source="codex-session-file"; fi; fi`,
-      // Fallback: if codex-specific session extraction fails, capture the last UUID in output log.
-      `if [ -z "$session_id" ]; then session_id=$(grep -Eo '[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | tail -1 || true); session_source="generic-output"; fi`,
       sessionWriter
     ].join('; ');
   }
@@ -16284,7 +16294,8 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     }
 
     function extractNativeSessionId(output) {
-      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/);
+      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/)
+        || String(output || '').match(/Continuation session id:\\s*([0-9a-fA-F-]{36})/);
       return match ? match[1] : '';
     }
 
@@ -18422,13 +18433,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const sessionRoots = {};
       conversations.forEach((conversation) => {
         byId[String(conversation.id || '')] = conversation;
-        const sessionId = extractNativeSessionId(conversation.output);
-        if (sessionId) {
-          const currentRoot = sessionRoots[sessionId];
-          if (!currentRoot || Number(conversation.id || 0) < Number(currentRoot.id || 0)) {
-            sessionRoots[sessionId] = conversation;
-          }
-        }
       });
       function findRootByParent(conversation) {
         let current = conversation;
@@ -18446,17 +18450,36 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       }
       conversations.forEach((conversation) => {
         const sessionId = extractNativeSessionId(conversation.output);
-        const sessionRoot = sessionId ? sessionRoots[sessionId] : null;
-        if (sessionRoot && Number(sessionRoot.id || 0) !== Number(conversation.id || 0)) {
-          const key = String(sessionRoot.id || '');
-          conversationChildrenMap[key] = conversationChildrenMap[key] || [];
-          conversationChildrenMap[key].push(conversation);
-          return;
+        if (sessionId) {
+          const parentId = extractContinuationParentConversationId(conversation.output);
+          const candidateRoot = parentId && byId[String(parentId)]
+            ? findRootByParent(conversation)
+            : conversation;
+          const currentRoot = sessionRoots[sessionId];
+          const currentHasParent = currentRoot ? Boolean(extractContinuationParentConversationId(currentRoot.output)) : false;
+          const candidateHasParent = Boolean(extractContinuationParentConversationId(candidateRoot.output));
+          if (!currentRoot
+            || (currentHasParent && !candidateHasParent)
+            || (currentHasParent === candidateHasParent && Number(candidateRoot.id || 0) < Number(currentRoot.id || 0))) {
+            sessionRoots[sessionId] = candidateRoot;
+          }
         }
+      });
+      conversations.forEach((conversation) => {
         const parentId = extractContinuationParentConversationId(conversation.output);
         if (parentId && byId[String(parentId)]) {
           const root = findRootByParent(conversation);
           const key = String(root.id || parentId);
+          if (Number(root.id || 0) !== Number(conversation.id || 0)) {
+            conversationChildrenMap[key] = conversationChildrenMap[key] || [];
+            conversationChildrenMap[key].push(conversation);
+            return;
+          }
+        }
+        const sessionId = extractNativeSessionId(conversation.output);
+        const sessionRoot = sessionId ? sessionRoots[sessionId] : null;
+        if (sessionRoot && Number(sessionRoot.id || 0) !== Number(conversation.id || 0)) {
+          const key = String(sessionRoot.id || '');
           conversationChildrenMap[key] = conversationChildrenMap[key] || [];
           conversationChildrenMap[key].push(conversation);
           return;
