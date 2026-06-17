@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.234 - 2026-06-17
+
+### Fixed
+- include codex exec sessions when resuming (7e4489a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.233 - 2026-06-15
 
 ### Fixed
