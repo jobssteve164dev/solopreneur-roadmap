@@ -2667,7 +2667,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('codex', '019dc472-6a80-7c70-99a4-b2593a641d11', '/workspace/app'),
-    "'codex' resume -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
+    "'codex' resume --include-non-interactive -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('cursor-agent', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),

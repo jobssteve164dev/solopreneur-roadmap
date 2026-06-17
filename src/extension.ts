@@ -6800,7 +6800,7 @@ function buildNativeContinueCommand(agentCli: string, sessionId: string, workspa
   const quotedSessionId = shellQuote(sessionId);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} resume -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
+    return `${quotedCli} resume --include-non-interactive -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} resume ${quotedSessionId})`;
