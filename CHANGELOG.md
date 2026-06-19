@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.238 - 2026-06-19
+
+### Fixed
+- unify codex continuation across entries (17984cf)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.237 - 2026-06-17
 
 ### Fixed
