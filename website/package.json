@@ -8,6 +8,6 @@
     "check": "set -a; . ../.env; set +a; wrangler deploy --dry-run"
   },
   "devDependencies": {
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.102.0"
   }
 }
