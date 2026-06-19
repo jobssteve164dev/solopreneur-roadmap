@@ -157,6 +157,21 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './projectSignals') {
           return require(path.join(projectRoot, 'out/projectSignals.js'));
         }
+        if (id === './roadmapWebview') {
+          return require(path.join(projectRoot, 'out/roadmapWebview.js'));
+        }
+        if (id === './strategyPyramidWebview') {
+          return require(path.join(projectRoot, 'out/strategyPyramidWebview.js'));
+        }
+        if (id === './strategyPyramid') {
+          return require(path.join(projectRoot, 'out/strategyPyramid.js'));
+        }
+        if (id === './runDigest') {
+          return require(path.join(projectRoot, 'out/runDigest.js'));
+        }
+        if (id === './solomapGlobal') {
+          return loadCompiledModule('out/solomapGlobal.js', '');
+        }
         if (id === './agentCli') {
           return require(path.join(projectRoot, 'out/agentCli.js'));
         }
@@ -377,7 +392,7 @@ test('extension manifest uses SoloMap visible branding', () => {
 
 test('ability settings copy is localized in English webviews', () => {
   const sources = [
-    fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8'),
+    fs.readFileSync(path.join(projectRoot, 'src', 'roadmapWebview.ts'), 'utf8'),
     fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8')
   ];
 
@@ -861,7 +876,7 @@ test('sidebar resolve survives persisted state and startup data failures', async
 test('full roadmap webview runtime script parses and opens settings panel', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__getWebviewHtml = getWebviewHtml;'
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
   );
   const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const script = extractLastScript(html);
@@ -1022,7 +1037,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 test('full roadmap webview exposes node conversation history and project settings', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__getWebviewHtml = getWebviewHtml;'
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
   );
   const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const script = extractLastScript(html);
@@ -1148,7 +1163,7 @@ test('full roadmap webview exposes node conversation history and project setting
 test('full roadmap conversation history keeps failed continuations under the main conversation', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__getWebviewHtml = getWebviewHtml;'
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
   );
   const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const script = extractLastScript(html);
@@ -1179,7 +1194,10 @@ test('full roadmap conversation history keeps failed continuations under the mai
 
 test('sidebar conversation result cards expose rollback actions for pre-session git hashes', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarProvider.js'), 'utf8');
-  const extensionSource = fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8');
+  const extensionSource = [
+    fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8'),
+    fs.readFileSync(path.join(projectRoot, 'out/roadmapWebview.js'), 'utf8')
+  ].join('\n');
 
   assert.match(sidebarSource, /function extractPreGitHash\(output\)/);
   assert.match(sidebarSource, /data-rollback-sidebar-solo-hash/);
@@ -1776,7 +1794,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
-      'module.exports.__getStrategyPyramidWebviewHtml = getStrategyPyramidWebviewHtml;',
+      'module.exports.__getStrategyPyramidWebviewHtml = strategyPyramidWebview_1.getStrategyPyramidWebviewHtml;',
       'module.exports.__hasProEntitlement = hasProEntitlement;'
     ].join('\n')
   );
@@ -2564,48 +2582,48 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
       'module.exports.__buildSoloConversationPrompt = buildSoloConversationPrompt;',
-      'module.exports.__buildSoloMapSystemMemoryPrompt = buildSoloMapSystemMemoryPrompt;',
-      'module.exports.__ensureSolomapMemoryStore = ensureSolomapMemoryStore;',
-      'module.exports.__ensureSolomapSkillStore = ensureSolomapSkillStore;',
-      'module.exports.__readSolomapSkillRegistry = readSolomapSkillRegistry;',
-      'module.exports.__writeSolomapSkillRegistry = writeSolomapSkillRegistry;',
-      'module.exports.__buildSolomapSkillCandidateInstructions = buildSolomapSkillCandidateInstructions;',
-      'module.exports.__buildSkillInstallPrompt = buildSkillInstallPrompt;',
-      'module.exports.__validateAndRegisterSkillInstall = validateAndRegisterSkillInstall;',
-      'module.exports.__ensureSolomapMcpStore = ensureSolomapMcpStore;',
-      'module.exports.__readSolomapMcpRegistry = readSolomapMcpRegistry;',
-      'module.exports.__writeSolomapMcpRegistry = writeSolomapMcpRegistry;',
-      'module.exports.__buildSolomapMcpCandidateInstructions = buildSolomapMcpCandidateInstructions;',
-      'module.exports.__buildMcpInstallPrompt = buildMcpInstallPrompt;',
-      'module.exports.__validateAndRegisterMcpInstall = validateAndRegisterMcpInstall;',
-      'module.exports.__ensureSolomapEnhancementStore = ensureSolomapEnhancementStore;',
-      'module.exports.__readSolomapEnhancementRegistry = readSolomapEnhancementRegistry;',
-      'module.exports.__writeSolomapEnhancementRegistry = writeSolomapEnhancementRegistry;',
-      'module.exports.__buildSolomapEnhancementCandidateInstructions = buildSolomapEnhancementCandidateInstructions;',
-      'module.exports.__ensureSolomapEnhancementRuntime = ensureSolomapEnhancementRuntime;',
-      'module.exports.__buildEnhancementInstallPrompt = buildEnhancementInstallPrompt;',
-      'module.exports.__buildEnhancementUninstallPrompt = buildEnhancementUninstallPrompt;',
-      'module.exports.__validateAndRegisterEnhancementInstall = validateAndRegisterEnhancementInstall;',
-      'module.exports.__validateAndRegisterEnhancementUninstall = validateAndRegisterEnhancementUninstall;',
-      'module.exports.__getSolomapEnhancementStatusSummaries = getSolomapEnhancementStatusSummaries;',
-      'module.exports.__checkAndRegisterEnhancement = checkAndRegisterEnhancement;',
-      'module.exports.__setSolomapEnhancementEnabled = setSolomapEnhancementEnabled;',
-      'module.exports.__uninstallSolomapEnhancement = uninstallSolomapEnhancement;',
+      'module.exports.__buildSoloMapSystemMemoryPrompt = solomapGlobal_1.buildSoloMapSystemMemoryPrompt;',
+      'module.exports.__ensureSolomapMemoryStore = solomapGlobal_1.ensureSolomapMemoryStore;',
+      'module.exports.__ensureSolomapSkillStore = solomapGlobal_1.ensureSolomapSkillStore;',
+      'module.exports.__readSolomapSkillRegistry = solomapGlobal_1.readSolomapSkillRegistry;',
+      'module.exports.__writeSolomapSkillRegistry = solomapGlobal_1.writeSolomapSkillRegistry;',
+      'module.exports.__buildSolomapSkillCandidateInstructions = solomapGlobal_1.buildSolomapSkillCandidateInstructions;',
+      'module.exports.__buildSkillInstallPrompt = solomapGlobal_1.buildSkillInstallPrompt;',
+      'module.exports.__validateAndRegisterSkillInstall = solomapGlobal_1.validateAndRegisterSkillInstall;',
+      'module.exports.__ensureSolomapMcpStore = solomapGlobal_1.ensureSolomapMcpStore;',
+      'module.exports.__readSolomapMcpRegistry = solomapGlobal_1.readSolomapMcpRegistry;',
+      'module.exports.__writeSolomapMcpRegistry = solomapGlobal_1.writeSolomapMcpRegistry;',
+      'module.exports.__buildSolomapMcpCandidateInstructions = solomapGlobal_1.buildSolomapMcpCandidateInstructions;',
+      'module.exports.__buildMcpInstallPrompt = solomapGlobal_1.buildMcpInstallPrompt;',
+      'module.exports.__validateAndRegisterMcpInstall = solomapGlobal_1.validateAndRegisterMcpInstall;',
+      'module.exports.__ensureSolomapEnhancementStore = solomapGlobal_1.ensureSolomapEnhancementStore;',
+      'module.exports.__readSolomapEnhancementRegistry = solomapGlobal_1.readSolomapEnhancementRegistry;',
+      'module.exports.__writeSolomapEnhancementRegistry = solomapGlobal_1.writeSolomapEnhancementRegistry;',
+      'module.exports.__buildSolomapEnhancementCandidateInstructions = solomapGlobal_1.buildSolomapEnhancementCandidateInstructions;',
+      'module.exports.__ensureSolomapEnhancementRuntime = solomapGlobal_1.ensureSolomapEnhancementRuntime;',
+      'module.exports.__buildEnhancementInstallPrompt = solomapGlobal_1.buildEnhancementInstallPrompt;',
+      'module.exports.__buildEnhancementUninstallPrompt = solomapGlobal_1.buildEnhancementUninstallPrompt;',
+      'module.exports.__validateAndRegisterEnhancementInstall = solomapGlobal_1.validateAndRegisterEnhancementInstall;',
+      'module.exports.__validateAndRegisterEnhancementUninstall = solomapGlobal_1.validateAndRegisterEnhancementUninstall;',
+      'module.exports.__getSolomapEnhancementStatusSummaries = solomapGlobal_1.getSolomapEnhancementStatusSummaries;',
+      'module.exports.__checkAndRegisterEnhancement = solomapGlobal_1.checkAndRegisterEnhancement;',
+      'module.exports.__setSolomapEnhancementEnabled = solomapGlobal_1.setSolomapEnhancementEnabled;',
+      'module.exports.__uninstallSolomapEnhancement = solomapGlobal_1.uninstallSolomapEnhancement;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__buildRoadmapValidationScript = buildRoadmapValidationScript;',
       'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
       'module.exports.__getOutputTail = getOutputTail;',
-      'module.exports.__buildRunHandoffEntry = buildRunHandoffEntry;',
-      'module.exports.__buildRunDigest = buildRunDigest;',
-      'module.exports.__writeRunDigest = writeRunDigest;',
-      'module.exports.__writeExecutionGraph = writeExecutionGraph;',
-      'module.exports.__buildExecutionExperiencePrompt = buildExecutionExperiencePrompt;',
-      'module.exports.__buildCrossAgentHandoffInstructions = buildCrossAgentHandoffInstructions;',
+      'module.exports.__buildRunHandoffEntry = runDigest_1.buildRunHandoffEntry;',
+      'module.exports.__buildRunDigest = runDigest_1.buildRunDigest;',
+      'module.exports.__writeRunDigest = runDigest_1.writeRunDigest;',
+      'module.exports.__writeExecutionGraph = runDigest_1.writeExecutionGraph;',
+      'module.exports.__buildExecutionExperiencePrompt = runDigest_1.buildExecutionExperiencePrompt;',
+      'module.exports.__buildCrossAgentHandoffInstructions = runDigest_1.buildCrossAgentHandoffInstructions;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
-      'module.exports.__parseStepHandoffEntries = parseStepHandoffEntries;',
-      'module.exports.__buildStepHandoffSummary = buildStepHandoffSummary;',
-      'module.exports.__updateStepHandoffSummary = updateStepHandoffSummary;',
-      'module.exports.__readStepHandoffSummary = readStepHandoffSummary;',
+      'module.exports.__parseStepHandoffEntries = runDigest_1.parseStepHandoffEntries;',
+      'module.exports.__buildStepHandoffSummary = runDigest_1.buildStepHandoffSummary;',
+      'module.exports.__updateStepHandoffSummary = runDigest_1.updateStepHandoffSummary;',
+      'module.exports.__readStepHandoffSummary = runDigest_1.readStepHandoffSummary;',
       'module.exports.__buildSolopreneurDirectoryReadme = buildSolopreneurDirectoryReadme;',
       'module.exports.__buildCompletionCriteriaForNode = buildCompletionCriteriaForNode;',
       'module.exports.__ensureCompletionCriteriaForNodes = ensureCompletionCriteriaForNodes;',
@@ -2628,8 +2646,8 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__validateBootstrapRoadmapRewrite = validateBootstrapRoadmapRewrite;',
       'module.exports.__validateRoadmapRevision = validateRoadmapRevision;',
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__recordSolomapLearningCycle = recordSolomapLearningCycle;',
-      'module.exports.__buildSolomapLearningContext = buildSolomapLearningContext;',
+      'module.exports.__recordSolomapLearningCycle = solomapGlobal_1.recordSolomapLearningCycle;',
+      'module.exports.__buildSolomapLearningContext = solomapGlobal_1.buildSolomapLearningContext;',
       'module.exports.__shellQuote = agentCli_1.shellQuote;'
     ].join('\n')
   );
@@ -4218,7 +4236,7 @@ test('documentation manifest indexes project docs and flags noisy docs after run
 test('failed conversations render retry action in roadmap webview', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__getWebviewHtml = getWebviewHtml;'
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
   );
   const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
 
@@ -4237,7 +4255,10 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(html, /methodology-overview/);
   assert.match(html, /methodology-stage-card/);
   assert.match(html, /data-open-roadmap-revision/);
-  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const source = [
+    fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8'),
+    fs.readFileSync(path.join(projectRoot, 'src', 'roadmapWebview.ts'), 'utf8')
+  ].join('\n');
   assert.match(source, /function extractConversationPreGitHash/);
   assert.match(source, /openProjectFileDiff/);
   assert.match(source, /vscode\.commands\.executeCommand\('vscode\.diff'/);
