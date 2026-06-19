@@ -13,6 +13,29 @@ import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { getAgentImpactStatus, buildAgentImpactSummary } from './agentImpact';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
+import {
+  clearStoredAgentSession,
+  extractCodexSessionIdFromOutputText,
+  extractContinuationParentConversationId,
+  extractContinuationSessionIdFromExecutionOutput,
+  extractFirstCodexUserMessageAfter,
+  extractNativeSessionIdFromExecutionOutput,
+  extractSavedNativeSessionIdFromExecutionOutput,
+  findCodexTranscriptFile,
+  getAgentSessionKey,
+  getStepSessionFilePath,
+  getStoredAgentSession,
+  hydrateConversationContinuations,
+  readRunSessionId,
+  readRunTextFile,
+  readStepSessionState,
+  resolveContinuationLeafConversationFromList,
+  resolveContinuationRootConversationFromList,
+  resolveContinuationSessionConversationFromList,
+  resolveNativeSessionIdForConversation as resolveNativeSessionIdForConversationFromWorkspace,
+  stripAnsiControlCodes,
+  updateStoredAgentSession
+} from './continuation';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
@@ -296,19 +319,6 @@ interface PassportDeviceStartResult {
   deviceCode?: string;
   loginUrl?: string;
   expiresIn?: number;
-}
-
-interface AgentStepSession {
-  agentCli: string;
-  provider: string;
-  sessionId: string;
-  updatedAt: string;
-}
-
-interface StepSessionState {
-  version: number;
-  nodeId: string;
-  sessions: Record<string, AgentStepSession>;
 }
 
 interface SolomapSkillRegistryEntry {
@@ -2839,7 +2849,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return syncEngine.getAgentExecutions(soloConversationId).slice(0, 1);
+    return hydrateConversationContinuations(projectPath, soloConversationId, syncEngine.getAgentExecutions(soloConversationId)).slice(0, 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -2848,7 +2858,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return store.getExecutionLogs(soloConversationId).slice(0, 1);
+    return hydrateConversationContinuations(projectPath, soloConversationId, store.getExecutionLogs(soloConversationId)).slice(0, 1);
   } finally {
     store.close();
   }
@@ -2859,7 +2869,7 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return syncEngine.getAgentExecutions(nodeId).slice(0, 1);
+    return hydrateConversationContinuations(projectPath, nodeId, syncEngine.getAgentExecutions(nodeId)).slice(0, 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -2868,7 +2878,7 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return store.getExecutionLogs(nodeId).slice(0, 1);
+    return hydrateConversationContinuations(projectPath, nodeId, store.getExecutionLogs(nodeId)).slice(0, 1);
   } finally {
     store.close();
   }
@@ -2880,7 +2890,7 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
   }
   const excludeNodeIds = new Set([soloConversationId, roadmapRevisionId]);
   if (syncEngine && activeProjectRoot === projectPath) {
-    return syncEngine.getProjectAgentExecutions()
+    return hydrateProjectConversationContinuations(projectPath, syncEngine.getProjectAgentExecutions())
       .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
       .slice(0, sidebarProjectConversationHistoryLimit);
   }
@@ -2891,12 +2901,31 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return store.getAllExecutionLogs()
+    return hydrateProjectConversationContinuations(projectPath, store.getAllExecutionLogs())
       .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
       .slice(0, sidebarProjectConversationHistoryLimit);
   } finally {
     store.close();
   }
+}
+
+function hydrateProjectConversationContinuations(projectPath: string, conversations: AgentConversation[]): AgentConversation[] {
+  const byNode = new Map<string, AgentConversation[]>();
+  for (const conversation of conversations) {
+    const nodeId = String(conversation.nodeId || '');
+    if (!nodeId) {
+      continue;
+    }
+    const group = byNode.get(nodeId) || [];
+    group.push(conversation);
+    byNode.set(nodeId, group);
+  }
+  const hydratedById = new Map<number, AgentConversation>();
+  for (const [nodeId, group] of byNode.entries()) {
+    hydrateConversationContinuations(projectPath, nodeId, group)
+      .forEach((conversation) => hydratedById.set(Number(conversation.id || 0), conversation));
+  }
+  return conversations.map((conversation) => hydratedById.get(Number(conversation.id || 0)) || conversation);
 }
 
 /**
@@ -3234,10 +3263,11 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
 
         case 'getNodeConversations':
           if (syncEngine && activePanel) {
+            const rawConversations = syncEngine.getAgentExecutions(message.nodeId);
             activePanel.webview.postMessage({
               command: 'nodeConversationsLoaded',
               nodeId: message.nodeId,
-              conversations: syncEngine.getAgentExecutions(message.nodeId),
+              conversations: hydrateConversationContinuations(activeProjectRoot || '', message.nodeId, rawConversations),
               projectPath: activeProjectRoot || ''
             });
           }
@@ -6630,74 +6660,6 @@ function getAgentProvider(agentCli: string): string {
   return executableName || 'unknown';
 }
 
-function getAgentSessionKey(agentCli: string): string {
-  return getAgentProvider(agentCli);
-}
-
-function getStepSessionFilePath(workspaceRoot: string, nodeId: string): string {
-  return path.join(workspaceRoot, '.solopreneur', 'step-sessions', `${nodeId}.json`);
-}
-
-function readStepSessionState(filePath: string, nodeId: string): StepSessionState {
-  const emptyState: StepSessionState = {
-    version: 1,
-    nodeId,
-    sessions: {}
-  };
-  if (!filePath || !fs.existsSync(filePath)) {
-    return emptyState;
-  }
-
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    const sessions = parsed && typeof parsed.sessions === 'object' && parsed.sessions ? parsed.sessions : {};
-    return {
-      version: 1,
-      nodeId: String(parsed.nodeId || nodeId),
-      sessions
-    };
-  } catch {
-    return emptyState;
-  }
-}
-
-function getStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string): AgentStepSession | null {
-  const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
-  const state = readStepSessionState(filePath, nodeId);
-  const session = state.sessions[getAgentSessionKey(agentCli)];
-  return session && session.sessionId ? session : null;
-}
-
-function updateStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string, sessionId: string): StepSessionState {
-  const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
-  const state = readStepSessionState(filePath, nodeId);
-  const sessionKey = getAgentSessionKey(agentCli);
-  state.version = 1;
-  state.nodeId = nodeId;
-  state.sessions[sessionKey] = {
-    agentCli,
-    provider: getAgentProvider(agentCli),
-    sessionId,
-    updatedAt: new Date().toISOString()
-  };
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf8');
-  return state;
-}
-
-function clearStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string): boolean {
-  const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
-  const state = readStepSessionState(filePath, nodeId);
-  const sessionKey = getAgentSessionKey(agentCli);
-  if (!state.sessions[sessionKey]) {
-    return false;
-  }
-  delete state.sessions[sessionKey];
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf8');
-  return true;
-}
-
 function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string, nativeSessionId = '', taskPermissionMode = 'auto', selectedModel = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
@@ -6828,97 +6790,6 @@ function buildSdkSentinelCommandLabel(agentCli: string, workspaceRoot: string, s
 function supportsSdkContinuation(agentCli: string): boolean {
   const provider = getAgentProvider(agentCli);
   return provider === 'codex';
-}
-
-function findCodexTranscriptFile(codexHome: string, sessionId: string): string {
-  const normalizedHome = String(codexHome || '').trim();
-  const normalizedSessionId = String(sessionId || '').trim();
-  if (!normalizedHome || !normalizedSessionId) {
-    return '';
-  }
-  const roots = [
-    path.join(normalizedHome, 'sessions'),
-    path.join(normalizedHome, 'archived_sessions')
-  ];
-  const stack = roots.filter((candidate) => fs.existsSync(candidate));
-  while (stack.length > 0) {
-    const current = stack.pop() || '';
-    let entries: fs.Dirent[] = [];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-        continue;
-      }
-      if (!entry.isFile() || !entry.name.endsWith('.jsonl') || !entry.name.includes(normalizedSessionId)) {
-        continue;
-      }
-      try {
-        const firstLine = fs.readFileSync(fullPath, 'utf8').split(/\r?\n/).find(Boolean) || '';
-        const parsed = JSON.parse(firstLine);
-        if (String(parsed?.payload?.id || '') === normalizedSessionId) {
-          return fullPath;
-        }
-      } catch {
-        // Ignore malformed or partially-written transcript files.
-      }
-    }
-  }
-  return '';
-}
-
-function stripAnsiControlCodes(text: string): string {
-  return String(text || '').replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-function extractCodexSessionIdFromOutputText(output: string): string {
-  const lines = stripAnsiControlCodes(output).split(/\r?\n/);
-  for (const line of lines) {
-    const match = line.match(/^\s*session id:\s*([0-9a-fA-F-]{36})\s*$/i);
-    if (match) {
-      return match[1];
-    }
-  }
-  return '';
-}
-
-function extractFirstCodexUserMessageAfter(codexHome: string, sessionId: string, startedAt: string): string {
-  const transcriptFile = findCodexTranscriptFile(codexHome, sessionId);
-  if (!transcriptFile) {
-    return '';
-  }
-  const startedMs = Date.parse(String(startedAt || ''));
-  try {
-    const lines = fs.readFileSync(transcriptFile, 'utf8').split(/\r?\n/).filter(Boolean);
-    for (const line of lines) {
-      let parsed: any;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const payload = parsed?.payload || {};
-      if (String(payload.type || '') !== 'user_message') {
-        continue;
-      }
-      const timestampMs = Date.parse(String(parsed.timestamp || ''));
-      if (Number.isFinite(startedMs) && Number.isFinite(timestampMs) && timestampMs < startedMs) {
-        continue;
-      }
-      const message = String(payload.message || '').trim();
-      if (message) {
-        return message;
-      }
-    }
-  } catch {
-    return '';
-  }
-  return '';
 }
 
 function buildContinuationMetadataBlock(parentConversationId: number, sessionId: string): string {
@@ -7104,65 +6975,8 @@ function buildSessionCaptureScript(
   ].filter(Boolean).join('; ');
 }
 
-function getConversationRunDir(workspaceRoot: string, nodeId: string, conversationId: number): string {
-  return path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(conversationId || ''));
-}
-
-function readRunTextFile(workspaceRoot: string, nodeId: string, conversationId: number, fileName: string, includeLegacyNodeRun = false): string {
-  const candidates = [path.join(getConversationRunDir(workspaceRoot, nodeId, conversationId), fileName)];
-  if (includeLegacyNodeRun) {
-    candidates.push(path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, fileName));
-  }
-  for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) {
-        return fs.readFileSync(candidate, 'utf8');
-      }
-    } catch {
-      // Ignore stale or partially-written run files.
-    }
-  }
-  return '';
-}
-
-function readRunSessionId(workspaceRoot: string, nodeId: string, conversationId: number): string {
-  const sessionText = readRunTextFile(workspaceRoot, nodeId, conversationId, 'session.json');
-  if (!sessionText) {
-    return '';
-  }
-  try {
-    const parsed = JSON.parse(sessionText);
-    return String(parsed?.sessionId || '').trim();
-  } catch {
-    return '';
-  }
-}
-
 function resolveNativeSessionIdForConversation(nodeId: string, conversation: AgentConversation | null): string {
-  if (!conversation) {
-    return '';
-  }
-  const savedSessionId = extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '');
-  const continuationSessionId = extractContinuationSessionIdFromExecutionOutput(conversation.output || '');
-  if (getAgentProvider(conversation.agentCli || '') !== 'codex' || !activeProjectRoot) {
-    return savedSessionId || continuationSessionId;
-  }
-  const conversationId = Number(conversation.id || 0);
-  const recordedCodexHome = readRunTextFile(activeProjectRoot, nodeId, conversationId, 'codex-home.txt').trim();
-  const codexHome = recordedCodexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const runSessionId = readRunSessionId(activeProjectRoot, nodeId, conversationId);
-  const outputText = readRunTextFile(activeProjectRoot, nodeId, conversationId, 'output.log');
-  const outputSessionId = extractCodexSessionIdFromOutputText(outputText);
-  const candidates = [runSessionId, outputSessionId, savedSessionId, continuationSessionId]
-    .map((sessionId) => String(sessionId || '').trim())
-    .filter(Boolean)
-    .filter((sessionId, index, all) => all.indexOf(sessionId) === index);
-  for (const sessionId of candidates) {
-    if (findCodexTranscriptFile(codexHome, sessionId)) {
-      return sessionId;
-    }
-  }
-  return '';
+  return resolveNativeSessionIdForConversationFromWorkspace(activeProjectRoot || '', nodeId, conversation);
 }
 
 function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: string): string {
@@ -11084,10 +10898,11 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
 function postNodeConversations(nodeId: string, fallbackConversations: import('./db/types').AgentConversation[] = []): void {
   if (syncEngine && activePanel) {
     const conversations = syncEngine.getAgentExecutions(nodeId);
+    const payloadConversations = conversations.length > 0 ? conversations : fallbackConversations;
     activePanel.webview.postMessage({
       command: 'nodeConversationsLoaded',
       nodeId,
-      conversations: conversations.length > 0 ? conversations : fallbackConversations,
+      conversations: hydrateConversationContinuations(activeProjectRoot || '', nodeId, payloadConversations),
       projectPath: activeProjectRoot || ''
     });
   }
@@ -11621,56 +11436,6 @@ async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContex
   }, 2000);
 }
 
-function extractSavedNativeSessionIdFromExecutionOutput(output: string): string {
-  const text = String(output || '');
-  const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/);
-  return match ? match[1] : '';
-}
-
-function extractContinuationSessionIdFromExecutionOutput(output: string): string {
-  const match = String(output || '').match(/Continuation session id:\s*([0-9a-fA-F-]{36})/);
-  return match ? match[1] : '';
-}
-
-function extractNativeSessionIdFromExecutionOutput(output: string): string {
-  return extractSavedNativeSessionIdFromExecutionOutput(output)
-    || extractContinuationSessionIdFromExecutionOutput(output);
-}
-
-function extractContinuationParentConversationId(output: string): number {
-  const match = String(output || '').match(/Continuation parent conversation:\s*(\d+)/);
-  return match ? Number(match[1]) : 0;
-}
-
-function resolveContinuationLeafConversationFromList(
-  conversations: AgentConversation[],
-  conversationId: number
-): AgentConversation | null {
-  if (!conversationId) {
-    return null;
-  }
-  const byParent = new Map<number, AgentConversation[]>();
-  for (const conversation of conversations) {
-    const parentId = extractContinuationParentConversationId(conversation.output || '');
-    if (!parentId) continue;
-    const siblings = byParent.get(parentId) || [];
-    siblings.push(conversation);
-    byParent.set(parentId, siblings);
-  }
-  for (const siblings of byParent.values()) {
-    siblings.sort((left, right) => Number(left.id || 0) - Number(right.id || 0));
-  }
-  let current = conversations.find((entry) => Number(entry.id) === Number(conversationId)) || null;
-  while (current) {
-    const children = byParent.get(Number(current.id || 0)) || [];
-    if (!children.length) {
-      return current;
-    }
-    current = children[children.length - 1] || null;
-  }
-  return null;
-}
-
 function resolveContinuationLeafConversation(nodeId: string, conversationId: number): AgentConversation | null {
   if (!syncEngine || !nodeId || !conversationId) {
     return null;
@@ -11679,75 +11444,11 @@ function resolveContinuationLeafConversation(nodeId: string, conversationId: num
   return resolveContinuationLeafConversationFromList(conversations, conversationId);
 }
 
-function resolveContinuationSessionConversationFromList(
-  conversations: AgentConversation[],
-  conversationId: number
-): AgentConversation | null {
-  if (!conversationId) {
-    return null;
-  }
-  const byId = new Map<number, AgentConversation>();
-  conversations.forEach((conversation) => byId.set(Number(conversation.id || 0), conversation));
-  const start = byId.get(Number(conversationId));
-  const leaf = resolveContinuationLeafConversationFromList(conversations, conversationId);
-  const candidates: AgentConversation[] = [];
-  const pushLineage = (conversation: AgentConversation | null) => {
-    let current = conversation;
-    const seen = new Set<number>();
-    while (current) {
-      const currentId = Number(current.id || 0);
-      if (!currentId || seen.has(currentId)) {
-        return;
-      }
-      seen.add(currentId);
-      candidates.push(current);
-      const parentId = extractContinuationParentConversationId(current.output || '');
-      current = parentId ? byId.get(Number(parentId)) || null : null;
-    }
-  };
-  pushLineage(leaf);
-  pushLineage(start || null);
-  return candidates.find((conversation) => extractSavedNativeSessionIdFromExecutionOutput(conversation.output || ''))
-    || candidates.find((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || ''))
-    || null;
-}
-
 function resolveContinuationSessionConversation(nodeId: string, conversationId: number): AgentConversation | null {
   if (!syncEngine || !nodeId || !conversationId) {
     return null;
   }
   return resolveContinuationSessionConversationFromList(syncEngine.getAgentExecutions(nodeId), conversationId);
-}
-
-function resolveContinuationRootConversationFromList(conversations: AgentConversation[], conversationId: number): AgentConversation | null {
-  const byId = new Map<number, AgentConversation>();
-  conversations.forEach((conversation) => byId.set(Number(conversation.id || 0), conversation));
-  const start = byId.get(Number(conversationId));
-  if (!start) {
-    return null;
-  }
-  const sessionId = extractSavedNativeSessionIdFromExecutionOutput(start.output || '');
-  if (sessionId) {
-    return conversations
-      .filter((conversation) => extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '') === sessionId)
-      .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))[0] || start;
-  }
-  let current = start;
-  const seen = new Set<number>();
-  while (current) {
-    const currentId = Number(current.id || 0);
-    if (seen.has(currentId)) {
-      return current;
-    }
-    seen.add(currentId);
-    const parentId = extractContinuationParentConversationId(current.output || '');
-    const parent = parentId ? byId.get(Number(parentId)) : null;
-    if (!parent) {
-      return current;
-    }
-    current = parent;
-  }
-  return start;
 }
 
 function resolveContinuationRootConversation(nodeId: string, conversationId: number): AgentConversation | null {
@@ -16381,7 +16082,13 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       return (i18n[currentLanguage].failureCategories || {})[category] || '';
     }
 
-    function extractNativeSessionId(output) {
+    function extractNativeSessionId(conversationOrOutput) {
+      if (conversationOrOutput && typeof conversationOrOutput === 'object' && conversationOrOutput.resumableNativeSessionId) {
+        return String(conversationOrOutput.resumableNativeSessionId || '');
+      }
+      const output = conversationOrOutput && typeof conversationOrOutput === 'object'
+        ? conversationOrOutput.output
+        : conversationOrOutput;
       const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/)
         || String(output || '').match(/Continuation session id:\\s*([0-9a-fA-F-]{36})/);
       return match ? match[1] : '';
@@ -18451,7 +18158,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     function renderConversationItem(nodeId, conversation, nested = false) {
       const conversationId = nodeId + ':' + conversation.id;
       const children = (conversationChildrenMap[String(conversation.id || '')] || []);
-      const rootConversationId = findConversationRootId(conversation);
+      const rootConversationId = conversation.continuationRootConversationId || findConversationRootId(conversation);
       const open = activeConversationId === conversationId || hasActiveConversationDescendant(nodeId, conversation);
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const summary = summarizeConversation(conversation);
@@ -18466,7 +18173,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       const retryButton = conversation.status === 'Failed'
         ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
         : '';
-      const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation.output)
+      const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation)
         ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(rootConversationId)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
         : '';
       const runningButtons = conversation.status === 'Running'
@@ -18537,7 +18244,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
         return conversation;
       }
       conversations.forEach((conversation) => {
-        const sessionId = extractNativeSessionId(conversation.output);
+        const sessionId = extractNativeSessionId(conversation);
         if (sessionId) {
           const parentId = extractContinuationParentConversationId(conversation.output);
           const candidateRoot = parentId && byId[String(parentId)]
@@ -18564,7 +18271,7 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
             return;
           }
         }
-        const sessionId = extractNativeSessionId(conversation.output);
+        const sessionId = extractNativeSessionId(conversation);
         const sessionRoot = sessionId ? sessionRoots[sessionId] : null;
         if (sessionRoot && Number(sessionRoot.id || 0) !== Number(conversation.id || 0)) {
           const key = String(sessionRoot.id || '');

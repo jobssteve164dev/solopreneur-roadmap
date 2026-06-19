@@ -154,6 +154,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './learningLedger') {
           return require(path.join(projectRoot, 'out/learningLedger.js'));
         }
+        if (id === './continuation') {
+          return require(path.join(projectRoot, 'out/continuation.js'));
+        }
         return {};
       }
       return require(id);
@@ -1070,7 +1073,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.doesNotMatch(script, /data-continue-turn-send-id/);
   assert.match(script, /conversation-children-title/);
   assert.match(script, /sessionRoots/);
-  assert.match(script, /const rootConversationId = findConversationRootId\(conversation\)/);
+  assert.match(script, /const rootConversationId = conversation\.continuationRootConversationId \|\| findConversationRootId\(conversation\)/);
   assert.match(script, /Continuation first message/);
   assert.match(script, /showAgentTerminal/);
   assert.match(script, /stopAgentRun/);
@@ -2538,16 +2541,17 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;',
       'module.exports.__buildSdkSentinelCommandLabel = buildSdkSentinelCommandLabel;',
       'module.exports.__supportsSdkContinuation = supportsSdkContinuation;',
-      'module.exports.__extractCodexSessionIdFromOutputText = extractCodexSessionIdFromOutputText;',
+      'module.exports.__extractCodexSessionIdFromOutputText = continuation_1.extractCodexSessionIdFromOutputText;',
       'module.exports.__resolveNativeSessionIdForConversation = resolveNativeSessionIdForConversation;',
       'module.exports.__setActiveProjectRootForSessionTest = (projectRoot) => { activeProjectRoot = projectRoot; };',
-      'module.exports.__findCodexTranscriptFile = findCodexTranscriptFile;',
-      'module.exports.__extractFirstCodexUserMessageAfter = extractFirstCodexUserMessageAfter;',
+      'module.exports.__findCodexTranscriptFile = continuation_1.findCodexTranscriptFile;',
+      'module.exports.__extractFirstCodexUserMessageAfter = continuation_1.extractFirstCodexUserMessageAfter;',
       'module.exports.__buildInteractiveContinuationPrompt = buildInteractiveContinuationPrompt;',
       'module.exports.__buildCodexContinuationRunnerScript = buildCodexContinuationRunnerScript;',
-      'module.exports.__extractContinuationParentConversationId = extractContinuationParentConversationId;',
-      'module.exports.__resolveContinuationLeafConversationFromList = resolveContinuationLeafConversationFromList;',
-      'module.exports.__resolveContinuationSessionConversationFromList = resolveContinuationSessionConversationFromList;',
+      'module.exports.__extractContinuationParentConversationId = continuation_1.extractContinuationParentConversationId;',
+      'module.exports.__resolveContinuationLeafConversationFromList = continuation_1.resolveContinuationLeafConversationFromList;',
+      'module.exports.__resolveContinuationSessionConversationFromList = continuation_1.resolveContinuationSessionConversationFromList;',
+      'module.exports.__hydrateConversationContinuations = continuation_1.hydrateConversationContinuations;',
       'module.exports.__getTaskPermissionArgs = getTaskPermissionArgs;',
       'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
@@ -2606,13 +2610,13 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__commandExists = commandExists;',
       'module.exports.__getAgentProvider = getAgentProvider;',
       'module.exports.__hasProEntitlement = hasProEntitlement;',
-      'module.exports.__getStepSessionFilePath = getStepSessionFilePath;',
-      'module.exports.__readStepSessionState = readStepSessionState;',
-      'module.exports.__getStoredAgentSession = getStoredAgentSession;',
-      'module.exports.__updateStoredAgentSession = updateStoredAgentSession;',
-      'module.exports.__clearStoredAgentSession = clearStoredAgentSession;',
-      'module.exports.__extractSavedNativeSessionIdFromExecutionOutput = extractSavedNativeSessionIdFromExecutionOutput;',
-      'module.exports.__extractNativeSessionIdFromExecutionOutput = extractNativeSessionIdFromExecutionOutput;',
+      'module.exports.__getStepSessionFilePath = continuation_1.getStepSessionFilePath;',
+      'module.exports.__readStepSessionState = continuation_1.readStepSessionState;',
+      'module.exports.__getStoredAgentSession = continuation_1.getStoredAgentSession;',
+      'module.exports.__updateStoredAgentSession = continuation_1.updateStoredAgentSession;',
+      'module.exports.__clearStoredAgentSession = continuation_1.clearStoredAgentSession;',
+      'module.exports.__extractSavedNativeSessionIdFromExecutionOutput = continuation_1.extractSavedNativeSessionIdFromExecutionOutput;',
+      'module.exports.__extractNativeSessionIdFromExecutionOutput = continuation_1.extractNativeSessionIdFromExecutionOutput;',
       'module.exports.__extractUserSupplementFromExecutionOutput = extractUserSupplementFromExecutionOutput;',
       'module.exports.__buildLocalRoadmap = buildLocalRoadmap;',
       'module.exports.__validateBootstrapRoadmapRewrite = validateBootstrapRoadmapRewrite;',
@@ -2917,6 +2921,25 @@ test('agent command builder uses non-interactive task runs and native continuati
     }),
     recoveredSessionId
   );
+  const stepRecoveryRunDir = path.join(recoveryRoot, '.solopreneur', 'agent-runs', 'build-step', '22');
+  fs.mkdirSync(stepRecoveryRunDir, { recursive: true });
+  fs.writeFileSync(path.join(stepRecoveryRunDir, 'codex-home.txt'), codexHome, 'utf8');
+  fs.writeFileSync(path.join(stepRecoveryRunDir, 'session.json'), JSON.stringify({
+    sessionId: recoveredSessionId,
+    source: 'codex-output'
+  }), 'utf8');
+  const hydratedStepConversations = extensionModule.__hydrateConversationContinuations(recoveryRoot, 'build-step', [
+    {
+      id: 22,
+      nodeId: 'build-step',
+      agentCli: 'codex',
+      command: 'codex exec',
+      output: 'Native Agent session saved: .solopreneur/step-sessions/build-step.json (019dc472-6a80-7c70-99a4-b2593a641d11)',
+      status: 'Completed'
+    }
+  ]);
+  assert.equal(hydratedStepConversations[0].resumableNativeSessionId, recoveredSessionId);
+  assert.equal(hydratedStepConversations[0].continuationRootConversationId, 22);
   const missingTranscriptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-missing-transcript-'));
   const missingRunDir = path.join(missingTranscriptRoot, '.solopreneur', 'agent-runs', '__solo__', '21');
   const emptyCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-empty-codex-home-'));

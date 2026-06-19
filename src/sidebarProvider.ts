@@ -8371,7 +8371,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return formatDurationMs(Date.now() - new Date(conversation.timestamp).getTime());
     }
 
-    function extractNativeSessionId(output) {
+    function extractNativeSessionId(conversationOrOutput) {
+      if (conversationOrOutput && typeof conversationOrOutput === 'object' && conversationOrOutput.resumableNativeSessionId) {
+        return String(conversationOrOutput.resumableNativeSessionId || '');
+      }
+      const output = conversationOrOutput && typeof conversationOrOutput === 'object'
+        ? conversationOrOutput.output
+        : conversationOrOutput;
       const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/)
         || String(output || '').match(/Continuation session id:\\s*([0-9a-fA-F-]{36})/);
       return match ? match[1] : '';
@@ -8473,7 +8479,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         ? '<button class="sidebar-conv-action-btn rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-rollback-sidebar-solo-hash="' + escapeHtml(preGitHash) + '" data-rollback-sidebar-step-hash="' + escapeHtml(preGitHash) + '" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>'
         : '';
         
-      const continueBtn = statusKey !== 'Running' && extractNativeSessionId(conversation.output)
+      const continueBtn = statusKey !== 'Running' && extractNativeSessionId(conversation)
         ? '<button class="sidebar-conv-action-btn continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('continueNative')) + '"><span class="codicon codicon-play"></span> ' + escapeHtml(t('continueNative')) + '</button>'
         : '';
         
