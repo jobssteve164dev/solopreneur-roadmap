@@ -154,6 +154,12 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './learningLedger') {
           return require(path.join(projectRoot, 'out/learningLedger.js'));
         }
+        if (id === './projectSignals') {
+          return require(path.join(projectRoot, 'out/projectSignals.js'));
+        }
+        if (id === './agentCli') {
+          return require(path.join(projectRoot, 'out/agentCli.js'));
+        }
         if (id === './continuation') {
           return require(path.join(projectRoot, 'out/continuation.js'));
         }
@@ -416,7 +422,7 @@ test('readme uses bilingual marketplace copy and marketplace-compatible remote l
 test('feedback issue URL includes local usage summary when provided', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__buildFeedbackIssueUrl = buildFeedbackIssueUrl;'
+    'module.exports.__buildFeedbackIssueUrl = projectSignals_1.buildFeedbackIssueUrl;'
   );
   const url = new URL(extensionModule.__buildFeedbackIssueUrl(
     '加载问题',
@@ -2534,13 +2540,13 @@ test('agent command builder uses non-interactive task runs and native continuati
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
-      'module.exports.__buildAgentCommand = buildAgentCommand;',
-      'module.exports.__buildAgentCommandForPromptFile = buildAgentCommandForPromptFile;',
-      'module.exports.__buildAgentCommandFromShellVar = buildAgentCommandFromShellVar;',
-      'module.exports.__buildNativeContinueCommand = buildNativeContinueCommand;',
+      'module.exports.__buildAgentCommand = agentCli_1.buildAgentCommand;',
+      'module.exports.__buildAgentCommandForPromptFile = agentCli_1.buildAgentCommandForPromptFile;',
+      'module.exports.__buildAgentCommandFromShellVar = agentCli_1.buildAgentCommandFromShellVar;',
+      'module.exports.__buildNativeContinueCommand = agentCli_1.buildNativeContinueCommand;',
       'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;',
-      'module.exports.__buildSdkSentinelCommandLabel = buildSdkSentinelCommandLabel;',
-      'module.exports.__supportsSdkContinuation = supportsSdkContinuation;',
+      'module.exports.__buildSdkSentinelCommandLabel = agentCli_1.buildSdkSentinelCommandLabel;',
+      'module.exports.__supportsSdkContinuation = agentCli_1.supportsSdkContinuation;',
       'module.exports.__extractCodexSessionIdFromOutputText = continuation_1.extractCodexSessionIdFromOutputText;',
       'module.exports.__resolveNativeSessionIdForConversation = resolveNativeSessionIdForConversation;',
       'module.exports.__setActiveProjectRootForSessionTest = (projectRoot) => { activeProjectRoot = projectRoot; };',
@@ -2552,7 +2558,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__resolveContinuationLeafConversationFromList = continuation_1.resolveContinuationLeafConversationFromList;',
       'module.exports.__resolveContinuationSessionConversationFromList = continuation_1.resolveContinuationSessionConversationFromList;',
       'module.exports.__hydrateConversationContinuations = continuation_1.hydrateConversationContinuations;',
-      'module.exports.__getTaskPermissionArgs = getTaskPermissionArgs;',
+      'module.exports.__getTaskPermissionArgs = agentCli_1.getTaskPermissionArgs;',
       'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
@@ -2605,10 +2611,10 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__ensureCompletionCriteriaForNodes = ensureCompletionCriteriaForNodes;',
       'module.exports.__readCompletionCriteria = readCompletionCriteria;',
       'module.exports.__getStepMemoryFilePath = getStepMemoryFilePath;',
-      'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
-      'module.exports.__resolveExecutablePath = resolveExecutablePath;',
-      'module.exports.__commandExists = commandExists;',
-      'module.exports.__getAgentProvider = getAgentProvider;',
+      'module.exports.__getAgentCliCandidates = agentCli_1.getAgentCliCandidates;',
+      'module.exports.__resolveExecutablePath = agentCli_1.resolveExecutablePath;',
+      'module.exports.__commandExists = agentCli_1.commandExists;',
+      'module.exports.__getAgentProvider = agentCli_1.getAgentProvider;',
       'module.exports.__hasProEntitlement = hasProEntitlement;',
       'module.exports.__getStepSessionFilePath = continuation_1.getStepSessionFilePath;',
       'module.exports.__readStepSessionState = continuation_1.readStepSessionState;',
@@ -2624,7 +2630,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__processAgentStatusFile = processAgentStatusFile;',
       'module.exports.__recordSolomapLearningCycle = recordSolomapLearningCycle;',
       'module.exports.__buildSolomapLearningContext = buildSolomapLearningContext;',
-      'module.exports.__shellQuote = shellQuote;'
+      'module.exports.__shellQuote = agentCli_1.shellQuote;'
     ].join('\n')
   );
 
@@ -4236,10 +4242,11 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(source, /openProjectFileDiff/);
   assert.match(source, /vscode\.commands\.executeCommand\('vscode\.diff'/);
   assert.match(source, /rollbackChange/);
-  assert.match(source, /当前项目交付信号/);
-  assert.match(source, /'3'/);
-  assert.match(source, /'run',\s*'list'/);
-  assert.match(source, /'release',\s*'list'/);
+  const projectSignalsSource = fs.readFileSync(path.join(projectRoot, 'src', 'projectSignals.ts'), 'utf8');
+  assert.match(projectSignalsSource, /当前项目交付信号/);
+  assert.match(projectSignalsSource, /'3'/);
+  assert.match(projectSignalsSource, /'run',\s*'list'/);
+  assert.match(projectSignalsSource, /'release',\s*'list'/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {

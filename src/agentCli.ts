@@ -1,0 +1,631 @@
+import * as childProcess from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+export interface AgentModelOption {
+  value: string;
+  label: string;
+  title?: string;
+}
+
+export interface AgentModelCatalog {
+  family: string;
+  command: string;
+  models: AgentModelOption[];
+  selectedValue: string;
+  supportsDiscovery: boolean;
+}
+
+const agentModelCatalogCache = new Map<string, { expiresAt: number; catalog: AgentModelCatalog }>();
+
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function normalizeTaskPermissionMode(value: unknown): string {
+  return ['auto', 'always', 'never'].includes(String(value || '')) ? String(value) : 'auto';
+}
+
+export function getTaskPermissionDetectionTokens(agentCli: string): string[] {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const commonTokens = [
+    '--dangerously-skip-permissions',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--ask-for-approval never',
+    '--ask-for-approval=never',
+    '-a never',
+    '--permission-mode bypasspermissions',
+    '--permission-mode=bypasspermissions',
+    '--permission-mode dontask',
+    '--permission-mode=dontask',
+    '--allow-all',
+    '--allow-all-tools',
+    '--yolo'
+  ];
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return ['--force'];
+  }
+  return commonTokens;
+}
+
+export function commandAlreadyGrantsTaskPermissions(agentCli: string): boolean {
+  const raw = String(agentCli || '').toLowerCase();
+  const knownTokens = getTaskPermissionDetectionTokens(agentCli);
+  if (knownTokens.some((token) => raw.includes(token))) {
+    return true;
+  }
+  if (!path.isAbsolute(agentCli)) {
+    return false;
+  }
+  try {
+    const stat = fs.statSync(agentCli);
+    if (!stat.isFile() || stat.size > 1024 * 1024) {
+      return false;
+    }
+    const content = fs.readFileSync(agentCli, 'utf8').toLowerCase();
+    return knownTokens.some((token) => content.includes(token));
+  } catch {
+    return false;
+  }
+}
+
+export function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
+  const normalizedMode = normalizeTaskPermissionMode(mode);
+  if (normalizedMode === 'never') {
+    return '';
+  }
+  if (normalizedMode === 'auto' && commandAlreadyGrantsTaskPermissions(agentCli)) {
+    return '';
+  }
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return '--dangerously-bypass-approvals-and-sandbox';
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return '--force';
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return '--dangerously-skip-permissions';
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return '--dangerously-skip-permissions';
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return '--allow-all --no-ask-user';
+  }
+  return '';
+}
+
+export function getAgentTaskAutomationStatus(agentCli: string): { supported: boolean; preconfigured: boolean; permissionArgs: string; message: string } {
+  const preconfigured = commandAlreadyGrantsTaskPermissions(agentCli);
+  const permissionArgs = getTaskPermissionArgs(agentCli, 'always');
+  if (preconfigured) {
+    return {
+      supported: true,
+      preconfigured: true,
+      permissionArgs,
+      message: `${agentCli} is already prepared for automatic task runs.`
+    };
+  }
+  if (permissionArgs) {
+    return {
+      supported: true,
+      preconfigured: false,
+      permissionArgs,
+      message: `SoloMap can prepare ${agentCli} automatically for task runs.`
+    };
+  }
+  return {
+    supported: false,
+    preconfigured: false,
+    permissionArgs: '',
+    message: `${agentCli} does not expose a supported automatic task permission mode yet.`
+  };
+}
+
+export function ensureAgentTaskAutomation(agentCli: string): { ok: boolean; message: string } {
+  const status = getAgentTaskAutomationStatus(agentCli);
+  if (status.supported) {
+    return { ok: true, message: status.message };
+  }
+  return {
+    ok: false,
+    message: `${status.message} Choose a supported Agent CLI or use the native terminal continuation for interactive approval.`
+  };
+}
+
+export function expandHomePath(value: string): string {
+  const trimmed = String(value || '').trim();
+  if (trimmed === '~') {
+    return process.env.HOME || trimmed;
+  }
+  if (trimmed.startsWith('~/')) {
+    return path.join(process.env.HOME || '~', trimmed.slice(2));
+  }
+  return trimmed;
+}
+
+export function isExecutableFile(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) {
+      return false;
+    }
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function readShellPath(shellPath: string): string[] {
+  const shell = expandHomePath(shellPath);
+  if (!shell || !fs.existsSync(shell)) {
+    return [];
+  }
+  try {
+    const result = childProcess.spawnSync(shell, ['-lc', 'printf %s "$PATH"'], {
+      encoding: 'utf8',
+      timeout: 1800,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    if (result.status !== 0) {
+      return [];
+    }
+    return String(result.stdout || '').split(path.delimiter).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+export function getExecutableSearchPaths(): string[] {
+  const configuredPath = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const shellPaths = [
+    ...readShellPath(process.env.SHELL || ''),
+    ...readShellPath('/bin/zsh'),
+    ...readShellPath('/bin/bash')
+  ];
+  const home = process.env.HOME || '';
+  const commonPaths = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/local/sbin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+    home ? path.join(home, '.local', 'bin') : '',
+    home ? path.join(home, 'bin') : '',
+    home ? path.join(home, '.npm-global', 'bin') : '',
+    home ? path.join(home, '.npm', 'bin') : '',
+    home ? path.join(home, '.yarn', 'bin') : '',
+    home ? path.join(home, '.bun', 'bin') : '',
+    home ? path.join(home, '.cargo', 'bin') : ''
+  ].filter(Boolean);
+  return [...configuredPath, ...shellPaths, ...commonPaths]
+    .map(expandHomePath)
+    .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+}
+
+export function resolveCommandOnSearchPath(command: string): string {
+  const trimmed = String(command || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+  const expanded = expandHomePath(trimmed);
+  if (path.isAbsolute(expanded) || expanded.includes(path.sep)) {
+    return isExecutableFile(expanded) ? expanded : '';
+  }
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+    : [''];
+  for (const dir of getExecutableSearchPaths()) {
+    for (const ext of extensions) {
+      const candidate = path.join(dir, `${expanded}${ext}`);
+      if (isExecutableFile(candidate)) {
+        return candidate;
+      }
+    }
+  }
+  return '';
+}
+
+export function commandExists(command: string): boolean {
+  return Boolean(resolveCommandOnSearchPath(command));
+}
+
+export function resolveExecutablePath(command: string): string {
+  const trimmed = (command || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+  return resolveCommandOnSearchPath(trimmed) || expandHomePath(trimmed);
+}
+
+export function getAgentCliFamily(command: string): string {
+  const name = path.basename((command || '').trim()).toLowerCase();
+  if (['codex', 'codex-cli'].includes(name)) return 'codex';
+  if (['claude', 'claude-code', 'claude-code-cli'].includes(name)) return 'claude';
+  if (['cursor', 'cursor-cli', 'cursor-agent'].includes(name)) return 'cursor';
+  if (['copilot', 'copilot-cli'].includes(name)) return 'copilot';
+  if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
+  if (['', 'agy', 'antigravity', 'antigravity-cli'].includes(name)) return 'antigravity';
+  return name;
+}
+
+export function getAgentModelCacheKey(agentCli: string): string {
+  const family = getAgentCliFamily(agentCli);
+  const command = resolveExecutablePath(agentCli);
+  return `${family}::${command}`;
+}
+
+export function getAgentModelFlag(agentCli: string, selectedModel = ''): string {
+  const model = String(selectedModel || '').trim();
+  if (!model || model === 'auto') {
+    return '';
+  }
+  const family = getAgentCliFamily(agentCli);
+  if (['codex', 'cursor', 'copilot', 'claude', 'opencode', 'antigravity'].includes(family)) {
+    return ` --model ${shellQuote(model)}`;
+  }
+  return '';
+}
+
+export function createAutoOnlyModelCatalog(agentCli: string): AgentModelCatalog {
+  return {
+    family: getAgentCliFamily(agentCli),
+    command: resolveExecutablePath(agentCli),
+    models: [{ value: 'auto', label: 'Auto' }],
+    selectedValue: 'auto',
+    supportsDiscovery: false
+  };
+}
+
+export function parseCursorModelList(output: string): AgentModelOption[] {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^([^\s]+)\s+-\s+(.+)$/);
+      if (match) {
+        return { value: match[1].trim(), label: match[2].trim(), title: line };
+      }
+      return { value: line, label: line };
+    });
+}
+
+export function parseAgyModelList(output: string): AgentModelOption[] {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => ({ value: line, label: line }));
+}
+
+export function parseOpencodeModelList(output: string): AgentModelOption[] {
+  return String(output || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^available models/i.test(line) && !/^tip:/i.test(line))
+    .map((line) => {
+      const match = line.match(/^([^\s]+)\s+-\s+(.+)$/);
+      if (match) {
+        return { value: match[1].trim(), label: match[2].trim(), title: line };
+      }
+      return { value: line, label: line };
+    });
+}
+
+export function parseCodexModelCatalog(output: string): AgentModelOption[] {
+  try {
+    const payload = JSON.parse(output || '{}') as { models?: Array<{ slug?: string; display_name?: string; visibility?: string }> };
+    return (payload.models || [])
+      .filter((model) => String(model.visibility || '').trim() !== 'hidden')
+      .map((model) => {
+        const value = String(model.slug || '').trim();
+        const label = String(model.display_name || value).trim();
+        return value ? { value, label } : null;
+      })
+      .filter((option): option is AgentModelOption => Boolean(option));
+  } catch {
+    return [];
+  }
+}
+
+export function loadDiscoveredAgentModels(agentCli: string): AgentModelCatalog {
+  const resolvedCli = resolveExecutablePath(agentCli);
+  const family = getAgentCliFamily(resolvedCli);
+  const cacheKey = getAgentModelCacheKey(resolvedCli);
+  const cached = agentModelCatalogCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.catalog;
+  }
+
+  let discovered: AgentModelOption[] = [];
+  let supportsDiscovery = false;
+  try {
+    if (family === 'codex') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['debug', 'models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseCodexModelCatalog(result.stdout);
+      }
+    } else if (family === 'cursor') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseCursorModelList(result.stdout);
+      }
+    } else if (family === 'antigravity') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseAgyModelList(result.stdout);
+      }
+    } else if (family === 'opencode') {
+      supportsDiscovery = true;
+      const result = childProcess.spawnSync(resolvedCli, ['models'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      if (result.status === 0) {
+        discovered = parseOpencodeModelList(result.stdout);
+      }
+    }
+  } catch (error) {
+    console.error(`SoloMap failed to discover models for ${resolvedCli}:`, error);
+  }
+
+  const models = [{ value: 'auto', label: 'Auto' }, ...discovered]
+    .filter((option, index, all) => option.value && all.findIndex((candidate) => candidate.value === option.value) === index);
+  const catalog: AgentModelCatalog = {
+    family,
+    command: resolvedCli,
+    models: models.length ? models : [{ value: 'auto', label: 'Auto' }],
+    selectedValue: 'auto',
+    supportsDiscovery: supportsDiscovery && discovered.length > 0
+  };
+  agentModelCatalogCache.set(cacheKey, {
+    expiresAt: Date.now() + 5 * 60 * 1000,
+    catalog
+  });
+  return catalog;
+}
+
+export function getKnownAgentCliCandidates(family: string): string[] {
+  if (family === 'codex') return ['codex', 'codex-cli'];
+  if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
+  if (family === 'cursor') return ['cursor-agent', 'cursor', 'cursor-cli'];
+  if (family === 'copilot') return ['copilot', 'copilot-cli'];
+  if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
+  if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
+  return family ? [family] : [];
+}
+
+export function getAgentCliCandidates(agentCli: string, configuredCliPath: string): string[] {
+  const requestedCli = (agentCli || '').trim();
+  const configuredCli = (configuredCliPath || '').trim();
+  const requestedFamily = getAgentCliFamily(requestedCli);
+  const configuredFamily = getAgentCliFamily(configuredCli);
+  const preferredFamily = requestedCli ? requestedFamily : configuredFamily;
+  const requestedCandidate = path.basename(requestedCli).toLowerCase() === 'cursor' ? '' : requestedCli;
+  const configuredCandidate = path.basename(configuredCli).toLowerCase() === 'cursor' ? '' : configuredCli;
+  const familyOrder = [
+    preferredFamily,
+    configuredFamily,
+    requestedFamily,
+    'antigravity',
+    'codex',
+    'claude',
+    'copilot',
+    'opencode'
+  ].filter(Boolean);
+  const preferredCandidates = requestedCli
+    ? [requestedCandidate, configuredCandidate]
+    : [configuredCandidate, requestedCandidate];
+  const candidates = [
+    ...preferredCandidates,
+    ...familyOrder.flatMap(getKnownAgentCliCandidates)
+  ];
+
+  return candidates.filter(Boolean).filter((candidate, index, all) => all.indexOf(candidate) === index);
+}
+
+export function resolveAgentCli(agentCli: string, configuredCliPath: string): string {
+  const candidates = getAgentCliCandidates(agentCli, configuredCliPath);
+
+  for (const candidate of candidates) {
+    if (commandExists(candidate)) {
+      return resolveExecutablePath(candidate);
+    }
+  }
+
+  return candidates[0] || 'agy';
+}
+
+export function getAgentProvider(agentCli: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return 'codex';
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return 'cursor';
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return 'claude';
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return 'opencode';
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return 'copilot';
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return 'antigravity';
+  }
+  return executableName || 'unknown';
+}
+
+export function buildAgentCommand(agentCli: string, agentPrompt: string, workspaceRoot: string, nativeSessionId = '', taskPermissionMode = 'auto', selectedModel = ''): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedPrompt = shellQuote(agentPrompt);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+  void nativeSessionId;
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPrompt}`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPrompt}`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPrompt})`;
+  }
+
+  return `${quotedCli} run --task ${quotedPrompt}`;
+}
+
+export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedPromptFile = shellQuote(promptFilePath);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
+  const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPromptFileInstruction}`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPromptFileInstruction})`;
+  }
+
+  return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
+}
+
+export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const promptExpression = `"$${promptVarName}"`;
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${promptExpression}`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `${quotedCli} run${modelSegment} ${promptExpression}`;
+  }
+
+  return `${quotedCli} run --task ${promptExpression}`;
+}
+
+export function buildNativeContinueCommand(agentCli: string, sessionId: string, workspaceRoot: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedSessionId = shellQuote(sessionId);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} resume --include-non-interactive --all -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} resume ${quotedSessionId})`;
+  }
+
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --conversation ${quotedSessionId} --add-dir=${shellQuote(workspaceRoot)}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} --connect ${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}`;
+  }
+
+  return `${quotedCli} ${quotedSessionId}`;
+}
+
+export function buildSdkSentinelCommandLabel(agentCli: string, workspaceRoot: string, sessionId: string): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} resume [tracked ${sessionId} @ ${workspaceRoot}]`;
+  }
+  return `${quotedCli} [interactive continuation]`;
+}
+
+export function supportsSdkContinuation(agentCli: string): boolean {
+  return getAgentProvider(agentCli) === 'codex';
+}
+
+export function getCliVersionArgs(agentCli: string): string[] {
+  const executableName = path.basename(agentCli).toLowerCase();
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return ['--version'];
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return ['--version'];
+  }
+  return ['--version'];
+}
+
+export function formatCliTestMessage(agentCli: string, stdout: string, stderr: string): string {
+  const version = (stdout.trim() || stderr.trim() || 'available').split('\n')[0];
+  return `${agentCli} · ${version}`;
+}
