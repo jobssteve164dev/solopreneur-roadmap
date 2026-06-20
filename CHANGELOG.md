@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.246 - 2026-06-20
+
+### Fixed
+- restore sidebar actions and pro refresh (043b757)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.245 - 2026-06-20
 
 ### Fixed
