@@ -73,15 +73,12 @@ import {
   writeSolomapSkillRegistry
 } from './solomapGlobal';
 import {
-  AgentModelCatalog,
-  AgentModelOption,
   buildAgentCommand,
   buildAgentCommandForPromptFile,
   buildAgentCommandFromShellVar,
   buildNativeContinueCommand,
   buildSdkSentinelCommandLabel,
   commandExists,
-  createAutoOnlyModelCatalog,
   ensureAgentTaskAutomation,
   formatCliTestMessage,
   getAgentCliCandidates,
@@ -89,12 +86,17 @@ import {
   getAgentProvider,
   getCliVersionArgs,
   getTaskPermissionArgs,
-  loadDiscoveredAgentModels,
   resolveAgentCli,
   resolveExecutablePath,
   shellQuote,
   supportsSdkContinuation
 } from './agentCli';
+import {
+  AgentModelCatalog,
+  AgentModelOption,
+  createAutoOnlyModelCatalog,
+  loadDiscoveredAgentModels
+} from './agentModels';
 import {
   clearStoredAgentSession,
   extractCodexSessionIdFromOutputText,

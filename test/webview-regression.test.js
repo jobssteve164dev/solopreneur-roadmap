@@ -178,6 +178,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './agentCli') {
           return require(path.join(projectRoot, 'out/agentCli.js'));
         }
+        if (id === './agentModels') {
+          return require(path.join(projectRoot, 'out/agentModels.js'));
+        }
         if (id === './continuation') {
           return require(path.join(projectRoot, 'out/continuation.js'));
         }
@@ -2660,6 +2663,30 @@ test('sidebar issue creation keeps labels auxiliary to creation', () => {
   assert.equal(sidebarModule.__parseIssueNumberFromOutput('created issue'), 0);
 });
 
+test('agent model discovery parsers normalize current CLI outputs', () => {
+  const agentModels = require(path.join(projectRoot, 'out/agentModels.js'));
+  assert.deepEqual(
+    agentModels.parseTextModelList('\u001b[36mgpt-5.3-codex\u001b[39m \u001b[2m- Codex 5.3\u001b[22m\u001b[2m (default)\u001b[22m'),
+    [{ value: 'gpt-5.3-codex', label: 'Codex 5.3', title: 'gpt-5.3-codex - Codex 5.3' }]
+  );
+  assert.deepEqual(
+    agentModels.parseTextModelList('Gemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)'),
+    [
+      { value: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)', title: undefined },
+      { value: 'Claude Sonnet 4.6 (Thinking)', label: 'Claude Sonnet 4.6 (Thinking)', title: undefined }
+    ]
+  );
+  assert.deepEqual(
+    agentModels.parseCodexModelCatalog(JSON.stringify({
+      models: [
+        { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list' },
+        { slug: 'hidden-model', display_name: 'Hidden', visibility: 'hidden' }
+      ]
+    })),
+    [{ value: 'gpt-5.5', label: 'GPT-5.5', title: 'gpt-5.5' }]
+  );
+});
+
 test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
@@ -2823,6 +2850,18 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('opencode', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
     "(cd '/workspace/app' && 'opencode' run 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.')"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto', 'gpt-5.5'),
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m 'gpt-5.5' -"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('cursor-agent', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto', 'gpt-5.3-codex'),
+    "'cursor-agent' -p --force --model 'gpt-5.3-codex' --output-format text 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
+  );
+  assert.equal(
+    extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto', 'Gemini 3.5 Flash (High)'),
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --dangerously-skip-permissions --model 'Gemini 3.5 Flash (High)' --add-dir='/workspace/app'"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),

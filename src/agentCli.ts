@@ -3,22 +3,6 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-export interface AgentModelOption {
-  value: string;
-  label: string;
-  title?: string;
-}
-
-export interface AgentModelCatalog {
-  family: string;
-  command: string;
-  models: AgentModelOption[];
-  selectedValue: string;
-  supportsDiscovery: boolean;
-}
-
-const agentModelCatalogCache = new Map<string, { expiresAt: number; catalog: AgentModelCatalog }>();
-
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -255,158 +239,19 @@ export function getAgentCliFamily(command: string): string {
   return name;
 }
 
-export function getAgentModelCacheKey(agentCli: string): string {
-  const family = getAgentCliFamily(agentCli);
-  const command = resolveExecutablePath(agentCli);
-  return `${family}::${command}`;
-}
-
 export function getAgentModelFlag(agentCli: string, selectedModel = ''): string {
   const model = String(selectedModel || '').trim();
   if (!model || model === 'auto') {
     return '';
   }
   const family = getAgentCliFamily(agentCli);
-  if (['codex', 'cursor', 'copilot', 'claude', 'opencode', 'antigravity'].includes(family)) {
+  if (family === 'codex') {
+    return ` -m ${shellQuote(model)}`;
+  }
+  if (['cursor', 'copilot', 'claude', 'opencode', 'antigravity'].includes(family)) {
     return ` --model ${shellQuote(model)}`;
   }
   return '';
-}
-
-export function createAutoOnlyModelCatalog(agentCli: string): AgentModelCatalog {
-  return {
-    family: getAgentCliFamily(agentCli),
-    command: resolveExecutablePath(agentCli),
-    models: [{ value: 'auto', label: 'Auto' }],
-    selectedValue: 'auto',
-    supportsDiscovery: false
-  };
-}
-
-export function parseCursorModelList(output: string): AgentModelOption[] {
-  return String(output || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const match = line.match(/^([^\s]+)\s+-\s+(.+)$/);
-      if (match) {
-        return { value: match[1].trim(), label: match[2].trim(), title: line };
-      }
-      return { value: line, label: line };
-    });
-}
-
-export function parseAgyModelList(output: string): AgentModelOption[] {
-  return String(output || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => ({ value: line, label: line }));
-}
-
-export function parseOpencodeModelList(output: string): AgentModelOption[] {
-  return String(output || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !/^available models/i.test(line) && !/^tip:/i.test(line))
-    .map((line) => {
-      const match = line.match(/^([^\s]+)\s+-\s+(.+)$/);
-      if (match) {
-        return { value: match[1].trim(), label: match[2].trim(), title: line };
-      }
-      return { value: line, label: line };
-    });
-}
-
-export function parseCodexModelCatalog(output: string): AgentModelOption[] {
-  try {
-    const payload = JSON.parse(output || '{}') as { models?: Array<{ slug?: string; display_name?: string; visibility?: string }> };
-    return (payload.models || [])
-      .filter((model) => String(model.visibility || '').trim() !== 'hidden')
-      .map((model) => {
-        const value = String(model.slug || '').trim();
-        const label = String(model.display_name || value).trim();
-        return value ? { value, label } : null;
-      })
-      .filter((option): option is AgentModelOption => Boolean(option));
-  } catch {
-    return [];
-  }
-}
-
-export function loadDiscoveredAgentModels(agentCli: string): AgentModelCatalog {
-  const resolvedCli = resolveExecutablePath(agentCli);
-  const family = getAgentCliFamily(resolvedCli);
-  const cacheKey = getAgentModelCacheKey(resolvedCli);
-  const cached = agentModelCatalogCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.catalog;
-  }
-
-  let discovered: AgentModelOption[] = [];
-  let supportsDiscovery = false;
-  try {
-    if (family === 'codex') {
-      supportsDiscovery = true;
-      const result = childProcess.spawnSync(resolvedCli, ['debug', 'models'], {
-        encoding: 'utf8',
-        timeout: 5000,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-      if (result.status === 0) {
-        discovered = parseCodexModelCatalog(result.stdout);
-      }
-    } else if (family === 'cursor') {
-      supportsDiscovery = true;
-      const result = childProcess.spawnSync(resolvedCli, ['models'], {
-        encoding: 'utf8',
-        timeout: 5000,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-      if (result.status === 0) {
-        discovered = parseCursorModelList(result.stdout);
-      }
-    } else if (family === 'antigravity') {
-      supportsDiscovery = true;
-      const result = childProcess.spawnSync(resolvedCli, ['models'], {
-        encoding: 'utf8',
-        timeout: 5000,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-      if (result.status === 0) {
-        discovered = parseAgyModelList(result.stdout);
-      }
-    } else if (family === 'opencode') {
-      supportsDiscovery = true;
-      const result = childProcess.spawnSync(resolvedCli, ['models'], {
-        encoding: 'utf8',
-        timeout: 5000,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-      if (result.status === 0) {
-        discovered = parseOpencodeModelList(result.stdout);
-      }
-    }
-  } catch (error) {
-    console.error(`SoloMap failed to discover models for ${resolvedCli}:`, error);
-  }
-
-  const models = [{ value: 'auto', label: 'Auto' }, ...discovered]
-    .filter((option, index, all) => option.value && all.findIndex((candidate) => candidate.value === option.value) === index);
-  const catalog: AgentModelCatalog = {
-    family,
-    command: resolvedCli,
-    models: models.length ? models : [{ value: 'auto', label: 'Auto' }],
-    selectedValue: 'auto',
-    supportsDiscovery: supportsDiscovery && discovered.length > 0
-  };
-  agentModelCatalogCache.set(cacheKey, {
-    expiresAt: Date.now() + 5 * 60 * 1000,
-    catalog
-  });
-  return catalog;
 }
 
 export function getKnownAgentCliCandidates(family: string): string[] {
