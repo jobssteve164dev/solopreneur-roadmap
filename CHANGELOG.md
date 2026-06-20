@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.245 - 2026-06-20
+
+### Fixed
+- stabilize agent model discovery (89158d2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.244 - 2026-06-20
 
 ### Fixed
