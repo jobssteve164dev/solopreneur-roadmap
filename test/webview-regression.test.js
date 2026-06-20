@@ -157,6 +157,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './projectSignals') {
           return require(path.join(projectRoot, 'out/projectSignals.js'));
         }
+        if (id === './projectFoundation') {
+          return require(path.join(projectRoot, 'out/projectFoundation.js'));
+        }
         if (id === './roadmapWebview') {
           return require(path.join(projectRoot, 'out/roadmapWebview.js'));
         }
@@ -539,6 +542,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /data-refresh-project-path/);
   assert.match(script, /data-toggle-delivery-panel/);
   assert.match(script, /data-agent-fix-delivery-project-path/);
+  assert.match(script, /data-agent-fix-security-project-path/);
+  assert.match(script, /data-agent-fix-foundation-project-path/);
+  assert.match(script, /projectSecurityLoaded/);
+  assert.match(script, /securitySignalText/);
+  assert.match(script, /foundationSignalText/);
+  assert.match(script, /buildSecurityActionPrompt/);
+  assert.match(script, /buildFoundationActionPrompt/);
   assert.match(script, /toggleProjectPinned/);
   assert.match(script, /getProjectConversationHistory/);
   assert.match(script, /checksCached/);
@@ -2398,6 +2408,61 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   assert.equal(deliverySummary.stale, true);
   const liveDeliverySummary = sidebarModule.__summarizeDeliveryCache('owner/repo', deliveryCache, false);
   assert.equal(liveDeliverySummary.failedWorkflowRuns, 1);
+});
+
+test('project foundation writes only missing minimal baseline files', () => {
+  const foundationModule = require(path.join(projectRoot, 'out/projectFoundation.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-foundation-'));
+  fs.writeFileSync(path.join(root, 'README.md'), '# Existing\n', 'utf8');
+
+  const assessment = foundationModule.ensureProjectFoundation(root, 'tool');
+
+  assert.equal(fs.readFileSync(path.join(root, 'README.md'), 'utf8'), '# Existing\n');
+  assert.equal(assessment.complete, true);
+  assert.ok(fs.existsSync(path.join(root, 'AGENTS.md')));
+  assert.ok(fs.existsSync(path.join(root, 'PROJECT_MEMORY.md')));
+  assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'ci.yml')));
+  assert.ok(fs.existsSync(path.join(root, '.github', 'workflows', 'security.yml')));
+  assert.match(fs.readFileSync(path.join(root, 'PROJECT_MEMORY.md'), 'utf8'), /Stable Decisions/);
+});
+
+test('sidebar security summary counts only live critical and high alerts', () => {
+  const sidebarModule = loadCompiledModule(
+    'out/sidebarProvider.js',
+    [
+      'module.exports.__summarizeSecurityCache = summarizeSecurityCache;',
+      'module.exports.__writeSecurityCache = writeSecurityCache;',
+      'module.exports.__readSecurityCache = readSecurityCache;',
+      'module.exports.__getSecurityCachePath = getSecurityCachePath;'
+    ].join('\n')
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-security-'));
+  childProcess.execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+  childProcess.execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: root, stdio: 'ignore' });
+  const cache = {
+    schemaVersion: 1,
+    repo: 'owner/repo',
+    syncedAt: '2026-06-20T00:00:00.000Z',
+    message: '',
+    alerts: [
+      { source: 'Dependabot', title: 'critical package', severity: 'critical', state: 'open', url: 'https://github.com/owner/repo/security/dependabot/1' },
+      { source: 'CodeQL', title: 'high code path', severity: 'high', state: 'open', url: 'https://github.com/owner/repo/security/code-scanning/2' },
+      { source: 'Dependabot', title: 'medium package', severity: 'medium', state: 'open', url: '' },
+      { source: 'CodeQL', title: 'fixed path', severity: 'critical', state: 'fixed', url: '' }
+    ]
+  };
+
+  sidebarModule.__writeSecurityCache(root, cache);
+  assert.equal(sidebarModule.__getSecurityCachePath(root), path.join(root, '.solopreneur', 'security-cache.json'));
+  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /security-cache\.json/);
+  const read = sidebarModule.__readSecurityCache(root, 'owner/repo');
+  const live = sidebarModule.__summarizeSecurityCache('owner/repo', read, false);
+  assert.equal(live.openCriticalHigh, 2);
+  assert.equal(live.openTotal, 3);
+  assert.equal(live.status, 'risk');
+  const stale = sidebarModule.__summarizeSecurityCache('owner/repo', read, true);
+  assert.equal(stale.openCriticalHigh, 0);
+  assert.equal(stale.status, 'unknown');
 });
 
 test('sidebar delivery summary ignores cancelled and superseded workflow runs', () => {

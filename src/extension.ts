@@ -13,9 +13,10 @@ import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { getAgentImpactStatus, buildAgentImpactSummary } from './agentImpact';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
-import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext } from './projectSignals';
+import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import { getWebviewHtml } from './roadmapWebview';
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
+import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import {
   buildCrossAgentHandoffInstructions,
@@ -2131,6 +2132,7 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
       path: folder,
       type: projectType.value
     });
+    ensureProjectFoundation(folder, projectType.value);
     await saveProjects(context, projects);
     recordLocalUsageEvent(context, 'projectAdded');
   }
@@ -3259,6 +3261,7 @@ function buildAgentConversationPrompt(
     enabledEnhancements
   );
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
+  const githubSecurityContext = buildGithubSecurityContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
@@ -3301,6 +3304,7 @@ function buildAgentConversationPrompt(
     supplement,
     ...(normalizedGithubIssueContext ? ['', normalizedGithubIssueContext] : []),
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
+    ...(githubSecurityContext ? ['', githubSecurityContext] : []),
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
     solomapMemoryInstructions,
@@ -3359,6 +3363,7 @@ function buildRoadmapRevisionPrompt(
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
   const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage, enabledEnhancements);
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
+  const githubSecurityContext = buildGithubSecurityContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
@@ -3392,6 +3397,7 @@ function buildRoadmapRevisionPrompt(
     '',
     crossAgentHandoffInstructions,
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
+    ...(githubSecurityContext ? ['', githubSecurityContext] : []),
     ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),

@@ -238,3 +238,63 @@ export function buildGithubDeliveryContext(workspaceRoot: string): string {
   const sections = [latestRelease, workflowSummary].filter(Boolean);
   return sections.length ? ['当前项目交付信号：', ...sections].join('\n\n') : '';
 }
+
+function normalizeSecuritySeverity(value: string): string {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['critical', 'high', 'medium', 'low'].includes(normalized)) return normalized;
+  if (normalized === 'error') return 'high';
+  if (normalized === 'warning') return 'medium';
+  return normalized || 'unknown';
+}
+
+function readGithubApiJson(repo: string, endpoint: string): any[] {
+  const result = childProcess.spawnSync('gh', ['api', endpoint], {
+    encoding: 'utf8',
+    timeout: 4200,
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  if (result.status !== 0) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(String(result.stdout || '[]'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function buildGithubSecurityContext(workspaceRoot: string): string {
+  const repo = getGithubRepoSlug(workspaceRoot);
+  if (!repo || !commandExists('gh')) {
+    return '';
+  }
+  const dependabotAlerts = readGithubApiJson(repo, `/repos/${repo}/dependabot/alerts?state=open&per_page=100`)
+    .map((alert: any) => ({
+      source: 'Dependabot',
+      title: String(alert?.security_advisory?.summary || alert?.dependency?.package?.name || 'Dependency alert'),
+      severity: normalizeSecuritySeverity(alert?.security_advisory?.severity || ''),
+      url: String(alert?.html_url || alert?.url || '')
+    }));
+  const codeScanningAlerts = readGithubApiJson(repo, `/repos/${repo}/code-scanning/alerts?state=open&per_page=100`)
+    .map((alert: any) => ({
+      source: String(alert?.tool?.name || 'Code scanning'),
+      title: String(alert?.rule?.description || alert?.rule?.name || alert?.rule?.id || 'Code scanning alert'),
+      severity: normalizeSecuritySeverity(alert?.rule?.security_severity_level || alert?.rule?.severity || ''),
+      url: String(alert?.html_url || alert?.url || '')
+    }));
+  const priorityAlerts = [...dependabotAlerts, ...codeScanningAlerts]
+    .filter((alert) => ['critical', 'high'].includes(alert.severity))
+    .slice(0, 5);
+  if (!priorityAlerts.length) {
+    return '';
+  }
+  return [
+    '当前项目安全审计信号：',
+    ...priorityAlerts.map((alert, index) => {
+      const url = alert.url ? ` · ${alert.url}` : '';
+      return `${index + 1}. ${alert.source}：${alert.severity} · ${alert.title}${url}`;
+    }),
+    '高危或严重安全告警应优先于普通推进动作处理；中低风险只作为背景。'
+  ].join('\n');
+}

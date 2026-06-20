@@ -8,6 +8,7 @@ import { AgentConversation } from './db/types';
 import { getAgentImpactStatus } from './agentImpact';
 import { summarizeDocumentationForReview } from './documentationManifest';
 import { readLearningSummary } from './learningLedger';
+import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -91,6 +92,9 @@ interface ProjectPortfolioSummary {
   stageGap: string;
   delivery: ProjectDeliverySummary;
   deliverySignal: string;
+  security: ProjectSecuritySummary;
+  securitySignal: string;
+  foundation: ProjectFoundationAssessment;
   documentationDocumentCount: number;
   documentationPendingReview: number;
   pinnedAt?: string;
@@ -655,6 +659,27 @@ interface ProjectDeliverySummary {
   message: string;
 }
 
+interface ProjectSecurityAlert {
+  source: string;
+  title: string;
+  severity: string;
+  state: string;
+  url: string;
+}
+
+interface ProjectSecuritySummary {
+  available: boolean;
+  loading: boolean;
+  stale: boolean;
+  syncedAt: string;
+  repo: string;
+  openCriticalHigh: number;
+  openTotal: number;
+  status: 'healthy' | 'risk' | 'unconfigured' | 'unknown';
+  alerts: ProjectSecurityAlert[];
+  message: string;
+}
+
 interface DeliveryCacheFile {
   schemaVersion: number;
   repo: string;
@@ -674,6 +699,14 @@ interface DeliveryCacheFile {
     updatedAt: string;
     url: string;
   }>;
+}
+
+interface SecurityCacheFile {
+  schemaVersion: number;
+  repo: string;
+  syncedAt: string;
+  alerts: ProjectSecurityAlert[];
+  message: string;
 }
 
 function createLoadingIssueSummary(): ProjectIssueSummary {
@@ -710,6 +743,29 @@ function createLoadingDeliverySummary(): ProjectDeliverySummary {
   };
 }
 
+function createEmptySecuritySummary(message = ''): ProjectSecuritySummary {
+  return {
+    available: false,
+    loading: false,
+    stale: false,
+    syncedAt: '',
+    repo: '',
+    openCriticalHigh: 0,
+    openTotal: 0,
+    status: message ? 'unknown' : 'unconfigured',
+    alerts: [],
+    message
+  };
+}
+
+function createLoadingSecuritySummary(): ProjectSecuritySummary {
+  return {
+    ...createEmptySecuritySummary('Loading security signals'),
+    loading: true,
+    status: 'unknown'
+  };
+}
+
 function getIssueCachePath(projectPath: string): string {
   return path.join(projectPath, '.solopreneur', 'issues-cache.json');
 }
@@ -718,13 +774,17 @@ function getDeliveryCachePath(projectPath: string): string {
   return path.join(projectPath, '.solopreneur', 'delivery-cache.json');
 }
 
+function getSecurityCachePath(projectPath: string): string {
+  return path.join(projectPath, '.solopreneur', 'security-cache.json');
+}
+
 function ensureIssueCacheGitignore(projectPath: string): void {
   const solopreneurDir = path.join(projectPath, '.solopreneur');
   const gitignorePath = path.join(solopreneurDir, '.gitignore');
   try {
     fs.mkdirSync(solopreneurDir, { recursive: true });
     const existing = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf8') : '';
-    const missing = ['issues-cache.json', 'delivery-cache.json']
+    const missing = ['issues-cache.json', 'delivery-cache.json', 'security-cache.json']
       .filter((entry) => !(new RegExp(`(^|\\n)${entry.replace('.', '\\.')}($|\\n)`).test(existing)));
     if (missing.length) {
       const next = `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`;
@@ -851,6 +911,66 @@ function writeDeliveryCache(projectPath: string, cache: DeliveryCacheFile): void
   ensureIssueCacheGitignore(projectPath);
 }
 
+function normalizeSecuritySeverity(value: string): string {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['critical', 'high', 'medium', 'low'].includes(normalized)) {
+    return normalized;
+  }
+  if (['error', 'warning', 'note'].includes(normalized)) {
+    return normalized === 'error' ? 'high' : normalized === 'warning' ? 'medium' : 'low';
+  }
+  return normalized || 'unknown';
+}
+
+function parseSecurityAlert(raw: any): ProjectSecurityAlert {
+  return {
+    source: String(raw?.source || ''),
+    title: String(raw?.title || ''),
+    severity: normalizeSecuritySeverity(raw?.severity || ''),
+    state: String(raw?.state || 'open').toLowerCase(),
+    url: String(raw?.url || '')
+  };
+}
+
+function validateSecurityCache(raw: any, repo: string): SecurityCacheFile | null {
+  if (!raw || raw.schemaVersion !== 1 || raw.repo !== repo || !Array.isArray(raw.alerts)) {
+    return null;
+  }
+  return {
+    schemaVersion: 1,
+    repo,
+    syncedAt: String(raw.syncedAt || ''),
+    alerts: raw.alerts.map(parseSecurityAlert).filter((alert: ProjectSecurityAlert) => alert.title || alert.source),
+    message: String(raw.message || '')
+  };
+}
+
+function readSecurityCache(projectPath: string, repo = getGithubRepoSlug(projectPath)): SecurityCacheFile | null {
+  if (!repo) {
+    return null;
+  }
+  try {
+    const cachePath = getSecurityCachePath(projectPath);
+    if (!fs.existsSync(cachePath)) {
+      return null;
+    }
+    return validateSecurityCache(JSON.parse(fs.readFileSync(cachePath, 'utf8')), repo);
+  } catch {
+    return null;
+  }
+}
+
+function writeSecurityCache(projectPath: string, cache: SecurityCacheFile): void {
+  const cachePath = getSecurityCachePath(projectPath);
+  const tempPath = `${cachePath}.tmp`;
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  const payload = JSON.stringify(cache, null, 2);
+  fs.writeFileSync(tempPath, payload, 'utf8');
+  JSON.parse(fs.readFileSync(tempPath, 'utf8'));
+  fs.renameSync(tempPath, cachePath);
+  ensureIssueCacheGitignore(projectPath);
+}
+
 function summarizeIssueItems(repo: string, items: ProjectIssueItem[], syncedAt = '', stale = false): ProjectIssueSummary {
   const byCategory: Record<string, number> = {};
   const byPriority: Record<string, number> = {};
@@ -881,6 +1001,23 @@ function summarizeIssueItems(repo: string, items: ProjectIssueItem[], syncedAt =
   };
 }
 
+function summarizeSecurityCache(repo: string, cache: SecurityCacheFile, stale = false): ProjectSecuritySummary {
+  const openAlerts = (cache.alerts || []).filter((alert) => !alert.state || alert.state === 'open');
+  const priorityAlerts = openAlerts.filter((alert) => ['critical', 'high'].includes(alert.severity));
+  return {
+    available: true,
+    loading: false,
+    stale,
+    syncedAt: cache.syncedAt,
+    repo,
+    openCriticalHigh: stale ? 0 : priorityAlerts.length,
+    openTotal: stale ? 0 : openAlerts.length,
+    status: stale ? 'unknown' : priorityAlerts.length > 0 ? 'risk' : 'healthy',
+    alerts: priorityAlerts.concat(openAlerts.filter((alert) => !['critical', 'high'].includes(alert.severity))).slice(0, 5),
+    message: stale ? 'Showing last synced security signals' : cache.message
+  };
+}
+
 function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
@@ -891,6 +1028,18 @@ function readCachedIssueSummary(projectPath: string): ProjectIssueSummary {
     return createLoadingIssueSummary();
   }
   return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+}
+
+function readCachedSecuritySummary(projectPath: string): ProjectSecuritySummary {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptySecuritySummary('No GitHub remote');
+  }
+  const cache = readSecurityCache(projectPath, repo);
+  if (!cache) {
+    return createLoadingSecuritySummary();
+  }
+  return summarizeSecurityCache(repo, cache, true);
 }
 
 function summarizeDeliveryCache(repo: string, cache: DeliveryCacheFile, stale = false): ProjectDeliverySummary {
@@ -1171,6 +1320,19 @@ async function runGhIssueCommandAsync(projectPath: string, args: string[], timeo
   return { ...result, repo };
 }
 
+async function runGhApiCommandAsync(projectPath: string, endpoint: string, timeout = 6500): Promise<{ ok: boolean; stdout: string; stderr: string; repo: string }> {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return { ok: false, stdout: '', stderr: 'No GitHub remote', repo: '' };
+  }
+  const ghPath = resolveCommandOnSearchPath('gh');
+  if (!ghPath) {
+    return { ok: false, stdout: '', stderr: 'GitHub CLI not found', repo };
+  }
+  const result = await runProcessAsync(ghPath, ['api', endpoint], timeout);
+  return { ...result, repo };
+}
+
 function readProjectDeliverySummary(projectPath: string): ProjectDeliverySummary {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
@@ -1363,6 +1525,85 @@ async function readProjectDeliverySummaryAsync(projectPath: string): Promise<Pro
     writeDeliveryCache(projectPath, cache);
   } catch {}
   return summarizeDeliveryCache(repo, cache, false);
+}
+
+function parseDependabotAlert(raw: any): ProjectSecurityAlert {
+  const advisory = raw?.security_advisory || {};
+  const dependency = raw?.dependency || {};
+  const packageName = String(dependency?.package?.name || advisory?.ghsa_id || 'Dependency alert');
+  return {
+    source: 'Dependabot',
+    title: String(advisory?.summary || packageName),
+    severity: normalizeSecuritySeverity(advisory?.severity || raw?.severity || ''),
+    state: String(raw?.state || 'open').toLowerCase(),
+    url: String(raw?.html_url || raw?.url || '')
+  };
+}
+
+function parseCodeScanningAlert(raw: any): ProjectSecurityAlert {
+  const rule = raw?.rule || {};
+  return {
+    source: String(raw?.tool?.name || 'Code scanning'),
+    title: String(rule?.description || rule?.name || rule?.id || 'Code scanning alert'),
+    severity: normalizeSecuritySeverity(rule?.security_severity_level || rule?.severity || ''),
+    state: String(raw?.state || 'open').toLowerCase(),
+    url: String(raw?.html_url || raw?.url || '')
+  };
+}
+
+async function readProjectSecuritySummaryAsync(projectPath: string): Promise<ProjectSecuritySummary> {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptySecuritySummary('No GitHub remote');
+  }
+  if (!resolveCommandOnSearchPath('gh')) {
+    const cache = readSecurityCache(projectPath, repo);
+    return cache ? summarizeSecurityCache(repo, cache, true) : { ...createEmptySecuritySummary('GitHub CLI not found'), repo };
+  }
+  const [dependabotResult, codeScanningResult] = await Promise.all([
+    runGhApiCommandAsync(projectPath, `/repos/${repo}/dependabot/alerts?state=open&per_page=100`, 6500),
+    runGhApiCommandAsync(projectPath, `/repos/${repo}/code-scanning/alerts?state=open&per_page=100`, 6500)
+  ]);
+  const alerts: ProjectSecurityAlert[] = [];
+  const messages: string[] = [];
+  try {
+    const dependabot = dependabotResult.ok ? JSON.parse(String(dependabotResult.stdout || '[]')) : [];
+    if (Array.isArray(dependabot)) {
+      alerts.push(...dependabot.map(parseDependabotAlert));
+    } else if (!dependabotResult.ok) {
+      messages.push(String(dependabotResult.stderr || 'Dependabot alerts unavailable').trim());
+    }
+  } catch {
+    messages.push('Dependabot alerts could not be read');
+  }
+  try {
+    const codeScanning = codeScanningResult.ok ? JSON.parse(String(codeScanningResult.stdout || '[]')) : [];
+    if (Array.isArray(codeScanning)) {
+      alerts.push(...codeScanning.map(parseCodeScanningAlert));
+    } else if (!codeScanningResult.ok) {
+      messages.push(String(codeScanningResult.stderr || 'Code scanning alerts unavailable').trim());
+    }
+  } catch {
+    messages.push('Code scanning alerts could not be read');
+  }
+  if (!dependabotResult.ok && !codeScanningResult.ok) {
+    const cache = readSecurityCache(projectPath, repo);
+    return cache ? summarizeSecurityCache(repo, cache, true) : {
+      ...createEmptySecuritySummary(messages.filter(Boolean).join(' / ') || 'GitHub security signals unavailable'),
+      repo
+    };
+  }
+  const cache: SecurityCacheFile = {
+    schemaVersion: 1,
+    repo,
+    syncedAt: new Date().toISOString(),
+    alerts: alerts.filter((alert) => alert.title || alert.source),
+    message: messages.filter(Boolean).join(' / ')
+  };
+  try {
+    writeSecurityCache(projectPath, cache);
+  } catch {}
+  return summarizeSecurityCache(repo, cache, false);
 }
 
 async function readProjectIssueSummaryAsync(projectPath: string): Promise<ProjectIssueSummary> {
@@ -2055,10 +2296,11 @@ function detectProjectType(nodes: RoadmapNodeLike[]): string {
   return 'core_product';
 }
 
-function inferGlobalPriority(summary: Pick<ProjectPortfolioSummary, 'failedNodes' | 'runningNodes' | 'inProgressNodes' | 'pendingNodes' | 'issues' | 'delivery' | 'overallStatus'>): string {
+function inferGlobalPriority(summary: Pick<ProjectPortfolioSummary, 'failedNodes' | 'runningNodes' | 'inProgressNodes' | 'pendingNodes' | 'issues' | 'delivery' | 'security' | 'overallStatus'>): string {
   const p0Issues = Number((summary.issues?.byPriority || {}).P0 || 0);
   const failedWorkflowRuns = Number(summary.delivery?.failedWorkflowRuns || 0);
-  if (p0Issues > 0 || failedWorkflowRuns > 0 || Number(summary.failedNodes || 0) > 0) return 'P0';
+  const securityRisks = Number(summary.security?.openCriticalHigh || 0);
+  if (securityRisks > 0 || p0Issues > 0 || failedWorkflowRuns > 0 || Number(summary.failedNodes || 0) > 0) return 'P0';
   if (Number(summary.runningNodes || 0) > 0 || Number(summary.inProgressNodes || 0) > 0) return 'P1';
   if (Number(summary.pendingNodes || 0) > 0) return 'P2';
   return 'P3';
@@ -2079,6 +2321,14 @@ function inferDeliverySignal(delivery: ProjectDeliverySummary): string {
   if (delivery.latestRelease) return `Latest ${delivery.latestRelease}`;
   if (delivery.stale && delivery.syncedAt) return 'Delivery cached';
   if (delivery.latestWorkflowStatus) return 'Checks healthy';
+  return '';
+}
+
+function inferSecuritySignal(security: ProjectSecuritySummary): string {
+  if (!security?.available) return '';
+  if (Number(security.openCriticalHigh || 0) > 0) return `${security.openCriticalHigh} security risk`;
+  if (security.status === 'healthy') return 'Security healthy';
+  if (security.stale && security.syncedAt) return 'Security cached';
   return '';
 }
 
@@ -2265,11 +2515,14 @@ function buildProjectPortfolioSummary(project: SolopreneurProject, options: { in
     overallStatus,
     recentActivityAt: getProjectRecentActivityAt(project.path),
     issues: readCachedIssueSummary(project.path),
-    delivery: readCachedDeliverySummary(project.path)
+    delivery: readCachedDeliverySummary(project.path),
+    security: readCachedSecuritySummary(project.path),
+    foundation: assessProjectFoundation(project.path)
   };
   const inferredPriority = inferGlobalPriority(baseSummary);
   const globalPriority = project.priority || inferredPriority;
   const deliverySignal = inferDeliverySignal(baseSummary.delivery);
+  const securitySignal = inferSecuritySignal(baseSummary.security);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
   const documentationSummary = summarizeDocumentationForReview(project.path);
   return {
@@ -2277,14 +2530,19 @@ function buildProjectPortfolioSummary(project: SolopreneurProject, options: { in
     globalPriority,
     projectType: project.type || detectProjectType(nodes),
     blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : '',
-    globalNextAction: baseSummary.delivery.failedWorkflowRuns > 0
-      ? '修复发布检查'
-      : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap')),
+    globalNextAction: baseSummary.security.openCriticalHigh > 0
+      ? '修复安全风险'
+      : baseSummary.delivery.failedWorkflowRuns > 0
+        ? '修复发布检查'
+        : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap')),
     reusableSignals: options.includeReusableSignals ? countReusableSignals(project.path, options.globalDataPath || '') : 0,
     issuePressure: inferIssuePressure(baseSummary.issues),
     stageGap: stageSummary.gap,
     delivery: baseSummary.delivery,
     deliverySignal,
+    security: baseSummary.security,
+    securitySignal,
+    foundation: baseSummary.foundation,
     documentationDocumentCount: documentationSummary.documentCount,
     documentationPendingReview: documentationSummary.pendingReviewCount,
     pinnedAt: project.pinnedAt || ''
@@ -2499,6 +2757,9 @@ function buildDailyReviewPrompt(options: {
       stageGap: project.stageGap,
       issuePressure: project.issuePressure,
       deliverySignal: project.deliverySignal,
+      securitySignal: project.securitySignal,
+      securityRisks: project.security?.openCriticalHigh || 0,
+      foundationMissing: project.foundation?.missingCount || 0,
       documentationDocumentCount: project.documentationDocumentCount || 0,
       documentationPendingReview: project.documentationPendingReview || 0
     }))
@@ -2705,6 +2966,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private _portfolioLoadRequest = 0;
   private _issueLoadRequest = 0;
   private _deliveryLoadRequest = 0;
+  private _securityLoadRequest = 0;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -3039,10 +3301,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             const projectPath = String(data.projectPath || '');
             let issues: ProjectIssueSummary | null = null;
             let delivery: ProjectDeliverySummary | null = null;
+            let security: ProjectSecuritySummary | null = null;
             try {
-              [issues, delivery] = await Promise.all([
+              [issues, delivery, security] = await Promise.all([
                 readProjectIssueSummaryAsync(projectPath),
-                readProjectDeliverySummaryAsync(projectPath)
+                readProjectDeliverySummaryAsync(projectPath),
+                readProjectSecuritySummaryAsync(projectPath)
               ]);
             } catch (error) {
               console.error('SoloMap sidebar failed to refresh project data:', error);
@@ -3061,11 +3325,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
                 delivery
               });
             }
+            if (security) {
+              this._view?.webview.postMessage({
+                command: 'projectSecurityLoaded',
+                projectPath,
+                security
+              });
+            }
             this._view?.webview.postMessage({
               command: 'projectRefreshCompleted',
               projectPath,
-              success: Boolean(issues?.available || delivery?.available),
-              message: issues?.message || delivery?.message || ''
+              success: Boolean(issues?.available || delivery?.available || security?.available),
+              message: issues?.message || delivery?.message || security?.message || ''
             });
             break;
           }
@@ -3189,6 +3460,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       this.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
       this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
       this.scheduleDeliverySummaryLoads(projectState.projects, projectState.selectedProjectPath);
+      this.scheduleSecuritySummaryLoads(projectState.projects, projectState.selectedProjectPath);
     } catch (error) {
       console.error('SoloMap sidebar failed to send projects:', error);
       this._view?.webview.postMessage({
@@ -3216,6 +3488,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       this._portfolioLoadRequest += 1;
       this._issueLoadRequest += 1;
       this._deliveryLoadRequest += 1;
+      this._securityLoadRequest += 1;
       const projectState = this._getProjects();
       const portfolio = buildProjectPortfolioSummaries(projectState.projects);
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
@@ -3286,6 +3559,33 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           console.error('SoloMap sidebar failed to refresh issue summary:', error);
         });
       }, 1200 + 80 * index);
+    });
+  }
+
+  private scheduleSecuritySummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
+    const requestId = ++this._securityLoadRequest;
+    const ordered = [
+      ...projects.filter((project) => project.path === selectedProjectPath),
+      ...projects.filter((project) => project.path !== selectedProjectPath)
+    ];
+    ordered.forEach((project, index) => {
+      setTimeout(() => {
+        if (!this._view || requestId !== this._securityLoadRequest) {
+          return;
+        }
+        void readProjectSecuritySummaryAsync(project.path).then((security) => {
+          if (!this._view || requestId !== this._securityLoadRequest) {
+            return;
+          }
+          this._view.webview.postMessage({
+            command: 'projectSecurityLoaded',
+            projectPath: project.path,
+            security
+          });
+        }).catch((error) => {
+          console.error('SoloMap sidebar failed to refresh security summary:', error);
+        });
+      }, 1600 + 140 * index);
     });
   }
 
@@ -6908,6 +7208,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliverySignalAttention: '交付需处理',
         deliverySignalHealthy: '最近检查正常',
         deliverySignalRelease: '最近发布',
+        securitySignalRisk: '安全需处理',
+        securitySignalHealthy: '安全正常',
+        foundationMissing: '基座缺失',
+        foundationReady: '基座完整',
         feedbackRatingTitle: '觉得 SoloMap 挺好用？',
         feedbackRatingDesc: '给个五星好评，支持我们持续更新！',
         feedbackRatingButton: '去评五星好评',
@@ -6926,6 +7230,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliveryActionHealthy: '最近 3 次检查没有失败。',
         deliveryActionInvestigate: '最近检查里有异常，先处理它再继续推进。',
         deliveryActionStarted: '已交给 Agent 检查并修复交付问题。',
+        deliveryActionSecurity: '安全审计',
+        deliveryActionFoundation: '项目基座',
+        deliveryActionRunAudit: '运行安全审计',
+        deliveryActionFixSecurity: '交给 Agent 修复安全风险',
+        deliveryActionFixFoundation: '补齐项目基座',
+        deliveryActionSecurityUnknown: '安全审计未配置或暂无权限。',
         deliveryActionFailureTag: '失败',
         deliveryActionTimeoutTag: '超时',
         deliveryActionRequiredTag: '需处理',
@@ -7185,6 +7495,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliverySignalAttention: 'Delivery needs attention',
         deliverySignalHealthy: 'Checks look healthy',
         deliverySignalRelease: 'Latest release',
+        securitySignalRisk: 'Security needs attention',
+        securitySignalHealthy: 'Security healthy',
+        foundationMissing: 'Foundation missing',
+        foundationReady: 'Foundation ready',
         feedbackRatingTitle: 'Loving SoloMap?',
         feedbackRatingDesc: 'Give us a 5-star rating on the marketplace to support our updates!',
         feedbackRatingButton: 'Rate on Marketplace',
@@ -7203,6 +7517,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         deliveryActionHealthy: 'The latest 3 checks have no failures.',
         deliveryActionInvestigate: 'A recent delivery check failed. Resolve it before pushing forward.',
         deliveryActionStarted: 'Asked the Agent to inspect and fix the delivery issue.',
+        deliveryActionSecurity: 'Security audit',
+        deliveryActionFoundation: 'Project foundation',
+        deliveryActionRunAudit: 'Run security audit',
+        deliveryActionFixSecurity: 'Ask Agent to fix security risk',
+        deliveryActionFixFoundation: 'Complete project foundation',
+        deliveryActionSecurityUnknown: 'Security audit is not configured or authorized yet.',
         deliveryActionFailureTag: 'Failed',
         deliveryActionTimeoutTag: 'Timed out',
         deliveryActionRequiredTag: 'Needs action',
@@ -7997,6 +8317,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         case 'projectDeliveryLoaded':
           currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
             project.path === message.projectPath ? { ...project, delivery: message.delivery, deliverySignal: deliverySignalText(message.delivery) } : project
+          ));
+          if (message.projectPath === currentProjects.selectedProjectPath) {
+            deliveryActionMessage = '';
+          }
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'projectSecurityLoaded':
+          currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
+            project.path === message.projectPath ? { ...project, security: message.security, securitySignal: securitySignalText(message.security) } : project
           ));
           if (message.projectPath === currentProjects.selectedProjectPath) {
             deliveryActionMessage = '';
@@ -9319,6 +9650,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function todayPlanScore(project) {
       let score = 0;
       const rhythm = getTodayWorkRhythm();
+      if (Number(project.security && project.security.openCriticalHigh || 0) > 0) score += 130;
       if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) score += 120;
       if (Number(project.failedNodes || 0) > 0) score += 100;
       if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) score += 90;
@@ -9340,6 +9672,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     function todayPlanReason(project) {
       const rhythm = getTodayWorkRhythm();
+      if (Number(project.security && project.security.openCriticalHigh || 0) > 0) return t('securitySignalRisk');
       if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) return t('todayReasonDelivery');
       if (Number(project.failedNodes || 0) > 0) return t('todayReasonFailed');
       if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) return t('todayReasonIssue');
@@ -9367,7 +9700,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return { slot, project };
       };
       return [
-        take(t('todaySlotUrgent'), project => Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 || Number(project.failedNodes || 0) > 0 || Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0 || project.globalPriority === 'P0'),
+        take(t('todaySlotUrgent'), project => Number(project.security && project.security.openCriticalHigh || 0) > 0 || Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 || Number(project.failedNodes || 0) > 0 || Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0 || project.globalPriority === 'P0'),
         take(t('todaySlotMain'), project => project.globalPriority === 'P1' || Number(project.runningNodes || 0) > 0 || Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0),
         take(t('todaySlotClose'), project => Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || project.stageGap)
       ].filter(Boolean).concat(
@@ -9676,6 +10009,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return '';
     }
 
+    function securitySignalText(security) {
+      if (!security || !security.available) return '';
+      if (Number(security.openCriticalHigh || 0) > 0) return t('securitySignalRisk') + ' ' + Number(security.openCriticalHigh || 0);
+      if (security.status === 'healthy') return t('securitySignalHealthy');
+      return '';
+    }
+
+    function foundationSignalText(foundation) {
+      if (!foundation) return '';
+      const missing = Number(foundation.missingCount || 0);
+      return missing > 0 ? t('foundationMissing') + ' ' + missing : t('foundationReady');
+    }
+
     function buildDeliveryActionPrompt(project) {
       const delivery = project && project.delivery ? project.delivery : {};
       const failedRuns = Array.isArray(delivery.recentWorkflowRuns)
@@ -9716,16 +10062,70 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       ].join('\\n');
     }
 
+    function buildSecurityActionPrompt(project) {
+      const security = project && project.security ? project.security : {};
+      const alerts = Array.isArray(security.alerts) ? security.alerts : [];
+      const alertSummary = alerts.length
+        ? alerts.map((alert, index) => {
+          const source = alert.source || 'Security';
+          const title = alert.title || 'Security alert';
+          const severity = alert.severity || 'unknown';
+          return (index + 1) + '. ' + source + ' · ' + severity + ' · ' + title + (alert.url ? ' · ' + alert.url : '');
+        }).join('\\n')
+        : (currentLanguage === 'zh' ? '当前没有缓存到具体告警明细，请重新审计项目安全状态。' : 'No alert details are cached. Re-audit the project security state.');
+      if (currentLanguage === 'zh') {
+        return [
+          '请处理这个项目当前最高优先级的安全风险。',
+          '已知安全告警：',
+          alertSummary,
+          '要求：先确认告警是否仍然成立；如果成立，直接修复根因，并运行最窄相关验证和安全审计命令。不要只隐藏告警或绕过检查。'
+        ].join('\\n');
+      }
+      return [
+        'Handle the highest-priority security risk in this project.',
+        'Known security alerts:',
+        alertSummary,
+        'Requirements: confirm the alert is still valid; if it is valid, fix the root cause and run the narrow relevant verification and security audit. Do not hide alerts or bypass checks.'
+      ].join('\\n');
+    }
+
+    function buildFoundationActionPrompt(project) {
+      const foundation = project && project.foundation ? project.foundation : {};
+      const missing = Array.isArray(foundation.missing) ? foundation.missing : [];
+      const missingSummary = missing.length
+        ? missing.map((item, index) => (index + 1) + '. ' + (item.relativePath || item.label || item.key)).join('\\n')
+        : (currentLanguage === 'zh' ? '当前没有缺失项明细，请重新体检项目基座。' : 'No missing foundation details are available. Re-check the project foundation.');
+      if (currentLanguage === 'zh') {
+        return [
+          '请补齐这个项目缺失的最小项目基座。',
+          '缺失项：',
+          missingSummary,
+          '边界：只创建缺失文件，不覆盖已有文件；基座要少而精，只服务项目可推进、可验证、可审计，不要生成大而全的文档体系。完成后检查这些文件存在且内容可直接使用。'
+        ].join('\\n');
+      }
+      return [
+        'Complete the missing minimal project foundation for this repository.',
+        'Missing items:',
+        missingSummary,
+        'Boundary: create only missing files, do not overwrite existing files; keep the foundation small and useful for execution, verification, and auditability. Do not generate a broad documentation system.'
+      ].join('\\n');
+    }
+
     function renderProjectDeliveryPanel(project) {
       const delivery = project && project.delivery ? project.delivery : null;
-      if (!delivery || (!delivery.available && !delivery.loading && !delivery.message)) {
+      const security = project && project.security ? project.security : null;
+      const foundation = project && project.foundation ? project.foundation : null;
+      const hasFoundationGap = Number(foundation && foundation.missingCount || 0) > 0;
+      const hasSecurityRisk = Number(security && security.openCriticalHigh || 0) > 0;
+      if ((!delivery || (!delivery.available && !delivery.loading && !delivery.message)) && !security && !hasFoundationGap) {
         return '';
       }
-      const recentRuns = Array.isArray(delivery.recentWorkflowRuns) ? delivery.recentWorkflowRuns : [];
+      const recentRuns = Array.isArray(delivery && delivery.recentWorkflowRuns) ? delivery.recentWorkflowRuns : [];
       const failedRuns = recentRuns.filter(run => isFailedDeliveryConclusion(run.conclusion));
       const hasFailure = failedRuns.length > 0;
       const expanded = deliveryActionPanelExpanded;
       const refreshBusy = projectRefreshPaths.has(project.path);
+      const hasActionRisk = hasSecurityRisk || hasFailure;
 
       const runRows = failedRuns.map(run => {
         const title = run.displayTitle || run.name || '-';
@@ -9739,32 +10139,38 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           + '</div>';
       }).join('');
 
-      const latestRunUrl = failedRuns[0]?.url || delivery.latestWorkflowUrl || '';
+      const latestRunUrl = failedRuns[0]?.url || (delivery && delivery.latestWorkflowUrl) || '';
 
       // 收起时的简短状态文字
       const checksFailedLabel = currentLanguage === 'zh' ? '检查失败' : 'Checks failed';
       const checksHealthyLabel = currentLanguage === 'zh' ? '检查正常' : 'Checks healthy';
       
       let miniStatusText = '';
-      if (delivery.loading) {
+      if (security && security.loading) {
         miniStatusText = t('issueLoading');
-      } else if (!delivery.available) {
-        miniStatusText = currentLanguage === 'zh' ? '暂无信号' : 'No signal';
+      } else if (hasSecurityRisk) {
+        miniStatusText = t('securitySignalRisk') + ' ' + security.openCriticalHigh;
+      } else if (delivery && delivery.loading) {
+        miniStatusText = t('issueLoading');
       } else if (hasFailure) {
         miniStatusText = checksFailedLabel + ' ' + failedRuns.length;
+      } else if (hasFoundationGap) {
+        miniStatusText = t('foundationMissing') + ' ' + foundation.missingCount;
+      } else if (!delivery || !delivery.available) {
+        miniStatusText = currentLanguage === 'zh' ? '暂无信号' : 'No signal';
       } else {
-        const releaseStr = delivery.latestRelease ? ' · ' + delivery.latestRelease : '';
+        const releaseStr = delivery && delivery.latestRelease ? ' · ' + delivery.latestRelease : '';
         miniStatusText = checksHealthyLabel + releaseStr;
       }
 
       if (!expanded) {
-        return '<div class="portfolio-delivery-panel ' + (hasFailure ? 'is-failed' : 'is-healthy') + '" data-delivery-action-panel>'
+        return '<div class="portfolio-delivery-panel ' + (hasActionRisk ? 'is-failed' : 'is-healthy') + '" data-delivery-action-panel>'
           + '<div class="delivery-collapsed-row">'
           + '<div class="delivery-title-wrapper">'
           + '<span class="codicon codicon-rocket delivery-rocket-icon"></span>'
           + '<span class="delivery-panel-title">' + escapeHtml(t('deliveryActionTitle')) + '</span>'
           + '</div>'
-          + '<div class="delivery-status-badge ' + (hasFailure ? 'status-failed' : 'status-healthy') + '">'
+          + '<div class="delivery-status-badge ' + (hasActionRisk ? 'status-failed' : 'status-healthy') + '">'
           + escapeHtml(miniStatusText)
           + '</div>'
           + '<button class="delivery-toggle-btn" data-toggle-delivery-panel title="' + escapeHtml(t('deliveryActionShow')) + '">'
@@ -9774,7 +10180,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           + '</div>';
       }
 
-      return '<div class="portfolio-delivery-panel is-expanded ' + (hasFailure ? 'is-failed' : 'is-healthy') + '" data-delivery-action-panel>'
+      const securityRows = security && Array.isArray(security.alerts)
+        ? security.alerts.map(alert => '<div class="portfolio-delivery-row">'
+          + '<span class="portfolio-issue-main">'
+          + '<span class="portfolio-issue-name">' + escapeHtml(alert.title || alert.source || '-') + '</span>'
+          + '<span class="portfolio-issue-sub">' + escapeHtml((alert.source || 'Security') + ' · ' + (alert.severity || 'unknown')) + '</span>'
+          + '</span>'
+          + (alert.url ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(alert.url) + '">' + escapeHtml(t('projectOpen')) + '</button>' : '')
+          + '</div>').join('')
+        : '';
+      const foundationRows = hasFoundationGap && Array.isArray(foundation.missing)
+        ? foundation.missing.map(item => '<div class="portfolio-delivery-row">'
+          + '<span class="portfolio-issue-main">'
+          + '<span class="portfolio-issue-name">' + escapeHtml(item.relativePath || item.label || item.key) + '</span>'
+          + '<span class="portfolio-issue-sub">' + escapeHtml(t('foundationMissing')) + '</span>'
+          + '</span>'
+          + '</div>').join('')
+        : '';
+
+      return '<div class="portfolio-delivery-panel is-expanded ' + (hasActionRisk ? 'is-failed' : 'is-healthy') + '" data-delivery-action-panel>'
         + '<div class="delivery-header-row">'
         + '<div class="delivery-title-wrapper">'
         + '<span class="codicon codicon-rocket delivery-rocket-icon"></span>'
@@ -9785,6 +10209,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         + '</button>'
         + '</div>'
         + '<div class="delivery-grid">'
+        + '<div class="delivery-card checks-card ' + (hasSecurityRisk ? 'card-failed' : 'card-healthy') + '">'
+        + '<div class="delivery-card-title"><span class="codicon codicon-shield"></span>' + escapeHtml(t('deliveryActionSecurity')) + '</div>'
+        + '<div class="delivery-card-value">'
+        + (hasSecurityRisk
+          ? '<span class="failed-count-highlight">' + security.openCriticalHigh + ' ' + (currentLanguage === 'zh' ? '个高危' : 'high risk') + '</span>'
+          : '<span class="healthy-highlight">' + escapeHtml(security && security.available ? t('securitySignalHealthy') : t('deliveryActionSecurityUnknown')) + '</span>')
+        + '</div>'
+        + '</div>'
         + '<div class="delivery-card checks-card ' + (hasFailure ? 'card-failed' : 'card-healthy') + '">'
         + '<div class="delivery-card-title"><span class="codicon codicon-tasklist"></span>' + escapeHtml(t('deliveryActionLatestChecks')) + '</div>'
         + '<div class="delivery-card-value">'
@@ -9794,26 +10226,38 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         + '</div>'
         + '</div>'
         + '<div class="delivery-card release-card">'
-        + '<div class="delivery-card-title"><span class="codicon codicon-tag"></span>' + escapeHtml(t('deliveryActionLatestRelease')) + '</div>'
+        + '<div class="delivery-card-title"><span class="codicon codicon-checklist"></span>' + escapeHtml(t('deliveryActionFoundation')) + '</div>'
         + '<div class="delivery-card-value">'
-        + (delivery.latestRelease
-          ? '<span class="release-version-highlight">' + escapeHtml(delivery.latestRelease) + '</span>'
-          : '<span class="no-release-highlight">-</span>')
+        + (hasFoundationGap
+          ? '<span class="failed-count-highlight">' + foundation.missingCount + ' ' + (currentLanguage === 'zh' ? '项缺失' : 'missing') + '</span>'
+          : '<span class="healthy-highlight">' + escapeHtml(t('foundationReady')) + '</span>')
         + '</div>'
         + '</div>'
         + '</div>'
         + '<div class="delivery-meta-info">'
-        + '<span class="delivery-repo-text" title="' + escapeHtml(delivery.repo || '') + '">'
-        + '<span class="codicon codicon-github"></span> ' + escapeHtml(delivery.repo || t('deliveryActionRepoMissing'))
+        + '<span class="delivery-repo-text" title="' + escapeHtml((delivery && delivery.repo) || (security && security.repo) || '') + '">'
+        + '<span class="codicon codicon-github"></span> ' + escapeHtml((delivery && delivery.repo) || (security && security.repo) || t('deliveryActionRepoMissing'))
         + '</span>'
-        + (delivery.syncedAt
-          ? '<span>' + escapeHtml(delivery.stale ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime(delivery.syncedAt)) + '</span>'
+        + ((delivery && delivery.syncedAt) || (security && security.syncedAt)
+          ? '<span>' + escapeHtml((delivery && delivery.stale) || (security && security.stale) ? t('issueCached') : t('issueSynced')) + ' ' + escapeHtml(formatRelativeTime((delivery && delivery.syncedAt) || (security && security.syncedAt))) + '</span>'
           : '')
         + '</div>'
         + (hasFailure
           ? '<div class="delivery-runs-section">'
             + '<div class="delivery-section-title">' + (currentLanguage === 'zh' ? '未通过的检查：' : 'Failed checks:') + '</div>'
             + '<div class="portfolio-delivery-list">' + runRows + '</div>'
+            + '</div>'
+          : '')
+        + (securityRows
+          ? '<div class="delivery-runs-section">'
+            + '<div class="delivery-section-title">' + escapeHtml(t('deliveryActionSecurity')) + '</div>'
+            + '<div class="portfolio-delivery-list">' + securityRows + '</div>'
+            + '</div>'
+          : '')
+        + (foundationRows
+          ? '<div class="delivery-runs-section">'
+            + '<div class="delivery-section-title">' + escapeHtml(t('deliveryActionFoundation')) + '</div>'
+            + '<div class="portfolio-delivery-list">' + foundationRows + '</div>'
             + '</div>'
           : '')
         + (deliveryActionMessage
@@ -9834,6 +10278,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           ? '<button class="delivery-action-btn primary-btn pulse-glow" data-agent-fix-delivery-project-path="' + escapeHtml(project.path) + '">'
             + '<span class="codicon codicon-tools"></span>'
             + escapeHtml(t('deliveryActionAgent'))
+            + '</button>'
+          : '')
+        + (hasSecurityRisk
+          ? '<button class="delivery-action-btn primary-btn pulse-glow" data-agent-fix-security-project-path="' + escapeHtml(project.path) + '">'
+            + '<span class="codicon codicon-shield"></span>'
+            + escapeHtml(t('deliveryActionFixSecurity'))
+            + '</button>'
+          : '')
+        + (hasFoundationGap
+          ? '<button class="delivery-action-btn secondary-btn" data-agent-fix-foundation-project-path="' + escapeHtml(project.path) + '">'
+            + '<span class="codicon codicon-checklist"></span>'
+            + escapeHtml(t('deliveryActionFixFoundation'))
             + '</button>'
           : '')
         + '</div>'
@@ -9864,6 +10320,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const isRefreshing = projectRefreshPaths.has(project.path);
         const isPinned = Boolean(project.pinnedAt);
         const deliverySignal = deliverySignalText(project.delivery) || project.deliverySignal || '';
+        const securitySignal = securitySignalText(project.security) || project.securitySignal || '';
+        const foundationSignal = project.foundation && Number(project.foundation.missingCount || 0) > 0 ? foundationSignalText(project.foundation) : '';
         return \`
           <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
@@ -9886,6 +10344,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               \${project.reusableSignals ? \`<span class="global-chip">\${escapeHtml(t('globalReusable'))}: \${escapeHtml(project.reusableSignals)}</span>\` : ''}
               \${project.issuePressure ? \`<span class="global-chip">\${escapeHtml(t('issues'))}: \${escapeHtml(project.issuePressure)}</span>\` : ''}
               \${deliverySignal ? \`<span class="global-chip">\${escapeHtml(deliverySignal)}</span>\` : ''}
+              \${securitySignal ? \`<span class="global-chip">\${escapeHtml(securitySignal)}</span>\` : ''}
+              \${foundationSignal ? \`<span class="global-chip">\${escapeHtml(foundationSignal)}</span>\` : ''}
             </div>
             <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
@@ -9982,6 +10442,50 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             command: 'runSoloConversation',
             projectPath,
             userMessage: buildDeliveryActionPrompt(project),
+            agentCli,
+            model,
+            supplementFiles: []
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-agent-fix-security-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-agent-fix-security-project-path') || '';
+          const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
+          if (!projectPath || !project) return;
+          const targetId = projectSoloTargetId(projectPath);
+          const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
+          const model = getTargetModelValue(targetId, agentCli);
+          projectConversationModes[projectPath] = 'solo';
+          deliveryActionMessage = t('deliveryActionStarted');
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'runSoloConversation',
+            projectPath,
+            userMessage: buildSecurityActionPrompt(project),
+            agentCli,
+            model,
+            supplementFiles: []
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-agent-fix-foundation-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-agent-fix-foundation-project-path') || '';
+          const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
+          if (!projectPath || !project) return;
+          const targetId = projectSoloTargetId(projectPath);
+          const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
+          const model = getTargetModelValue(targetId, agentCli);
+          projectConversationModes[projectPath] = 'solo';
+          deliveryActionMessage = t('deliveryActionStarted');
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'runSoloConversation',
+            projectPath,
+            userMessage: buildFoundationActionPrompt(project),
             agentCli,
             model,
             supplementFiles: []
