@@ -2169,8 +2169,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         reviewerCliPathPlaceholder: '留空则使用主 Agent',
         reviewerCliPathHelp: '可选的副 Agent CLI，只读复核任务结果，不直接改文件。',
         collaborationReviewMode: '自动复核',
-        collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
+        collaborationReviewHelp: '复核会折叠在被复核的主对话下方。',
         reviewerSame: '跟随主 Agent',
+        followupRecords: '后续记录',
+        continuationCount: '续聊',
+        reviewCount: '复核',
         settingsSectionBasic: '基础',
         settingsSectionAccount: '账户与 Pro',
         settingsSectionAgent: 'Agent 协作',
@@ -2371,8 +2374,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         reviewerCliPathPlaceholder: 'Leave empty to use the main Agent',
         reviewerCliPathHelp: 'Optional secondary CLI for read-only review after task runs.',
         collaborationReviewMode: 'Auto Review',
-        collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
+        collaborationReviewHelp: 'Review runs are folded under the task conversation they check.',
         reviewerSame: 'Same as main Agent',
+        followupRecords: 'Follow-up Records',
+        continuationCount: 'Continuations',
+        reviewCount: 'Reviews',
         settingsSectionBasic: 'Basics',
         settingsSectionAccount: 'Account & Pro',
         settingsSectionAgent: 'Agent Collaboration',
@@ -2587,6 +2593,15 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function extractContinuationParentConversationId(output) {
       const match = String(output || '').match(/Continuation parent conversation:\\s*(\\d+)/);
       return match ? Number(match[1]) : 0;
+    }
+
+    function extractReviewParentConversationId(output) {
+      const match = String(output || '').match(/Review of execution:\\s*(\\d+)/);
+      return match ? Number(match[1]) : 0;
+    }
+
+    function isReviewConversation(conversation) {
+      return Boolean(extractReviewParentConversationId(conversation && conversation.output));
     }
 
     function setText(id, value) {
@@ -4636,7 +4651,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       return \`
         <div class="conversation-children">
-          <div class="conversation-children-title">续聊记录</div>
+          <div class="conversation-children-title">\${escapeHtml(t('followupRecords'))}</div>
           <div class="conversation-list conversation-list-children">
             \${children.map(child => renderConversationItem(nodeId, child, true)).join('')}
           </div>
@@ -4647,6 +4662,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function renderConversationItem(nodeId, conversation, nested = false) {
       const conversationId = nodeId + ':' + conversation.id;
       const children = (conversationChildrenMap[String(conversation.id || '')] || []);
+      const continuationChildrenCount = children.filter(child => !isReviewConversation(child)).length;
+      const reviewChildrenCount = children.filter(child => isReviewConversation(child)).length;
       const rootConversationId = conversation.continuationRootConversationId || findConversationRootId(conversation);
       const open = activeConversationId === conversationId || hasActiveConversationDescendant(nodeId, conversation);
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
@@ -4679,7 +4696,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               <span class="conversation-summary">\${escapeHtml(summary)}</span>
               <span class="conversation-time">\${escapeHtml(when)}</span>
               \${runtimeLabel ? \`<span class="conversation-runtime">\${escapeHtml(runtimeLabel)}</span>\` : ''}
-              \${children.length > 0 ? \`<span class="conversation-runtime">续聊 \${children.length}</span>\` : ''}
+              \${continuationChildrenCount > 0 ? \`<span class="conversation-runtime">\${escapeHtml(t('continuationCount'))} \${continuationChildrenCount}</span>\` : ''}
+              \${reviewChildrenCount > 0 ? \`<span class="conversation-runtime">\${escapeHtml(t('reviewCount'))} \${reviewChildrenCount}</span>\` : ''}
             </div>
             <div class="conversation-actions">
               \${runningButtons}
@@ -4750,6 +4768,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         }
       });
       conversations.forEach((conversation) => {
+        const reviewParentId = extractReviewParentConversationId(conversation.output);
+        if (reviewParentId && byId[String(reviewParentId)]) {
+          conversationChildrenMap[String(reviewParentId)] = conversationChildrenMap[String(reviewParentId)] || [];
+          conversationChildrenMap[String(reviewParentId)].push(conversation);
+          return;
+        }
         const parentId = extractContinuationParentConversationId(conversation.output);
         if (parentId && byId[String(parentId)]) {
           const root = findRootByParent(conversation);

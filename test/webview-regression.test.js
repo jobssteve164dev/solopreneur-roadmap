@@ -1202,6 +1202,47 @@ test('full roadmap conversation history keeps failed continuations under the mai
   assert.match(rendered, /续聊 1|Continuation/);
 });
 
+test('full roadmap conversation history folds review runs under the reviewed conversation', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const { context } = runScriptWithMinimalDom(script, ids, [
+    'globalThis.__renderConversationsForTest = renderConversations;',
+    'globalThis.__setActiveConversationForTest = (id) => { activeConversationId = id; };'
+  ].join('\n'));
+
+  const conversations = [
+    {
+      id: 20,
+      status: 'Completed',
+      agentCli: 'codex',
+      command: 'codex exec',
+      output: 'User supplement:\n主对话\n\nSolo conversation state: Completed'
+    },
+    {
+      id: 21,
+      status: 'Completed',
+      agentCli: 'agy',
+      command: 'agy review',
+      output: 'Agent review started.\n\nReview of execution: 20\n\nReview decision: pass'
+    }
+  ];
+  const collapsed = context.__renderConversationsForTest('__solo__', conversations, 'empty');
+
+  assert.match(collapsed, /data-conversation-id="__solo__:20"/);
+  assert.doesNotMatch(collapsed, /data-conversation-id="__solo__:21"/);
+  assert.match(collapsed, /复核 1|Reviews 1/);
+
+  context.__setActiveConversationForTest('__solo__:20');
+  const expanded = context.__renderConversationsForTest('__solo__', conversations, 'empty');
+  assert.match(expanded, /data-conversation-id="__solo__:21"/);
+  assert.match(expanded, /后续记录|Follow-up Records/);
+});
+
 test('sidebar conversation result cards expose rollback actions for pre-session git hashes', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarProvider.js'), 'utf8');
   const extensionSource = [
