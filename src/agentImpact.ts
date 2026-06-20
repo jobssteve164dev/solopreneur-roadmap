@@ -132,6 +132,45 @@ function readRunChangedFiles(runDir: string): string[] {
   return parseChangedFiles(readFileIfExists(path.join(runDir, 'changes.txt')));
 }
 
+function isAgentRunDir(runDir: string): boolean {
+  return [
+    'command.txt',
+    'output.log',
+    'completion.json',
+    'touched-files.txt',
+    'changes.txt',
+    'prompt.txt'
+  ].some((name) => fs.existsSync(path.join(runDir, name)));
+}
+
+function listAgentRunDirs(runsRoot: string): string[] {
+  const result: string[] = [];
+  const visit = (dir: string) => {
+    let entries: string[] = [];
+    try {
+      entries = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+    } catch {
+      return;
+    }
+    if (isAgentRunDir(dir)) {
+      result.push(dir);
+      return;
+    }
+    for (const entry of entries) {
+      const candidate = path.join(dir, entry);
+      try {
+        if (fs.statSync(candidate).isDirectory()) {
+          visit(candidate);
+        }
+      } catch {
+        // Ignore partial run directories while an Agent is still starting.
+      }
+    }
+  };
+  visit(runsRoot);
+  return result;
+}
+
 function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
   const roadmapPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
   if (!fs.existsSync(roadmapPath)) {
@@ -173,23 +212,7 @@ export function buildAgentImpactSummary(projects: AgentImpactProject[], now = ne
     completedNodes += nodes.filter((node) => node.status === 'Completed').length;
 
     const runsRoot = path.join(project.path, '.solopreneur', 'agent-runs');
-    let runNames: string[] = [];
-    try {
-      runNames = fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot) : [];
-    } catch {
-      runNames = [];
-    }
-
-    for (const runName of runNames) {
-      const runDir = path.join(runsRoot, runName);
-      try {
-        if (!fs.statSync(runDir).isDirectory()) {
-          continue;
-        }
-      } catch {
-        continue;
-      }
-
+    for (const runDir of listAgentRunDirs(runsRoot)) {
       const timestamp = getRunTimestamp(runDir);
       const command = readFileIfExists(path.join(runDir, 'command.txt'));
       const agent = inferAgentFromCommand(command);

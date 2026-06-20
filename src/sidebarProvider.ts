@@ -2456,6 +2456,11 @@ function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
 
 function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, feature: ProFeatureKey): boolean {
   const entitlements = settings?.proEntitlements || {};
+  const expiresAt = String(settings?.proAccount?.expiresAt || '').trim();
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
+  if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+    return false;
+  }
   return Boolean(entitlements[PRO_FEATURES[feature]] || entitlements[feature] || entitlements.pro || entitlements.solomap_pro);
 }
 
@@ -2999,7 +3004,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     private readonly _getFeedbackUsageSummary?: () => string,
     private readonly _stopConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>,
     private readonly _rollbackChanges?: (projectPath: string, gitHash: string) => Promise<void>,
-    private readonly _manageProAuthorization?: (action?: string) => Promise<void>
+    private readonly _manageProAuthorization?: (action?: string) => Promise<void>,
+    private readonly _refreshProAccount?: () => Promise<void>
   ) {}
 
   public resolveWebviewView(
@@ -3112,13 +3118,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             }
             break;
           case 'showStrategyPyramid':
-            vscode.commands.executeCommand('solopreneur.showStrategyPyramid');
+            await vscode.commands.executeCommand('solopreneur.showStrategyPyramid');
             break;
           case 'showFullRoadmap':
-            vscode.commands.executeCommand('solopreneur.showRoadmap');
+            await vscode.commands.executeCommand('solopreneur.showRoadmap');
             break;
           case 'showFlowView':
-            vscode.commands.executeCommand('solopreneur.showFlow');
+            await vscode.commands.executeCommand('solopreneur.showFlow');
             break;
           case 'openProAuthorization':
             if (this._manageProAuthorization) {
@@ -3137,6 +3143,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             this.sendSettings();
             break;
           case 'getSettings':
+            if (this._refreshProAccount) {
+              await this._refreshProAccount();
+            }
             this.sendSettings();
             break;
           case 'updateSettings':
@@ -3351,14 +3360,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'openProjectFromPortfolio':
             await this._selectProject(data.projectPath);
-            vscode.commands.executeCommand('solopreneur.showRoadmap');
+            await vscode.commands.executeCommand('solopreneur.showRoadmap');
             break;
           case 'continueProjectFromPortfolio':
             await this._selectProject(data.projectPath);
             if (data.nodeId) {
               await this._onRunAgent(data.nodeId);
             } else {
-              vscode.commands.executeCommand('solopreneur.showRoadmap');
+              await vscode.commands.executeCommand('solopreneur.showRoadmap');
             }
             break;
         }
@@ -8007,12 +8016,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function hasStrategyPyramidPro(settings) {
       const entitlements = (settings && settings.proEntitlements) || {};
       const account = (settings && settings.proAccount) || {};
+      const expiresAt = String(account.expiresAt || '').trim();
+      const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
+      if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+        return false;
+      }
       return Boolean(account.allowed || entitlements.strategy_pyramid || entitlements.strategyPyramid || entitlements.pro || entitlements.solomap_pro);
     }
 
     function hasFlowPro(settings) {
       const entitlements = (settings && settings.proEntitlements) || {};
       const account = (settings && settings.proAccount) || {};
+      const expiresAt = String(account.expiresAt || '').trim();
+      const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
+      if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+        return false;
+      }
       return Boolean(account.allowed || entitlements.flow_mode || entitlements.flowMode || entitlements.pro || entitlements.solomap_pro);
     }
 
@@ -8361,6 +8380,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
         case 'agentImpactLoaded':
           renderAgentImpact(message.status || {});
+          break;
+
+        case 'sidebarActionFailed':
+          deliveryActionMessage = message.message || '';
+          if (cliTestBadge && settingsPanel && settingsPanel.style.display === 'block') {
+            cliTestBadge.style.display = 'block';
+            cliTestBadge.className = 'cli-badge error';
+            cliTestBadge.textContent = message.message || '';
+          }
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'dailyReviewLoaded':

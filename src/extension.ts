@@ -483,6 +483,9 @@ export async function activate(context: vscode.ExtensionContext) {
     },
     async (action) => {
       await handleManageProAuthorization(context, action);
+    },
+    async () => {
+      await refreshProAccountStatus(context);
     }
   );
 
@@ -554,8 +557,35 @@ function readLocalProEntitlements(): Record<string, boolean> {
 
 function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, featureKey: string): boolean {
   const entitlements = settings?.proEntitlements || {};
+  const localEntitlements = readLocalProEntitlements();
+  const hasLocalPro = Boolean(localEntitlements.pro || localEntitlements[featureKey] || localEntitlements[strategyPyramidFeature] || localEntitlements[flowModeFeature]);
+  const expiresAt = String(settings?.proAccount?.expiresAt || '').trim();
+  const expiresAtMs = Date.parse(expiresAt);
+  if (!hasLocalPro && Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
+    return false;
+  }
   const normalizedFeature = featureKey === 'strategyPyramid' ? 'strategy_pyramid' : featureKey;
   return Boolean(entitlements[normalizedFeature] || entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
+}
+
+async function clearStoredProAccess(context: vscode.ExtensionContext): Promise<void> {
+  const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  const nextEntitlements = { ...(saved.proEntitlements || {}) };
+  delete nextEntitlements.pro;
+  delete nextEntitlements.solomap_pro;
+  delete nextEntitlements[strategyPyramidFeature];
+  delete nextEntitlements.strategyPyramid;
+  delete nextEntitlements[flowModeFeature];
+  delete nextEntitlements.flowMode;
+  await context.globalState.update(settingsKey, {
+    ...saved,
+    proEntitlements: nextEntitlements,
+    proAccount: {
+      ...normalizeProAccountStatus(saved.proAccount),
+      allowed: false
+    }
+  });
+  await broadcastSettings(context);
 }
 
 function normalizeProAccountStatus(value: unknown): ProAccountStatus {
@@ -744,7 +774,8 @@ async function verifyPassportGrant(grant: string, options: { authNonce?: string 
 }
 
 async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
-  if (hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
+  const settings = getPersistedSettings(context);
+  if (hasProEntitlement(settings, 'strategyPyramid')) {
     return true;
   }
   const cached = await readPassportGrant(context);
@@ -756,11 +787,16 @@ async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promi
     await writePassportGrant(context, verified, cached.grant);
     return true;
   }
-  return grantContainsFeature(cached);
+  if (grantContainsFeature(cached)) {
+    return true;
+  }
+  await clearStoredProAccess(context);
+  return false;
 }
 
 async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<boolean> {
-  if (hasProEntitlement(getPersistedSettings(context), flowModeFeature)) {
+  const settings = getPersistedSettings(context);
+  if (hasProEntitlement(settings, flowModeFeature)) {
     return true;
   }
   const cached = await readPassportGrant(context);
@@ -772,7 +808,35 @@ async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<bool
     await writePassportGrant(context, verified, cached.grant);
     return true;
   }
-  return grantContainsFeature(cached);
+  if (grantContainsFeature(cached)) {
+    return true;
+  }
+  await clearStoredProAccess(context);
+  return false;
+}
+
+async function refreshProAccountStatus(context: vscode.ExtensionContext): Promise<void> {
+  if (Object.keys(readLocalProEntitlements()).length > 0) {
+    await broadcastSettings(context);
+    return;
+  }
+  const cached = await readPassportGrant(context);
+  if (!cached) {
+    if (!hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
+      await clearStoredProAccess(context);
+    }
+    return;
+  }
+  const verified = await verifyPassportGrant(cached.grant);
+  if (verified.allowed) {
+    await writePassportGrant(context, verified, cached.grant);
+    return;
+  }
+  if (!grantContainsFeature(cached)) {
+    await clearStoredProAccess(context);
+    return;
+  }
+  await broadcastSettings(context);
 }
 
 async function beginPassportAuthorization(): Promise<void> {

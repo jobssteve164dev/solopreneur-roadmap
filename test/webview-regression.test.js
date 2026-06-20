@@ -1841,6 +1841,10 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   ]).title, 'Running step');
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { pro: true } }, 'strategyPyramid'), true);
+  assert.equal(sidebarModule.__hasProEntitlement({
+    proEntitlements: { strategy_pyramid: true },
+    proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }
+  }, 'strategyPyramid'), false);
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: {} }, 'strategyPyramid'), false);
 });
 
@@ -2790,6 +2794,10 @@ test('agent command builder uses non-interactive task runs and native continuati
     "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Ship the MVP'"
   );
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategy_pyramid'), true);
+  assert.equal(extensionModule.__hasProEntitlement({
+    proEntitlements: { strategy_pyramid: true },
+    proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }
+  }, 'strategy_pyramid'), false);
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: {} }, 'strategy_pyramid'), false);
   assert.equal(
     extensionModule.__buildAgentCommand('codex-cli', "Don't skip tests", '/workspace/app'),
@@ -4485,7 +4493,7 @@ test('agent impact summary counts local SoloMap contribution by agent', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-'));
   const solopreneurDir = path.join(tempRoot, '.solopreneur');
   const runsRoot = path.join(tempRoot, '.solopreneur', 'agent-runs');
-  const runToday = path.join(runsRoot, '1');
+  const runToday = path.join(runsRoot, '__solo__', '1');
   const runWeek = path.join(runsRoot, '2');
   fs.mkdirSync(runToday, { recursive: true });
   fs.mkdirSync(runWeek, { recursive: true });
