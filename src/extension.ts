@@ -4049,7 +4049,7 @@ send({
 }
 
 function isReviewableRunKind(runKind: string, nodeId: string): boolean {
-  return runKind !== 'agent_review' && nodeId !== soloConversationId && runKind !== 'solo';
+  return runKind !== 'agent_review' && !isContinuationRunKind(runKind);
 }
 
 function shouldRunAgentReview(

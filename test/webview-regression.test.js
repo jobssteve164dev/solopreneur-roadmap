@@ -4785,6 +4785,80 @@ test('completed step starts read-only Agent review before marking the step compl
   assert.match(reviewPrompt, /不要修改项目文件/);
 });
 
+test('completed Solo conversation starts configured review Agent when review mode is every task', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
+      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-agent-review-start-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '21');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'changes.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'output.log'), 'Solo task completed.\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.agent_status-21.json');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    agentCli: 'codex',
+    reviewerCliPath: 'agy',
+    collaborationReviewMode: 'all',
+    executionLogId: 21,
+    userMessage: '检查 Solo 任务复核',
+    outputFilePath: path.join(runDir, 'output.log'),
+    changesFilePath: path.join(runDir, 'changes.txt'),
+    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
+    commandFilePath: path.join(runDir, 'command.txt'),
+    startedAt: '2026-05-24T00:00:00.000Z'
+  }), 'utf8');
+
+  const executionUpdates = [];
+  const executionLogs = [];
+  let reviewCommand = '';
+  extensionModule.__setCommandExistsForTest(() => true);
+  extensionModule.__setTerminalForTest(() => ({
+    show() {},
+    sendText(command) {
+      reviewCommand = command;
+    }
+  }));
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    updateNode: () => { throw new Error('Solo review must not update roadmap nodes.'); },
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      executionUpdates.push({ output, status });
+      return true;
+    },
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      executionLogs.push({ nodeId, agentCli, command, output, status });
+      return 89;
+    },
+    getAgentExecutions: () => [],
+    getProjectAgentExecutions: () => []
+  }, tempRoot);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(executionUpdates[0].status, 'Completed');
+  assert.match(executionUpdates[0].output, /Solo conversation state: Completed/);
+  assert.equal(executionLogs.length, 1);
+  assert.equal(executionLogs[0].nodeId, '__solo__');
+  assert.equal(path.basename(executionLogs[0].agentCli), 'agy');
+  assert.equal(executionLogs[0].status, 'Running');
+  assert.match(executionLogs[0].output, /Agent review started/);
+  assert.match(reviewCommand, /run-agent-review\.sh/);
+  const reviewPrompt = fs.readFileSync(path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', 'review-21', 'prompt.txt'), 'utf8');
+  assert.match(reviewPrompt, /只读复核 Agent/);
+  assert.match(reviewPrompt, /runKind: solo/);
+});
+
 test('passing Agent review completes the deferred roadmap step', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
