@@ -157,6 +157,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './localDataLoader') {
           return require(path.join(projectRoot, 'out/localDataLoader.js'));
         }
+        if (id === './externalDataLoader') {
+          return require(path.join(projectRoot, 'out/externalDataLoader.js'));
+        }
         if (id === './projectSignals') {
           return require(path.join(projectRoot, 'out/projectSignals.js'));
         }
@@ -2689,6 +2692,31 @@ test('agent model discovery parsers normalize current CLI outputs', () => {
     })),
     [{ value: 'gpt-5.5', label: 'GPT-5.5', title: 'gpt-5.5' }]
   );
+});
+
+test('external data loader deduplicates in-flight loads and reuses fresh results', async () => {
+  const { ExternalDataLoadCoordinator, buildExternalDataKey } = require(path.join(projectRoot, 'out/externalDataLoader.js'));
+  const coordinator = new ExternalDataLoadCoordinator({ defaultMinIntervalMs: 60_000 });
+  const key = buildExternalDataKey('github-issues', '/tmp/project-a');
+  let calls = 0;
+  const load = async () => {
+    calls += 1;
+    await new Promise((resolve) => setImmediate(resolve));
+    return { calls };
+  };
+
+  const [first, second] = await Promise.all([
+    coordinator.load(key, load),
+    coordinator.load(key, load)
+  ]);
+  const cached = await coordinator.load(key, load);
+  const forced = await coordinator.load(key, load, { force: true });
+
+  assert.equal(calls, 2);
+  assert.equal(first.calls, 1);
+  assert.equal(second.calls, 1);
+  assert.equal(cached.calls, 1);
+  assert.equal(forced.calls, 2);
 });
 
 test('agent command builder uses non-interactive task runs and native continuation commands', async () => {

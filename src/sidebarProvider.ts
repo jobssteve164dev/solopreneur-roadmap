@@ -9,6 +9,7 @@ import { getAgentImpactStatus } from './agentImpact';
 import { summarizeDocumentationForReview } from './documentationManifest';
 import { readLearningSummary } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
+import { buildExternalDataKey, ExternalDataLoadCoordinator, ExternalDataLoadOptions } from './externalDataLoader';
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -245,6 +246,7 @@ const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadm
 const githubRepoSlugCache = new Map<string, string>();
 const commandResolutionCache = new Map<string, string>();
 let executableSearchPathsCache: string[] | null = null;
+const externalDataLoads = new ExternalDataLoadCoordinator({ defaultMinIntervalMs: 90_000 });
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -1652,6 +1654,34 @@ async function readProjectIssueSummaryAsync(projectPath: string): Promise<Projec
   return summarizeIssueItems(repo, items, cache.syncedAt, false);
 }
 
+function loadExternalIssueSummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectIssueSummary> {
+  return externalDataLoads.load(
+    buildExternalDataKey('github-issues', projectPath),
+    () => readProjectIssueSummaryAsync(projectPath),
+    options
+  );
+}
+
+function loadExternalDeliverySummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectDeliverySummary> {
+  return externalDataLoads.load(
+    buildExternalDataKey('github-delivery', projectPath),
+    () => readProjectDeliverySummaryAsync(projectPath),
+    options
+  );
+}
+
+function loadExternalSecuritySummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectSecuritySummary> {
+  return externalDataLoads.load(
+    buildExternalDataKey('github-security', projectPath),
+    () => readProjectSecuritySummaryAsync(projectPath),
+    options
+  );
+}
+
+function invalidateExternalIssueSummary(projectPath: string): void {
+  externalDataLoads.invalidate(buildExternalDataKey('github-issues', projectPath));
+}
+
 function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale?: boolean } {
   const result = runGhIssueCommand(projectPath, [
     'issue',
@@ -1704,6 +1734,7 @@ function createProjectIssue(projectPath: string, title: string, body: string, ca
   const args = ['issue', 'create', '--title', title, '--body', body || title];
   const result = runGhIssueCommand(projectPath, args, 10000);
   if (result.ok) {
+    invalidateExternalIssueSummary(projectPath);
     const issueNumber = parseIssueNumberFromOutput(result.stdout);
     if (issueNumber && labels.length) {
       labels.forEach((label) => ensureGithubIssueLabel(projectPath, label));
@@ -1720,6 +1751,7 @@ function createProjectIssue(projectPath: string, title: string, body: string, ca
 function closeProjectIssue(projectPath: string, issueNumber: number): { ok: boolean; message: string } {
   const result = runGhIssueCommand(projectPath, ['issue', 'close', String(issueNumber)], 8000);
   if (result.ok) {
+    invalidateExternalIssueSummary(projectPath);
     readProjectIssueSummary(projectPath);
   }
   return {
@@ -3313,9 +3345,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             let security: ProjectSecuritySummary | null = null;
             try {
               [issues, delivery, security] = await Promise.all([
-                readProjectIssueSummaryAsync(projectPath),
-                readProjectDeliverySummaryAsync(projectPath),
-                readProjectSecuritySummaryAsync(projectPath)
+                loadExternalIssueSummary(projectPath, { force: true }),
+                loadExternalDeliverySummary(projectPath, { force: true }),
+                loadExternalSecuritySummary(projectPath, { force: true })
               ]);
             } catch (error) {
               console.error('SoloMap sidebar failed to refresh project data:', error);
@@ -3555,7 +3587,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!this._view || requestId !== this._issueLoadRequest) {
           return;
         }
-        void readProjectIssueSummaryAsync(project.path).then((issues) => {
+        void loadExternalIssueSummary(project.path).then((issues) => {
           if (!this._view || requestId !== this._issueLoadRequest) {
             return;
           }
@@ -3582,7 +3614,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!this._view || requestId !== this._securityLoadRequest) {
           return;
         }
-        void readProjectSecuritySummaryAsync(project.path).then((security) => {
+        void loadExternalSecuritySummary(project.path).then((security) => {
           if (!this._view || requestId !== this._securityLoadRequest) {
             return;
           }
@@ -3609,7 +3641,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!this._view || requestId !== this._deliveryLoadRequest) {
           return;
         }
-        void readProjectDeliverySummaryAsync(project.path).then((delivery) => {
+        void loadExternalDeliverySummary(project.path).then((delivery) => {
           if (!this._view || requestId !== this._deliveryLoadRequest) {
             return;
           }
