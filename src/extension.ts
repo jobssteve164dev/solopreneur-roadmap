@@ -99,6 +99,29 @@ import {
   loadDiscoveredAgentModels
 } from './agentModels';
 import {
+  chooseSupplementFilesForProject,
+  filterProjectRelativeFiles,
+  normalizeSupplementFiles,
+  sanitizeAttachmentScope,
+  savePastedImageAttachments
+} from './attachments';
+import {
+  getHiddenProjects as getHiddenProjectsFromRegistry,
+  getProjects as getProjectsFromRegistry,
+  getSelectedProjectPath as getSelectedProjectPathFromRegistry,
+  normalizeGlobalDataPathForExtension as normalizeGlobalDataPathForRegistry,
+  normalizeProjectsForStorage as normalizeProjectsForRegistryStorage,
+  projectName as registryProjectName,
+  readProjectRegistry as readProjectRegistryFile,
+  writeProjectRegistry as writeProjectRegistryFile
+} from './projectRegistry';
+import {
+  buildFeedbackUsageSummary as buildFeedbackUsageSummaryFromStats,
+  LocalUsageEvent,
+  LocalUsageStats,
+  recordLocalUsageEvent as recordLocalUsageEventInStats
+} from './localUsageStats';
+import {
   clearStoredAgentSession,
   extractCodexSessionIdFromOutputText,
   extractContinuationParentConversationId,
@@ -176,38 +199,6 @@ interface ProjectRegistryFile {
   updatedAt: string;
   projects: SolopreneurProject[];
   hiddenProjects: string[];
-}
-
-interface LocalUsageStats {
-  schemaVersion: number;
-  createdAt: string;
-  updatedAt: string;
-  extensionVersion: string;
-  counters: {
-    activations: number;
-    roadmapOpens: number;
-    projectsAdded: number;
-    agentRuns: number;
-    soloConversations: number;
-    roadmapRevisions: number;
-    feedbackIssuesOpened: number;
-  };
-  lastEventAt: Record<string, string>;
-  snapshot: {
-    registeredProjectCount: number;
-    projectsWithRoadmap: number;
-    roadmapNodeCount: number;
-    completedNodeCount: number;
-    failedNodeCount: number;
-    runningNodeCount: number;
-    inProgressNodeCount: number;
-    pendingNodeCount: number;
-    projectProgressPercent: number;
-    issueCacheProjectCount: number;
-    deliveryCacheProjectCount: number;
-    agentRunDirectoryCount: number;
-    latestAgentRunAt: string;
-  };
 }
 
 interface PassportGrantCache {
@@ -1015,7 +1006,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
 }
 
 function projectName(projectPath: string): string {
-  return path.basename(projectPath) || projectPath;
+  return registryProjectName(projectPath);
 }
 
 function getWorkspaceRoot(): string {
@@ -1023,418 +1014,72 @@ function getWorkspaceRoot(): string {
 }
 
 function normalizeGlobalDataPathForExtension(rawPath: string): string {
-  const trimmed = String(rawPath || '').trim();
-  if (trimmed) {
-    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
-  }
-  const workspaceRoot = getWorkspaceRoot();
-  return path.join(path.dirname(workspaceRoot || process.cwd()), '.solomap-global');
+  return normalizeGlobalDataPathForRegistry(rawPath, getWorkspaceRoot());
 }
 
 function getProjectRegistryPath(context: vscode.ExtensionContext): string {
   return path.join(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), projectRegistryFileName);
 }
 
-function getUsageStatsPath(context: vscode.ExtensionContext): string {
-  return path.join(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), 'usage', usageStatsFileName);
-}
-
-function getExtensionVersion(context: vscode.ExtensionContext): string {
-  return String((context as any).extension?.packageJSON?.version || '');
-}
-
-function createEmptyUsageStats(context: vscode.ExtensionContext, now = new Date().toISOString()): LocalUsageStats {
-  return {
-    schemaVersion: 1,
-    createdAt: now,
-    updatedAt: now,
-    extensionVersion: getExtensionVersion(context),
-    counters: {
-      activations: 0,
-      roadmapOpens: 0,
-      projectsAdded: 0,
-      agentRuns: 0,
-      soloConversations: 0,
-      roadmapRevisions: 0,
-      feedbackIssuesOpened: 0
-    },
-    lastEventAt: {},
-    snapshot: {
-      registeredProjectCount: 0,
-      projectsWithRoadmap: 0,
-      roadmapNodeCount: 0,
-      completedNodeCount: 0,
-      failedNodeCount: 0,
-      runningNodeCount: 0,
-      inProgressNodeCount: 0,
-      pendingNodeCount: 0,
-      projectProgressPercent: 0,
-      issueCacheProjectCount: 0,
-      deliveryCacheProjectCount: 0,
-      agentRunDirectoryCount: 0,
-      latestAgentRunAt: ''
-    }
-  };
-}
-
-function normalizeUsageStats(context: vscode.ExtensionContext, raw: any): LocalUsageStats {
-  const base = createEmptyUsageStats(context);
-  const counters = raw && typeof raw.counters === 'object' ? raw.counters : {};
-  const snapshot = raw && typeof raw.snapshot === 'object' ? raw.snapshot : {};
-  return {
-    ...base,
-    createdAt: String(raw?.createdAt || base.createdAt),
-    updatedAt: String(raw?.updatedAt || base.updatedAt),
-    extensionVersion: String(raw?.extensionVersion || base.extensionVersion),
-    counters: {
-      activations: Number(counters.activations || 0),
-      roadmapOpens: Number(counters.roadmapOpens || 0),
-      projectsAdded: Number(counters.projectsAdded || 0),
-      agentRuns: Number(counters.agentRuns || 0),
-      soloConversations: Number(counters.soloConversations || 0),
-      roadmapRevisions: Number(counters.roadmapRevisions || 0),
-      feedbackIssuesOpened: Number(counters.feedbackIssuesOpened || 0)
-    },
-    lastEventAt: raw && typeof raw.lastEventAt === 'object'
-      ? Object.fromEntries(Object.entries(raw.lastEventAt).map(([key, value]) => [String(key), String(value || '')]))
-      : {},
-    snapshot: {
-      registeredProjectCount: Number(snapshot.registeredProjectCount || 0),
-      projectsWithRoadmap: Number(snapshot.projectsWithRoadmap || 0),
-      roadmapNodeCount: Number(snapshot.roadmapNodeCount || 0),
-      completedNodeCount: Number(snapshot.completedNodeCount || 0),
-      failedNodeCount: Number(snapshot.failedNodeCount || 0),
-      runningNodeCount: Number(snapshot.runningNodeCount || 0),
-      inProgressNodeCount: Number(snapshot.inProgressNodeCount || 0),
-      pendingNodeCount: Number(snapshot.pendingNodeCount || 0),
-      projectProgressPercent: Number(snapshot.projectProgressPercent || 0),
-      issueCacheProjectCount: Number(snapshot.issueCacheProjectCount || 0),
-      deliveryCacheProjectCount: Number(snapshot.deliveryCacheProjectCount || 0),
-      agentRunDirectoryCount: Number(snapshot.agentRunDirectoryCount || 0),
-      latestAgentRunAt: String(snapshot.latestAgentRunAt || '')
-    }
-  };
-}
-
-function readLocalUsageStats(context: vscode.ExtensionContext): LocalUsageStats {
-  const statsPath = getUsageStatsPath(context);
-  if (!fs.existsSync(statsPath)) {
-    return createEmptyUsageStats(context);
-  }
-  try {
-    return normalizeUsageStats(context, JSON.parse(fs.readFileSync(statsPath, 'utf8')));
-  } catch {
-    return createEmptyUsageStats(context);
-  }
-}
-
-function writeLocalUsageStats(context: vscode.ExtensionContext, stats: LocalUsageStats): void {
-  const statsPath = getUsageStatsPath(context);
-  fs.mkdirSync(path.dirname(statsPath), { recursive: true });
-  const payload = JSON.stringify(stats, null, 2);
-  const tempPath = `${statsPath}.tmp`;
-  fs.writeFileSync(tempPath, payload, 'utf8');
-  JSON.parse(fs.readFileSync(tempPath, 'utf8'));
-  fs.renameSync(tempPath, statsPath);
-}
-
 function normalizeProjectsForStorage(projects: SolopreneurProject[]): SolopreneurProject[] {
-  const seen = new Set<string>();
-  return (projects || [])
-    .map((project) => ({
-      name: String(project.name || projectName(project.path || '')).trim(),
-      path: String(project.path || '').trim(),
-      ...(project.type ? { type: String(project.type) } : {}),
-      ...(project.priority ? { priority: String(project.priority) } : {}),
-      ...(project.description ? { description: String(project.description) } : {}),
-      ...(project.notes ? { notes: String(project.notes) } : {}),
-      ...(project.pinnedAt ? { pinnedAt: String(project.pinnedAt) } : {})
-    }))
-    .filter((project) => {
-      if (!project.path || seen.has(project.path)) {
-        return false;
-      }
-      seen.add(project.path);
-      return true;
-    });
-}
-
-function sortProjectsForDisplay(projects: SolopreneurProject[]): SolopreneurProject[] {
-  return [...projects].sort((a, b) => {
-    const pinnedA = a.pinnedAt ? 1 : 0;
-    const pinnedB = b.pinnedAt ? 1 : 0;
-    if (pinnedA !== pinnedB) {
-      return pinnedB - pinnedA;
-    }
-    if (a.pinnedAt || b.pinnedAt) {
-      return String(b.pinnedAt || '').localeCompare(String(a.pinnedAt || ''));
-    }
-    return 0;
-  });
+  return normalizeProjectsForRegistryStorage(projects);
 }
 
 function readProjectRegistry(context: vscode.ExtensionContext): ProjectRegistryFile | null {
-  const registryPath = getProjectRegistryPath(context);
-  if (!fs.existsSync(registryPath)) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-    return {
-      schemaVersion: 1,
-      updatedAt: String(parsed.updatedAt || ''),
-      projects: normalizeProjectsForStorage(Array.isArray(parsed.projects) ? parsed.projects : []),
-      hiddenProjects: Array.isArray(parsed.hiddenProjects)
-        ? parsed.hiddenProjects.map((item: unknown) => String(item || '').trim()).filter(Boolean)
-        : []
-    };
-  } catch (error) {
-    console.error('SoloMap failed to read global project registry:', error);
-    return null;
-  }
+  return readProjectRegistryFile(getPersistedSettings(context).globalDataPath, projectRegistryFileName);
 }
 
 function writeProjectRegistry(context: vscode.ExtensionContext, projects: SolopreneurProject[], hiddenProjects: string[]): void {
-  const registryPath = getProjectRegistryPath(context);
-  fs.mkdirSync(path.dirname(registryPath), { recursive: true });
-  const payload: ProjectRegistryFile = {
-    schemaVersion: 1,
-    updatedAt: new Date().toISOString(),
-    projects: normalizeProjectsForStorage(projects),
-    hiddenProjects: [...new Set((hiddenProjects || []).map((item) => String(item || '').trim()).filter(Boolean))]
-  };
-  fs.writeFileSync(registryPath, JSON.stringify(payload, null, 2), 'utf8');
+  writeProjectRegistryFile(getPersistedSettings(context).globalDataPath, projectRegistryFileName, projects, hiddenProjects);
 }
 
 function getHiddenProjects(context: vscode.ExtensionContext): string[] {
-  const registry = readProjectRegistry(context);
-  if (registry) {
-    return registry.hiddenProjects;
-  }
-  return context.globalState.get<string[]>(hiddenProjectsKey) || [];
+  return getHiddenProjectsFromRegistry({
+    globalDataPath: getPersistedSettings(context).globalDataPath,
+    projectRegistryFileName,
+    legacyHiddenProjects: context.globalState.get<string[]>(hiddenProjectsKey) || []
+  });
 }
 
 function getProjects(context: vscode.ExtensionContext): SolopreneurProject[] {
-  const registry = readProjectRegistry(context);
-  const legacyProjects = context.globalState.get<SolopreneurProject[]>(projectsKey) || [];
-  const savedProjects = registry ? registry.projects : legacyProjects;
-  const hiddenProjects = new Set(registry ? registry.hiddenProjects : (context.globalState.get<string[]>(hiddenProjectsKey) || []));
-  const workspaceRoot = getWorkspaceRoot();
-  const projects = normalizeProjectsForStorage(savedProjects);
-
-  if (workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
-    projects.unshift({
-      name: projectName(workspaceRoot),
-      path: workspaceRoot
-    });
-  }
-
-  const normalizedProjects = normalizeProjectsForStorage(projects);
-  if (!registry) {
-    writeProjectRegistry(context, normalizedProjects, [...hiddenProjects]);
-  }
-  return sortProjectsForDisplay(normalizedProjects);
+  return getProjectsFromRegistry({
+    globalDataPath: getPersistedSettings(context).globalDataPath,
+    projectRegistryFileName,
+    legacyProjects: context.globalState.get<SolopreneurProject[]>(projectsKey) || [],
+    legacyHiddenProjects: context.globalState.get<string[]>(hiddenProjectsKey) || [],
+    workspaceRoot: getWorkspaceRoot()
+  });
 }
 
 function getSelectedProjectPath(context: vscode.ExtensionContext): string {
-  const projects = getProjects(context);
-  const savedSelected = context.globalState.get<string>(selectedProjectKey) || '';
-  if (savedSelected && projects.some((project) => project.path === savedSelected)) {
-    return savedSelected;
-  }
-  return projects[0]?.path || '';
+  return getSelectedProjectPathFromRegistry(
+    getProjects(context),
+    context.globalState.get<string>(selectedProjectKey) || ''
+  );
 }
 
 function getProjectState(context: vscode.ExtensionContext): { projects: SolopreneurProject[]; selectedProjectPath: string } {
   const projects = getProjects(context);
   return {
     projects,
-    selectedProjectPath: getSelectedProjectPath(context)
+    selectedProjectPath: getSelectedProjectPathFromRegistry(projects, context.globalState.get<string>(selectedProjectKey) || '')
   };
 }
-
-function readUsageRoadmapNodes(projectPath: string): Array<{ id: string; status: string }> {
-  const roadmapPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
-  if (!fs.existsSync(roadmapPath)) {
-    return [];
-  }
-  try {
-    const parsed = Papa.parse<{ id: string; status: string }>(fs.readFileSync(roadmapPath, 'utf8'), {
-      header: true,
-      skipEmptyLines: true
-    });
-    return parsed.data
-      .map((node) => ({
-        id: String(node.id || '').trim(),
-        status: String(node.status || 'Pending').trim() || 'Pending'
-      }))
-      .filter((node) => node.id);
-  } catch {
-    return [];
-  }
-}
-
-function getLatestRunTimestamp(runsRoot: string): { count: number; latestAt: string } {
-  let count = 0;
-  let latest = 0;
-  try {
-    const runNames = fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot) : [];
-    for (const runName of runNames) {
-      const runDir = path.join(runsRoot, runName);
-      if (!fs.existsSync(runDir) || !fs.statSync(runDir).isDirectory()) {
-        continue;
-      }
-      count += 1;
-      const startedAtPath = path.join(runDir, 'started_at');
-      let timestamp = 0;
-      if (fs.existsSync(startedAtPath)) {
-        const parsed = Date.parse(fs.readFileSync(startedAtPath, 'utf8').trim());
-        timestamp = Number.isFinite(parsed) ? parsed : 0;
-      }
-      if (!timestamp) {
-        timestamp = fs.statSync(runDir).mtimeMs;
-      }
-      latest = Math.max(latest, timestamp);
-    }
-  } catch {
-    return { count, latestAt: latest ? new Date(latest).toISOString() : '' };
-  }
-  return { count, latestAt: latest ? new Date(latest).toISOString() : '' };
-}
-
-function refreshLocalUsageSnapshot(context: vscode.ExtensionContext, stats: LocalUsageStats): LocalUsageStats {
-  const projects = getProjects(context);
-  let projectsWithRoadmap = 0;
-  let roadmapNodeCount = 0;
-  let completedNodeCount = 0;
-  let failedNodeCount = 0;
-  let runningNodeCount = 0;
-  let inProgressNodeCount = 0;
-  let pendingNodeCount = 0;
-  let issueCacheProjectCount = 0;
-  let deliveryCacheProjectCount = 0;
-  let agentRunDirectoryCount = 0;
-  let latestAgentRunAtMs = 0;
-
-  for (const project of projects) {
-    const nodes = readUsageRoadmapNodes(project.path);
-    if (nodes.length > 0) {
-      projectsWithRoadmap += 1;
-    }
-    roadmapNodeCount += nodes.length;
-    completedNodeCount += nodes.filter((node) => node.status === 'Completed').length;
-    failedNodeCount += nodes.filter((node) => node.status === 'Failed').length;
-    runningNodeCount += nodes.filter((node) => node.status === 'Running').length;
-    inProgressNodeCount += nodes.filter((node) => node.status === 'In Progress').length;
-    pendingNodeCount += nodes.filter((node) => node.status === 'Pending').length;
-    if (fs.existsSync(path.join(project.path, '.solopreneur', 'issues-cache.json'))) {
-      issueCacheProjectCount += 1;
-    }
-    if (fs.existsSync(path.join(project.path, '.solopreneur', 'delivery-cache.json'))) {
-      deliveryCacheProjectCount += 1;
-    }
-    const runStats = getLatestRunTimestamp(path.join(project.path, '.solopreneur', 'agent-runs'));
-    agentRunDirectoryCount += runStats.count;
-    const runMs = runStats.latestAt ? Date.parse(runStats.latestAt) : 0;
-    latestAgentRunAtMs = Number.isFinite(runMs) ? Math.max(latestAgentRunAtMs, runMs) : latestAgentRunAtMs;
-  }
-
+function getLocalUsageStatsOptions(context: vscode.ExtensionContext) {
   return {
-    ...stats,
-    extensionVersion: getExtensionVersion(context) || stats.extensionVersion,
-    snapshot: {
-      registeredProjectCount: projects.length,
-      projectsWithRoadmap,
-      roadmapNodeCount,
-      completedNodeCount,
-      failedNodeCount,
-      runningNodeCount,
-      inProgressNodeCount,
-      pendingNodeCount,
-      projectProgressPercent: roadmapNodeCount > 0 ? Math.round((completedNodeCount / roadmapNodeCount) * 100) : 0,
-      issueCacheProjectCount,
-      deliveryCacheProjectCount,
-      agentRunDirectoryCount,
-      latestAgentRunAt: latestAgentRunAtMs ? new Date(latestAgentRunAtMs).toISOString() : ''
-    }
+    globalDataPath: getPersistedSettings(context).globalDataPath,
+    usageStatsFileName,
+    projects: getProjects(context)
   };
 }
-
-type LocalUsageEvent =
-  | 'activation'
-  | 'roadmapOpened'
-  | 'projectAdded'
-  | 'agentRun'
-  | 'soloConversation'
-  | 'roadmapRevision'
-  | 'feedbackIssueOpened';
 
 function recordLocalUsageEvent(context: vscode.ExtensionContext, event: LocalUsageEvent): LocalUsageStats {
-  const now = new Date().toISOString();
-  let stats = readLocalUsageStats(context);
-  const counters = { ...stats.counters };
-  if (event === 'activation') counters.activations += 1;
-  if (event === 'roadmapOpened') counters.roadmapOpens += 1;
-  if (event === 'projectAdded') counters.projectsAdded += 1;
-  if (event === 'agentRun') counters.agentRuns += 1;
-  if (event === 'soloConversation') counters.soloConversations += 1;
-  if (event === 'roadmapRevision') counters.roadmapRevisions += 1;
-  if (event === 'feedbackIssueOpened') counters.feedbackIssuesOpened += 1;
-  stats = {
-    ...stats,
-    updatedAt: now,
-    extensionVersion: getExtensionVersion(context) || stats.extensionVersion,
-    counters,
-    lastEventAt: {
-      ...stats.lastEventAt,
-      [event]: now
-    }
-  };
-  if (event === 'feedbackIssueOpened') {
-    stats = refreshLocalUsageSnapshot(context, stats);
-  }
-  try {
-    writeLocalUsageStats(context, stats);
-  } catch (error) {
-    console.error('SoloMap failed to write local usage stats:', error);
-  }
-  return stats;
+  return recordLocalUsageEventInStats(context, getLocalUsageStatsOptions(context), event);
 }
 
 function buildFeedbackUsageSummary(context: vscode.ExtensionContext): string {
-  const stats = recordLocalUsageEvent(context, 'feedbackIssueOpened');
-  const snapshot = stats.snapshot;
-  return [
-    'This anonymous local summary is included only because the user opened a feedback issue.',
-    `Stats file: .solomap-global/usage/${usageStatsFileName}`,
-    `Extension version: ${stats.extensionVersion || 'unknown'}`,
-    `First opened: ${stats.createdAt || 'unknown'}`,
-    `Last updated: ${stats.updatedAt || 'unknown'}`,
-    '',
-    'Counters:',
-    `- Activations: ${stats.counters.activations}`,
-    `- Roadmap opens: ${stats.counters.roadmapOpens}`,
-    `- Projects added: ${stats.counters.projectsAdded}`,
-    `- Agent runs requested: ${stats.counters.agentRuns}`,
-    `- Solo conversations requested: ${stats.counters.soloConversations}`,
-    `- Roadmap revisions requested: ${stats.counters.roadmapRevisions}`,
-    '',
-    'Local snapshot:',
-    `- Registered projects: ${snapshot.registeredProjectCount}`,
-    `- Projects with roadmap: ${snapshot.projectsWithRoadmap}`,
-    `- Roadmap nodes: ${snapshot.roadmapNodeCount}`,
-    `- Completed / failed / running / in progress / pending: ${snapshot.completedNodeCount} / ${snapshot.failedNodeCount} / ${snapshot.runningNodeCount} / ${snapshot.inProgressNodeCount} / ${snapshot.pendingNodeCount}`,
-    `- Project progress: ${snapshot.projectProgressPercent}%`,
-    `- Projects with Issue cache: ${snapshot.issueCacheProjectCount}`,
-    `- Projects with delivery cache: ${snapshot.deliveryCacheProjectCount}`,
-    `- Local Agent run directories: ${snapshot.agentRunDirectoryCount}`,
-    `- Latest local Agent run: ${snapshot.latestAgentRunAt || 'none'}`,
-    '',
-    'Privacy:',
-    '- No project paths, project names, Issue titles, Agent outputs, prompts, logs, or file contents are included.'
-  ].join('\n');
+  return buildFeedbackUsageSummaryFromStats(context, getLocalUsageStatsOptions(context));
 }
-
 async function saveProjects(context: vscode.ExtensionContext, projects: SolopreneurProject[]): Promise<void> {
   const normalizedProjects = normalizeProjectsForStorage(projects);
   writeProjectRegistry(context, normalizedProjects, getHiddenProjects(context));
@@ -1963,81 +1608,6 @@ function ensureCompletionCriteriaForNodes(workspaceRoot: string, nodes: RoadmapN
   });
 }
 
-function normalizeSupplementFiles(files: unknown): string[] {
-  if (!Array.isArray(files)) {
-    return [];
-  }
-  const normalized = files
-    .map((file) => String(file || '').trim())
-    .filter(Boolean)
-    .filter((file, index, all) => all.indexOf(file) === index)
-    .slice(0, 10);
-  return normalized;
-}
-
-function filterProjectRelativeFiles(workspaceRoot: string, files: string[]): string[] {
-  return normalizeSupplementFiles(files).filter((relativePath) => {
-    const absolutePath = path.resolve(workspaceRoot, relativePath);
-    const relativeToRoot = path.relative(workspaceRoot, absolutePath);
-    return Boolean(relativeToRoot)
-      && !relativeToRoot.startsWith('..')
-      && !path.isAbsolute(relativeToRoot)
-      && fs.existsSync(absolutePath)
-      && fs.statSync(absolutePath).isFile();
-  });
-}
-
-interface PastedImageAttachment {
-  name?: string;
-  mimeType?: string;
-  dataUrl?: string;
-}
-
-function sanitizeAttachmentScope(scope: string): string {
-  const normalized = String(scope || 'conversation')
-    .replace(/[^a-zA-Z0-9_-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-  return normalized || 'conversation';
-}
-
-function imageExtensionFromMimeType(mimeType: string): string {
-  const normalized = String(mimeType || '').toLowerCase();
-  if (normalized === 'image/jpeg' || normalized === 'image/jpg') return 'jpg';
-  if (normalized === 'image/webp') return 'webp';
-  if (normalized === 'image/gif') return 'gif';
-  return 'png';
-}
-
-function savePastedImageAttachments(projectRoot: string, scope: string, attachments: PastedImageAttachment[]): string[] {
-  if (!projectRoot || !Array.isArray(attachments) || attachments.length === 0) {
-    return [];
-  }
-
-  const safeScope = sanitizeAttachmentScope(scope);
-  const targetDir = path.join(projectRoot, '.solopreneur', 'attachments', safeScope);
-  fs.mkdirSync(targetDir, { recursive: true });
-
-  return attachments.slice(0, 10).map((attachment, index) => {
-    const dataUrl = String(attachment?.dataUrl || '');
-    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\r\n]+)$/);
-    if (!match) {
-      return '';
-    }
-    const mimeType = String(attachment.mimeType || match[1] || 'image/png').toLowerCase();
-    if (!mimeType.startsWith('image/')) {
-      return '';
-    }
-    const extension = imageExtensionFromMimeType(mimeType);
-    const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-    const randomId = Math.random().toString(16).slice(2, 8);
-    const fileName = `${timestamp}-${randomId}-${index + 1}.${extension}`;
-    const filePath = path.join(targetDir, fileName);
-    fs.writeFileSync(filePath, Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
-    return path.relative(projectRoot, filePath).split(path.sep).join('/');
-  }).filter(Boolean);
-}
-
 async function chooseSupplementFilesForNode(nodeId: string): Promise<void> {
   if (!activeProjectRoot || !activePanel) {
     vscode.window.showErrorMessage('Choose a project folder before attaching task files.');
@@ -2051,120 +1621,6 @@ async function chooseSupplementFilesForNode(nodeId: string): Promise<void> {
     files
   });
 }
-
-async function chooseSupplementFilesForProject(projectRoot: string): Promise<string[]> {
-  const files = listProjectAttachmentCandidates(projectRoot);
-  if (!files.length) {
-    vscode.window.showInformationMessage('当前项目里还没有可选择的补充文件。');
-    return [];
-  }
-
-  const selected = await vscode.window.showQuickPick(
-    files.map((file) => ({
-      label: file,
-      description: path.dirname(file) === '.' ? '' : path.dirname(file)
-    })),
-    {
-      canPickMany: true,
-      matchOnDescription: true,
-      placeHolder: '选择要附加给 Agent 的项目文件',
-      title: '添加补充文件'
-    }
-  );
-
-  return (selected || []).map((item) => item.label).slice(0, 10);
-}
-
-function listProjectAttachmentCandidates(projectRoot: string): string[] {
-  const fromGit = listProjectFilesFromGit(projectRoot);
-  if (fromGit.length > 0) {
-    return fromGit;
-  }
-  const fromRipgrep = listProjectFilesFromCommand('rg', ['--files', '--hidden', '-g', '!.git', '-g', '!node_modules', '-g', '!cache', '-g', '!.solopreneur/agent-runs'], projectRoot);
-  if (fromRipgrep.length > 0) {
-    return fromRipgrep;
-  }
-  return listProjectFilesByWalking(projectRoot);
-}
-
-function listProjectFilesFromGit(projectRoot: string): string[] {
-  const files = listProjectFilesFromCommand('git', ['-C', projectRoot, 'ls-files', '--cached', '--others', '--exclude-standard'], projectRoot);
-  return files.filter((file) => !file.startsWith('.solopreneur/agent-runs/'));
-}
-
-function listProjectFilesFromCommand(command: string, args: string[], projectRoot: string): string[] {
-  try {
-    const output = childProcess.execFileSync(command, args, {
-      cwd: projectRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 1500,
-      maxBuffer: 1024 * 1024
-    });
-    return normalizeAttachmentCandidateFiles(projectRoot, output.split(/\r?\n/));
-  } catch {
-    return [];
-  }
-}
-
-function listProjectFilesByWalking(projectRoot: string): string[] {
-  const results: string[] = [];
-  const skip = new Set(['.git', 'node_modules', 'cache']);
-  const walk = (directory: string) => {
-    if (results.length >= 1500) {
-      return;
-    }
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (results.length >= 1500) {
-        return;
-      }
-      if (skip.has(entry.name)) {
-        continue;
-      }
-      const absolutePath = path.join(directory, entry.name);
-      const relativePath = path.relative(projectRoot, absolutePath).split(path.sep).join('/');
-      if (relativePath.startsWith('.solopreneur/agent-runs/')) {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        walk(absolutePath);
-      } else if (entry.isFile()) {
-        results.push(relativePath);
-      }
-    }
-  };
-  walk(projectRoot);
-  return normalizeAttachmentCandidateFiles(projectRoot, results);
-}
-
-function normalizeAttachmentCandidateFiles(projectRoot: string, files: string[]): string[] {
-  const seen = new Set<string>();
-  return files
-    .map((file) => String(file || '').trim().replace(/\\/g, '/'))
-    .filter(Boolean)
-    .filter((file) => {
-      if (seen.has(file)) {
-        return false;
-      }
-      seen.add(file);
-      const absolutePath = path.resolve(projectRoot, file);
-      const relativeToRoot = path.relative(projectRoot, absolutePath);
-      return Boolean(relativeToRoot)
-        && !relativeToRoot.startsWith('..')
-        && !path.isAbsolute(relativeToRoot)
-        && fs.existsSync(absolutePath)
-        && fs.statSync(absolutePath).isFile();
-    })
-    .sort((a, b) => a.localeCompare(b))
-    .slice(0, 1500);
-}
-
 async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
   const result = await vscode.window.showOpenDialog({
     canSelectFiles: false,

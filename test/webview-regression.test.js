@@ -148,6 +148,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './agentImpact') {
           return require(path.join(projectRoot, 'out/agentImpact.js'));
         }
+        if (id === './attachments') {
+          return require(path.join(projectRoot, 'out/attachments.js'));
+        }
         if (id === './flowStore') {
           return require(path.join(projectRoot, 'out/flowStore.js'));
         }
@@ -157,11 +160,17 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './localDataLoader') {
           return require(path.join(projectRoot, 'out/localDataLoader.js'));
         }
+        if (id === './localUsageStats') {
+          return require(path.join(projectRoot, 'out/localUsageStats.js'));
+        }
         if (id === './externalDataLoader') {
           return require(path.join(projectRoot, 'out/externalDataLoader.js'));
         }
         if (id === './projectSignals') {
           return require(path.join(projectRoot, 'out/projectSignals.js'));
+        }
+        if (id === './projectRegistry') {
+          return require(path.join(projectRoot, 'out/projectRegistry.js'));
         }
         if (id === './projectFoundation') {
           return require(path.join(projectRoot, 'out/projectFoundation.js'));
@@ -473,12 +482,9 @@ test('feedback issue URL includes local usage summary when provided', () => {
 });
 
 test('pasted image attachments are saved as project-relative SoloMap files', () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    'module.exports.__savePastedImageAttachments = savePastedImageAttachments;'
-  );
+  const attachments = require(path.join(projectRoot, 'out/attachments.js'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-pasted-attachment-'));
-  const files = extensionModule.__savePastedImageAttachments(root, 'step:1', [{
+  const files = attachments.savePastedImageAttachments(root, 'step:1', [{
     name: 'clipboard.png',
     mimeType: 'image/png',
     dataUrl: 'data:image/png;base64,aGVsbG8='
@@ -490,10 +496,7 @@ test('pasted image attachments are saved as project-relative SoloMap files', () 
 });
 
 test('attachment picker candidates are local project files and skip run artifacts', () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    'module.exports.__listProjectAttachmentCandidates = listProjectAttachmentCandidates;'
-  );
+  const attachments = require(path.join(projectRoot, 'out/attachments.js'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-attachment-candidates-'));
   fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
   fs.mkdirSync(path.join(root, '.solopreneur', 'agent-runs', 'step-1'), { recursive: true });
@@ -501,7 +504,7 @@ test('attachment picker candidates are local project files and skip run artifact
   fs.writeFileSync(path.join(root, 'docs', 'brief.md'), 'brief', 'utf8');
   fs.writeFileSync(path.join(root, '.solopreneur', 'agent-runs', 'step-1', 'output.log'), 'log', 'utf8');
 
-  const files = extensionModule.__listProjectAttachmentCandidates(root);
+  const files = attachments.listProjectAttachmentCandidates(root);
 
   assert.ok(files.includes('README.md'));
   assert.ok(files.includes('docs/brief.md'));
