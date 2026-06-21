@@ -169,6 +169,12 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './projectSignals') {
           return require(path.join(projectRoot, 'out/projectSignals.js'));
         }
+        if (id === './projectExternalSignals') {
+          return require(path.join(projectRoot, 'out/projectExternalSignals.js'));
+        }
+        if (id === './projectPortfolio') {
+          return require(path.join(projectRoot, 'out/projectPortfolio.js'));
+        }
         if (id === './projectRegistry') {
           return require(path.join(projectRoot, 'out/projectRegistry.js'));
         }
@@ -1794,8 +1800,8 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
     [
-      'module.exports.__buildProjectPortfolioSummaries = buildProjectPortfolioSummaries;',
-      'module.exports.__getRecommendedNode = getRecommendedNode;',
+      'module.exports.__buildProjectPortfolioSummaries = projectPortfolio_1.buildProjectPortfolioSummaries;',
+      'module.exports.__getRecommendedNode = projectPortfolio_1.getRecommendedNode;',
       'module.exports.__hasProEntitlement = proAccount_1.hasProEntitlement;'
     ].join('\n')
   );
@@ -2280,7 +2286,7 @@ test('global engineering store writes git-friendly portfolio files', () => {
     'out/sidebarProvider.js',
     [
       'module.exports.__ensureGlobalEngineeringStore = ensureGlobalEngineeringStore;',
-      'module.exports.__normalizeGlobalDataPath = normalizeGlobalDataPath;'
+      'module.exports.__normalizeGlobalDataPath = projectPortfolio_1.normalizeGlobalDataPath;'
     ].join('\n')
   );
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-store-'));
@@ -2335,14 +2341,14 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
     [
-      'module.exports.__getIssueCachePath = getIssueCachePath;',
-      'module.exports.__getDeliveryCachePath = getDeliveryCachePath;',
-      'module.exports.__readIssueCache = readIssueCache;',
-      'module.exports.__writeIssueCache = writeIssueCache;',
-      'module.exports.__readDeliveryCache = readDeliveryCache;',
-      'module.exports.__writeDeliveryCache = writeDeliveryCache;',
-      'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;',
-      'module.exports.__summarizeIssueItems = summarizeIssueItems;'
+      'module.exports.__getIssueCachePath = projectExternalSignals_1.getIssueCachePath;',
+      'module.exports.__getDeliveryCachePath = projectExternalSignals_1.getDeliveryCachePath;',
+      'module.exports.__readIssueCache = projectExternalSignals_1.readIssueCache;',
+      'module.exports.__writeIssueCache = projectExternalSignals_1.writeIssueCache;',
+      'module.exports.__readDeliveryCache = projectExternalSignals_1.readDeliveryCache;',
+      'module.exports.__writeDeliveryCache = projectExternalSignals_1.writeDeliveryCache;',
+      'module.exports.__summarizeDeliveryCache = projectExternalSignals_1.summarizeDeliveryCache;',
+      'module.exports.__summarizeIssueItems = projectExternalSignals_1.summarizeIssueItems;'
     ].join('\n')
   );
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-issue-cache-'));
@@ -2493,10 +2499,10 @@ test('sidebar security summary counts only live critical and high alerts', () =>
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
     [
-      'module.exports.__summarizeSecurityCache = summarizeSecurityCache;',
-      'module.exports.__writeSecurityCache = writeSecurityCache;',
-      'module.exports.__readSecurityCache = readSecurityCache;',
-      'module.exports.__getSecurityCachePath = getSecurityCachePath;'
+      'module.exports.__summarizeSecurityCache = projectExternalSignals_1.summarizeSecurityCache;',
+      'module.exports.__writeSecurityCache = projectExternalSignals_1.writeSecurityCache;',
+      'module.exports.__readSecurityCache = projectExternalSignals_1.readSecurityCache;',
+      'module.exports.__getSecurityCachePath = projectExternalSignals_1.getSecurityCachePath;'
     ].join('\n')
   );
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-security-'));
@@ -2531,7 +2537,7 @@ test('sidebar security summary counts only live critical and high alerts', () =>
 test('sidebar delivery summary ignores cancelled and superseded workflow runs', () => {
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
-    'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;'
+    'module.exports.__summarizeDeliveryCache = projectExternalSignals_1.summarizeDeliveryCache;'
   );
   const cache = {
     schemaVersion: 1,
@@ -2586,7 +2592,7 @@ test('sidebar delivery summary ignores cancelled and superseded workflow runs', 
 test('sidebar delivery summary ignores failures outside the most recent three runs', () => {
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
-    'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;'
+    'module.exports.__summarizeDeliveryCache = projectExternalSignals_1.summarizeDeliveryCache;'
   );
   const cache = {
     schemaVersion: 1,
@@ -2642,7 +2648,7 @@ test('sidebar delivery summary ignores failures outside the most recent three ru
 test('sidebar delivery signal avoids raw failed-check wording', () => {
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
-    'module.exports.__inferDeliverySignal = inferDeliverySignal;'
+    'module.exports.__inferDeliverySignal = projectPortfolio_1.inferDeliverySignal;'
   );
   const signal = sidebarModule.__inferDeliverySignal({
     available: true,
@@ -2668,8 +2674,8 @@ test('sidebar issue creation keeps labels auxiliary to creation', () => {
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
     [
-      'module.exports.__getProjectIssueLabels = getProjectIssueLabels;',
-      'module.exports.__parseIssueNumberFromOutput = parseIssueNumberFromOutput;'
+      'module.exports.__getProjectIssueLabels = projectExternalSignals_1.getProjectIssueLabels;',
+      'module.exports.__parseIssueNumberFromOutput = projectExternalSignals_1.parseIssueNumberFromOutput;'
     ].join('\n')
   );
 
@@ -3256,11 +3262,11 @@ test('agent command builder uses non-interactive task runs and native continuati
   const sidebarModule = loadCompiledModule(
     'out/sidebarProvider.js',
     [
-      'module.exports.__getAgentCliCandidates = getAgentCliCandidates;',
-      'module.exports.__resolveExecutablePath = resolveExecutablePath;',
-      'module.exports.__commandExists = commandExists;',
-      'module.exports.__getCliVersionArgs = getCliVersionArgs;',
-      'module.exports.__formatCliTestMessage = formatCliTestMessage;',
+      'module.exports.__getAgentCliCandidates = agentCli_1.getAgentCliCandidates;',
+      'module.exports.__resolveExecutablePath = agentCli_1.resolveExecutablePath;',
+      'module.exports.__commandExists = agentCli_1.commandExists;',
+      'module.exports.__getCliVersionArgs = agentCli_1.getCliVersionArgs;',
+      'module.exports.__formatCliTestMessage = agentCli_1.formatCliTestMessage;',
       'module.exports.__buildAgentInstallCommand = buildAgentInstallCommand;',
       'module.exports.__getDependencyStatus = getDependencyStatus;',
       'module.exports.__buildAgentAutomationWrapper = buildAgentAutomationWrapper;'
