@@ -232,6 +232,15 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './sidebarProjectLoader') {
           return require(path.join(projectRoot, 'out/sidebarProjectLoader.js'));
         }
+        if (id === './sidebarWebview') {
+          return require(path.join(projectRoot, 'out/sidebarWebview.js'));
+        }
+        if (id === './dailyReview') {
+          return loadCompiledModule('out/dailyReview.js', '');
+        }
+        if (id === './globalEngineeringStore') {
+          return require(path.join(projectRoot, 'out/globalEngineeringStore.js'));
+        }
         return {};
       }
       return require(id);
@@ -455,7 +464,7 @@ test('extension manifest uses SoloMap visible branding', () => {
 test('ability settings copy is localized in English webviews', () => {
   const sources = [
     fs.readFileSync(path.join(projectRoot, 'src', 'roadmapWebview.ts'), 'utf8'),
-    fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8')
+    fs.readFileSync(path.join(projectRoot, 'src', 'sidebarWebview.ts'), 'utf8')
   ];
   const sharedRuntimeSource = fs.readFileSync(path.join(projectRoot, 'src', 'webviewSharedRuntime.ts'), 'utf8');
 
@@ -569,7 +578,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     async () => {},
     async () => {}
   );
-  const html = provider._getHtmlForWebview(createWebviewStub());
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
   const script = extractLastScript(html);
 
   assert.doesNotThrow(() => new vm.Script(script));
@@ -1308,7 +1318,7 @@ test('full roadmap conversation history folds review runs under the reviewed con
 });
 
 test('sidebar conversation result cards expose rollback actions for pre-session git hashes', () => {
-  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarProvider.js'), 'utf8');
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarWebview.js'), 'utf8');
   const extensionSource = [
     fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8'),
     fs.readFileSync(path.join(projectRoot, 'out/roadmapWebview.js'), 'utf8')
@@ -1344,7 +1354,8 @@ test('sidebar keeps project creation focused on the project switcher', () => {
     async () => {},
     async () => {}
   );
-  const html = provider._getHtmlForWebview(createWebviewStub());
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
 
   assert.match(html, /id="project-select"/);
@@ -1629,7 +1640,7 @@ test('sidebar keeps solo composer active when nodes load after the user starts t
 
 test('daily review prompt switches modes by engineering rhythm and signals', () => {
   const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
+    'out/dailyReview.js',
     [
       'module.exports.__getDailyReviewMode = getDailyReviewMode;',
       'module.exports.__buildDailyReviewPrompt = buildDailyReviewPrompt;'
@@ -1827,14 +1838,13 @@ test('sidebar local project refresh keeps reusable signal enrichment without ext
 });
 
 test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
-  const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
-    [
-      'module.exports.__buildProjectPortfolioSummaries = projectPortfolio_1.buildProjectPortfolioSummaries;',
-      'module.exports.__getRecommendedNode = projectPortfolio_1.getRecommendedNode;',
-      'module.exports.__hasProEntitlement = proAccount_1.hasProEntitlement;'
-    ].join('\n')
-  );
+  const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
+  const proAccount = require(path.join(projectRoot, 'out/proAccount.js'));
+  const sidebarModule = {
+    __buildProjectPortfolioSummaries: projectPortfolio.buildProjectPortfolioSummaries,
+    __getRecommendedNode: projectPortfolio.getRecommendedNode,
+    __hasProEntitlement: proAccount.hasProEntitlement
+  };
 
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-portfolio-a-'));
   const solopreneurA = path.join(projectRootA, '.solopreneur');
@@ -2313,7 +2323,7 @@ test('passport callback verifies and stores a user grant before unlocking Pro', 
 
 test('global engineering store writes git-friendly portfolio files', () => {
   const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
+    'out/globalEngineeringStore.js',
     [
       'module.exports.__ensureGlobalEngineeringStore = ensureGlobalEngineeringStore;',
       'module.exports.__normalizeGlobalDataPath = projectPortfolio_1.normalizeGlobalDataPath;'
@@ -2925,6 +2935,7 @@ test('legacy and canonical webview commands dispatch through one plugin action c
 test('roadmap and sidebar keep one shared application action boundary', () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
+  const sidebarWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
   const roadmapSource = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
   const sharedRuntimeSource = fs.readFileSync(path.join(projectRoot, 'src/webviewSharedRuntime.ts'), 'utf8');
 
@@ -2935,23 +2946,40 @@ test('roadmap and sidebar keep one shared application action boundary', () => {
   assert.doesNotMatch(extensionSource, /case 'updateSettings'/);
   assert.doesNotMatch(sidebarSource, /case 'runAgent'/);
   assert.doesNotMatch(sidebarSource, /case 'updateSettings'/);
-  assert.doesNotMatch(sidebarSource, /Native Agent session saved/);
+  assert.doesNotMatch(sidebarWebviewSource, /Native Agent session saved/);
   assert.doesNotMatch(roadmapSource, /Native Agent session saved/);
-  assert.match(sidebarSource, /command: 'settings\.update'[\s\S]*?agentModelPreferences/);
+  assert.match(sidebarWebviewSource, /command: 'settings\.update'[\s\S]*?agentModelPreferences/);
   assert.match(roadmapSource, /command: 'settings\.get'/);
   assert.match(sharedRuntimeSource, /command: 'agentModels\.get'/);
-  assert.match(sidebarSource, /getSharedWebviewRuntimeScript/);
+  assert.match(sidebarWebviewSource, /getSharedWebviewRuntimeScript/);
   assert.match(roadmapSource, /getSharedWebviewRuntimeScript/);
   assert.match(sharedRuntimeSource, /function createModelController/);
   assert.match(sharedRuntimeSource, /function createAbilityController/);
-  assert.match(sidebarSource, /SoloMapWebview\.createModelController/);
+  assert.match(sidebarWebviewSource, /SoloMapWebview\.createModelController/);
   assert.match(roadmapSource, /SoloMapWebview\.createModelController/);
-  assert.doesNotMatch(sidebarSource, /function getAgentModelOptions/);
+  assert.doesNotMatch(sidebarWebviewSource, /function getAgentModelOptions/);
   assert.doesNotMatch(roadmapSource, /function getAgentModelOptions/);
-  assert.doesNotMatch(sidebarSource, /function bindSoloSelect\(/);
+  assert.doesNotMatch(sidebarWebviewSource, /function bindSoloSelect\(/);
   assert.doesNotMatch(roadmapSource, /function bindSoloSelect\(/);
-  assert.doesNotMatch(sidebarSource, /command: 'ability\.installSkill'/);
+  assert.doesNotMatch(sidebarWebviewSource, /command: 'ability\.installSkill'/);
   assert.doesNotMatch(roadmapSource, /command: 'ability\.installSkill'/);
+});
+
+test('sidebar provider delegates view, daily review, and global store responsibilities', () => {
+  const providerSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
+  const webviewSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  const dailyReviewSource = fs.readFileSync(path.join(projectRoot, 'src/dailyReview.ts'), 'utf8');
+  const globalStoreSource = fs.readFileSync(path.join(projectRoot, 'src/globalEngineeringStore.ts'), 'utf8');
+
+  assert.match(providerSource, /getSidebarWebviewHtml/);
+  assert.match(providerSource, /startDailyReviewAgent/);
+  assert.match(providerSource, /ensureGlobalEngineeringStore/);
+  assert.doesNotMatch(providerSource, /<style>|<script>/);
+  assert.doesNotMatch(providerSource, /function buildDailyReviewPrompt/);
+  assert.doesNotMatch(providerSource, /function ensureGlobalEngineeringStore/);
+  assert.match(webviewSource, /export function getSidebarWebviewHtml/);
+  assert.match(dailyReviewSource, /export function startDailyReviewAgent/);
+  assert.match(globalStoreSource, /export function ensureGlobalEngineeringStore/);
 });
 
 test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
