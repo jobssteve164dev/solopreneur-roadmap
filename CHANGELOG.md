@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.248 - 2026-06-21
+
+### Fixed
+- dedupe external data refreshes (44c124d)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.247 - 2026-06-21
 
 ### Fixed
