@@ -2123,6 +2123,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let activeMainView = 'roadmap';
     let currentSettings = {};
     let currentRoadmapLoading = false;
+    let currentRoadmapError = '';
     let selectedEnhancementId = '';
     const roadmapRevisionId = '__roadmap_revision__';
     const soloConversationId = '__solo__';
@@ -3345,13 +3346,23 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       switch (message.command) {
         case 'roadmapLoading':
           currentRoadmapLoading = true;
+          currentRoadmapError = '';
           if (message.projectPath && message.projectPath !== activeProjectPath) {
             resetProjectScopedState(message.projectPath, true);
           }
           renderRoadmap(currentNodes);
           break;
+        case 'roadmapLoadFailed':
+          currentRoadmapLoading = false;
+          currentRoadmapError = message.message || '';
+          if (message.projectPath && message.projectPath !== activeProjectPath) {
+            resetProjectScopedState(message.projectPath, true);
+          }
+          renderRoadmap([]);
+          break;
         case 'nodesUpdated':
           currentRoadmapLoading = false;
+          currentRoadmapError = '';
           if (message.projectPath && message.projectPath !== activeProjectPath) {
             resetProjectScopedState(message.projectPath, false);
           }
@@ -3945,9 +3956,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
       if (!nodes || nodes.length === 0) {
         const placeholder = document.createElement('div');
-        placeholder.innerHTML = currentRoadmapLoading
-          ? '<div class="onboarding-panel"><div class="onboarding-title">' + escapeHtml(t('roadmapLoading')) + '</div></div>'
-          : renderOnboardingPanel();
+        if (currentRoadmapLoading) {
+          placeholder.innerHTML = '<div class="onboarding-panel"><div class="onboarding-title">' + escapeHtml(t('roadmapLoading')) + '</div></div>';
+        } else if (currentRoadmapError) {
+          placeholder.innerHTML = '<div class="onboarding-panel"><div class="onboarding-title">' + escapeHtml(currentRoadmapError) + '</div></div>';
+        } else {
+          placeholder.innerHTML = renderOnboardingPanel();
+        }
         canvas.appendChild(placeholder);
         bindOnboardingActions(placeholder);
         return;

@@ -15,6 +15,7 @@ import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocu
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import { getWebviewHtml } from './roadmapWebview';
+import { buildLocalDataStatusHtml, formatLocalDataError, runLocalDataLoad } from './localDataLoader';
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -2427,7 +2428,8 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
       return true;
     } catch (error) {
       syncEngineReady = false;
-      vscode.window.showErrorMessage(`Failed to initialize Roadmap database: ${error}`);
+      postRoadmapLoadFailed(projectRoot, error);
+      vscode.window.showErrorMessage(`路线图本地数据加载失败：${formatLocalDataError(error)}`);
       return false;
     } finally {
       syncEngineInitPromise = null;
@@ -2438,15 +2440,13 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
 }
 
 async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: 'roadmap' | 'solo' | 'flow' = 'roadmap') {
-  const effectiveInitialView = initialView === 'flow' && !await hasFlowModeAccess(context)
-    ? 'roadmap'
-    : initialView;
+  const effectiveInitialView = initialView;
   // If panel already exists, reveal it
   if (activePanel) {
     recordLocalUsageEvent(context, 'roadmapOpened');
     activePanel.reveal(vscode.ViewColumn.One);
     activePanel.webview.postMessage({ command: 'setMainView', view: effectiveInitialView });
-    await postFlowStateToWebview(context);
+    void postFlowStateToWebview(context);
     return;
   }
 
@@ -2481,7 +2481,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
     projects: getProjectState(context)
   });
   activePanel.webview.postMessage({ command: 'setMainView', view: effectiveInitialView });
-  await postFlowStateToWebview(context);
+  void postFlowStateToWebview(context);
 
   // Handle messages from Webview
   activePanel.webview.onDidReceiveMessage(
@@ -2805,22 +2805,29 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
 }
 
 async function handleOpenStrategyPyramid(context: vscode.ExtensionContext): Promise<void> {
-  if (!await hasStrategyPyramidAccess(context)) {
-    const choice = await vscode.window.showInformationMessage(
-      '战略金字塔是 Pro 功能。',
-      '升级 Pro'
-    );
-    if (choice === '升级 Pro') {
-      await beginPassportAuthorizationFlow(context);
-    }
-    return;
-  }
   await openStrategyPyramidPanel(context);
+}
+
+async function hasLocalStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
+  if (hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
+    return true;
+  }
+  const cached = await readPassportGrant(context);
+  return cached ? grantContainsFeature(cached) : false;
 }
 
 async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {
   if (activeStrategyPyramidPanel) {
     activeStrategyPyramidPanel.reveal(vscode.ViewColumn.One);
+    activeStrategyPyramidPanel.webview.html = buildLocalDataStatusHtml(
+      activeStrategyPyramidPanel.webview,
+      context,
+      {
+        title: '正在打开战略金字塔',
+        message: '先打开视图，再读取本地项目组合数据。'
+      }
+    );
+    void refreshStrategyPyramidPanel(context);
     return;
   }
 
@@ -2835,24 +2842,32 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
     }
   );
 
-  const refresh = () => {
-    if (!activeStrategyPyramidPanel) {
-      return;
+  activeStrategyPyramidPanel.webview.html = buildLocalDataStatusHtml(
+    activeStrategyPyramidPanel.webview,
+    context,
+    {
+      title: '正在打开战略金字塔',
+      message: '先打开视图，再读取本地项目组合数据。'
     }
-    activeStrategyPyramidPanel.webview.html = getStrategyPyramidWebviewHtml(
-      activeStrategyPyramidPanel.webview,
-      context,
-      buildStrategyPyramidSnapshot(context)
-    );
-  };
-
-  refresh();
+  );
+  void refreshStrategyPyramidPanel(context);
 
   activeStrategyPyramidPanel.webview.onDidReceiveMessage(
     async (message) => {
       switch (message.command) {
         case 'refreshStrategyPyramid':
-          refresh();
+          activeStrategyPyramidPanel!.webview.html = buildLocalDataStatusHtml(
+            activeStrategyPyramidPanel!.webview,
+            context,
+            {
+              title: '正在刷新战略金字塔',
+              message: '正在重新读取本地项目组合数据。'
+            }
+          );
+          void refreshStrategyPyramidPanel(context);
+          break;
+        case 'openProAuthorization':
+          await beginPassportAuthorizationFlow(context);
           break;
         case 'openProjectRoadmap':
           if (message.projectPath) {
@@ -2872,7 +2887,7 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
               message.strategicAction,
               message.abilities
             );
-            refresh();
+            void refreshStrategyPyramidPanel(context);
           }
           break;
       }
@@ -2887,6 +2902,44 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
     },
     null,
     context.subscriptions
+  );
+}
+
+async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {
+  const panel = activeStrategyPyramidPanel;
+  if (!panel) {
+    return;
+  }
+  if (!await hasLocalStrategyPyramidAccess(context)) {
+    panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
+      title: '需要 SoloMap Pro',
+      message: '战略金字塔需要 Pro。你仍然可以先使用本地路线图和项目卡片；登录或升级后这里会读取本地项目组合数据。',
+      actionLabel: '登录 / 升级 Pro',
+      actionCommand: 'openProAuthorization'
+    });
+    return;
+  }
+  await runLocalDataLoad(
+    () => buildStrategyPyramidSnapshot(context),
+    (snapshot) => {
+      if (!activeStrategyPyramidPanel) return;
+      activeStrategyPyramidPanel.webview.html = getStrategyPyramidWebviewHtml(
+        activeStrategyPyramidPanel.webview,
+        context,
+        snapshot
+      );
+    },
+    (message) => {
+      if (!activeStrategyPyramidPanel) return;
+      activeStrategyPyramidPanel.webview.html = buildLocalDataStatusHtml(activeStrategyPyramidPanel.webview, context, {
+        title: '战略金字塔加载失败',
+        message: '本地项目组合数据没有成功读取。',
+        detail: message,
+        actionLabel: '重试',
+        actionCommand: 'refreshStrategyPyramid'
+      });
+    },
+    '战略金字塔本地数据加载失败。'
   );
 }
 
@@ -2940,6 +2993,20 @@ function sendNodesToWebview() {
   }
   if (extensionContextRef) {
     void postFlowStateToWebview(extensionContextRef);
+  }
+}
+
+function postRoadmapLoadFailed(projectPath: string, error: unknown): void {
+  const message = formatLocalDataError(error, '路线图本地数据加载失败。');
+  if (activePanel) {
+    activePanel.webview.postMessage({
+      command: 'roadmapLoadFailed',
+      projectPath,
+      message
+    });
+  }
+  if (sidebarProvider) {
+    sidebarProvider.sendNodesToWebview();
   }
 }
 
