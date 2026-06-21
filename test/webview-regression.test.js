@@ -606,13 +606,17 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /data-refresh-project-path/);
   assert.match(script, /data-toggle-delivery-panel/);
   assert.match(script, /data-agent-fix-delivery-project-path/);
-  assert.match(script, /data-agent-fix-security-project-path/);
+  assert.match(script, /data-open-security-audit/);
+  assert.doesNotMatch(script, /data-agent-fix-security-project-path/);
   assert.match(script, /data-agent-fix-foundation-project-path/);
   assert.match(script, /projectSecurityLoaded/);
   assert.match(script, /securitySignalText/);
   assert.match(script, /foundationSignalText/);
-  assert.match(script, /buildSecurityActionPrompt/);
+  assert.doesNotMatch(script, /buildSecurityActionPrompt/);
   assert.match(script, /buildFoundationActionPrompt/);
+  assert.match(html, /\.portfolio-compose\s*\{[\s\S]*border:\s*1px solid rgba\(124,\s*77,\s*255,\s*0\.22\)[\s\S]*border-radius:\s*8px/);
+  assert.match(script, /security\.alerts\.filter\(alert => \(!alert\.state \|\| alert\.state === 'open'\) && \['critical', 'high'\]\.includes/);
+  assert.match(script, /'https:\/\/github\.com\/' \+ securityRepo \+ '\/security'/);
   assert.match(script, /project\.togglePinned/);
   assert.match(script, /conversation\.getProjectHistory/);
   assert.match(script, /checksCached/);
@@ -625,7 +629,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /data-issue-panel/);
   assert.match(html, /data-toggle-issue-form/);
 
-  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
+  const { elements, postedMessages, dispatchMessage, context } = runScriptWithMinimalDom(script, [
     'tasks-list',
     'progress-bar',
     'progress-text',
@@ -671,7 +675,33 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'dependency-github-status',
     'dependency-github-message',
     'cli-test-badge'
-  ]);
+  ], `
+    globalThis.__setDeliveryActionPanelExpanded = (value) => { deliveryActionPanelExpanded = Boolean(value); };
+    globalThis.__renderProjectDeliveryPanel = renderProjectDeliveryPanel;
+  `);
+
+  context.__setDeliveryActionPanelExpanded(true);
+  const securityPanelHtml = context.__renderProjectDeliveryPanel({
+    name: 'app',
+    path: '/workspace/app',
+    security: {
+      available: true,
+      repo: 'owner/repo',
+      openCriticalHigh: 2,
+      alerts: [
+        { source: 'Dependabot', title: 'critical package', severity: 'critical', state: 'open', url: 'https://github.com/owner/repo/security/dependabot/1' },
+        { source: 'CodeQL', title: 'high code path', severity: 'high', state: 'open', url: 'https://github.com/owner/repo/security/code-scanning/2' },
+        { source: 'Dependabot', title: 'medium package', severity: 'medium', state: 'open', url: 'https://github.com/owner/repo/security/dependabot/3' }
+      ]
+    }
+  });
+  assert.match(securityPanelHtml, /critical package/);
+  assert.match(securityPanelHtml, /high code path/);
+  assert.doesNotMatch(securityPanelHtml, /medium package/);
+  assert.equal((securityPanelHtml.match(/data-open-security-audit=/g) || []).length, 1);
+  assert.match(securityPanelHtml, /data-open-security-audit="https:\/\/github\.com\/owner\/repo\/security"/);
+  assert.doesNotMatch(securityPanelHtml, /data-agent-fix-security-project-path|打开路线大图/);
+  context.__setDeliveryActionPanelExpanded(false);
 
   elements['btn-open-strategy-pyramid'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'showStrategyPyramid'));

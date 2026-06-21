@@ -1816,9 +1816,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     .portfolio-compose {
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
-      padding-top: 7px;
-      margin-top: 0;
+      border: 1px solid rgba(124, 77, 255, 0.22);
+      border-radius: 8px;
+      padding: 9px;
+      margin-top: 10px;
+      background: linear-gradient(135deg, rgba(124, 77, 255, 0.07), rgba(0, 176, 255, 0.045));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
       cursor: default;
     }
 
@@ -2167,6 +2170,39 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       font-weight: 700;
       color: var(--text-muted, #888888);
       margin-bottom: 6px;
+    }
+
+    .delivery-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .delivery-section-head .delivery-section-title {
+      margin-bottom: 0;
+    }
+
+    .security-audit-link {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-main);
+      padding: 4px 7px;
+      font-size: 9px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .security-audit-link:hover {
+      border-color: rgba(124, 77, 255, 0.5);
+      background: rgba(124, 77, 255, 0.14);
     }
 
     .delivery-toast-message {
@@ -5842,33 +5878,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       ].join('\\n');
     }
 
-    function buildSecurityActionPrompt(project) {
-      const security = project && project.security ? project.security : {};
-      const alerts = Array.isArray(security.alerts) ? security.alerts : [];
-      const alertSummary = alerts.length
-        ? alerts.map((alert, index) => {
-          const source = alert.source || 'Security';
-          const title = alert.title || 'Security alert';
-          const severity = alert.severity || 'unknown';
-          return (index + 1) + '. ' + source + ' · ' + severity + ' · ' + title + (alert.url ? ' · ' + alert.url : '');
-        }).join('\\n')
-        : (currentLanguage === 'zh' ? '当前没有缓存到具体告警明细，请重新审计项目安全状态。' : 'No alert details are cached. Re-audit the project security state.');
-      if (currentLanguage === 'zh') {
-        return [
-          '请处理这个项目当前最高优先级的安全风险。',
-          '已知安全告警：',
-          alertSummary,
-          '要求：先确认告警是否仍然成立；如果成立，直接修复根因，并运行最窄相关验证和安全审计命令。不要只隐藏告警或绕过检查。'
-        ].join('\\n');
-      }
-      return [
-        'Handle the highest-priority security risk in this project.',
-        'Known security alerts:',
-        alertSummary,
-        'Requirements: confirm the alert is still valid; if it is valid, fix the root cause and run the narrow relevant verification and security audit. Do not hide alerts or bypass checks.'
-      ].join('\\n');
-    }
-
     function buildFoundationActionPrompt(project) {
       const foundation = project && project.foundation ? project.foundation : {};
       const missing = Array.isArray(foundation.missing) ? foundation.missing : [];
@@ -5960,15 +5969,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           + '</div>';
       }
 
-      const securityRows = security && Array.isArray(security.alerts)
-        ? security.alerts.map(alert => '<div class="portfolio-delivery-row">'
+      const securityAlerts = security && Array.isArray(security.alerts)
+        ? security.alerts.filter(alert => (!alert.state || alert.state === 'open') && ['critical', 'high'].includes(String(alert.severity || '').toLowerCase()))
+        : [];
+      const securityRows = securityAlerts.length
+        ? securityAlerts.map(alert => '<div class="portfolio-delivery-row">'
           + '<span class="portfolio-issue-main">'
           + '<span class="portfolio-issue-name">' + escapeHtml(alert.title || alert.source || '-') + '</span>'
           + '<span class="portfolio-issue-sub">' + escapeHtml((alert.source || 'Security') + ' · ' + (alert.severity || 'unknown')) + '</span>'
           + '</span>'
-          + (alert.url ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(alert.url) + '">' + escapeHtml(t('projectOpen')) + '</button>' : '')
           + '</div>').join('')
         : '';
+      const securityRepo = String((security && security.repo) || '').trim();
+      const securityAuditUrl = securityRepo ? 'https://github.com/' + securityRepo + '/security' : '';
       const foundationRows = hasFoundationGap && Array.isArray(foundation.missing)
         ? foundation.missing.map(item => '<div class="portfolio-delivery-row">'
           + '<span class="portfolio-issue-main">'
@@ -6030,7 +6043,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           : '')
         + (securityRows
           ? '<div class="delivery-runs-section">'
+            + '<div class="delivery-section-head">'
             + '<div class="delivery-section-title">' + escapeHtml(t('deliveryActionSecurity')) + '</div>'
+            + (securityAuditUrl
+              ? '<button class="security-audit-link" data-open-security-audit="' + escapeHtml(securityAuditUrl) + '">'
+                + '<span class="codicon codicon-github"></span>'
+                + escapeHtml(currentLanguage === 'zh' ? 'GitHub 审计' : 'GitHub audit')
+                + '</button>'
+              : '')
+            + '</div>'
             + '<div class="portfolio-delivery-list">' + securityRows + '</div>'
             + '</div>'
           : '')
@@ -6058,12 +6079,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           ? '<button class="delivery-action-btn primary-btn pulse-glow" data-agent-fix-delivery-project-path="' + escapeHtml(project.path) + '">'
             + '<span class="codicon codicon-tools"></span>'
             + escapeHtml(t('deliveryActionAgent'))
-            + '</button>'
-          : '')
-        + (hasSecurityRisk
-          ? '<button class="delivery-action-btn primary-btn pulse-glow" data-agent-fix-security-project-path="' + escapeHtml(project.path) + '">'
-            + '<span class="codicon codicon-shield"></span>'
-            + escapeHtml(t('deliveryActionFixSecurity'))
             + '</button>'
           : '')
         + (hasFoundationGap
@@ -6194,6 +6209,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({ command: 'external.open', url });
         });
       });
+      portfolioList.querySelectorAll('[data-open-security-audit]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const url = button.getAttribute('data-open-security-audit') || '';
+          if (!url) return;
+          vscode.postMessage({ command: 'external.open', url });
+        });
+      });
       portfolioList.querySelectorAll('[data-refresh-delivery-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -6222,28 +6245,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             command: 'conversation.runSolo',
             projectPath,
             userMessage: buildDeliveryActionPrompt(project),
-            agentCli,
-            model,
-            supplementFiles: []
-          });
-        });
-      });
-      portfolioList.querySelectorAll('[data-agent-fix-security-project-path]').forEach(button => {
-        button.addEventListener('click', (event) => {
-          event.stopPropagation();
-          const projectPath = button.getAttribute('data-agent-fix-security-project-path') || '';
-          const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
-          if (!projectPath || !project) return;
-          const targetId = projectSoloTargetId(projectPath);
-          const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
-          const model = getTargetModelValue(targetId, agentCli);
-          projectConversationModes[projectPath] = 'solo';
-          deliveryActionMessage = t('deliveryActionStarted');
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          vscode.postMessage({
-            command: 'conversation.runSolo',
-            projectPath,
-            userMessage: buildSecurityActionPrompt(project),
             agentCli,
             model,
             supplementFiles: []
