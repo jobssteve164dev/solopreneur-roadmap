@@ -1,16 +1,19 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as childProcess from 'child_process';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { readLearningSummary } from './learningLedger';
 import { hasProEntitlement as hasProEntitlementForSettings } from './proAccount';
 import { SolopreneurSettings } from './pluginContracts';
+import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
+import { SidebarProjectLoader } from './sidebarProjectLoader';
 import {
-  loadExternalDeliverySummary,
-  loadExternalIssueSummary,
-  loadExternalSecuritySummary,
+  buildAgentAutomationWrapper,
+  buildAgentInstallCommand,
+  getDependencyStatus
+} from './sidebarDependencies';
+import {
   ProjectDeliverySummary,
   ProjectIssueComment,
   ProjectIssueItem,
@@ -32,11 +35,7 @@ import {
   buildAgentCommandForPromptFile,
   commandExists,
   getAgentCliCandidates,
-  getAgentCliFamily,
-  getAgentTaskAutomationStatus,
-  getKnownAgentCliCandidates,
   resolveAgentCli,
-  resolveCommandOnSearchPath,
   shellQuote
 } from './agentCli';
 
@@ -100,18 +99,6 @@ interface DailyReviewArtifact {
   error?: string;
 }
 
-interface DependencyStatus {
-  agentReady: boolean;
-  agentMessage: string;
-  agentAutomationReady: boolean;
-  agentAutomationPreconfigured: boolean;
-  agentAutomationMessage: string;
-  agentAutomationCanPrepare: boolean;
-  githubCliReady: boolean;
-  githubAuthReady: boolean;
-  githubMessage: string;
-}
-
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
   updateSettings: (settings: SolopreneurSettings) => Promise<void>;
@@ -131,110 +118,6 @@ function escapeHtmlText(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-}
-
-function getDependencyStatus(cliPath: string): DependencyStatus {
-  const agentCli = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
-  const agentReady = commandExists(agentCli);
-  const automation = agentReady
-    ? getAgentTaskAutomationStatus(agentCli)
-    : { supported: false, preconfigured: false, permissionArgs: '', message: 'Agent CLI is not ready yet.' };
-  const githubCliReady = commandExists('gh');
-  let githubAuthReady = false;
-  let githubMessage = githubCliReady ? 'GitHub CLI is installed.' : 'GitHub CLI is not installed.';
-  if (githubCliReady) {
-    const auth = childProcess.spawnSync('gh', ['auth', 'status'], {
-      encoding: 'utf8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    githubAuthReady = auth.status === 0;
-    githubMessage = githubAuthReady ? 'GitHub is authorized.' : 'GitHub authorization is needed.';
-  }
-  return {
-    agentReady,
-    agentMessage: agentReady ? `${agentCli} is ready.` : `Agent CLI not found. Tried: ${getAgentCliCandidates(cliPath || 'agy', cliPath || 'agy').join(', ')}`,
-    agentAutomationReady: agentReady && automation.supported,
-    agentAutomationPreconfigured: Boolean(automation.preconfigured),
-    agentAutomationMessage: automation.message,
-    agentAutomationCanPrepare: agentReady && automation.supported && !automation.preconfigured,
-    githubCliReady,
-    githubAuthReady,
-    githubMessage
-  };
-}
-
-function buildAgentInstallCommand(cliPath: string): string {
-  const family = getAgentCliFamily(cliPath || 'agy');
-  const verifyCandidates = getKnownAgentCliCandidates(family)
-    .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
-  const verifyScript = [
-    'echo ""',
-    'echo "SoloMap: verifying Agent CLI..."',
-    `for c in ${verifyCandidates.map(shellQuote).join(' ')}; do if command -v "$c" >/dev/null 2>&1; then echo "SoloMap: found $(command -v "$c")"; "$c" --version || true; exit 0; fi; done`,
-    'echo "SoloMap: install command finished, but the CLI is not visible in this terminal PATH yet."',
-    'echo "SoloMap: restart VS Code/code-server or paste the executable absolute path into SoloMap settings."'
-  ].join('; ');
-
-  if (family === 'codex') {
-    return `npm install -g @openai/codex; ${verifyScript}`;
-  }
-  if (family === 'claude') {
-    return `npm install -g @anthropic-ai/claude-code; ${verifyScript}`;
-  }
-  if (family === 'copilot') {
-    return `npm install -g @github/copilot; ${verifyScript}`;
-  }
-  if (family === 'opencode') {
-    return `npm install -g opencode-ai; ${verifyScript}`;
-  }
-  if (family === 'antigravity') {
-    return `curl -fsSL https://antigravity.google/cli/install.sh | bash; ${verifyScript}`;
-  }
-  if (family === 'cursor') {
-    return [
-      'echo "SoloMap: Cursor CLI is installed from the Cursor app command palette."',
-      'echo "Open Cursor, run the command to install the cursor command, then return here and click Check."',
-      'echo "If the command already exists, paste its absolute path into SoloMap settings."'
-    ].join('; ');
-  }
-  return [
-    `echo "SoloMap: no built-in installer is available for ${String(cliPath || 'this custom CLI').replace(/"/g, '\\"')}."`,
-    'echo "Install that CLI with its official installer, then paste its executable absolute path into SoloMap settings."'
-  ].join('; ');
-}
-
-function buildAgentAutomationWrapper(cliPath: string, globalDataPath: string, projects: SolopreneurProject[]): { ok: boolean; message: string; wrapperPath?: string } {
-  const agentCli = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
-  if (!commandExists(agentCli)) {
-    return { ok: false, message: `Agent CLI not found. Tried: ${getAgentCliCandidates(cliPath || 'agy', cliPath || 'agy').join(', ')}` };
-  }
-  const automation = getAgentTaskAutomationStatus(agentCli);
-  if (!automation.supported) {
-    return { ok: false, message: automation.message };
-  }
-  if (automation.preconfigured) {
-    return { ok: true, message: automation.message, wrapperPath: agentCli };
-  }
-  const family = getAgentCliFamily(agentCli || cliPath || 'agy');
-  const wrapperNameByFamily: Record<string, string> = {
-    antigravity: 'agy',
-    codex: 'codex',
-    cursor: 'cursor-agent',
-    claude: 'claude',
-    copilot: 'copilot'
-  };
-  const wrapperName = wrapperNameByFamily[family] || path.basename(agentCli).replace(/[^a-z0-9_-]/gi, '-') || 'agent';
-  const wrapperDir = path.join(normalizeGlobalDataPath(globalDataPath, projects), 'agent-cli');
-  const wrapperPath = path.join(wrapperDir, wrapperName);
-  fs.mkdirSync(wrapperDir, { recursive: true });
-  const script = [
-    '#!/bin/sh',
-    `exec ${shellQuote(agentCli)} ${automation.permissionArgs} "$@"`
-  ].join('\n');
-  fs.writeFileSync(wrapperPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
-  fs.chmodSync(wrapperPath, 0o755);
-  return { ok: true, message: `Agent prepared for automatic task runs: ${wrapperPath}`, wrapperPath };
 }
 
 function csvEscape(value: string | number): string {
@@ -1022,10 +905,7 @@ function startDailyReviewAgent(settings: SolopreneurSettings, projects: Solopren
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'solopreneur.sidebar';
   private _view?: vscode.WebviewView;
-  private _portfolioLoadRequest = 0;
-  private _issueLoadRequest = 0;
-  private _deliveryLoadRequest = 0;
-  private _securityLoadRequest = 0;
+  private readonly _projectLoader: SidebarProjectLoader;
   private readonly _getSettings: () => SolopreneurSettings;
   private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>;
   private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string };
@@ -1058,6 +938,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     this._getStepConversationHistory = dependencies.getStepConversationHistory;
     this._getProjectConversationHistory = dependencies.getProjectConversationHistory;
     this._dispatchSharedAction = dependencies.dispatchSharedAction;
+    this._projectLoader = new SidebarProjectLoader({
+      isAvailable: () => Boolean(this._view),
+      postMessage: (message) => { this._view?.webview.postMessage(message); },
+      getGlobalDataPath: () => this._getSettings().globalDataPath,
+      buildGlobalStore: ensureGlobalEngineeringStore,
+      buildGlobalStorePlaceholder: createGlobalEngineeringSnapshotPlaceholder
+    });
   }
 
   public resolveWebviewView(
@@ -1236,10 +1123,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       void this.sendSoloConversationHistory(projectState.selectedProjectPath);
       void this.sendProjectConversationHistory(projectState.selectedProjectPath);
       this.sendDailyReview();
-      this.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
-      this.scheduleIssueSummaryLoads(projectState.projects, projectState.selectedProjectPath);
-      this.scheduleDeliverySummaryLoads(projectState.projects, projectState.selectedProjectPath);
-      this.scheduleSecuritySummaryLoads(projectState.projects, projectState.selectedProjectPath);
+      this._projectLoader.scheduleAll(projectState.projects, projectState.selectedProjectPath);
     } catch (error) {
       console.error('SoloMap sidebar failed to send projects:', error);
       this._view?.webview.postMessage({
@@ -1264,10 +1148,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!this._view) {
         return;
       }
-      this._portfolioLoadRequest += 1;
-      this._issueLoadRequest += 1;
-      this._deliveryLoadRequest += 1;
-      this._securityLoadRequest += 1;
+      this._projectLoader.cancelExternalLoads();
       const projectState = this._getProjects();
       const portfolio = buildProjectPortfolioSummaries(projectState.projects);
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
@@ -1279,120 +1160,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           globalStore
         }
       });
-      this.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
+      this._projectLoader.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
     } catch (error) {
       console.error('SoloMap sidebar failed to send local projects:', error);
     }
-  }
-
-  private schedulePortfolioEnrichment(projects: SolopreneurProject[], selectedProjectPath: string) {
-    const requestId = ++this._portfolioLoadRequest;
-    setTimeout(() => {
-      try {
-        if (!this._view || requestId !== this._portfolioLoadRequest) {
-          return;
-        }
-        const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true, globalDataPath: this._getSettings().globalDataPath });
-        let globalStore: GlobalEngineeringSnapshot;
-        try {
-          globalStore = ensureGlobalEngineeringStore(this._getSettings().globalDataPath, portfolio);
-        } catch {
-          globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
-        }
-        this._view.webview.postMessage({
-          command: 'projectsLoaded',
-          projects: {
-            projects,
-            selectedProjectPath,
-            portfolio,
-            globalStore
-          }
-        });
-      } catch (error) {
-        console.error('SoloMap sidebar failed to enrich portfolio:', error);
-      }
-    }, 1000);
-  }
-
-  private scheduleIssueSummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
-    const requestId = ++this._issueLoadRequest;
-    const ordered = [
-      ...projects.filter((project) => project.path === selectedProjectPath),
-      ...projects.filter((project) => project.path !== selectedProjectPath)
-    ];
-    ordered.forEach((project, index) => {
-      setTimeout(() => {
-        if (!this._view || requestId !== this._issueLoadRequest) {
-          return;
-        }
-        void loadExternalIssueSummary(project.path).then((issues) => {
-          if (!this._view || requestId !== this._issueLoadRequest) {
-            return;
-          }
-          this._view.webview.postMessage({
-            command: 'projectIssuesLoaded',
-            projectPath: project.path,
-            issues
-          });
-        }).catch((error) => {
-          console.error('SoloMap sidebar failed to refresh issue summary:', error);
-        });
-      }, 1200 + 80 * index);
-    });
-  }
-
-  private scheduleSecuritySummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
-    const requestId = ++this._securityLoadRequest;
-    const ordered = [
-      ...projects.filter((project) => project.path === selectedProjectPath),
-      ...projects.filter((project) => project.path !== selectedProjectPath)
-    ];
-    ordered.forEach((project, index) => {
-      setTimeout(() => {
-        if (!this._view || requestId !== this._securityLoadRequest) {
-          return;
-        }
-        void loadExternalSecuritySummary(project.path).then((security) => {
-          if (!this._view || requestId !== this._securityLoadRequest) {
-            return;
-          }
-          this._view.webview.postMessage({
-            command: 'projectSecurityLoaded',
-            projectPath: project.path,
-            security
-          });
-        }).catch((error) => {
-          console.error('SoloMap sidebar failed to refresh security summary:', error);
-        });
-      }, 1600 + 140 * index);
-    });
-  }
-
-  private scheduleDeliverySummaryLoads(projects: SolopreneurProject[], selectedProjectPath: string) {
-    const requestId = ++this._deliveryLoadRequest;
-    const ordered = [
-      ...projects.filter((project) => project.path === selectedProjectPath),
-      ...projects.filter((project) => project.path !== selectedProjectPath)
-    ];
-    ordered.forEach((project, index) => {
-      setTimeout(() => {
-        if (!this._view || requestId !== this._deliveryLoadRequest) {
-          return;
-        }
-        void loadExternalDeliverySummary(project.path).then((delivery) => {
-          if (!this._view || requestId !== this._deliveryLoadRequest) {
-            return;
-          }
-          this._view.webview.postMessage({
-            command: 'projectDeliveryLoaded',
-            projectPath: project.path,
-            delivery
-          });
-        }).catch((error) => {
-          console.error('SoloMap sidebar failed to refresh delivery summary:', error);
-        });
-      }, 1400 + 120 * index);
-    });
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
@@ -4640,7 +4411,22 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   </div>
 
   <script>
+    ${getSharedWebviewRuntimeScript()}
     const vscode = acquireVsCodeApi();
+    const {
+      escapeHtml,
+      statusClass,
+      extractNativeSessionId,
+      closeSoloSelects,
+      setSoloSelectValue,
+      getSoloSelectValue,
+      setSoloSelectOptions,
+      renderSoloSelect,
+      bindSoloSelect,
+      bindSoloSelects,
+      buildAgentOption,
+      normalizeAgentOptionLabel
+    } = SoloMapWebview;
     const tasksList = document.getElementById('tasks-list');
     const progressBar = document.getElementById('progress-bar');
     const progressText = document.getElementById('progress-text');
@@ -5393,10 +5179,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return value || 'Completed';
     }
 
-    function statusClass(status) {
-      return String(status || '').replace(/[^a-zA-Z0-9]/g, '-');
-    }
-
     function setText(id, value) {
       const el = document.getElementById(id);
       if (el) el.textContent = value;
@@ -5613,86 +5395,27 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       abilityActionBadge.textContent = message;
     }
 
-    function getCliPresetFromCliPath(cliPath) {
-      const raw = String(cliPath || '').trim();
-      if (!raw) return 'agy';
-      // NOTE: this code runs inside a Webview <script> string; escaping must survive TS template literal parsing.
-      const base = raw.split(/[\\\\/]/).pop().toLowerCase();
-      if (['agy', 'antigravity', 'antigravity-cli'].includes(base)) return 'agy';
-      if (['codex', 'codex-cli'].includes(base)) return 'codex';
-      if (['cursor', 'cursor-cli', 'cursor-agent'].includes(base)) return 'cursor';
-      if (['copilot', 'copilot-cli'].includes(base)) return 'copilot';
-      if (['claude', 'claude-code', 'claude-code-cli'].includes(base)) return 'claude';
-      if (['opencode', 'open-code', 'open-code-cli'].includes(base)) return 'opencode';
-      return 'custom';
-    }
-
-    function getAgentFamilyKey(agentCli) {
-      const normalized = normalizeAgentOptionLabel(agentCli || getEffectiveSettingCliPath() || currentCliPath || 'agy');
-      return String(normalized || 'agy').toLowerCase();
-    }
-
-    function getAutoOnlyModelCatalog(agentCli) {
-      return {
-        agentCli: getAgentFamilyKey(agentCli),
-        supportsDiscovery: false,
-        models: [{ value: 'auto', label: 'Auto' }]
-      };
-    }
-
-    function getAgentModelCatalog(agentCli) {
-      const family = getAgentFamilyKey(agentCli);
-      return agentModelCatalogs[family] || getAutoOnlyModelCatalog(family);
-    }
-
-    function getAgentModelOptions(agentCli) {
-      const catalog = getAgentModelCatalog(agentCli);
-      const options = Array.isArray(catalog.models) && catalog.models.length
-        ? catalog.models
-        : getAutoOnlyModelCatalog(agentCli).models;
-      return options.map(option => ({
-        value: String(option.value || 'auto'),
-        label: String(option.label || option.value || 'Auto'),
-        title: String(option.description || option.label || option.value || 'Auto')
-      }));
-    }
-
-    function sanitizeModelValue(agentCli, value) {
-      const selectedValue = String(value || 'auto');
-      return getAgentModelOptions(agentCli).some(option => option.value === selectedValue) ? selectedValue : 'auto';
-    }
-
-    function getStoredModelPreference(agentCli) {
-      return sanitizeModelValue(agentCli, agentModelPreferenceMap[getAgentFamilyKey(agentCli)] || 'auto');
-    }
-
-    function getTargetModelValue(targetId, agentCli) {
-      if (targetId && projectConversationModelSelections[targetId]) {
-        return sanitizeModelValue(agentCli, projectConversationModelSelections[targetId]);
-      }
-      return getStoredModelPreference(agentCli);
-    }
-
-    function setTargetModelValue(targetId, agentCli, value, persistPreference) {
-      const nextValue = sanitizeModelValue(agentCli, value);
-      if (targetId) {
-        projectConversationModelSelections[targetId] = nextValue;
-      }
-      if (persistPreference) {
-        agentModelPreferenceMap[getAgentFamilyKey(agentCli)] = nextValue;
-      }
-      return nextValue;
-    }
-
-    function ensureAgentModelsLoaded(agentCli, targetId) {
-      const requestId = 'models-' + (++agentModelRequestSeq);
-      vscode.postMessage({
-        command: 'agentModels.get',
-        requestId,
-        targetId: targetId || '',
-        agentCli: String(agentCli || '').trim() || currentCliPath || 'agy'
-      });
-    }
+    const getCliPresetFromCliPath = SoloMapWebview.getCliPresetFromCliPath;
+    const modelController = SoloMapWebview.createModelController({
+      catalogs: agentModelCatalogs,
+      preferences: agentModelPreferenceMap,
+      selections: projectConversationModelSelections,
+      getCurrentCliPath: () => currentCliPath,
+      getEffectiveSettingCliPath: () => getEffectiveSettingCliPath(),
+      nextRequestId: () => 'models-' + (++agentModelRequestSeq),
+      postMessage: message => vscode.postMessage(message)
+    });
+    const {
+      getAgentFamilyKey,
+      getAutoOnlyModelCatalog,
+      getAgentModelCatalog,
+      getAgentModelOptions,
+      sanitizeModelValue,
+      getStoredModelPreference,
+      getTargetModelValue,
+      setTargetModelValue,
+      ensureAgentModelsLoaded
+    } = modelController;
 
     function syncSettingAgentModelSelect() {
       if (!settingAgentModelSelect) return;
@@ -5701,300 +5424,54 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function getEffectiveSettingCliPath() {
-      const selected = getSoloSelectValue(settingCliSelect);
-      if (selected === 'custom') {
-        return (settingCliPathCustom.value || '').trim() || 'agy';
-      }
-      if (currentCliPath && getCliPresetFromCliPath(currentCliPath) === selected) {
-        return currentCliPath;
-      }
-      return selected || 'agy';
+      return SoloMapWebview.getEffectiveSettingCliPath(settingCliSelect, settingCliPathCustom, currentCliPath);
     }
 
     function applySettingCliPath(cliPath) {
-      const raw = String(cliPath || '').trim() || 'agy';
-      const preset = getCliPresetFromCliPath(raw);
-      currentCliPath = raw;
-      setSoloSelectValue(settingCliSelect, preset);
-      if (preset === 'custom') {
-        settingCliPathCustom.value = raw;
-        settingCliPathCustom.style.display = 'block';
-      } else {
-        settingCliPathCustom.value = '';
-        settingCliPathCustom.style.display = 'none';
-      }
+      currentCliPath = SoloMapWebview.applySettingCliPath(settingCliSelect, settingCliPathCustom, cliPath);
     }
 
     function getEffectiveReviewerCliPath() {
-      const selected = getSoloSelectValue(settingReviewerCliSelect);
-      if (!selected) return '';
-      if (selected === 'custom') {
-        return (settingReviewerCliPathCustom.value || '').trim();
-      }
-      return selected;
+      return SoloMapWebview.getEffectiveReviewerCliPath(settingReviewerCliSelect, settingReviewerCliPathCustom);
     }
 
     function applyReviewerCliPath(cliPath) {
-      const raw = String(cliPath || '').trim();
-      if (!raw) {
-        setSoloSelectValue(settingReviewerCliSelect, '');
-        if (settingReviewerCliPathCustom) {
-          settingReviewerCliPathCustom.value = '';
-          settingReviewerCliPathCustom.style.display = 'none';
-        }
-        return;
-      }
-      const preset = getCliPresetFromCliPath(raw);
-      setSoloSelectValue(settingReviewerCliSelect, preset);
-      if (settingReviewerCliPathCustom) {
-        if (preset === 'custom') {
-          settingReviewerCliPathCustom.value = raw;
-          settingReviewerCliPathCustom.style.display = 'block';
-        } else {
-          settingReviewerCliPathCustom.value = '';
-          settingReviewerCliPathCustom.style.display = 'none';
-        }
-      }
+      SoloMapWebview.applyReviewerCliPath(settingReviewerCliSelect, settingReviewerCliPathCustom, cliPath);
     }
 
     function hasStrategyPyramidPro(settings) {
-      const entitlements = (settings && settings.proEntitlements) || {};
-      const account = (settings && settings.proAccount) || {};
-      const expiresAt = String(account.expiresAt || '').trim();
-      const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
-      if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
-        return false;
-      }
-      return Boolean(account.allowed || entitlements.strategy_pyramid || entitlements.strategyPyramid || entitlements.pro || entitlements.solomap_pro);
+      return SoloMapWebview.hasProEntitlement(settings, 'strategy_pyramid');
     }
 
     function hasFlowPro(settings) {
-      const entitlements = (settings && settings.proEntitlements) || {};
-      const account = (settings && settings.proAccount) || {};
-      const expiresAt = String(account.expiresAt || '').trim();
-      const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
-      if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
-        return false;
-      }
-      return Boolean(account.allowed || entitlements.flow_mode || entitlements.flowMode || entitlements.pro || entitlements.solomap_pro);
+      return SoloMapWebview.hasProEntitlement(settings, 'flow_mode');
     }
 
     function renderProAccount(settings) {
-      if (!proAccountPanel) return;
-      const account = (settings && settings.proAccount) || {};
-      const unlocked = hasStrategyPyramidPro(settings || {});
-      const email = String(account.email || '').trim();
-      const expiresAt = String(account.expiresAt || '').trim();
-      let expiresText = '';
-      if (expiresAt) {
-        const dateText = new Date(expiresAt).toLocaleDateString(currentLanguage === 'zh' ? 'zh-CN' : 'en-US');
-        expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>'
-          + '<div class="dependency-message" style="font-size: 10px; opacity: 0.8; line-height: 1.35; margin-top: 2px; color: var(--vscode-descriptionForeground, var(--text-muted));">' + escapeHtml(t('proExpirationHelp')) + '</div>';
-      }
-      proAccountPanel.innerHTML =
-        '<div class="dependency-item">'
-        + '<div class="dependency-info">'
-        + '<div class="dependency-name">' + escapeHtml(t('proFeatureName')) + '</div>'
-        + '<div class="dependency-message">' + escapeHtml(email || t('proAccountAnonymous')) + '</div>'
-        + expiresText
-        + '<div class="dependency-message">' + escapeHtml(t('proAccountHelp')) + '</div>'
-        + '</div>'
-        + '<span class="dependency-status ' + (unlocked ? 'ready' : 'missing') + '">' + escapeHtml(unlocked ? t('proUnlocked') : t('proLocked')) + '</span>'
-        + '</div>';
+      SoloMapWebview.renderProAccount(proAccountPanel, settings, t, currentLanguage);
     }
 
-    let selectedAbilityId = '';
-    let currentAbilitySettings = null;
+    const abilityController = SoloMapWebview.createAbilityController({
+      t,
+      showMessage: showAbilityActionMessage,
+      postMessage: message => vscode.postMessage(message),
+      elements: {
+        select: settingAbilitySelect,
+        urlContainer: settingsAbilityUrlInputContainer,
+        urlInput: settingAbilityUrlInput,
+        urlHelp: helpAbilityUrlInput,
+        detailCard: abilityDetailCard,
+        detailTitle: abilityDetailTitle,
+        detailDescription: abilityDetailDesc,
+        detailStatus: abilityDetailStatus,
+        detailMeta: abilityDetailMeta,
+        installButton: btnInstallAbility,
+        uninstallButton: btnUninstallAbility
+      }
+    });
 
     function renderAbilitiesAndEnhancements(settings) {
-      if (!settingAbilitySelect || !settingsAbilityUrlInputContainer || !settingAbilityUrlInput || !helpAbilityUrlInput || !abilityDetailCard || !btnInstallAbility || !btnUninstallAbility) {
-        return;
-      }
-      currentAbilitySettings = settings;
-      const skills = Array.isArray(settings.skills) ? settings.skills : [];
-      const connectors = Array.isArray(settings.connectors) ? settings.connectors : [];
-      const enhancements = Array.isArray(settings.enhancementStatuses) ? settings.enhancementStatuses : [];
-
-      const items = [];
-      skills.forEach(s => {
-        items.push({
-          id: 'skill-' + s.id,
-          type: 'skill',
-          originId: s.id,
-          title: s.title || s.id,
-          description: s.description || '',
-          installed: true,
-          statusLabel: t('installedStatus'),
-          statusClass: 'ready',
-          meta: t('skillMetaPrefix') + (s.entry || '')
-        });
-      });
-      items.push({
-        id: 'add-new-skill',
-        type: 'add-new-skill',
-        title: t('addSkill'),
-        description: t('addSkillDescription'),
-        installed: false
-      });
-
-      connectors.forEach(c => {
-        items.push({
-          id: 'connector-' + c.id,
-          type: 'connector',
-          originId: c.id,
-          title: c.title || c.id,
-          description: c.description || '',
-          installed: true,
-          statusLabel: t('installedStatus'),
-          statusClass: 'ready',
-          meta: t('connectorMetaPrefix') + (c.type || 'mcp')
-        });
-      });
-      items.push({
-        id: 'add-new-connector',
-        type: 'add-new-connector',
-        title: t('addConnector'),
-        description: t('addConnectorDescription'),
-        installed: false
-      });
-
-      enhancements.forEach(e => {
-        const isInstalled = e.status === 'ready' || e.installed;
-        items.push({
-          id: 'enhancement-' + e.id,
-          type: 'enhancement',
-          originId: e.id,
-          title: e.title || e.id,
-          description: e.description || '',
-          installed: isInstalled,
-          statusLabel: e.statusLabel || (isInstalled ? t('readyStatus') : t('notInstalledStatus')),
-          statusClass: e.status || (isInstalled ? 'ready' : 'missing'),
-          meta: t('enhancementMetaPrefix') + (e.version || 'unknown')
-        });
-      });
-
-      if (!selectedAbilityId || !items.some(item => item.id === selectedAbilityId)) {
-        selectedAbilityId = items.length > 0 ? items[0].id : '';
-      }
-      const selectedItem = items.find(item => item.id === selectedAbilityId) || items[0];
-
-      let optionsHtml = '';
-      
-      optionsHtml += '<div class="solo-select-group-header">' + escapeHtml(t('abilityGroupSkills')) + '</div>';
-      optionsHtml += items.filter(i => i.type === 'skill' || i.type === 'add-new-skill').map(item => 
-        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
-      ).join('');
-
-      optionsHtml += '<div class="solo-select-group-header">' + escapeHtml(t('abilityGroupConnectors')) + '</div>';
-      optionsHtml += items.filter(i => i.type === 'connector' || i.type === 'add-new-connector').map(item => 
-        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
-      ).join('');
-
-      optionsHtml += '<div class="solo-select-group-header">' + escapeHtml(t('abilityGroupEnhancements')) + '</div>';
-      optionsHtml += items.filter(i => i.type === 'enhancement').map(item => 
-        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(item.id) + '" aria-selected="' + (item.id === selectedItem.id ? 'true' : 'false') + '">' + escapeHtml(item.title) + '</button>'
-      ).join('');
-
-      const selectMenu = settingAbilitySelect.querySelector('[data-solo-menu]');
-      if (selectMenu) {
-        selectMenu.innerHTML = optionsHtml;
-      }
-      
-      const selectLabel = settingAbilitySelect.querySelector('[data-solo-label]');
-      if (selectLabel) {
-        selectLabel.textContent = selectedItem.title;
-      }
-      settingAbilitySelect.setAttribute('data-value', selectedItem.id);
-
-      if (selectedItem.type === 'add-new-skill') {
-        settingsAbilityUrlInputContainer.style.display = 'block';
-        settingAbilityUrlInput.placeholder = 'e.g. https://skills.sh/owner/repo or owner/repo@skill';
-        helpAbilityUrlInput.textContent = t('skillInstallInputHelp');
-        abilityDetailCard.style.display = 'none';
-        btnInstallAbility.removeAttribute('disabled');
-        btnUninstallAbility.setAttribute('disabled', 'true');
-      } else if (selectedItem.type === 'add-new-connector') {
-        settingsAbilityUrlInputContainer.style.display = 'block';
-        settingAbilityUrlInput.placeholder = 'e.g. GitHub MCP server URL, npm package, or config snippet';
-        helpAbilityUrlInput.textContent = t('mcpInstallInputHelp');
-        abilityDetailCard.style.display = 'none';
-        btnInstallAbility.removeAttribute('disabled');
-        btnUninstallAbility.setAttribute('disabled', 'true');
-      } else {
-        settingsAbilityUrlInputContainer.style.display = 'none';
-        abilityDetailCard.style.display = 'block';
-        abilityDetailTitle.textContent = selectedItem.title;
-        abilityDetailDesc.textContent = selectedItem.description;
-        abilityDetailStatus.textContent = selectedItem.statusLabel;
-        abilityDetailStatus.className = 'enhancement-status ' + selectedItem.statusClass;
-        abilityDetailMeta.textContent = selectedItem.meta || '';
-        
-        if (selectedItem.type === 'enhancement') {
-          if (selectedItem.installed) {
-            btnInstallAbility.setAttribute('disabled', 'true');
-            btnUninstallAbility.removeAttribute('disabled');
-          } else {
-            btnInstallAbility.removeAttribute('disabled');
-            btnUninstallAbility.setAttribute('disabled', 'true');
-          }
-        } else {
-          btnInstallAbility.setAttribute('disabled', 'true');
-          btnUninstallAbility.removeAttribute('disabled');
-        }
-      }
-
-      bindSoloSelect(settingAbilitySelect, (value) => {
-        selectedAbilityId = value || '';
-        renderAbilitiesAndEnhancements(settings);
-      });
-    }
-
-    if (btnInstallAbility) {
-      btnInstallAbility.addEventListener('click', () => {
-        if (!selectedAbilityId || !currentAbilitySettings) return;
-        
-        if (selectedAbilityId === 'add-new-skill') {
-          const urlVal = settingAbilityUrlInput.value.trim();
-          if (!urlVal) {
-            showAbilityActionMessage(t('skillInputRequired'), true);
-            return;
-          }
-          showAbilityActionMessage(t('installingSkillMessage'));
-          vscode.postMessage({ command: 'ability.installSkill', skillInput: urlVal });
-        } else if (selectedAbilityId === 'add-new-connector') {
-          const urlVal = settingAbilityUrlInput.value.trim();
-          if (!urlVal) {
-            showAbilityActionMessage(t('mcpInputRequired'), true);
-            return;
-          }
-          showAbilityActionMessage(t('installingMcpMessage'));
-          vscode.postMessage({ command: 'ability.installMcp', mcpInput: urlVal });
-        } else if (selectedAbilityId.startsWith('enhancement-')) {
-          const originId = selectedAbilityId.substring('enhancement-'.length);
-          showAbilityActionMessage(t('installingEnhancementMessage'));
-          vscode.postMessage({ command: 'ability.installEnhancement', enhancementId: originId });
-        }
-      });
-    }
-
-    if (btnUninstallAbility) {
-      btnUninstallAbility.addEventListener('click', () => {
-        if (!selectedAbilityId || !currentAbilitySettings) return;
-        
-        if (selectedAbilityId.startsWith('skill-')) {
-          const originId = selectedAbilityId.substring('skill-'.length);
-          showAbilityActionMessage(t('uninstallingSkillMessage'));
-          vscode.postMessage({ command: 'ability.uninstallSkill', skillId: originId });
-        } else if (selectedAbilityId.startsWith('connector-')) {
-          const originId = selectedAbilityId.substring('connector-'.length);
-          showAbilityActionMessage(t('uninstallingMcpMessage'));
-          vscode.postMessage({ command: 'ability.uninstallMcp', mcpId: originId });
-        } else if (selectedAbilityId.startsWith('enhancement-')) {
-          const originId = selectedAbilityId.substring('enhancement-'.length);
-          showAbilityActionMessage(t('uninstallingEnhancementMessage'));
-          vscode.postMessage({ command: 'ability.uninstallEnhancement', enhancementId: originId });
-        }
-      });
+      abilityController.render(settings);
     }
 
     // Request configurations and nodes on load
@@ -6398,44 +5875,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    function readClipboardImage(file) {
-      return new Promise((resolve) => {
-        if (typeof FileReader === 'undefined' || !file) {
-          resolve(null);
-          return;
-        }
-        const reader = new FileReader();
-        reader.onload = () => resolve({
-          name: file.name || 'pasted-image',
-          mimeType: file.type || 'image/png',
-          dataUrl: String(reader.result || '')
-        });
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(file);
-      });
-    }
-
     function bindPastedImageAttachments(input, targetId, getProjectPath, scope) {
-      if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
-      input.setAttribute('data-paste-image-bound', 'true');
-      input.addEventListener('paste', async (event) => {
-        const items = Array.from((event.clipboardData && event.clipboardData.items) || []);
-        const files = items
-          .filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))
-          .map(item => item.getAsFile())
-          .filter(Boolean);
-        if (!files.length) return;
-        event.preventDefault();
-        const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
-        if (!attachments.length) return;
-        vscode.postMessage({
+      SoloMapWebview.bindPastedImageAttachments(
+        input,
+        message => vscode.postMessage(message),
+        attachments => ({
           command: 'attachment.save',
           projectPath: typeof getProjectPath === 'function' ? getProjectPath() : currentProjects.selectedProjectPath,
           targetId,
           scope: scope || targetId || 'conversation',
           attachments
-        });
-      });
+        })
+      );
     }
 
     function mergeAttachmentFiles(existing, incoming) {
@@ -6454,12 +5905,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function formatDurationMs(durationMs) {
-      if (!Number.isFinite(durationMs) || durationMs < 0) return '';
-      const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
-      const minutes = Math.floor(totalSeconds / 60);
-      const remainder = totalSeconds % 60;
-      if (minutes > 0) return minutes + 'm ' + remainder + 's';
-      return remainder + 's';
+      return SoloMapWebview.formatDurationMs(durationMs, { minimumOneSecond: true });
     }
 
     function formatSoloDuration(conversation) {
@@ -6470,13 +5916,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return '';
       }
       return formatDurationMs(Date.now() - new Date(conversation.timestamp).getTime());
-    }
-
-    function extractNativeSessionId(conversationOrOutput) {
-      if (conversationOrOutput && typeof conversationOrOutput === 'object' && conversationOrOutput.resumableNativeSessionId) {
-        return String(conversationOrOutput.resumableNativeSessionId || '');
-      }
-      return '';
     }
 
     function soloConclusion(conversation) {
@@ -6866,51 +6305,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return labels[String(value || '')] || value || '-';
     }
 
-    function escapeHtml(value) {
-      return String(value == null ? '' : value)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-    }
-
-    function closeSoloSelects(except) {
-      document.querySelectorAll('[data-solo-select]').forEach(select => {
-        if (select !== except) {
-          select.classList.remove('open');
-          const trigger = select.querySelector('[data-solo-trigger]');
-          if (trigger) trigger.setAttribute('aria-expanded', 'false');
-        }
-      });
-    }
-
-    function setSoloSelectValue(select, value) {
-      if (!select) return;
-      const choices = Array.from(select.querySelectorAll('[data-solo-option-value]'));
-      const selected = choices.find(choice => choice.getAttribute('data-solo-option-value') === String(value || '')) || choices[0];
-      const selectedValue = selected ? selected.getAttribute('data-solo-option-value') || '' : '';
-      select.setAttribute('data-value', selectedValue);
-      const label = select.querySelector('[data-solo-label]');
-      if (label) label.textContent = selected ? selected.textContent || '' : '';
-      choices.forEach(choice => choice.setAttribute('aria-selected', choice === selected ? 'true' : 'false'));
-    }
-
-    function getSoloSelectValue(select) {
-      return select ? select.getAttribute('data-value') || '' : '';
-    }
-
-    function setSoloSelectOptions(select, options, selectedValue) {
-      const menu = select && select.querySelector('[data-solo-menu]');
-      if (!menu) return;
-      menu.innerHTML = (options || []).map(option => (
-        '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
-        '" title="' + escapeHtml(option.title || option.label) + '" aria-selected="false">' +
-        escapeHtml(option.label) + '</button>'
-      )).join('');
-      setSoloSelectValue(select, selectedValue);
-    }
-
     function renderProjects(projects, selectedProjectPath) {
       const options = (projects || []).map(project => ({
         value: project.path || '',
@@ -6941,108 +6335,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     }
 
-    function renderSoloSelect(className, attributes, options, disabled, selectedValue) {
-      const selected = options.find(option => String(option.value || '') === String(selectedValue || '')) || options[0] || { value: '', label: '' };
-      const disabledClass = disabled ? ' is-disabled' : '';
-      const disabledAttribute = disabled ? ' disabled' : '';
-      return '<div class="solo-select ' + className + disabledClass + '" data-solo-select data-value="' + escapeHtml(selected.value) + '" ' + attributes + '>' +
-        '<button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false"' + disabledAttribute + '>' +
-        '<span class="solo-select-trigger-label" data-solo-label>' + escapeHtml(selected.label) + '</span>' +
-        '<span class="codicon codicon-chevron-down solo-select-caret"></span></button>' +
-        '<div class="solo-select-menu" data-solo-menu role="listbox">' +
-        options.map((option, index) => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) +
-          '" aria-selected="' + (String(option.value || '') === String(selected.value || '') || (!selected.value && index === 0) ? 'true' : 'false') + '">' + escapeHtml(option.label) + '</button>').join('') +
-        '</div></div>';
-    }
-
-    function bindSoloSelect(select, onChange) {
-      if (!select || select.getAttribute('data-solo-bound') === 'true') return;
-      select.setAttribute('data-solo-bound', 'true');
-      select.addEventListener('click', event => {
-        event.stopPropagation();
-        const option = event.target.closest('[data-solo-option-value]');
-        if (option) {
-          const previousValue = getSoloSelectValue(select);
-          setSoloSelectValue(select, option.getAttribute('data-solo-option-value'));
-          select.classList.remove('open');
-          const trigger = select.querySelector('[data-solo-trigger]');
-          if (trigger) trigger.setAttribute('aria-expanded', 'false');
-          if (onChange && previousValue !== getSoloSelectValue(select)) {
-            onChange(getSoloSelectValue(select));
-          }
-          return;
-        }
-        if (event.target.closest('[data-solo-trigger]') && !select.classList.contains('is-disabled')) {
-          const open = !select.classList.contains('open');
-          closeSoloSelects(select);
-          select.classList.toggle('open', open);
-          const trigger = select.querySelector('[data-solo-trigger]');
-          if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
-        }
-      });
-      select.addEventListener('keydown', event => {
-        if (event.key === 'Escape') {
-          select.classList.remove('open');
-          const trigger = select.querySelector('[data-solo-trigger]');
-          if (trigger) trigger.setAttribute('aria-expanded', 'false');
-          return;
-        }
-        if ((event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowDown') && event.target.closest('[data-solo-trigger]')) {
-          event.preventDefault();
-          closeSoloSelects(select);
-          select.classList.add('open');
-          event.target.setAttribute('aria-expanded', 'true');
-        }
-      });
-    }
-
-    function bindSoloSelects(container) {
-      container.querySelectorAll('[data-solo-select]').forEach(select => bindSoloSelect(select));
-    }
-
     document.addEventListener('click', () => closeSoloSelects());
 
     function getAgentOptions(node) {
-      const options = [];
-      function add(value) {
-        const option = buildAgentOption(value);
-        if (!option || options.some(existing => existing.label === option.label)) return;
-        options.push(option);
-      }
-      add(getEffectiveSettingCliPath() || 'agy');
-      add(node && node.agentCli);
-      add('antigravity');
-      add('codex');
-      add('cursor');
-      add('copilot');
-      add('claude');
-      add('opencode');
-      return options;
-    }
-
-    function buildAgentOption(value) {
-      const normalized = String(value || '').trim();
-      const label = normalizeAgentOptionLabel(normalized);
-      if (!label) return null;
-      const optionValue = normalized.includes('/') || normalized.includes('\\\\') ? normalized : label;
-      return { value: optionValue, label };
-    }
-
-    function normalizeAgentOptionLabel(value) {
-      const normalized = String(value || '').trim();
-      const name = normalized.split(/[\\\\/]/).pop().toLowerCase();
-      if (name === 'codex-cli') return 'codex';
-      if (name === 'solomap-codex-auto') return 'codex';
-      if (name === 'cursor-cli' || name === 'cursor-agent') return 'cursor';
-      if (name === 'solomap-cursor-auto') return 'cursor';
-      if (name === 'copilot-cli') return 'copilot';
-      if (name === 'solomap-copilot-auto') return 'copilot';
-      if (name === 'agy' || name === 'antigravity-cli') return 'antigravity';
-      if (name === 'solomap-antigravity-auto') return 'antigravity';
-      if (name === 'claude-code' || name === 'claude-code-cli') return 'claude';
-      if (name === 'solomap-claude-auto') return 'claude';
-      if (name === 'open-code' || name === 'open-code-cli') return 'opencode';
-      return normalized;
+      return SoloMapWebview.getAgentOptions(getEffectiveSettingCliPath() || 'agy', node && node.agentCli);
     }
 
     function projectSoloTargetId(projectPath) {
@@ -7587,21 +6883,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function renderOnboardingPanel() {
-      return \`
-        <div class="onboarding-panel">
-          <div class="onboarding-kicker"><span class="codicon codicon-compass"></span>\${escapeHtml(t('onboardingKicker'))}</div>
-          <div class="onboarding-title">\${escapeHtml(t('onboardingTitle'))}</div>
-          <div class="onboarding-copy">\${escapeHtml(t('onboardingCopy'))}</div>
-          <div class="onboarding-steps">
-            <div class="onboarding-step"><span class="onboarding-step-index">1</span><span>\${escapeHtml(t('onboardingStepProject'))}</span></div>
-            <div class="onboarding-step"><span class="onboarding-step-index">2</span><span>\${escapeHtml(t('onboardingStepType'))}</span></div>
-            <div class="onboarding-step"><span class="onboarding-step-index">3</span><span>\${escapeHtml(t('onboardingStepRoadmap'))}</span></div>
-          </div>
-          <button class="onboarding-action" data-onboarding-add-project>
-            <span class="codicon codicon-add"></span>\${escapeHtml(t('onboardingAction'))}
-          </button>
-        </div>
-      \`;
+      return SoloMapWebview.renderOnboardingPanel(t);
     }
 
     function renderProjectIssuePanel(project) {
@@ -8505,11 +7787,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function bindOnboardingActions(container) {
-      container.querySelectorAll('[data-onboarding-add-project]').forEach(button => {
-        button.addEventListener('click', () => {
-          vscode.postMessage({ command: 'project.add' });
-        });
-      });
+      SoloMapWebview.bindOnboardingActions(container, message => vscode.postMessage(message));
     }
 
     function runNodeAgent(nodeId, userMessage, agentCli, model, supplementFiles) {

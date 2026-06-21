@@ -184,6 +184,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './roadmapWebview') {
           return require(path.join(projectRoot, 'out/roadmapWebview.js'));
         }
+        if (id === './webviewSharedRuntime') {
+          return require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
+        }
         if (id === './strategyPyramidWebview') {
           return require(path.join(projectRoot, 'out/strategyPyramidWebview.js'));
         }
@@ -222,6 +225,12 @@ function loadCompiledModule(relativePath, exportPatch) {
         }
         if (id === './pluginContracts') {
           return require(path.join(projectRoot, 'out/pluginContracts.js'));
+        }
+        if (id === './sidebarDependencies') {
+          return require(path.join(projectRoot, 'out/sidebarDependencies.js'));
+        }
+        if (id === './sidebarProjectLoader') {
+          return require(path.join(projectRoot, 'out/sidebarProjectLoader.js'));
         }
         return {};
       }
@@ -448,6 +457,7 @@ test('ability settings copy is localized in English webviews', () => {
     fs.readFileSync(path.join(projectRoot, 'src', 'roadmapWebview.ts'), 'utf8'),
     fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8')
   ];
+  const sharedRuntimeSource = fs.readFileSync(path.join(projectRoot, 'src', 'webviewSharedRuntime.ts'), 'utf8');
 
   for (const source of sources) {
     assert.match(source, /abilityManagerLabel:\s*'Ability Extensions & Execution Enhancements'/);
@@ -455,12 +465,12 @@ test('ability settings copy is localized in English webviews', () => {
     assert.match(source, /abilityGroupConnectors:\s*'MCP Connectors'/);
     assert.match(source, /abilityGroupEnhancements:\s*'Execution Enhancements'/);
     assert.match(source, /skillInputRequired:\s*'Enter a skill link before installing\.'/);
-    assert.match(source, /showAbilityActionMessage\(t\('installingEnhancementMessage'\)\)/);
     assert.doesNotMatch(source, /setText\('label-enhancement-toggles',\s*'能力扩展与执行增强'\)/);
     assert.doesNotMatch(source, /setText\('text-install-ability',\s*'安装'\)/);
     assert.doesNotMatch(source, /statusLabel:\s*'已安装'/);
     assert.doesNotMatch(source, /showAbilityActionMessage\('正在安装/);
   }
+  assert.match(sharedRuntimeSource, /config\.showMessage\(config\.t\('installingEnhancementMessage'\)\)/);
 });
 
 test('website-only changes do not trigger extension publishing', () => {
@@ -1182,7 +1192,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /renderOnboardingPanel/);
   assert.match(script, /data-onboarding-add-project/);
   assert.match(script, /添加第一个项目|Add first project/);
-  assert.match(script, /vscode\.postMessage\(\{ command: 'project\.add' \}\)/);
+  assert.match(script, /postMessage\(\{ command: 'project\.add' \}\)/);
   assert.doesNotMatch(script, /confirmStepCompletion|completeConfirm/);
   assert.match(script, /Completion criteria|完成标准/);
   assert.match(html, /id="btn-toggle-roadmap-revision"/);
@@ -1391,7 +1401,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /\.sidebar-conversation-detail\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.match(html, /\.sidebar-conversation-detail pre\s*\{[\s\S]*?max-width:\s*100%/);
   assert.match(html, /function normalizeAgentOption/);
-  assert.match(html, /add\('antigravity'\)/);
+  assert.match(html, /\['antigravity', 'cursor', 'codex', 'copilot', 'claude', 'opencode'\]\.forEach\(add\)/);
   assert.doesNotMatch(html, /add\('codex-cli'\)/);
   assert.doesNotMatch(html, /add\('antigravity-cli'\)/);
   assert.match(html, /\.portfolio-panel\s*\{[\s\S]*?z-index:\s*1/);
@@ -1804,17 +1814,13 @@ test('sidebar local project refresh keeps reusable signal enrichment without ext
       }
     }
   };
-  provider.schedulePortfolioEnrichment = () => { portfolioEnrichments += 1; };
-  provider.scheduleIssueSummaryLoads = () => { externalLoads += 1; };
-  provider.scheduleDeliverySummaryLoads = () => { externalLoads += 1; };
+  provider._projectLoader.cancelExternalLoads = () => { externalLoads += 1; };
+  provider._projectLoader.schedulePortfolioEnrichment = () => { portfolioEnrichments += 1; };
 
   provider.sendLocalProjects();
 
   assert.equal(portfolioEnrichments, 1);
-  assert.equal(externalLoads, 0);
-  assert.equal(provider._portfolioLoadRequest, 1);
-  assert.equal(provider._issueLoadRequest, 1);
-  assert.equal(provider._deliveryLoadRequest, 1);
+  assert.equal(externalLoads, 1);
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].command, 'projectsLoaded');
   assert.equal(postedMessages[0].projects.portfolio[0].pinnedAt, '2026-01-01T00:00:00.000Z');
@@ -2363,16 +2369,16 @@ test('global engineering store writes git-friendly portfolio files', () => {
 
 test('sidebar GitHub issue cache is validated and ignored by git', () => {
   const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
+    'out/projectExternalSignals.js',
     [
-      'module.exports.__getIssueCachePath = projectExternalSignals_1.getIssueCachePath;',
-      'module.exports.__getDeliveryCachePath = projectExternalSignals_1.getDeliveryCachePath;',
-      'module.exports.__readIssueCache = projectExternalSignals_1.readIssueCache;',
-      'module.exports.__writeIssueCache = projectExternalSignals_1.writeIssueCache;',
-      'module.exports.__readDeliveryCache = projectExternalSignals_1.readDeliveryCache;',
-      'module.exports.__writeDeliveryCache = projectExternalSignals_1.writeDeliveryCache;',
-      'module.exports.__summarizeDeliveryCache = projectExternalSignals_1.summarizeDeliveryCache;',
-      'module.exports.__summarizeIssueItems = projectExternalSignals_1.summarizeIssueItems;'
+      'module.exports.__getIssueCachePath = getIssueCachePath;',
+      'module.exports.__getDeliveryCachePath = getDeliveryCachePath;',
+      'module.exports.__readIssueCache = readIssueCache;',
+      'module.exports.__writeIssueCache = writeIssueCache;',
+      'module.exports.__readDeliveryCache = readDeliveryCache;',
+      'module.exports.__writeDeliveryCache = writeDeliveryCache;',
+      'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;',
+      'module.exports.__summarizeIssueItems = summarizeIssueItems;'
     ].join('\n')
   );
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-issue-cache-'));
@@ -2521,12 +2527,12 @@ test('project foundation writes only missing minimal baseline files', () => {
 
 test('sidebar security summary counts only live critical and high alerts', () => {
   const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
+    'out/projectExternalSignals.js',
     [
-      'module.exports.__summarizeSecurityCache = projectExternalSignals_1.summarizeSecurityCache;',
-      'module.exports.__writeSecurityCache = projectExternalSignals_1.writeSecurityCache;',
-      'module.exports.__readSecurityCache = projectExternalSignals_1.readSecurityCache;',
-      'module.exports.__getSecurityCachePath = projectExternalSignals_1.getSecurityCachePath;'
+      'module.exports.__summarizeSecurityCache = summarizeSecurityCache;',
+      'module.exports.__writeSecurityCache = writeSecurityCache;',
+      'module.exports.__readSecurityCache = readSecurityCache;',
+      'module.exports.__getSecurityCachePath = getSecurityCachePath;'
     ].join('\n')
   );
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-security-'));
@@ -2560,8 +2566,8 @@ test('sidebar security summary counts only live critical and high alerts', () =>
 
 test('sidebar delivery summary ignores cancelled and superseded workflow runs', () => {
   const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
-    'module.exports.__summarizeDeliveryCache = projectExternalSignals_1.summarizeDeliveryCache;'
+    'out/projectExternalSignals.js',
+    'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;'
   );
   const cache = {
     schemaVersion: 1,
@@ -2615,8 +2621,8 @@ test('sidebar delivery summary ignores cancelled and superseded workflow runs', 
 
 test('sidebar delivery summary ignores failures outside the most recent three runs', () => {
   const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
-    'module.exports.__summarizeDeliveryCache = projectExternalSignals_1.summarizeDeliveryCache;'
+    'out/projectExternalSignals.js',
+    'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;'
   );
   const cache = {
     schemaVersion: 1,
@@ -2696,10 +2702,10 @@ test('sidebar delivery signal avoids raw failed-check wording', () => {
 
 test('sidebar issue creation keeps labels auxiliary to creation', () => {
   const sidebarModule = loadCompiledModule(
-    'out/sidebarProvider.js',
+    'out/projectExternalSignals.js',
     [
-      'module.exports.__getProjectIssueLabels = projectExternalSignals_1.getProjectIssueLabels;',
-      'module.exports.__parseIssueNumberFromOutput = projectExternalSignals_1.parseIssueNumberFromOutput;'
+      'module.exports.__getProjectIssueLabels = getProjectIssueLabels;',
+      'module.exports.__parseIssueNumberFromOutput = parseIssueNumberFromOutput;'
     ].join('\n')
   );
 
@@ -2920,6 +2926,7 @@ test('roadmap and sidebar keep one shared application action boundary', () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
   const roadmapSource = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
+  const sharedRuntimeSource = fs.readFileSync(path.join(projectRoot, 'src/webviewSharedRuntime.ts'), 'utf8');
 
   assert.match(extensionSource, /handleSharedWebviewAction/);
   assert.match(extensionSource, /dispatchPluginAction/);
@@ -2932,7 +2939,19 @@ test('roadmap and sidebar keep one shared application action boundary', () => {
   assert.doesNotMatch(roadmapSource, /Native Agent session saved/);
   assert.match(sidebarSource, /command: 'settings\.update'[\s\S]*?agentModelPreferences/);
   assert.match(roadmapSource, /command: 'settings\.get'/);
-  assert.match(roadmapSource, /command: 'agentModels\.get'/);
+  assert.match(sharedRuntimeSource, /command: 'agentModels\.get'/);
+  assert.match(sidebarSource, /getSharedWebviewRuntimeScript/);
+  assert.match(roadmapSource, /getSharedWebviewRuntimeScript/);
+  assert.match(sharedRuntimeSource, /function createModelController/);
+  assert.match(sharedRuntimeSource, /function createAbilityController/);
+  assert.match(sidebarSource, /SoloMapWebview\.createModelController/);
+  assert.match(roadmapSource, /SoloMapWebview\.createModelController/);
+  assert.doesNotMatch(sidebarSource, /function getAgentModelOptions/);
+  assert.doesNotMatch(roadmapSource, /function getAgentModelOptions/);
+  assert.doesNotMatch(sidebarSource, /function bindSoloSelect\(/);
+  assert.doesNotMatch(roadmapSource, /function bindSoloSelect\(/);
+  assert.doesNotMatch(sidebarSource, /command: 'ability\.installSkill'/);
+  assert.doesNotMatch(roadmapSource, /command: 'ability\.installSkill'/);
 });
 
 test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
@@ -3388,9 +3407,9 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__commandExists = agentCli_1.commandExists;',
       'module.exports.__getCliVersionArgs = agentCli_1.getCliVersionArgs;',
       'module.exports.__formatCliTestMessage = agentCli_1.formatCliTestMessage;',
-      'module.exports.__buildAgentInstallCommand = buildAgentInstallCommand;',
-      'module.exports.__getDependencyStatus = getDependencyStatus;',
-      'module.exports.__buildAgentAutomationWrapper = buildAgentAutomationWrapper;'
+      'module.exports.__buildAgentInstallCommand = sidebarDependencies_1.buildAgentInstallCommand;',
+      'module.exports.__getDependencyStatus = sidebarDependencies_1.getDependencyStatus;',
+      'module.exports.__buildAgentAutomationWrapper = sidebarDependencies_1.buildAgentAutomationWrapper;'
     ].join('\n')
   );
   assert.equal(
