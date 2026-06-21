@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as childProcess from 'child_process';
-import * as crypto from 'crypto';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { SqliteStore } from './db/sqliteStore';
@@ -15,7 +14,7 @@ import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocu
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import { getWebviewHtml } from './roadmapWebview';
-import { buildLocalDataStatusHtml, formatLocalDataError, runLocalDataLoad } from './localDataLoader';
+import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -95,9 +94,14 @@ import {
 import {
   AgentModelCatalog,
   AgentModelOption,
-  createAutoOnlyModelCatalog,
-  loadDiscoveredAgentModels
+  createAutoOnlyModelCatalog
 } from './agentModels';
+import {
+  buildAgentModelsLoadedMessage,
+  mergeAgentModelPreferences,
+  normalizeAgentModelPreferences,
+  resolveAgentModelCatalog
+} from './agentModelSelection';
 import {
   chooseSupplementFilesForProject,
   filterProjectRelativeFiles,
@@ -121,6 +125,30 @@ import {
   LocalUsageStats,
   recordLocalUsageEvent as recordLocalUsageEventInStats
 } from './localUsageStats';
+import {
+  buildPassportProUrl,
+  buildProAccountStatus,
+  clearProEntitlements,
+  createPassportAuthNonce,
+  flowModeFeature,
+  grantContainsFeature,
+  hasProEntitlement as hasProEntitlementForSettings,
+  normalizeProAccountStatus,
+  passportGrantOfflineGraceMs,
+  PassportGrantCache,
+  PassportVerifyResult,
+  ProAccountStatus,
+  readLocalProEntitlements,
+  strategyPyramidFeature,
+  verifyPassportGrant as verifyPassportGrantWithFetch
+} from './proAccount';
+import {
+  postAgentModelsLoaded,
+  postFlowStateLoaded,
+  postProjectsLoaded,
+  postSettingsLoaded,
+  postWebviewMessage
+} from './panelMessages';
 import {
   clearStoredAgentSession,
   extractCodexSessionIdFromOutputText,
@@ -160,6 +188,8 @@ let syncEngineInitProjectRoot = '';
 const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
 
+const hasProEntitlement = hasProEntitlementForSettings;
+
 interface SolopreneurSettings {
   cliPath: string;
   agentModelPreferences?: Record<string, string>;
@@ -175,13 +205,6 @@ interface SolopreneurSettings {
   enhancementStatuses?: SolomapEnhancementStatusSummary[];
   skills?: any[];
   connectors?: any[];
-}
-
-interface ProAccountStatus {
-  authenticated: boolean;
-  allowed: boolean;
-  email?: string;
-  expiresAt?: string;
 }
 
 interface SolopreneurProject {
@@ -201,42 +224,11 @@ interface ProjectRegistryFile {
   hiddenProjects: string[];
 }
 
-interface PassportGrantCache {
-  grant: string;
-  email: string;
-  userId: string;
-  entitlements: string[];
-  expiresAt: string;
-  checkedAt: string;
-}
-
-interface PassportVerifyResult {
-  allowed: boolean;
-  reason?: string;
-  grant?: string;
-  email?: string;
-  userId?: string;
-  entitlements?: string[];
-  expiresAt?: string;
-}
-
-interface PassportDeviceStartResult {
-  ok: boolean;
-  reason?: string;
-  deviceCode?: string;
-  loginUrl?: string;
-  expiresIn?: number;
-}
-
 const settingsKey = 'solopreneur.settings';
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
 const passportGrantSecretKey = 'solopreneur.passportGrant';
-const passportProduct = 'solomap';
-const strategyPyramidFeature = 'strategy_pyramid';
-const flowModeFeature = 'flow_mode';
-const passportGrantOfflineGraceMs = 14 * 24 * 60 * 60 * 1000;
 const projectRegistryFileName = 'projects.json';
 const usageStatsFileName = 'solomap-usage.json';
 const roadmapRevisionId = '__roadmap_revision__';
@@ -312,14 +304,8 @@ export async function activate(context: vscode.ExtensionContext) {
         sidebarProvider.sendProjects();
       }
       if (activePanel) {
-        activePanel.webview.postMessage({
-          command: 'settingsLoaded',
-          settings: getPersistedSettings(context)
-        });
-        activePanel.webview.postMessage({
-          command: 'projectsLoaded',
-          projects: getProjectState(context)
-        });
+        postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
+        postProjectsLoaded(activePanel.webview, getProjectState(context));
       }
     }
   );
@@ -379,7 +365,7 @@ export async function activate(context: vscode.ExtensionContext) {
         await handleRunFlow(context, goal, agentCli, model, normalizeSupplementFiles(supplementFiles));
       }
     },
-    async (agentCli) => loadDiscoveredAgentModels(resolveAgentCli(agentCli || '', getPersistedSettings(context).cliPath || 'agy')),
+    async (agentCli) => resolveAgentModelCatalog(agentCli || '', getPersistedSettings(context).cliPath || 'agy').catalog,
     async (projectPath) => {
       if (!getProjects(context).some((project) => project.path === projectPath)) {
         vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
@@ -521,57 +507,11 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   };
 }
 
-function normalizeAgentModelPreferences(value: unknown): Record<string, string> {
-  if (!value || typeof value !== 'object') {
-    return {};
-  }
-  return Object.entries(value as Record<string, unknown>).reduce<Record<string, string>>((acc, [key, model]) => {
-    const family = String(key || '').trim();
-    const normalizedModel = String(model || '').trim();
-    if (family && normalizedModel) {
-      acc[family] = normalizedModel;
-    }
-    return acc;
-  }, {});
-}
-
-function readLocalProEntitlements(): Record<string, boolean> {
-  const value = String(process.env.SOLOMAP_PRO || '').trim().toLowerCase();
-  if (!['1', 'true', 'yes', 'pro'].includes(value)) {
-    return {};
-  }
-  return {
-    pro: true,
-    strategy_pyramid: true,
-    flow_mode: true
-  };
-}
-
-function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, featureKey: string): boolean {
-  const entitlements = settings?.proEntitlements || {};
-  const localEntitlements = readLocalProEntitlements();
-  const hasLocalPro = Boolean(localEntitlements.pro || localEntitlements[featureKey] || localEntitlements[strategyPyramidFeature] || localEntitlements[flowModeFeature]);
-  const expiresAt = String(settings?.proAccount?.expiresAt || '').trim();
-  const expiresAtMs = Date.parse(expiresAt);
-  if (!hasLocalPro && Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
-    return false;
-  }
-  const normalizedFeature = featureKey === 'strategyPyramid' ? 'strategy_pyramid' : featureKey;
-  return Boolean(entitlements[normalizedFeature] || entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
-}
-
 async function clearStoredProAccess(context: vscode.ExtensionContext): Promise<void> {
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
-  const nextEntitlements = { ...(saved.proEntitlements || {}) };
-  delete nextEntitlements.pro;
-  delete nextEntitlements.solomap_pro;
-  delete nextEntitlements[strategyPyramidFeature];
-  delete nextEntitlements.strategyPyramid;
-  delete nextEntitlements[flowModeFeature];
-  delete nextEntitlements.flowMode;
   await context.globalState.update(settingsKey, {
     ...saved,
-    proEntitlements: nextEntitlements,
+    proEntitlements: clearProEntitlements(saved.proEntitlements || {}),
     proAccount: {
       ...normalizeProAccountStatus(saved.proAccount),
       allowed: false
@@ -580,45 +520,14 @@ async function clearStoredProAccess(context: vscode.ExtensionContext): Promise<v
   await broadcastSettings(context);
 }
 
-function normalizeProAccountStatus(value: unknown): ProAccountStatus {
-  const source = (value && typeof value === 'object' ? value : {}) as Partial<ProAccountStatus>;
-  return {
-    authenticated: Boolean(source.authenticated),
-    allowed: Boolean(source.allowed),
-    email: String(source.email || ''),
-    expiresAt: String(source.expiresAt || '')
-  };
-}
-
-function buildProAccountStatus(result: PassportVerifyResult | PassportGrantCache | null | undefined): ProAccountStatus {
-  const source = (result || {}) as Partial<PassportVerifyResult & PassportGrantCache>;
-  const allowed = Boolean((source as PassportVerifyResult).allowed) || grantContainsFeature({
-    entitlements: Array.isArray(source.entitlements) ? source.entitlements : [],
-    expiresAt: String(source.expiresAt || ''),
-    checkedAt: (source as PassportGrantCache).checkedAt || new Date().toISOString()
-  });
-  return {
-    authenticated: Boolean(source.email || source.userId || allowed),
-    allowed,
-    email: String(source.email || ''),
-    expiresAt: String(source.expiresAt || '')
-  };
-}
-
 async function broadcastSettings(context: vscode.ExtensionContext): Promise<void> {
   if (sidebarProvider) {
     sidebarProvider.sendSettings();
   }
   if (activePanel) {
-    activePanel.webview.postMessage({
-      command: 'settingsLoaded',
-      settings: getPersistedSettings(context)
-    });
+    postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
     if (activeProjectRoot) {
-      activePanel.webview.postMessage({
-        command: 'flowStateLoaded',
-        state: buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context))
-      });
+      postFlowStateLoaded(activePanel.webview, buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context)));
     }
   }
 }
@@ -627,14 +536,7 @@ async function postFlowStateToWebview(context: vscode.ExtensionContext): Promise
   if (!activePanel || !activeProjectRoot) {
     return;
   }
-  activePanel.webview.postMessage({
-    command: 'flowStateLoaded',
-    state: buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context))
-  });
-}
-
-function getPassportBaseUrl(): string {
-  return String(process.env.SOLOMAP_PASSPORT_BASE_URL || 'https://solomap.app').replace(/\/+$/, '');
+  postFlowStateLoaded(activePanel.webview, buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context)));
 }
 
 function buildPassportCallbackUri(): string {
@@ -642,53 +544,12 @@ function buildPassportCallbackUri(): string {
   return `${scheme}://SZLK.solopreneur-roadmap/passport/callback`;
 }
 
-function createPassportAuthNonce(): string {
-  return crypto.randomBytes(24).toString('base64url');
-}
-
-function buildPassportProUrl(mode: 'callback' | 'device', authNonce: string, callbackUri = buildPassportCallbackUri()): string {
-  const url = new URL('/pro', getPassportBaseUrl());
-  url.searchParams.set('product', passportProduct);
-  url.searchParams.set('feature', strategyPyramidFeature);
-  url.searchParams.set('source', 'vscode');
-  url.searchParams.set('mode', mode);
-  url.searchParams.set('auth_nonce', authNonce);
-  if (mode === 'callback') {
-    url.searchParams.set('callback', callbackUri);
-  }
-  return url.toString();
-}
-
 function buildPassportStartUrl(callbackUri = buildPassportCallbackUri()): string {
   return buildPassportProUrl('callback', createPassportAuthNonce(), callbackUri);
 }
 
-function buildPassportVerifyUrl(): string {
-  return new URL('/api/passport/verify', getPassportBaseUrl()).toString();
-}
-
-function buildPassportDeviceStartUrl(): string {
-  return new URL('/api/passport/device/start', getPassportBaseUrl()).toString();
-}
-
-function buildPassportDeviceVerifyUrl(): string {
-  return new URL('/api/passport/device/verify', getPassportBaseUrl()).toString();
-}
-
-function grantContainsFeature(grant: Pick<PassportGrantCache, 'entitlements' | 'expiresAt' | 'checkedAt'>): boolean {
-  const entitlements = new Set((grant.entitlements || []).map((item) => String(item || '').trim()));
-  const expiresAtMs = Date.parse(grant.expiresAt || '');
-  const checkedAtMs = Date.parse(grant.checkedAt || '');
-  if (!entitlements.has(strategyPyramidFeature) && !entitlements.has('solomap_pro') && !entitlements.has('pro')) {
-    return false;
-  }
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
-    return false;
-  }
-  if (!Number.isFinite(checkedAtMs) || Date.now() - checkedAtMs > passportGrantOfflineGraceMs) {
-    return false;
-  }
-  return true;
+function verifyPassportGrant(grant: string, options: { authNonce?: string | null; callbackUri?: string | null; deviceCode?: string | null } = {}): Promise<PassportVerifyResult> {
+  return verifyPassportGrantWithFetch(grant, { ...options, fetcher: fetch });
 }
 
 async function readPassportGrant(context: vscode.ExtensionContext): Promise<PassportGrantCache | null> {
@@ -726,43 +587,6 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
     proAccount: buildProAccountStatus(result)
   });
   await broadcastSettings(context);
-}
-
-async function verifyPassportGrant(grant: string, options: { authNonce?: string | null; callbackUri?: string | null; deviceCode?: string | null } = {}): Promise<PassportVerifyResult> {
-  if (!grant) {
-    return { allowed: false, reason: 'missing_grant' };
-  }
-  try {
-    const response = await fetch(buildPassportVerifyUrl(), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        product: passportProduct,
-        feature: strategyPyramidFeature,
-        grant,
-        code: grant,
-        authNonce: options.authNonce || '',
-        callback: options.callbackUri || '',
-        deviceCode: options.deviceCode || ''
-      })
-    });
-    if (!response.ok) {
-      return { allowed: false, reason: `verify_http_${response.status}` };
-    }
-    const body = await response.json() as PassportVerifyResult;
-    return {
-      allowed: Boolean(body.allowed),
-      reason: String(body.reason || ''),
-      grant: String(body.grant || ''),
-      email: String(body.email || ''),
-      userId: String(body.userId || ''),
-      entitlements: Array.isArray(body.entitlements) ? body.entitlements.map((item) => String(item || '')).filter(Boolean) : [],
-      expiresAt: String(body.expiresAt || '')
-    };
-  } catch (error) {
-    console.warn('Failed to verify SoloMap Pro grant:', error);
-    return { allowed: false, reason: 'verify_failed' };
-  }
 }
 
 async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
@@ -834,7 +658,7 @@ async function refreshProAccountStatus(context: vscode.ExtensionContext): Promis
 async function beginPassportAuthorization(): Promise<void> {
   const authNonce = createPassportAuthNonce();
   pendingPassportAuthNonce = authNonce;
-  await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('callback', authNonce)));
+  await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('callback', authNonce, buildPassportCallbackUri())));
 }
 
 async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext): Promise<void> {
@@ -980,10 +804,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   const currentSettings = getPersistedSettings(context);
   const nextSettings: SolopreneurSettings = {
     cliPath: settings.cliPath || 'agy',
-    agentModelPreferences: {
-      ...normalizeAgentModelPreferences(currentSettings.agentModelPreferences),
-      ...normalizeAgentModelPreferences(settings.agentModelPreferences)
-    },
+    agentModelPreferences: mergeAgentModelPreferences(currentSettings.agentModelPreferences, settings.agentModelPreferences),
     language: settings.language === 'en' ? 'en' : 'zh',
     globalPrompt: String(settings.globalPrompt || '').trim(),
     globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim(),
@@ -1120,7 +941,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   }
   sendLocalProjectsToWebviews(context);
   if (activePanel) {
-    activePanel.webview.postMessage({ command: 'roadmapLoading', projectPath });
+    postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
   }
   void ensureSyncEngine(context).then((ready) => {
     if (ready && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
@@ -1723,10 +1544,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
 function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
   const projects = getProjectState(context);
   if (activePanel) {
-    activePanel.webview.postMessage({
-      command: 'projectsLoaded',
-      projects
-    });
+    postProjectsLoaded(activePanel.webview, projects);
   }
   if (sidebarProvider) {
     sidebarProvider.sendProjects();
@@ -1736,10 +1554,7 @@ function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
 function sendLocalProjectsToWebviews(context: vscode.ExtensionContext): void {
   const projects = getProjectState(context);
   if (activePanel) {
-    activePanel.webview.postMessage({
-      command: 'projectsLoaded',
-      projects
-    });
+    postProjectsLoaded(activePanel.webview, projects);
   }
   if (sidebarProvider) {
     sidebarProvider.sendLocalProjects();
@@ -1901,7 +1716,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
   if (activePanel) {
     recordLocalUsageEvent(context, 'roadmapOpened');
     activePanel.reveal(vscode.ViewColumn.One);
-    activePanel.webview.postMessage({ command: 'setMainView', view: effectiveInitialView });
+    postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
     void postFlowStateToWebview(context);
     return;
   }
@@ -1927,16 +1742,10 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
 
   // Load basic HTML into Webview
   activePanel.webview.html = getWebviewHtml(activePanel.webview, context);
-  activePanel.webview.postMessage({ command: 'roadmapLoading', projectPath: projectRoot });
-  activePanel.webview.postMessage({
-    command: 'settingsLoaded',
-    settings: getPersistedSettings(context)
-  });
-  activePanel.webview.postMessage({
-    command: 'projectsLoaded',
-    projects: getProjectState(context)
-  });
-  activePanel.webview.postMessage({ command: 'setMainView', view: effectiveInitialView });
+  postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
+  postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
+  postProjectsLoaded(activePanel.webview, getProjectState(context));
+  postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
   void postFlowStateToWebview(context);
 
   // Handle messages from Webview
@@ -1947,7 +1756,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           if (syncEngine && activeProjectRoot === getSelectedProjectPath(context)) {
             sendNodesToWebview();
           } else {
-            activePanel?.webview.postMessage({ command: 'roadmapLoading', projectPath: getSelectedProjectPath(context) });
+            postWebviewMessage(activePanel?.webview, { command: 'roadmapLoading', projectPath: getSelectedProjectPath(context) });
             void ensureSyncEngine(context).then((ready) => {
               if (ready) {
                 sendNodesToWebview();
@@ -2079,10 +1888,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
 
         case 'getSettings':
           if (activePanel) {
-            activePanel.webview.postMessage({
-              command: 'settingsLoaded',
-              settings: getPersistedSettings(context)
-            });
+            postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
           }
           break;
 
@@ -2092,14 +1898,12 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
 
         case 'getAgentModels':
           if (activePanel) {
-            const resolvedAgentCli = resolveAgentCli(message.agentCli || '', getPersistedSettings(context).cliPath || 'agy');
-            activePanel.webview.postMessage({
-              command: 'agentModelsLoaded',
-              requestId: String(message.requestId || ''),
-              targetId: String(message.targetId || ''),
-              agentCli: resolvedAgentCli,
-              catalog: loadDiscoveredAgentModels(resolvedAgentCli)
-            });
+            postAgentModelsLoaded(activePanel.webview, buildAgentModelsLoadedMessage({
+              requestId: message.requestId,
+              targetId: message.targetId,
+              agentCli: message.agentCli || '',
+              configuredCliPath: getPersistedSettings(context).cliPath || 'agy'
+            }));
           }
           break;
 
@@ -2175,10 +1979,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           break;
 
         case 'getProjects':
-          activePanel?.webview.postMessage({
-            command: 'projectsLoaded',
-            projects: getProjectState(context)
-          });
+          postProjectsLoaded(activePanel?.webview, getProjectState(context));
           break;
 
         case 'selectProject':
@@ -2375,7 +2176,7 @@ async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext): Pr
     });
     return;
   }
-  await runLocalDataLoad(
+  await postLocalDataLoad(
     () => buildStrategyPyramidSnapshot(context),
     (snapshot) => {
       if (!activeStrategyPyramidPanel) return;

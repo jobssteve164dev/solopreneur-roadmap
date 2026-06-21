@@ -76,3 +76,26 @@ export class ExternalDataLoadCoordinator {
 export function buildExternalDataKey(scope: string, projectPath = ''): string {
   return `${String(scope || '').trim()}::${String(projectPath || '').trim()}`;
 }
+
+const sharedExternalDataCoordinator = new ExternalDataLoadCoordinator({ defaultMinIntervalMs: 90_000 });
+
+export function getSharedExternalDataCoordinator(): ExternalDataLoadCoordinator {
+  return sharedExternalDataCoordinator;
+}
+
+export function loadExternalData<T>(
+  scope: string,
+  projectPath: string,
+  load: () => Promise<T>,
+  options: ExternalDataLoadOptions = {}
+): Promise<T> {
+  return sharedExternalDataCoordinator.load(buildExternalDataKey(scope, projectPath), load, options);
+}
+
+export function invalidateExternalData(scope: string, projectPath = ''): void {
+  sharedExternalDataCoordinator.invalidate(buildExternalDataKey(scope, projectPath));
+}
+
+export function invalidateExternalDataScope(scope: string): void {
+  sharedExternalDataCoordinator.invalidatePrefix(`${String(scope || '').trim()}::`);
+}

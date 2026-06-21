@@ -196,6 +196,15 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './agentModels') {
           return require(path.join(projectRoot, 'out/agentModels.js'));
         }
+        if (id === './agentModelSelection') {
+          return require(path.join(projectRoot, 'out/agentModelSelection.js'));
+        }
+        if (id === './panelMessages') {
+          return require(path.join(projectRoot, 'out/panelMessages.js'));
+        }
+        if (id === './proAccount') {
+          return require(path.join(projectRoot, 'out/proAccount.js'));
+        }
         if (id === './continuation') {
           return require(path.join(projectRoot, 'out/continuation.js'));
         }
@@ -1787,7 +1796,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     [
       'module.exports.__buildProjectPortfolioSummaries = buildProjectPortfolioSummaries;',
       'module.exports.__getRecommendedNode = getRecommendedNode;',
-      'module.exports.__hasProEntitlement = hasProEntitlement;'
+      'module.exports.__hasProEntitlement = proAccount_1.hasProEntitlement;'
     ].join('\n')
   );
 
@@ -1864,7 +1873,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
     'out/extension.js',
     [
       'module.exports.__getStrategyPyramidWebviewHtml = strategyPyramidWebview_1.getStrategyPyramidWebviewHtml;',
-      'module.exports.__hasProEntitlement = hasProEntitlement;'
+      'module.exports.__hasProEntitlement = proAccount_1.hasProEntitlement;'
     ].join('\n')
   );
   const context = {
@@ -2722,6 +2731,83 @@ test('external data loader deduplicates in-flight loads and reuses fresh results
   assert.equal(forced.calls, 2);
 });
 
+test('external data loader exposes one shared loading boundary', async () => {
+  const { loadExternalData, invalidateExternalData } = require(path.join(projectRoot, 'out/externalDataLoader.js'));
+  const projectPath = '/tmp/project-shared-loader';
+  let calls = 0;
+  invalidateExternalData('shared-test', projectPath);
+  const load = async () => {
+    calls += 1;
+    return { calls };
+  };
+
+  const first = await loadExternalData('shared-test', projectPath, load);
+  const second = await loadExternalData('shared-test', projectPath, load);
+  const forced = await loadExternalData('shared-test', projectPath, load, { force: true });
+
+  assert.equal(calls, 2);
+  assert.equal(first.calls, 1);
+  assert.equal(second.calls, 1);
+  assert.equal(forced.calls, 2);
+});
+
+test('pro account module keeps expired remote grants from unlocking local features', () => {
+  const proAccount = require(path.join(projectRoot, 'out/proAccount.js'));
+
+  assert.equal(proAccount.hasProEntitlement({
+    proEntitlements: { strategy_pyramid: true },
+    proAccount: { authenticated: true, allowed: true, expiresAt: '2020-01-01T00:00:00.000Z' }
+  }, 'strategyPyramid'), false);
+  assert.equal(proAccount.hasProEntitlement({
+    proEntitlements: { strategy_pyramid: true },
+    proAccount: { authenticated: true, allowed: true, expiresAt: '2999-01-01T00:00:00.000Z' }
+  }, 'strategyPyramid'), true);
+  assert.deepEqual(
+    proAccount.clearProEntitlements({ pro: true, solomap_pro: true, strategy_pyramid: true, flow_mode: true, other: true }),
+    { other: true }
+  );
+});
+
+test('agent model selection normalizes preferences and message shape', () => {
+  const modelSelection = require(path.join(projectRoot, 'out/agentModelSelection.js'));
+
+  assert.deepEqual(
+    modelSelection.mergeAgentModelPreferences(
+      { codex: 'gpt-5.1', empty: '' },
+      { codex: 'gpt-5.2', antigravity: 'Gemini 3.5 Flash' }
+    ),
+    { codex: 'gpt-5.2', antigravity: 'Gemini 3.5 Flash' }
+  );
+});
+
+test('panel message helper posts stable command payloads', async () => {
+  const panelMessages = require(path.join(projectRoot, 'out/panelMessages.js'));
+  const sent = [];
+  const target = {
+    postMessage(message) {
+      sent.push(message);
+      return Promise.resolve(true);
+    }
+  };
+
+  await panelMessages.postSettingsLoaded(target, { language: 'zh' });
+  await panelMessages.postProjectsLoaded(target, { selectedProjectPath: '/tmp/project' });
+  await panelMessages.postFlowStateLoaded(target, { hasProAccess: true });
+  await panelMessages.postAgentModelsLoaded(target, {
+    requestId: 'r1',
+    targetId: 't1',
+    agentCli: 'codex',
+    catalog: { models: [{ value: 'auto', label: 'Auto' }] }
+  });
+
+  assert.deepEqual(sent.map((message) => message.command), [
+    'settingsLoaded',
+    'projectsLoaded',
+    'flowStateLoaded',
+    'agentModelsLoaded'
+  ]);
+});
+
 test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
@@ -2801,7 +2887,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__resolveExecutablePath = agentCli_1.resolveExecutablePath;',
       'module.exports.__commandExists = agentCli_1.commandExists;',
       'module.exports.__getAgentProvider = agentCli_1.getAgentProvider;',
-      'module.exports.__hasProEntitlement = hasProEntitlement;',
+      'module.exports.__hasProEntitlement = proAccount_1.hasProEntitlement;',
       'module.exports.__getStepSessionFilePath = continuation_1.getStepSessionFilePath;',
       'module.exports.__readStepSessionState = continuation_1.readStepSessionState;',
       'module.exports.__getStoredAgentSession = continuation_1.getStoredAgentSession;',

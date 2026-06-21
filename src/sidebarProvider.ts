@@ -9,7 +9,9 @@ import { getAgentImpactStatus } from './agentImpact';
 import { summarizeDocumentationForReview } from './documentationManifest';
 import { readLearningSummary } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
-import { buildExternalDataKey, ExternalDataLoadCoordinator, ExternalDataLoadOptions } from './externalDataLoader';
+import { ExternalDataLoadOptions, invalidateExternalData, loadExternalData } from './externalDataLoader';
+import { hasProEntitlement as hasProEntitlementForSettings, ProAccountStatus } from './proAccount';
+import { postAgentModelsLoaded } from './panelMessages';
 
 interface SolopreneurSettings {
   cliPath: string;
@@ -50,13 +52,6 @@ interface AgentModelCatalog {
   models: AgentModelOption[];
   selectedValue: string;
   supportsDiscovery: boolean;
-}
-
-interface ProAccountStatus {
-  authenticated: boolean;
-  allowed: boolean;
-  email?: string;
-  expiresAt?: string;
 }
 
 interface SolopreneurProject {
@@ -229,24 +224,19 @@ interface RoadmapNodeLike {
 }
 
 type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
-type ProFeatureKey = 'strategyPyramid';
-
 const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
   { key: 'build', label: 'Build' },
   { key: 'sell', label: 'Sell' },
   { key: 'learn', label: 'Learn' },
   { key: 'improve', label: 'Improve' }
 ];
-const PRO_FEATURES: Record<ProFeatureKey, string> = {
-  strategyPyramid: 'strategy_pyramid'
-};
 const DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT = 3;
 const DELIVERY_WORKFLOW_RUN_FETCH_LIMIT = 20;
 const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
 const githubRepoSlugCache = new Map<string, string>();
 const commandResolutionCache = new Map<string, string>();
 let executableSearchPathsCache: string[] | null = null;
-const externalDataLoads = new ExternalDataLoadCoordinator({ defaultMinIntervalMs: 90_000 });
+const hasProEntitlement = hasProEntitlementForSettings;
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -1655,31 +1645,34 @@ async function readProjectIssueSummaryAsync(projectPath: string): Promise<Projec
 }
 
 function loadExternalIssueSummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectIssueSummary> {
-  return externalDataLoads.load(
-    buildExternalDataKey('github-issues', projectPath),
+  return loadExternalData(
+    'github-issues',
+    projectPath,
     () => readProjectIssueSummaryAsync(projectPath),
     options
   );
 }
 
 function loadExternalDeliverySummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectDeliverySummary> {
-  return externalDataLoads.load(
-    buildExternalDataKey('github-delivery', projectPath),
+  return loadExternalData(
+    'github-delivery',
+    projectPath,
     () => readProjectDeliverySummaryAsync(projectPath),
     options
   );
 }
 
 function loadExternalSecuritySummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectSecuritySummary> {
-  return externalDataLoads.load(
-    buildExternalDataKey('github-security', projectPath),
+  return loadExternalData(
+    'github-security',
+    projectPath,
     () => readProjectSecuritySummaryAsync(projectPath),
     options
   );
 }
 
 function invalidateExternalIssueSummary(projectPath: string): void {
-  externalDataLoads.invalidate(buildExternalDataKey('github-issues', projectPath));
+  invalidateExternalData('github-issues', projectPath);
 }
 
 function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale?: boolean } {
@@ -2486,16 +2479,6 @@ function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | null {
     || nodes[0];
 }
 
-function hasProEntitlement(settings: Partial<SolopreneurSettings> | undefined, feature: ProFeatureKey): boolean {
-  const entitlements = settings?.proEntitlements || {};
-  const expiresAt = String(settings?.proAccount?.expiresAt || '').trim();
-  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
-  if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) {
-    return false;
-  }
-  return Boolean(entitlements[PRO_FEATURES[feature]] || entitlements[feature] || entitlements.pro || entitlements.solomap_pro);
-}
-
 function getProjectRecentActivityAt(projectPath: string): string {
   const candidates = [
     path.join(projectPath, '.solopreneur', 'roadmap.csv'),
@@ -3085,8 +3068,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             if (this._getAgentModels) {
               const requestedAgentCli = data.agentCli || '';
               const catalog = await this._getAgentModels(requestedAgentCli);
-              this._view?.webview.postMessage({
-                command: 'agentModelsLoaded',
+              postAgentModelsLoaded(this._view?.webview, {
                 requestId: String(data.requestId || ''),
                 targetId: String(data.targetId || ''),
                 agentCli: requestedAgentCli,

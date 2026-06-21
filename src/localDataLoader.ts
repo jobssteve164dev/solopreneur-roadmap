@@ -51,6 +51,32 @@ export async function runLocalDataLoad<T>(
   }
 }
 
+export async function loadLocalData<T>(
+  load: () => T | Promise<T>,
+  fallbackError = '本地数据加载失败。'
+): Promise<{ ok: true; value: T } | { ok: false; message: string }> {
+  try {
+    return { ok: true, value: await load() };
+  } catch (error) {
+    return { ok: false, message: formatLocalDataError(error, fallbackError) };
+  }
+}
+
+export async function postLocalDataLoad<T>(
+  load: () => T | Promise<T>,
+  onSuccess: (value: T) => void | Promise<void>,
+  onFailure: (message: string) => void | Promise<void>,
+  fallbackError = '本地数据加载失败。'
+): Promise<boolean> {
+  const result = await loadLocalData(load, fallbackError);
+  if (result.ok) {
+    await onSuccess(result.value);
+    return true;
+  }
+  await onFailure(result.message);
+  return false;
+}
+
 export function buildLocalDataStatusHtml(
   webview: vscode.Webview,
   context: vscode.ExtensionContext,
