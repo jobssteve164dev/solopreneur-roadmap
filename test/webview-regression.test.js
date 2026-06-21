@@ -214,6 +214,15 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './continuation') {
           return require(path.join(projectRoot, 'out/continuation.js'));
         }
+        if (id === './conversationPresentation') {
+          return require(path.join(projectRoot, 'out/conversationPresentation.js'));
+        }
+        if (id === './pluginActions') {
+          return require(path.join(projectRoot, 'out/pluginActions.js'));
+        }
+        if (id === './pluginContracts') {
+          return require(path.join(projectRoot, 'out/pluginContracts.js'));
+        }
         return {};
       }
       return require(id);
@@ -400,7 +409,15 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
     postedMessages,
     context,
     dispatchMessage(message) {
-      context.__messageListener({ data: message });
+      const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+      const nodeId = String(message.nodeId || (message.command === 'sidebarSoloConversationLoaded' ? '__solo__' : ''));
+      const data = Array.isArray(message.conversations)
+        ? {
+          ...message,
+          conversations: presentation.buildConversationPresentations('', nodeId, message.conversations)
+        }
+        : message;
+      context.__messageListener({ data });
     }
   };
 }
@@ -550,9 +567,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /data-solo-select/);
   assert.match(script, /bindSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
-  assert.match(script, /savePastedAttachments/);
+  assert.match(script, /attachment\.save/);
   assert.match(script, /checkDependencies/);
-  assert.match(script, /openFeedbackIssue/);
+  assert.match(script, /feedback\.open/);
   assert.match(html, /id="btn-toggle-feedback"/);
   assert.match(html, /id="feedback-panel"/);
   assert.match(html, /id="btn-open-strategy-pyramid"/);
@@ -562,10 +579,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.doesNotMatch(html, /id="label-feedback"/);
   assert.match(script, /renderProjectIssuePanel/);
   assert.match(script, /renderProjectDeliveryPanel/);
-  assert.match(script, /createIssue/);
-  assert.match(script, /closeIssue/);
-  assert.match(script, /getIssueDetails/);
-  assert.match(script, /refreshProjectData/);
+  assert.match(script, /issue\.create/);
+  assert.match(script, /issue\.close/);
+  assert.match(script, /issue\.getDetails/);
+  assert.match(script, /project\.refreshExternalData/);
   assert.match(script, /data-refresh-project-path/);
   assert.match(script, /data-toggle-delivery-panel/);
   assert.match(script, /data-agent-fix-delivery-project-path/);
@@ -576,15 +593,15 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /foundationSignalText/);
   assert.match(script, /buildSecurityActionPrompt/);
   assert.match(script, /buildFoundationActionPrompt/);
-  assert.match(script, /toggleProjectPinned/);
-  assert.match(script, /getProjectConversationHistory/);
+  assert.match(script, /project\.togglePinned/);
+  assert.match(script, /conversation\.getProjectHistory/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
   assert.match(html, /id="pro-account-panel"/);
   assert.match(html, /id="btn-open-pro-authorization"/);
   assert.match(html, /id="btn-paste-pro-code"/);
-  assert.match(script, /openProAuthorization/);
-  assert.match(script, /pasteProAuthorizationCode/);
+  assert.match(script, /entitlement\.login/);
+  assert.match(script, /entitlement\.paste/);
   assert.match(html, /data-issue-panel/);
   assert.match(html, /data-toggle-issue-form/);
 
@@ -650,13 +667,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   elements['btn-save-settings'].listeners.click();
 
   assert.equal(elements['settings-panel'].style.display, 'none');
-  assert.ok(postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
+  assert.ok(postedMessages.some((message) => message.command === 'settings.get'));
+  assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
   postedMessages.length = 0;
   elements['btn-open-pro-authorization'].listeners.click();
   elements['btn-paste-pro-code'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'openProAuthorization'));
-  assert.ok(postedMessages.some((message) => message.command === 'pasteProAuthorizationCode'));
+  assert.ok(postedMessages.some((message) => message.command === 'entitlement.login'));
+  assert.ok(postedMessages.some((message) => message.command === 'entitlement.paste'));
   elements['btn-check-dependencies'].listeners.click();
   elements['btn-open-agent-install'].listeners.click();
   elements['btn-prepare-agent-automation'].listeners.click();
@@ -670,7 +687,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'agent-install'));
   assert.ok(postedMessages.some((message) => message.command === 'prepareAgentAutomation'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'github-auth'));
-  assert.ok(postedMessages.some((message) => message.command === 'openFeedbackIssue' && message.title === '希望加载更快' && message.category === 'not_working'));
+  assert.ok(postedMessages.some((message) => message.command === 'feedback.open' && message.title === '希望加载更快' && message.category === 'not_working'));
 
   dispatchMessage({
     command: 'settingsLoaded',
@@ -680,7 +697,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.equal(elements['setting-clipath-custom'].style.display, 'none');
   postedMessages.length = 0;
   elements['btn-save-settings'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'updateSettings' && message.cliPath === '/workspace/.solomap-global/agent-cli/agy'));
+  assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.cliPath === '/workspace/.solomap-global/agent-cli/agy'));
 
   dispatchMessage({
     command: 'projectsLoaded',
@@ -734,7 +751,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     stopPropagation() {}
   });
   assert.equal(elements['project-select'].getAttribute('data-value'), '/workspace/app');
-  assert.ok(postedMessages.some((message) => message.command === 'selectProject' && message.projectPath === '/workspace/app'));
+  assert.ok(postedMessages.some((message) => message.command === 'project.select' && message.projectPath === '/workspace/app'));
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {
@@ -765,7 +782,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     target: elements['project-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === '/workspace/second'),
     stopPropagation() {}
   });
-  assert.ok(postedMessages.some((message) => message.command === 'getProjectConversationHistory' && message.projectPath === '/workspace/second'));
+  assert.ok(postedMessages.some((message) => message.command === 'conversation.getProjectHistory' && message.projectPath === '/workspace/second'));
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {
@@ -888,12 +905,17 @@ test('sidebar resolve survives persisted state and startup data failures', async
   const provider = new SolopreneurSidebarProvider(
     createUri(projectRoot),
     { getNodes: () => { throw new Error('stale sync engine'); } },
-    async () => { throw new Error('agent failed'); },
-    () => { throw new Error('settings unavailable'); },
-    async () => {},
-    () => { throw new Error('persisted projects unavailable'); },
-    async () => {},
-    async () => {}
+    {
+      getSettings: () => { throw new Error('settings unavailable'); },
+      updateSettings: async () => {},
+      getProjects: () => { throw new Error('persisted projects unavailable'); },
+      dispatchSharedAction: async (message) => {
+        if (message.command === 'conversation.runStep') {
+          throw new Error('agent failed');
+        }
+        return false;
+      }
+    }
   );
 
   const originalConsoleError = console.error;
@@ -903,7 +925,7 @@ test('sidebar resolve survives persisted state and startup data failures', async
     assert.match(webviewView.webview.html, /SoloMap/);
     assert.ok(postedMessages.some((message) => message.command === 'projectsLoaded'));
 
-    await messageListener({ command: 'runAgent', nodeId: '1' });
+    await messageListener({ command: 'conversation.runStep', nodeId: '1' });
     assert.ok(postedMessages.some((message) => message.command === 'sidebarActionFailed' && /agent failed/.test(message.message)));
   } finally {
     console.error = originalConsoleError;
@@ -924,7 +946,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(html, /data-solo-select/);
   assert.match(script, /renderSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
-  assert.match(script, /savePastedAttachments/);
+  assert.match(script, /attachment\.save/);
   assert.match(script, /conversation-log-pre/);
   assert.ok(script.includes("querySelectorAll('[data-conversation-id] .conversation-row')"));
   assert.match(script, /hasActiveConversationDescendant/);
@@ -1027,7 +1049,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) =>
-    message.command === 'updateProjectMetadata'
+    message.command === 'project.updateMetadata'
     && message.projectPath === '/workspace/app'
     && message.name === 'New App'
     && message.description === 'Project intro'
@@ -1035,14 +1057,14 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     && message.projectType === 'content'
     && message.priority === 'P0'
   ));
-  assert.ok(!postedMessages.some((message) => message.command === 'getSettings'));
-  assert.ok(!postedMessages.some((message) => message.command === 'updateSettings'));
+  assert.ok(!postedMessages.some((message) => message.command === 'settings.get'));
+  assert.ok(!postedMessages.some((message) => message.command === 'settings.update'));
   elements['btn-toggle-feedback'].listeners.click();
   assert.equal(elements['feedback-panel'].style.display, 'flex');
   elements['setting-feedback-title'].value = '看不懂下一步';
   elements['setting-feedback-body'].value = '路线图打开后不知道先点哪里。';
   elements['btn-open-feedback'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'openFeedbackIssue' && message.title === '看不懂下一步' && message.category === 'not_working'));
+  assert.ok(postedMessages.some((message) => message.command === 'feedback.open' && message.title === '看不懂下一步' && message.category === 'not_working'));
 
   postedMessages.length = 0;
   elements['btn-toggle-solo'].listeners.click();
@@ -1061,14 +1083,14 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.ok(elements['solo-body'].innerHTML.includes('data-value="/workspace/.solomap-global/agent-cli/agy"'));
   assert.ok(elements['solo-body'].innerHTML.includes('>antigravity</button>'));
   assert.ok(!elements['solo-body'].innerHTML.includes('>/workspace/.solomap-global/agent-cli/agy</button>'));
-  assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__solo__'));
+  assert.ok(postedMessages.some((message) => message.command === 'conversation.getHistory' && message.nodeId === '__solo__'));
   elements['btn-toggle-roadmap-view'].listeners.click();
 
   elements['btn-toggle-roadmap-revision'].listeners.click();
 
   assert.ok(elements['roadmap-revision-panel'].classList.contains('open'));
   assert.ok(elements['roadmap-revision-body'].innerHTML.includes('data-roadmap-revision-input'));
-  assert.ok(postedMessages.some((message) => message.command === 'getNodeConversations' && message.nodeId === '__roadmap_revision__'));
+  assert.ok(postedMessages.some((message) => message.command === 'conversation.getHistory' && message.nodeId === '__roadmap_revision__'));
 });
 
 test('full roadmap webview exposes node conversation history and project settings', () => {
@@ -1085,7 +1107,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(html, /id="project-type-select"/);
   assert.match(html, /id="project-priority-select"/);
   assert.match(script, /renderProjectSettings/);
-  assert.match(script, /updateProjectMetadata/);
+  assert.match(script, /project\.updateMetadata/);
   assert.doesNotMatch(html, /id="btn-add-project"/);
   assert.doesNotMatch(html, /id="setting-language"/);
   assert.doesNotMatch(html, /id="setting-global-prompt"/);
@@ -1093,7 +1115,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.doesNotMatch(html, /id="agent-impact-panel"/);
   assert.doesNotMatch(html, /id="btn-refresh-agent-impact"/);
   assert.match(html, /id="btn-open-feedback"/);
-  assert.match(script, /openFeedbackIssue/);
+  assert.match(script, /feedback\.open/);
   assert.doesNotMatch(html, /id="setting-ability-select"/);
   assert.doesNotMatch(html, /id="setting-ability-url-input"/);
   assert.doesNotMatch(html, /id="btn-install-ability"/);
@@ -1101,12 +1123,12 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.doesNotMatch(html, /id="ability-detail-card"/);
   assert.doesNotMatch(html, /id="ability-action-badge"/);
   assert.match(html, /id="btn-remove-project"/);
-  assert.match(html, /removeProject/);
+  assert.match(html, /project\.remove/);
   assert.doesNotMatch(html, /id="setting-provider"/);
   assert.doesNotMatch(html, /id="setting-key"/);
   assert.doesNotMatch(html, /id="ai-prompt"/);
   assert.doesNotMatch(html, /id="btn-generate"/);
-  assert.match(script, /getNodeConversations/);
+  assert.match(script, /conversation\.getHistory/);
   assert.match(script, /nodeConversationsLoaded/);
   assert.match(script, /Start Agent Conversation|发起 Agent 对话/);
   assert.match(script, /Agent Conversation History|Agent 对话历史/);
@@ -1114,7 +1136,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /conversation-composer/);
   assert.match(html, /\.conversation-compose\s*\{[\s\S]*?align-items:\s*stretch/);
   assert.match(script, /data-attach-node-id/);
-  assert.match(script, /chooseSupplementFiles/);
+  assert.match(script, /attachment\.choose/);
   assert.match(script, /supplementFilesSelected/);
   assert.match(script, /conversation-attachment-chip/);
   assert.match(script, /data-send-node-id/);
@@ -1123,8 +1145,8 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /getAgentOptions/);
   assert.match(script, /normalizeAgentOption/);
   assert.match(script, /summarizeConversation/);
-  assert.match(script, /retryConversation/);
-  assert.match(script, /continueNativeConversation/);
+  assert.match(script, /conversation\.retry/);
+  assert.match(script, /conversation\.continue/);
   assert.match(script, /data-continue-native-conversation-id/);
   assert.match(script, /data-continue-native-node-id/);
   assert.doesNotMatch(script, /data-open-inline-continue-id/);
@@ -1132,9 +1154,9 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /conversation-children-title/);
   assert.match(script, /sessionRoots/);
   assert.match(script, /const rootConversationId = conversation\.continuationRootConversationId \|\| findConversationRootId\(conversation\)/);
-  assert.match(script, /Continuation first message/);
-  assert.match(script, /showAgentTerminal/);
-  assert.match(script, /stopAgentRun/);
+  assert.doesNotMatch(script, /Continuation first message/);
+  assert.match(script, /conversation\.openTerminal/);
+  assert.match(script, /conversation\.stop/);
   assert.match(script, /formatConversationDuration/);
   assert.match(script, /renderConversationOutcome/);
   assert.match(script, /extractAgentConclusion/);
@@ -1143,11 +1165,11 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.doesNotMatch(script, /node\.status === 'Running' \? 'disabled'/);
   assert.doesNotMatch(script, /Another Agent conversation is running/);
   assert.match(script, /Failure reason|失败原因/);
-  assert.match(script, /runRoadmapRevision/);
+  assert.match(script, /conversation\.runRoadmapRevision/);
   assert.match(script, /Roadmap Revision History|路线图调整历史/);
   assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
-  assert.match(script, /runSoloConversation/);
-  assert.match(script, /linkSoloConversation/);
+  assert.match(script, /conversation\.runSolo/);
+  assert.match(script, /conversation\.linkToStep/);
   assert.match(script, /soloTitle:\s*'Free Work'|soloTitle:\s*'自由研讨'/);
   assert.match(script, /This Solo conversation has finished|本次 Solo 对话已结束/);
   assert.match(script, /renderSoloPanel/);
@@ -1160,7 +1182,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /renderOnboardingPanel/);
   assert.match(script, /data-onboarding-add-project/);
   assert.match(script, /添加第一个项目|Add first project/);
-  assert.match(script, /vscode\.postMessage\(\{ command: 'addProject' \}\)/);
+  assert.match(script, /vscode\.postMessage\(\{ command: 'project\.add' \}\)/);
   assert.doesNotMatch(script, /confirmStepCompletion|completeConfirm/);
   assert.match(script, /Completion criteria|完成标准/);
   assert.match(html, /id="btn-toggle-roadmap-revision"/);
@@ -1209,7 +1231,8 @@ test('full roadmap conversation history keeps failed continuations under the mai
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
   const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
 
-  const rendered = context.__renderConversationsForTest('__solo__', [
+  const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const rendered = context.__renderConversationsForTest('__solo__', presentation.buildConversationPresentations('', '__solo__', [
     {
       id: 12,
       status: 'Recorded',
@@ -1224,7 +1247,7 @@ test('full roadmap conversation history keeps failed continuations under the mai
       command: 'codex exec',
       output: 'User supplement:\n主对话\n\nNative Agent session saved: .solopreneur/step-sessions/__solo__.json (019ecd99-4325-7050-8e71-7def92359c9f)'
     }
-  ], 'empty');
+  ]), 'empty');
 
   assert.match(rendered, /data-conversation-id="__solo__:20"/);
   assert.doesNotMatch(rendered, /data-conversation-id="__solo__:12"/);
@@ -1260,14 +1283,16 @@ test('full roadmap conversation history folds review runs under the reviewed con
       output: 'Agent review started.\n\nReview of execution: 20\n\nReview decision: pass'
     }
   ];
-  const collapsed = context.__renderConversationsForTest('__solo__', conversations, 'empty');
+  const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const presentedConversations = presentation.buildConversationPresentations('', '__solo__', conversations);
+  const collapsed = context.__renderConversationsForTest('__solo__', presentedConversations, 'empty');
 
   assert.match(collapsed, /data-conversation-id="__solo__:20"/);
   assert.doesNotMatch(collapsed, /data-conversation-id="__solo__:21"/);
   assert.match(collapsed, /复核 1|Reviews 1/);
 
   context.__setActiveConversationForTest('__solo__:20');
-  const expanded = context.__renderConversationsForTest('__solo__', conversations, 'empty');
+  const expanded = context.__renderConversationsForTest('__solo__', presentedConversations, 'empty');
   assert.match(expanded, /data-conversation-id="__solo__:21"/);
   assert.match(expanded, /后续记录|Follow-up Records/);
 });
@@ -1279,11 +1304,10 @@ test('sidebar conversation result cards expose rollback actions for pre-session 
     fs.readFileSync(path.join(projectRoot, 'out/roadmapWebview.js'), 'utf8')
   ].join('\n');
 
-  assert.match(sidebarSource, /function extractPreGitHash\(output\)/);
+  assert.match(sidebarSource, /function extractPreGitHash\(conversation\)/);
   assert.match(sidebarSource, /data-rollback-sidebar-solo-hash/);
   assert.match(sidebarSource, /data-rollback-sidebar-step-hash/);
-  assert.match(sidebarSource, /command:\s*'rollbackChanges'/);
-  assert.match(sidebarSource, /this\._rollbackChanges/);
+  assert.match(sidebarSource, /command:\s*'conversation\.rollback'/);
 
   assert.match(extensionSource, /function rollbackProjectToPreSessionGitHash/);
   assert.match(extensionSource, /rollback-safety/);
@@ -1318,11 +1342,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /sidebar-solo-card/);
   assert.doesNotMatch(html, /id="sidebar-solo-project"/);
   assert.doesNotMatch(html, /id="sidebar-solo-input"/);
-  assert.match(html, /runSoloConversation/);
-  assert.match(html, /chooseSoloSupplementFiles/);
+  assert.match(html, /conversation\.runSolo/);
+  assert.match(html, /attachment\.choose/);
   assert.match(html, /soloSupplementFilesSelected/);
-  assert.match(html, /getSoloConversationHistory/);
-  assert.match(html, /getProjectConversationHistory/);
+  assert.match(html, /conversation\.getHistory/);
+  assert.match(html, /conversation\.getProjectHistory/);
   assert.match(html, /sidebarSoloConversationLoaded/);
   assert.match(html, /sidebarProjectConversationLoaded/);
   assert.match(html, /renderSidebarSoloHistoryContent/);
@@ -1347,12 +1371,12 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /function buildConversationTree\(conversations\)/);
   assert.doesNotMatch(html, /sidebar-conversations-tree-container/);
   assert.doesNotMatch(html, /conversation\.status\.toLowerCase\(\)/);
-  assert.match(html, /continueSoloConversation/);
+  assert.match(html, /conversation\.continue/);
   assert.match(html, /data-continue-sidebar-solo-id/);
-  assert.match(html, /Continuation session id/);
+  assert.doesNotMatch(html, /Continuation session id/);
   assert.match(html, /data-stop-sidebar-solo-id/);
   assert.match(html, /data-stop-sidebar-step-id/);
-  assert.match(html, /stopConversation/);
+  assert.match(html, /conversation\.stop/);
   assert.match(html, /\.sidebar-conversation-card\s*\{[\s\S]*?flex-wrap:\s*wrap/);
   assert.match(html, /\.sidebar-conversation-body\s*\{[\s\S]*?flex:\s*1 1 130px/);
   assert.match(html, /@media \(max-width:\s*330px\)[\s\S]*?\.sidebar-conversation-right-col\s*\{[\s\S]*?width:\s*100%/);
@@ -1399,7 +1423,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="setting-global-data-path"/);
   assert.match(html, /id="agent-impact-panel"/);
   assert.match(html, /id="btn-refresh-agent-impact"/);
-  assert.match(html, /getAgentImpact/);
+  assert.match(html, /agentImpact\.get/);
   assert.match(html, /agentImpactLoaded/);
   assert.match(html, /id="setting-ability-select"/);
   assert.match(html, /id="setting-ability-url-input"/);
@@ -1407,12 +1431,12 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="btn-uninstall-ability"/);
   assert.match(html, /id="ability-detail-card"/);
   assert.match(html, /id="ability-action-badge"/);
-  assert.match(html, /installSkill/);
-  assert.match(html, /installMcp/);
-  assert.match(html, /installEnhancement/);
-  assert.match(html, /uninstallSkill/);
-  assert.match(html, /uninstallMcp/);
-  assert.match(html, /uninstallEnhancement/);
+  assert.match(html, /ability\.installSkill/);
+  assert.match(html, /ability\.installMcp/);
+  assert.match(html, /ability\.installEnhancement/);
+  assert.match(html, /ability\.uninstallSkill/);
+  assert.match(html, /ability\.uninstallMcp/);
+  assert.match(html, /ability\.uninstallEnhancement/);
   assert.match(html, /setting-ability-select/);
   assert.match(html, /btn-install-ability"/);
   assert.match(html, /btn-uninstall-ability"/);
@@ -1421,16 +1445,16 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);
   assert.match(html, /添加第一个项目|Add first project/);
-  assert.match(html, /vscode\.postMessage\(\{ command: 'addProject' \}\)/);
+  assert.match(html, /vscode\.postMessage\(\{ command: 'project\.add' \}\)/);
   assert.doesNotMatch(html, /id="tasks-list"/);
   assert.doesNotMatch(html, /id="progress-bar"/);
   assert.doesNotMatch(html, /id="progress-text"/);
   assert.match(html, /function activateProjectInSidebar/);
   assert.match(html, /padding:\s*12px 12px 78px/);
   assert.match(html, /bindSoloSelect\(projectSelect,\s*\(value\) => \{[\s\S]*?activateProjectInSidebar\(value\)/);
-  assert.match(html, /selectProject/);
-  assert.match(html, /continueProjectFromPortfolio/);
-  assert.match(html, /openProjectFromPortfolio/);
+  assert.match(html, /project\.select/);
+  assert.match(html, /project\.continue/);
+  assert.match(html, /project\.openRoadmap/);
   assert.doesNotMatch(html, /ai-prompt-sidebar/);
   assert.doesNotMatch(html, /btn-generate-sidebar/);
 });
@@ -2812,6 +2836,103 @@ test('panel message helper posts stable command payloads', async () => {
     'flowStateLoaded',
     'agentModelsLoaded'
   ]);
+});
+
+test('conversation presentation is the shared source for roadmap and sidebar actions', () => {
+  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const conversations = buildConversationPresentations('', '__solo__', [
+    {
+      id: 20,
+      nodeId: '__solo__',
+      timestamp: '2026-06-21T00:00:00.000Z',
+      agentCli: 'codex',
+      command: 'codex exec',
+      status: 'Completed',
+      output: [
+        'User supplement:',
+        '统一两个入口',
+        '',
+        'Touched project files:',
+        'M src/example.ts',
+        '',
+        'SoloMapPreGitHash: abc1234',
+        '',
+        'Native Agent session saved: session.json (019ecd99-4325-7050-8e71-7def92359c9f)',
+        '',
+        'Agent output tail:',
+        '共享链路已完成。'
+      ].join('\n')
+    },
+    {
+      id: 21,
+      nodeId: '__solo__',
+      timestamp: '2026-06-21T00:01:00.000Z',
+      agentCli: 'codex',
+      command: 'codex resume',
+      status: 'Recorded',
+      output: 'Continuation parent conversation: 20\nContinuation session id: 019ecd99-4325-7050-8e71-7def92359c9f'
+    },
+    {
+      id: 22,
+      nodeId: '__solo__',
+      timestamp: '2026-06-21T00:02:00.000Z',
+      agentCli: 'agy',
+      command: 'agy review',
+      status: 'Completed',
+      output: 'Review of execution: 20\n\nReview decision: pass'
+    }
+  ]);
+
+  assert.equal(conversations[0].summary, '统一两个入口');
+  assert.equal(conversations[0].conclusion, '共享链路已完成。');
+  assert.deepEqual(conversations[0].changedFiles, [{ label: 'M src/example.ts', path: 'src/example.ts' }]);
+  assert.equal(conversations[0].rollbackGitHash, 'abc1234');
+  assert.equal(conversations[0].capabilities.canContinue, true);
+  assert.equal(conversations[0].capabilities.canRollback, true);
+  assert.equal(conversations[1].continuationParentConversationId, 20);
+  assert.equal(conversations[2].reviewParentConversationId, 20);
+});
+
+test('legacy and canonical webview commands dispatch through one plugin action contract', async () => {
+  const { dispatchPluginAction } = require(path.join(projectRoot, 'out/pluginActions.js'));
+  const received = [];
+  const handlers = {
+    'conversation.continue': async (message) => received.push(message)
+  };
+
+  assert.equal(await dispatchPluginAction({
+    command: 'continueSoloConversation',
+    projectPath: '/workspace/app',
+    conversationId: 7
+  }, 'sidebar', handlers), true);
+  assert.equal(await dispatchPluginAction({
+    command: 'conversation.continue',
+    projectPath: '/workspace/app',
+    nodeId: '__solo__',
+    conversationId: 8
+  }, 'roadmap', handlers), true);
+  assert.equal(received[0].command, 'conversation.continue');
+  assert.equal(received[0].nodeId, '__solo__');
+  assert.equal(received[1].command, 'conversation.continue');
+});
+
+test('roadmap and sidebar keep one shared application action boundary', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
+  const roadmapSource = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
+
+  assert.match(extensionSource, /handleSharedWebviewAction/);
+  assert.match(extensionSource, /dispatchPluginAction/);
+  assert.match(sidebarSource, /dispatchSharedAction/);
+  assert.doesNotMatch(extensionSource, /case 'runAgent'/);
+  assert.doesNotMatch(extensionSource, /case 'updateSettings'/);
+  assert.doesNotMatch(sidebarSource, /case 'runAgent'/);
+  assert.doesNotMatch(sidebarSource, /case 'updateSettings'/);
+  assert.doesNotMatch(sidebarSource, /Native Agent session saved/);
+  assert.doesNotMatch(roadmapSource, /Native Agent session saved/);
+  assert.match(sidebarSource, /command: 'settings\.update'[\s\S]*?agentModelPreferences/);
+  assert.match(roadmapSource, /command: 'settings\.get'/);
+  assert.match(roadmapSource, /command: 'agentModels\.get'/);
 });
 
 test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
@@ -4518,10 +4639,10 @@ test('failed conversations render retry action in roadmap webview', () => {
 
   assert.match(html, /conversation-retry-btn/);
   assert.match(html, /Retry|重试/);
-  assert.match(html, /retryConversation/);
+  assert.match(html, /conversation\.retry/);
   assert.match(html, /data-open-file-path/);
   assert.match(html, /data-open-file-hash/);
-  assert.match(html, /openProjectFile/);
+  assert.match(html, /project\.openFile/);
   assert.match(html, /修改文件|Changed Files/);
   assert.match(html, /conversation-control-btn/);
   assert.match(html, /data-show-agent-terminal/);

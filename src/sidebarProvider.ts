@@ -4,14 +4,10 @@ import * as fs from 'fs';
 import * as childProcess from 'child_process';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
-import { getAgentImpactStatus } from './agentImpact';
-import { buildFeedbackIssueUrl } from './projectSignals';
 import { readLearningSummary } from './learningLedger';
-import { hasProEntitlement as hasProEntitlementForSettings, ProAccountStatus } from './proAccount';
-import { postAgentModelsLoaded } from './panelMessages';
+import { hasProEntitlement as hasProEntitlementForSettings } from './proAccount';
+import { SolopreneurSettings } from './pluginContracts';
 import {
-  closeProjectIssue,
-  createProjectIssue,
   loadExternalDeliverySummary,
   loadExternalIssueSummary,
   loadExternalSecuritySummary,
@@ -19,9 +15,7 @@ import {
   ProjectIssueComment,
   ProjectIssueItem,
   ProjectIssueSummary,
-  ProjectSecuritySummary,
-  readCachedIssueDetails,
-  readProjectIssueDetails
+  ProjectSecuritySummary
 } from './projectExternalSignals';
 import {
   buildProjectPortfolioSummaries,
@@ -37,57 +31,14 @@ import {
 import {
   buildAgentCommandForPromptFile,
   commandExists,
-  formatCliTestMessage,
   getAgentCliCandidates,
   getAgentCliFamily,
   getAgentTaskAutomationStatus,
-  getCliVersionArgs,
   getKnownAgentCliCandidates,
   resolveAgentCli,
   resolveCommandOnSearchPath,
   shellQuote
 } from './agentCli';
-
-interface SolopreneurSettings {
-  cliPath: string;
-  agentModelPreferences?: Record<string, string>;
-  language: string;
-  globalPrompt: string;
-  globalDataPath: string;
-  taskPermissionMode?: string;
-  reviewerCliPath?: string;
-  collaborationReviewMode?: string;
-  proEntitlements?: Record<string, boolean>;
-  proAccount?: ProAccountStatus;
-  enabledEnhancements?: Record<string, boolean>;
-  enhancementStatuses?: Array<{
-    id: string;
-    title: string;
-    description: string;
-    status: string;
-    statusLabel: string;
-    version: string;
-    installed: boolean;
-    enabled: boolean;
-    action: string;
-    message: string;
-    updatedAt: string;
-  }>;
-}
-
-interface AgentModelOption {
-  value: string;
-  label: string;
-  title?: string;
-}
-
-interface AgentModelCatalog {
-  family: string;
-  command: string;
-  models: AgentModelOption[];
-  selectedValue: string;
-  supportsDiscovery: boolean;
-}
 
 interface GlobalEngineeringSnapshot {
   dataPath: string;
@@ -159,6 +110,16 @@ interface DependencyStatus {
   githubCliReady: boolean;
   githubAuthReady: boolean;
   githubMessage: string;
+}
+
+interface SidebarProviderDependencies {
+  getSettings: () => SolopreneurSettings;
+  updateSettings: (settings: SolopreneurSettings) => Promise<void>;
+  getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string };
+  getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
+  getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
+  getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
+  dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
 }
 
 const hasProEntitlement = hasProEntitlementForSettings;
@@ -1065,41 +1026,39 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private _issueLoadRequest = 0;
   private _deliveryLoadRequest = 0;
   private _securityLoadRequest = 0;
+  private readonly _getSettings: () => SolopreneurSettings;
+  private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>;
+  private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string };
+  private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
+  private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
+  private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
+  private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _syncEngine: SyncEngine,
-    private readonly _onRunAgent: (nodeId: string, userMessage?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
-    private readonly _getSettings: () => SolopreneurSettings,
-    private readonly _updateSettings: (settings: SolopreneurSettings) => Promise<void>,
-    private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string },
-    private readonly _selectProject: (projectPath: string) => Promise<void>,
-    private readonly _addProject: () => Promise<void>,
-    private readonly _onRunSolo?: (projectPath: string, userMessage?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
-    private readonly _onRunFlow?: (projectPath: string, goal?: string, agentCli?: string, model?: string, supplementFiles?: string[]) => Promise<void>,
-    private readonly _getAgentModels?: (agentCli: string) => Promise<AgentModelCatalog>,
-    private readonly _chooseSoloSupplementFiles?: (projectPath: string) => Promise<string[]>,
-    private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
-    private readonly _continueSoloConversation?: (projectPath: string, conversationId: number) => Promise<void>,
-    private readonly _continueStepConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>,
-    private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>,
-    private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>,
-    private readonly _toggleProjectPinned?: (projectPath: string) => Promise<void>,
-    private readonly _savePastedAttachments?: (projectPath: string, scope: string, attachments: any[]) => Promise<string[]>,
-    private readonly _installSkill?: (skillInput: string) => Promise<void>,
-    private readonly _installMcp?: (mcpInput: string) => Promise<void>,
-    private readonly _installEnhancement?: (enhancementId: string) => Promise<void>,
-    private readonly _checkEnhancement?: (enhancementId: string) => Promise<void>,
-    private readonly _setEnhancementEnabled?: (enhancementId: string, enabled: boolean) => Promise<void>,
-    private readonly _uninstallEnhancement?: (enhancementId: string) => Promise<void>,
-    private readonly _uninstallSkill?: (skillId: string) => Promise<void>,
-    private readonly _uninstallMcp?: (mcpId: string) => Promise<void>,
-    private readonly _getFeedbackUsageSummary?: () => string,
-    private readonly _stopConversation?: (projectPath: string, nodeId: string, conversationId: number) => Promise<void>,
-    private readonly _rollbackChanges?: (projectPath: string, gitHash: string) => Promise<void>,
-    private readonly _manageProAuthorization?: (action?: string) => Promise<void>,
-    private readonly _refreshProAccount?: () => Promise<void>
-  ) {}
+    dependenciesOrLegacyRunAgent: SidebarProviderDependencies | ((...args: any[]) => Promise<void>),
+    ...legacyDependencies: any[]
+  ) {
+    const dependencies: SidebarProviderDependencies = typeof dependenciesOrLegacyRunAgent === 'object'
+      ? dependenciesOrLegacyRunAgent
+      : {
+        getSettings: legacyDependencies[0],
+        updateSettings: legacyDependencies[1],
+        getProjects: legacyDependencies[2],
+        getSoloConversationHistory: legacyDependencies[9],
+        getStepConversationHistory: legacyDependencies[12],
+        getProjectConversationHistory: legacyDependencies[13],
+        dispatchSharedAction: legacyDependencies[29]
+      };
+    this._getSettings = dependencies.getSettings;
+    this._updateSettings = dependencies.updateSettings;
+    this._getProjects = dependencies.getProjects;
+    this._getSoloConversationHistory = dependencies.getSoloConversationHistory;
+    this._getStepConversationHistory = dependencies.getStepConversationHistory;
+    this._getProjectConversationHistory = dependencies.getProjectConversationHistory;
+    this._dispatchSharedAction = dependencies.dispatchSharedAction;
+  }
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -1124,90 +1083,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     // Listen to messages from the webview
     webviewView.webview.onDidReceiveMessage(async (data) => {
       try {
+        if (this._dispatchSharedAction && await this._dispatchSharedAction(data, webviewView.webview)) {
+          return;
+        }
         switch (data.command) {
           case 'getNodes':
             this.sendNodesToWebview();
-            break;
-          case 'runAgent':
-            await this._onRunAgent(data.nodeId, data.userMessage || '', data.agentCli || '', data.model || '', data.supplementFiles || []);
-            break;
-          case 'runSoloConversation':
-            if (this._onRunSolo) {
-              await this._onRunSolo(data.projectPath || '', data.userMessage || '', data.agentCli || '', data.model || '', data.supplementFiles || []);
-              await this.sendSoloConversationHistory(data.projectPath || '');
-            }
-            break;
-          case 'runFlow':
-            if (this._onRunFlow) {
-              await this._onRunFlow(data.projectPath || '', data.goal || '', data.agentCli || '', data.model || '', data.supplementFiles || []);
-            }
-            break;
-          case 'getAgentModels':
-            if (this._getAgentModels) {
-              const requestedAgentCli = data.agentCli || '';
-              const catalog = await this._getAgentModels(requestedAgentCli);
-              postAgentModelsLoaded(this._view?.webview, {
-                requestId: String(data.requestId || ''),
-                targetId: String(data.targetId || ''),
-                agentCli: requestedAgentCli,
-                catalog
-              });
-            }
-            break;
-          case 'chooseSoloSupplementFiles':
-            if (this._chooseSoloSupplementFiles) {
-              const files = await this._chooseSoloSupplementFiles(data.projectPath || '');
-              this._view?.webview.postMessage({ command: 'soloSupplementFilesSelected', targetId: data.targetId || '', files });
-            }
-            break;
-          case 'savePastedAttachments':
-            if (this._savePastedAttachments) {
-              const files = await this._savePastedAttachments(data.projectPath || '', data.scope || data.targetId || 'conversation', data.attachments || []);
-              this._view?.webview.postMessage({ command: 'pastedAttachmentsSaved', targetId: data.targetId || '', files });
-            }
-            break;
-          case 'getSoloConversationHistory':
-            await this.sendSoloConversationHistory(data.projectPath || '');
-            break;
-          case 'getStepConversationHistory':
-            await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
-            break;
-          case 'getProjectConversationHistory':
-            await this.sendProjectConversationHistory(data.projectPath || '');
-            break;
-          case 'continueSoloConversation':
-            if (this._continueSoloConversation) {
-              await this._continueSoloConversation(data.projectPath || '', Number(data.conversationId || 0));
-            }
-            break;
-          case 'continueStepConversation':
-            if (this._continueStepConversation) {
-              await this._continueStepConversation(data.projectPath || '', data.nodeId || '', Number(data.conversationId || 0));
-            }
-            break;
-          case 'stopConversation':
-            if (this._stopConversation) {
-              await this._stopConversation(data.projectPath || '', data.nodeId || '', Number(data.conversationId || 0));
-              await this.sendProjectConversationHistory(data.projectPath || '');
-              await this.sendSoloConversationHistory(data.projectPath || '');
-              if (data.nodeId) {
-                await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
-              }
-            }
-            break;
-          case 'rollbackChanges':
-            if (this._rollbackChanges) {
-              await this._rollbackChanges(data.projectPath || '', data.gitHash || '');
-              await this.sendSoloConversationHistory(data.projectPath || '');
-              if (data.nodeId) {
-                await this.sendStepConversationHistory(data.projectPath || '', data.nodeId || '');
-              }
-            }
-            break;
-          case 'toggleProjectPinned':
-            if (this._toggleProjectPinned) {
-              await this._toggleProjectPinned(data.projectPath || '');
-            }
             break;
           case 'showStrategyPyramid':
             await vscode.commands.executeCommand('solopreneur.showStrategyPyramid');
@@ -1217,100 +1098,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'showFlowView':
             await vscode.commands.executeCommand('solopreneur.showFlow');
-            break;
-          case 'openProAuthorization':
-            if (this._manageProAuthorization) {
-              await this._manageProAuthorization('login');
-            } else {
-              await vscode.commands.executeCommand('solopreneur.manageProAuthorization', 'login');
-            }
-            this.sendSettings();
-            break;
-          case 'pasteProAuthorizationCode':
-            if (this._manageProAuthorization) {
-              await this._manageProAuthorization('paste');
-            } else {
-              await vscode.commands.executeCommand('solopreneur.manageProAuthorization', 'paste');
-            }
-            this.sendSettings();
-            break;
-          case 'getSettings':
-            if (this._refreshProAccount) {
-              await this._refreshProAccount();
-            }
-            this.sendSettings();
-            break;
-          case 'updateSettings':
-            await this._updateSettings({
-              cliPath: data.cliPath,
-              language: data.language,
-              globalPrompt: data.globalPrompt,
-              globalDataPath: data.globalDataPath,
-              reviewerCliPath: data.reviewerCliPath,
-              collaborationReviewMode: data.collaborationReviewMode,
-              taskPermissionMode: 'auto'
-            });
-            vscode.window.showInformationMessage('SoloMap settings saved successfully!');
-            // Broadcast to sync both Webviews
-            this.sendSettings();
-            // Trigger updates on the full screen view if active
-            vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
-            break;
-          case 'installSkill':
-            if (this._installSkill) {
-              await this._installSkill(data.skillInput || '');
-            }
-            break;
-          case 'installMcp':
-            if (this._installMcp) {
-              await this._installMcp(data.mcpInput || '');
-            }
-            break;
-          case 'installEnhancement':
-            if (this._installEnhancement) {
-              await this._installEnhancement(data.enhancementId || '');
-            }
-            break;
-          case 'checkEnhancement':
-            if (this._checkEnhancement) {
-              await this._checkEnhancement(data.enhancementId || '');
-            }
-            break;
-          case 'setEnhancementEnabled':
-            if (this._setEnhancementEnabled) {
-              await this._setEnhancementEnabled(data.enhancementId || '', Boolean(data.enabled));
-            }
-            break;
-          case 'uninstallEnhancement':
-            if (this._uninstallEnhancement) {
-              await this._uninstallEnhancement(data.enhancementId || '');
-            }
-            break;
-          case 'uninstallSkill':
-            if (this._uninstallSkill) {
-              await this._uninstallSkill(data.skillId || '');
-            }
-            break;
-          case 'uninstallMcp':
-            if (this._uninstallMcp) {
-              await this._uninstallMcp(data.mcpId || '');
-            }
-            break;
-          case 'testCli':
-            const cliToTest = resolveAgentCli('antigravity-cli', data.cliPath || '');
-            childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
-              const success = !error;
-              let msg = error ? error.message : formatCliTestMessage(cliToTest, stdout, stderr);
-              if (!success) {
-                const candidates = getAgentCliCandidates('antigravity-cli', data.cliPath || '').join(', ');
-                msg = `Command not found or failed. Tried: ${candidates}`;
-              }
-              this._view?.webview.postMessage({
-                command: 'cliTestResult',
-                success,
-                message: msg
-              });
-            });
             break;
           case 'checkDependencies':
             this._view?.webview.postMessage({
@@ -1342,12 +1129,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             }
             break;
           }
-          case 'getAgentImpact':
-            this._view?.webview.postMessage({
-              command: 'agentImpactLoaded',
-              status: getAgentImpactStatus(this._getProjects().projects)
-            });
-            break;
           case 'getDailyReview':
             this.sendDailyReview();
             break;
@@ -1358,109 +1139,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           }
           case 'openDependencyAction':
             this.openDependencyAction(data.action || '', data.cliPath || this._getSettings().cliPath || 'agy');
-            break;
-          case 'openExternal':
-            if (data.url) {
-              vscode.env.openExternal(vscode.Uri.parse(String(data.url)));
-            }
-            break;
-          case 'openFeedbackIssue':
-            vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(data.title || '', data.body || '', data.category || '', this._getFeedbackUsageSummary ? this._getFeedbackUsageSummary() : '')));
-            break;
-          case 'getIssueDetails':
-            this.sendIssueDetails(data.projectPath || '', Number(data.issueNumber || 0));
-            break;
-          case 'createIssue': {
-            const result = createProjectIssue(
-              data.projectPath || '',
-              String(data.title || '').trim(),
-              String(data.body || '').trim(),
-              String(data.category || 'discussion'),
-              String(data.priority || '')
-            );
-            this._view?.webview.postMessage({
-              command: 'issueActionCompleted',
-              projectPath: data.projectPath || '',
-              success: result.ok,
-              message: result.message
-            });
-            this.sendProjects();
-            break;
-          }
-          case 'closeIssue': {
-            const result = closeProjectIssue(data.projectPath || '', Number(data.issueNumber || 0));
-            this._view?.webview.postMessage({
-              command: 'issueActionCompleted',
-              projectPath: data.projectPath || '',
-              success: result.ok,
-              message: result.message
-            });
-            this.sendProjects();
-            break;
-          }
-          case 'refreshProjectData': {
-            const projectPath = String(data.projectPath || '');
-            let issues: ProjectIssueSummary | null = null;
-            let delivery: ProjectDeliverySummary | null = null;
-            let security: ProjectSecuritySummary | null = null;
-            try {
-              [issues, delivery, security] = await Promise.all([
-                loadExternalIssueSummary(projectPath, { force: true }),
-                loadExternalDeliverySummary(projectPath, { force: true }),
-                loadExternalSecuritySummary(projectPath, { force: true })
-              ]);
-            } catch (error) {
-              console.error('SoloMap sidebar failed to refresh project data:', error);
-            }
-            if (issues) {
-              this._view?.webview.postMessage({
-                command: 'projectIssuesLoaded',
-                projectPath,
-                issues
-              });
-            }
-            if (delivery) {
-              this._view?.webview.postMessage({
-                command: 'projectDeliveryLoaded',
-                projectPath,
-                delivery
-              });
-            }
-            if (security) {
-              this._view?.webview.postMessage({
-                command: 'projectSecurityLoaded',
-                projectPath,
-                security
-              });
-            }
-            this._view?.webview.postMessage({
-              command: 'projectRefreshCompleted',
-              projectPath,
-              success: Boolean(issues?.available || delivery?.available || security?.available),
-              message: issues?.message || delivery?.message || security?.message || ''
-            });
-            break;
-          }
-          case 'getProjects':
-            this.sendProjects();
-            break;
-          case 'selectProject':
-            await this._selectProject(data.projectPath);
-            break;
-          case 'addProject':
-            await this._addProject();
-            break;
-          case 'openProjectFromPortfolio':
-            await this._selectProject(data.projectPath);
-            await vscode.commands.executeCommand('solopreneur.showRoadmap');
-            break;
-          case 'continueProjectFromPortfolio':
-            await this._selectProject(data.projectPath);
-            if (data.nodeId) {
-              await this._onRunAgent(data.nodeId);
-            } else {
-              await vscode.commands.executeCommand('solopreneur.showRoadmap');
-            }
             break;
         }
       } catch (error) {
@@ -1715,32 +1393,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         });
       }, 1400 + 120 * index);
     });
-  }
-
-  private sendIssueDetails(projectPath: string, issueNumber: number) {
-    if (!projectPath || !issueNumber) {
-      return;
-    }
-    const cached = readCachedIssueDetails(projectPath, issueNumber);
-    if (cached) {
-      this._view?.webview.postMessage({
-        command: 'issueDetailsLoaded',
-        projectPath,
-        issueNumber,
-        ...cached
-      });
-    }
-    setTimeout(() => {
-      if (!this._view) {
-        return;
-      }
-      this._view.webview.postMessage({
-        command: 'issueDetailsLoaded',
-        projectPath,
-        issueNumber,
-        ...readProjectIssueDetails(projectPath, issueNumber)
-      });
-    }, 0);
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
@@ -5778,7 +5430,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return;
       }
       sidebarSoloConversationRequestedAt[key] = Date.now();
-      vscode.postMessage({ command: 'getSoloConversationHistory', projectPath: key });
+      vscode.postMessage({ command: 'conversation.getHistory', projectPath: key, nodeId: '__solo__' });
     }
 
     function requestSidebarProjectConversationHistory(projectPath, force = false) {
@@ -5788,7 +5440,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       sidebarProjectConversationRequested[key] = true;
       sidebarProjectConversationRequestedAt[key] = Date.now();
-      vscode.postMessage({ command: 'getProjectConversationHistory', projectPath: key });
+      vscode.postMessage({ command: 'conversation.getProjectHistory', projectPath: key });
     }
 
     function applyLanguage() {
@@ -5895,7 +5547,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       } else {
         feedbackPanel.style.display = 'none';
         settingsPanel.style.display = 'block';
-        vscode.postMessage({ command: 'getSettings' });
+        vscode.postMessage({ command: 'settings.get' });
         requestAgentImpact();
       }
     });
@@ -5942,13 +5594,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
-        vscode.postMessage({ command: 'openProAuthorization' });
+        vscode.postMessage({ command: 'entitlement.login' });
       });
     }
 
     if (btnPasteProCode) {
       btnPasteProCode.addEventListener('click', () => {
-        vscode.postMessage({ command: 'pasteProAuthorizationCode' });
+        vscode.postMessage({ command: 'entitlement.paste' });
       });
     }
 
@@ -6035,7 +5687,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function ensureAgentModelsLoaded(agentCli, targetId) {
       const requestId = 'models-' + (++agentModelRequestSeq);
       vscode.postMessage({
-        command: 'getAgentModels',
+        command: 'agentModels.get',
         requestId,
         targetId: targetId || '',
         agentCli: String(agentCli || '').trim() || currentCliPath || 'agy'
@@ -6308,7 +5960,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             return;
           }
           showAbilityActionMessage(t('installingSkillMessage'));
-          vscode.postMessage({ command: 'installSkill', skillInput: urlVal });
+          vscode.postMessage({ command: 'ability.installSkill', skillInput: urlVal });
         } else if (selectedAbilityId === 'add-new-connector') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
@@ -6316,11 +5968,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             return;
           }
           showAbilityActionMessage(t('installingMcpMessage'));
-          vscode.postMessage({ command: 'installMcp', mcpInput: urlVal });
+          vscode.postMessage({ command: 'ability.installMcp', mcpInput: urlVal });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
           showAbilityActionMessage(t('installingEnhancementMessage'));
-          vscode.postMessage({ command: 'installEnhancement', enhancementId: originId });
+          vscode.postMessage({ command: 'ability.installEnhancement', enhancementId: originId });
         }
       });
     }
@@ -6332,23 +5984,23 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (selectedAbilityId.startsWith('skill-')) {
           const originId = selectedAbilityId.substring('skill-'.length);
           showAbilityActionMessage(t('uninstallingSkillMessage'));
-          vscode.postMessage({ command: 'uninstallSkill', skillId: originId });
+          vscode.postMessage({ command: 'ability.uninstallSkill', skillId: originId });
         } else if (selectedAbilityId.startsWith('connector-')) {
           const originId = selectedAbilityId.substring('connector-'.length);
           showAbilityActionMessage(t('uninstallingMcpMessage'));
-          vscode.postMessage({ command: 'uninstallMcp', mcpId: originId });
+          vscode.postMessage({ command: 'ability.uninstallMcp', mcpId: originId });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
           showAbilityActionMessage(t('uninstallingEnhancementMessage'));
-          vscode.postMessage({ command: 'uninstallEnhancement', enhancementId: originId });
+          vscode.postMessage({ command: 'ability.uninstallEnhancement', enhancementId: originId });
         }
       });
     }
 
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
-    vscode.postMessage({ command: 'getSettings' });
-    vscode.postMessage({ command: 'getProjects' });
+    vscode.postMessage({ command: 'settings.get' });
+    vscode.postMessage({ command: 'project.getAll' });
     vscode.postMessage({ command: 'getDailyReview' });
 
     // Handle messages
@@ -6594,7 +6246,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     btnSaveSettings.addEventListener('click', () => {
       const effectiveCliPath = getEffectiveSettingCliPath();
       vscode.postMessage({
-        command: 'updateSettings',
+        command: 'settings.update',
         cliPath: effectiveCliPath,
         agentModelPreferences: agentModelPreferenceMap,
         language: getSoloSelectValue(settingLanguage),
@@ -6616,7 +6268,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       cliTestBadge.textContent = t('testing');
 
       vscode.postMessage({
-        command: 'testCli',
+        command: 'agent.testCli',
         cliPath: getEffectiveSettingCliPath()
       });
     });
@@ -6631,7 +6283,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     if (btnOpenFeedback) {
       btnOpenFeedback.addEventListener('click', () => {
         vscode.postMessage({
-          command: 'openFeedbackIssue',
+          command: 'feedback.open',
           title: settingFeedbackTitle ? settingFeedbackTitle.value.trim() : '',
           body: settingFeedbackBody ? settingFeedbackBody.value.trim() : '',
           category: currentFeedbackType
@@ -6643,7 +6295,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     if (btnRateExtension) {
       btnRateExtension.addEventListener('click', () => {
         vscode.postMessage({
-          command: 'openExternal',
+          command: 'external.open',
           url: 'https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap'
         });
       });
@@ -6706,13 +6358,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     bindSoloSelect(projectSelect, (value) => {
       activateProjectInSidebar(value);
       vscode.postMessage({
-        command: 'selectProject',
+        command: 'project.select',
         projectPath: value
       });
     });
 
     btnAddProject.addEventListener('click', () => {
-      vscode.postMessage({ command: 'addProject' });
+      vscode.postMessage({ command: 'project.add' });
     });
 
     function setDependencyPending() {
@@ -6732,7 +6384,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function requestAgentImpact() {
       setAgentImpactPending();
       vscode.postMessage({
-        command: 'getAgentImpact',
+        command: 'agentImpact.get',
         cliPath: getEffectiveSettingCliPath()
       });
     }
@@ -6777,7 +6429,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
         if (!attachments.length) return;
         vscode.postMessage({
-          command: 'savePastedAttachments',
+          command: 'attachment.save',
           projectPath: typeof getProjectPath === 'function' ? getProjectPath() : currentProjects.selectedProjectPath,
           targetId,
           scope: scope || targetId || 'conversation',
@@ -6797,9 +6449,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    function extractPreGitHash(output) {
-      const match = String(output || '').match(/SoloMapPreGitHash:\\s*([a-f0-9]+)/i);
-      return match ? match[1] : '';
+    function extractPreGitHash(conversation) {
+      return String(conversation && conversation.rollbackGitHash || '');
     }
 
     function formatDurationMs(durationMs) {
@@ -6812,10 +6463,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
 
     function formatSoloDuration(conversation) {
-      const output = String(conversation.output || '');
-      const storedDuration = output.match(/Run duration ms:\\s*(\\d+)/);
-      if (storedDuration) {
-        return formatDurationMs(Number(storedDuration[1]));
+      if (Number.isFinite(conversation && conversation.durationMs)) {
+        return formatDurationMs(Number(conversation.durationMs));
       }
       if (conversationStatusKey(conversation.status) !== 'Running' || !conversation.timestamp) {
         return '';
@@ -6827,54 +6476,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (conversationOrOutput && typeof conversationOrOutput === 'object' && conversationOrOutput.resumableNativeSessionId) {
         return String(conversationOrOutput.resumableNativeSessionId || '');
       }
-      const output = conversationOrOutput && typeof conversationOrOutput === 'object'
-        ? conversationOrOutput.output
-        : conversationOrOutput;
-      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/)
-        || String(output || '').match(/Continuation session id:\\s*([0-9a-fA-F-]{36})/);
-      return match ? match[1] : '';
+      return '';
     }
 
-    function soloConclusion(output) {
-      const match = String(output || '').match(/Agent output tail:\\n([\\s\\S]*)$/);
-      if (!match || !match[1]) return '';
-      return match[1]
-        .split('\\n')
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith('SoloMap:'))
-        .slice(-3)
-        .join(' ')
-        .replace(/\\s+/g, ' ')
-        .slice(0, 240);
+    function soloConclusion(conversation) {
+      return String(conversation && conversation.conclusion || '');
     }
 
-    function countSoloChangedFiles(output) {
-      const match = String(output || '').match(/Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/);
-      if (!match || !match[1]) return 0;
-      return match[1]
-        .split('\\n')
-        .map(line => line.trim())
-        .filter(line => line && !line.includes('No project files') && line !== '无')
-        .length;
+    function countSoloChangedFiles(conversation) {
+      return Array.isArray(conversation && conversation.changedFiles) ? conversation.changedFiles.length : 0;
     }
 
     function summarizeSoloConversation(conversation) {
-      const output = String(conversation.output || '');
-      const continuationFirstMessage = output.match(/Continuation first message:\\n([\\s\\S]*?)(\\n\\n|$)/);
-      if (continuationFirstMessage && continuationFirstMessage[1].trim()) {
-        return continuationFirstMessage[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(\\n\\n|$)/);
-      if (userMatch && userMatch[1].trim()) {
-        return userMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const changedMatch = output.match(/Touched project files:\\n([\\s\\S]*?)(\\n\\n|$)/);
-      if (changedMatch && changedMatch[1].trim() && !changedMatch[1].includes('No project files')) {
-        return changedMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const tailMatch = output.match(/Agent output tail:\\n([\\s\\S]*)$/);
-      const fallback = tailMatch ? tailMatch[1] : output;
-      return fallback.trim().replace(/\\s+/g, ' ').slice(0, 120) || statusText(conversationStatusKey(conversation.status));
+      return String(conversation && conversation.summary || '') || statusText(conversationStatusKey(conversation.status));
     }
 
     function renderAgentImpact(status) {
@@ -6913,29 +6527,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const logsExpanded = !!sidebarLogsExpandedConversations[convId];
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const duration = formatSoloDuration(conversation);
-      const failureReasonMatch = String(conversation.output || '').match(new RegExp('Failure reason:\\\\n([\\\\s\\\\S]*?)(?:\\\\n\\\\n|$)'));
       const outcomeText = statusKey === 'Running' ? (isSolo ? t('stillWorking') : t('continueWorking'))
-        : statusKey === 'Failed' ? (((failureReasonMatch || [])[1] || '').trim() || statusText(statusKey))
+        : statusKey === 'Failed' ? (String(conversation.failureReason || '').trim() || statusText(statusKey))
         : statusKey === 'Linked' ? t('linkedFromSolo')
         : statusKey === 'Recorded' ? t('continuationRecorded')
         : (isSolo ? t('soloCompleted') : t('continueCompleted'));
         
-      const conclusion = statusKey === 'Running' ? '' : soloConclusion(conversation.output);
-      const changedCount = statusKey === 'Running' ? 0 : countSoloChangedFiles(conversation.output);
+      const conclusion = statusKey === 'Running' ? '' : soloConclusion(conversation);
+      const changedCount = statusKey === 'Running' ? 0 : countSoloChangedFiles(conversation);
       const resultMsg = outcomeText + (changedCount ? ' ' + t('changedCount') + ': ' + changedCount + '.' : '');
-      const preGitHash = statusKey === 'Running' ? '' : extractPreGitHash(conversation.output);
+      const preGitHash = statusKey === 'Running' ? '' : extractPreGitHash(conversation);
       const hasLogs = !!(conversation.command || conversation.output);
       const conversationNodeId = String(conversation.nodeId || nodeId || '');
       
-      const rollbackBtn = preGitHash
+      const rollbackBtn = preGitHash && conversation.capabilities && conversation.capabilities.canRollback
         ? '<button class="sidebar-conv-action-btn rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-rollback-sidebar-solo-hash="' + escapeHtml(preGitHash) + '" data-rollback-sidebar-step-hash="' + escapeHtml(preGitHash) + '" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>'
         : '';
         
-      const continueBtn = statusKey !== 'Running' && extractNativeSessionId(conversation)
+      const continueBtn = conversation.capabilities && conversation.capabilities.canContinue
         ? '<button class="sidebar-conv-action-btn continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('continueNative')) + '"><span class="codicon codicon-play"></span> ' + escapeHtml(t('continueNative')) + '</button>'
         : '';
         
-      const stopBtn = statusKey === 'Running'
+      const stopBtn = conversation.capabilities && conversation.capabilities.canStop
         ? '<button class="sidebar-conv-action-btn stop" data-stop-id="' + escapeHtml(convId) + '" data-stop-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-stop-sidebar-solo-id="' + escapeHtml(convId) + '" data-stop-sidebar-step-id="' + escapeHtml(convId) + '" data-stop-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('stopRun')) + '"><span class="codicon codicon-debug-stop"></span> ' + escapeHtml(t('stopRun')) + '</button>'
         : '';
 
@@ -7128,13 +6741,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const targetNodeId = item.getAttribute('data-continue-node-id') || nodeId;
           if (isSolo) {
             vscode.postMessage({
-              command: 'continueSoloConversation',
+              command: 'conversation.continue',
               projectPath,
+              nodeId: '__solo__',
               conversationId
             });
           } else {
             vscode.postMessage({
-              command: 'continueStepConversation',
+              command: 'conversation.continue',
               projectPath,
               nodeId: targetNodeId,
               conversationId
@@ -7149,7 +6763,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const conversationId = item.getAttribute('data-stop-id');
           const targetNodeId = item.getAttribute('data-stop-node-id') || nodeId;
           vscode.postMessage({
-            command: 'stopConversation',
+            command: 'conversation.stop',
             projectPath,
             nodeId: isSolo ? '__solo__' : targetNodeId,
             conversationId
@@ -7163,7 +6777,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const gitHash = item.getAttribute('data-rollback-hash');
           const targetNodeId = item.getAttribute('data-rollback-node-id') || nodeId;
           vscode.postMessage({
-            command: 'rollbackChanges',
+            command: 'conversation.rollback',
             projectPath,
             nodeId: isSolo ? '__solo__' : targetNodeId,
             gitHash
@@ -7527,7 +7141,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const projectPath = button.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
           const targetId = button.getAttribute('data-conversation-target-id') || '';
           if (!projectPath || !targetId) return;
-          vscode.postMessage({ command: 'chooseSoloSupplementFiles', projectPath, targetId });
+          vscode.postMessage({ command: 'attachment.choose', projectPath, targetId });
         });
       });
       container.querySelectorAll('[data-project-continue-send]').forEach(sendButton => {
@@ -7544,7 +7158,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (mode === 'solo') {
             if (!projectPath || !userMessage.trim()) return;
             vscode.postMessage({
-              command: 'runSoloConversation',
+              command: 'conversation.runSolo',
               projectPath,
               userMessage,
               agentCli: getSoloSelectValue(agentSelect),
@@ -7561,7 +7175,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (mode === 'flow') {
             if (!projectPath || !userMessage.trim()) return;
             vscode.postMessage({
-              command: 'runFlow',
+              command: 'flow.run',
               projectPath,
               goal: userMessage,
               agentCli: getSoloSelectValue(agentSelect),
@@ -7638,7 +7252,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       container.querySelectorAll('[data-open-pro-upgrade]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
-          vscode.postMessage({ command: 'openProAuthorization' });
+          vscode.postMessage({ command: 'entitlement.login' });
         });
       });
       container.querySelectorAll('[data-open-flow-view]').forEach(button => {
@@ -7886,7 +7500,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const projectPath = item && item.projectPath ? String(item.projectPath) : '';
       if (!projectPath) return;
       activateProjectInSidebar(projectPath);
-      vscode.postMessage({ command: 'selectProject', projectPath });
+      vscode.postMessage({ command: 'project.select', projectPath });
       if (item.nodeId) {
         vscode.postMessage({ command: 'showFullRoadmap' });
       }
@@ -7952,7 +7566,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (projectPath === currentProjects.selectedProjectPath) return;
           activateProjectInSidebar(projectPath);
           vscode.postMessage({
-            command: 'selectProject',
+            command: 'project.select',
             projectPath
           });
         });
@@ -8491,7 +8105,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           if (projectPath === currentProjects.selectedProjectPath) return;
           activateProjectInSidebar(projectPath);
           vscode.postMessage({
-            command: 'selectProject',
+            command: 'project.select',
             projectPath
           });
         });
@@ -8499,7 +8113,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       portfolioList.querySelectorAll('[data-open-project-path]').forEach(button => {
         button.addEventListener('click', () => {
           vscode.postMessage({
-            command: 'openProjectFromPortfolio',
+            command: 'project.openRoadmap',
             projectPath: button.getAttribute('data-open-project-path')
           });
         });
@@ -8513,7 +8127,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           deliveryActionMessage = '';
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
-            command: 'refreshProjectData',
+            command: 'project.refreshExternalData',
             projectPath
           });
           requestSidebarSoloConversationHistory(projectPath, true);
@@ -8532,7 +8146,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           event.stopPropagation();
           const url = button.getAttribute('data-open-delivery-run') || '';
           if (!url) return;
-          vscode.postMessage({ command: 'openExternal', url });
+          vscode.postMessage({ command: 'external.open', url });
         });
       });
       portfolioList.querySelectorAll('[data-refresh-delivery-project-path]').forEach(button => {
@@ -8543,7 +8157,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           projectRefreshPaths.add(projectPath);
           deliveryActionMessage = '';
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          vscode.postMessage({ command: 'refreshProjectData', projectPath });
+          vscode.postMessage({ command: 'project.refreshExternalData', projectPath });
           requestSidebarProjectConversationHistory(projectPath, true);
         });
       });
@@ -8560,7 +8174,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           deliveryActionMessage = t('deliveryActionStarted');
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
-            command: 'runSoloConversation',
+            command: 'conversation.runSolo',
             projectPath,
             userMessage: buildDeliveryActionPrompt(project),
             agentCli,
@@ -8582,7 +8196,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           deliveryActionMessage = t('deliveryActionStarted');
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
-            command: 'runSoloConversation',
+            command: 'conversation.runSolo',
             projectPath,
             userMessage: buildSecurityActionPrompt(project),
             agentCli,
@@ -8604,7 +8218,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           deliveryActionMessage = t('deliveryActionStarted');
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
-            command: 'runSoloConversation',
+            command: 'conversation.runSolo',
             projectPath,
             userMessage: buildFoundationActionPrompt(project),
             agentCli,
@@ -8623,7 +8237,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
-            command: 'toggleProjectPinned',
+            command: 'project.togglePinned',
             projectPath
           });
         });
@@ -8631,7 +8245,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       portfolioList.querySelectorAll('[data-continue-project-path]').forEach(button => {
         button.addEventListener('click', () => {
           vscode.postMessage({
-            command: 'continueProjectFromPortfolio',
+            command: 'project.continue',
             projectPath: button.getAttribute('data-continue-project-path'),
             nodeId: button.getAttribute('data-continue-node-id')
           });
@@ -8642,7 +8256,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           event.stopPropagation();
           const url = button.getAttribute('data-open-issue-url') || '';
           if (url) {
-            vscode.postMessage({ command: 'openExternal', url });
+            vscode.postMessage({ command: 'external.open', url });
           }
         });
       });
@@ -8654,7 +8268,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           const quickValue = quickInput ? quickInput.value.trim() : '';
           if (quickValue) {
             vscode.postMessage({
-              command: 'createIssue',
+              command: 'issue.create',
               projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
               title: quickValue,
               body: '',
@@ -8685,7 +8299,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             const value = input.value.trim();
             if (value) {
               vscode.postMessage({
-                command: 'createIssue',
+                command: 'issue.create',
                 projectPath: input.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
                 title: value,
                 body: '',
@@ -8757,7 +8371,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           issueDraftPriority = getSoloSelectValue(priority) || issueDraftPriority || '';
           issueActionMessage = '';
           vscode.postMessage({
-            command: 'createIssue',
+            command: 'issue.create',
             projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
             title: issueDraftTitle,
             body: issueDraftBody,
@@ -8781,7 +8395,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           issueDetails = null;
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
-            command: 'getIssueDetails',
+            command: 'issue.getDetails',
             projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
             issueNumber
           });
@@ -8791,7 +8405,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
-            command: 'closeIssue',
+            command: 'issue.close',
             projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
             issueNumber: Number(button.getAttribute('data-close-issue') || 0)
           });
@@ -8893,14 +8507,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     function bindOnboardingActions(container) {
       container.querySelectorAll('[data-onboarding-add-project]').forEach(button => {
         button.addEventListener('click', () => {
-          vscode.postMessage({ command: 'addProject' });
+          vscode.postMessage({ command: 'project.add' });
         });
       });
     }
 
     function runNodeAgent(nodeId, userMessage, agentCli, model, supplementFiles) {
       vscode.postMessage({
-        command: 'runAgent',
+        command: 'conversation.runStep',
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',

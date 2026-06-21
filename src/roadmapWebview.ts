@@ -2583,26 +2583,19 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (conversationOrOutput && typeof conversationOrOutput === 'object' && conversationOrOutput.resumableNativeSessionId) {
         return String(conversationOrOutput.resumableNativeSessionId || '');
       }
-      const output = conversationOrOutput && typeof conversationOrOutput === 'object'
-        ? conversationOrOutput.output
-        : conversationOrOutput;
-      const match = String(output || '').match(/Native Agent session saved:[^\\n]*\\(([0-9a-fA-F-]{36})\\)/)
-        || String(output || '').match(/Continuation session id:\\s*([0-9a-fA-F-]{36})/);
-      return match ? match[1] : '';
+      return '';
     }
 
-    function extractContinuationParentConversationId(output) {
-      const match = String(output || '').match(/Continuation parent conversation:\\s*(\\d+)/);
-      return match ? Number(match[1]) : 0;
+    function extractContinuationParentConversationId(conversation) {
+      return Number(conversation && conversation.continuationParentConversationId || 0);
     }
 
-    function extractReviewParentConversationId(output) {
-      const match = String(output || '').match(/Review of execution:\\s*(\\d+)/);
-      return match ? Number(match[1]) : 0;
+    function extractReviewParentConversationId(conversation) {
+      return Number(conversation && conversation.reviewParentConversationId || 0);
     }
 
     function isReviewConversation(conversation) {
-      return Boolean(extractReviewParentConversationId(conversation && conversation.output));
+      return Boolean(extractReviewParentConversationId(conversation));
     }
 
     function setText(id, value) {
@@ -2733,7 +2726,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (btnToggleSolo) btnToggleSolo.classList.toggle('active', activeMainView === 'solo');
       if (btnToggleFlow) btnToggleFlow.classList.toggle('active', activeMainView === 'flow');
       if (activeMainView === 'solo' && !nodeConversations[soloConversationId]) {
-        vscode.postMessage({ command: 'getNodeConversations', nodeId: soloConversationId });
+        vscode.postMessage({ command: 'conversation.getHistory', nodeId: soloConversationId });
       }
       if (activeMainView === 'solo') {
         ensureAgentModelsLoaded(soloAgentSelection || currentCliPath || 'agy', soloConversationId);
@@ -2806,7 +2799,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         roadmapRevisionPanel.classList.remove('open');
         btnToggleRoadmapRevision.classList.remove('active');
         if (!currentFlowState.hasProAccess) {
-          vscode.postMessage({ command: 'openProAuthorization' });
+          vscode.postMessage({ command: 'entitlement.login' });
           return;
         }
         setMainView('flow');
@@ -2824,7 +2817,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         if (cliTestBadge) cliTestBadge.style.display = 'none';
         setMainView('roadmap');
         if (!nodeConversations[roadmapRevisionId]) {
-          vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
+          vscode.postMessage({ command: 'conversation.getHistory', nodeId: roadmapRevisionId });
         }
       }
       renderRoadmapRevisionPanel(currentNodes);
@@ -2877,13 +2870,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
-        vscode.postMessage({ command: 'openProAuthorization' });
+        vscode.postMessage({ command: 'entitlement.login' });
       });
     }
 
     if (btnPasteProCode) {
       btnPasteProCode.addEventListener('click', () => {
-        vscode.postMessage({ command: 'pasteProAuthorizationCode' });
+        vscode.postMessage({ command: 'entitlement.paste' });
       });
     }
 
@@ -2977,7 +2970,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const effectiveCli = String(agentCli || '').trim() || currentCliPath || 'agy';
       const requestId = 'models-' + (++agentModelRequestSeq);
       vscode.postMessage({
-        command: 'getAgentModels',
+        command: 'agentModels.get',
         requestId,
         targetId: targetId || '',
         agentCli: effectiveCli
@@ -3259,7 +3252,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             return;
           }
           showAbilityActionMessage(t('installingSkillMessage'));
-          vscode.postMessage({ command: 'installSkill', skillInput: urlVal });
+          vscode.postMessage({ command: 'ability.installSkill', skillInput: urlVal });
         } else if (selectedAbilityId === 'add-new-connector') {
           const urlVal = settingAbilityUrlInput.value.trim();
           if (!urlVal) {
@@ -3267,11 +3260,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             return;
           }
           showAbilityActionMessage(t('installingMcpMessage'));
-          vscode.postMessage({ command: 'installMcp', mcpInput: urlVal });
+          vscode.postMessage({ command: 'ability.installMcp', mcpInput: urlVal });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
           showAbilityActionMessage(t('installingEnhancementMessage'));
-          vscode.postMessage({ command: 'installEnhancement', enhancementId: originId });
+          vscode.postMessage({ command: 'ability.installEnhancement', enhancementId: originId });
         }
       });
     }
@@ -3283,15 +3276,15 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         if (selectedAbilityId.startsWith('skill-')) {
           const originId = selectedAbilityId.substring('skill-'.length);
           showAbilityActionMessage(t('uninstallingSkillMessage'));
-          vscode.postMessage({ command: 'uninstallSkill', skillId: originId });
+          vscode.postMessage({ command: 'ability.uninstallSkill', skillId: originId });
         } else if (selectedAbilityId.startsWith('connector-')) {
           const originId = selectedAbilityId.substring('connector-'.length);
           showAbilityActionMessage(t('uninstallingMcpMessage'));
-          vscode.postMessage({ command: 'uninstallMcp', mcpId: originId });
+          vscode.postMessage({ command: 'ability.uninstallMcp', mcpId: originId });
         } else if (selectedAbilityId.startsWith('enhancement-')) {
           const originId = selectedAbilityId.substring('enhancement-'.length);
           showAbilityActionMessage(t('uninstallingEnhancementMessage'));
-          vscode.postMessage({ command: 'uninstallEnhancement', enhancementId: originId });
+          vscode.postMessage({ command: 'ability.uninstallEnhancement', enhancementId: originId });
         }
       });
     }
@@ -3306,7 +3299,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         const gitHash = rollbackBtn.getAttribute('data-rollback-hash');
         if (gitHash) {
           vscode.postMessage({
-            command: 'rollbackChanges',
+            command: 'conversation.rollback',
             gitHash: gitHash,
             projectPath: activeProjectPath
           });
@@ -3316,8 +3309,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
-    vscode.postMessage({ command: 'getSettings' });
-    vscode.postMessage({ command: 'getProjects' });
+    vscode.postMessage({ command: 'settings.get' });
+    vscode.postMessage({ command: 'project.getAll' });
     vscode.postMessage({ command: 'getFlowState' });
     if (typeof setInterval === 'function') {
       setInterval(() => {
@@ -3518,7 +3511,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const projectPath = getSoloSelectValue(projectSelect);
       if (!projectPath) return;
       vscode.postMessage({
-        command: 'updateProjectMetadata',
+        command: 'project.updateMetadata',
         projectPath,
         name: projectNameInput ? projectNameInput.value.trim() : '',
         description: projectDescriptionInput ? projectDescriptionInput.value.trim() : '',
@@ -3539,7 +3532,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       cliTestBadge.textContent = t('testing');
 
       vscode.postMessage({
-        command: 'testCli',
+        command: 'agent.testCli',
         cliPath: getEffectiveSettingCliPath()
       });
     });
@@ -3553,7 +3546,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function requestAgentImpact() {
       setAgentImpactPending();
       vscode.postMessage({
-        command: 'getAgentImpact',
+        command: 'agentImpact.get',
         cliPath: getEffectiveSettingCliPath()
       });
     }
@@ -3599,7 +3592,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     if (btnOpenFeedback) {
       btnOpenFeedback.addEventListener('click', () => {
         vscode.postMessage({
-          command: 'openFeedbackIssue',
+          command: 'feedback.open',
           title: settingFeedbackTitle ? settingFeedbackTitle.value.trim() : '',
           body: settingFeedbackBody ? settingFeedbackBody.value.trim() : '',
           category: currentFeedbackType
@@ -3618,7 +3611,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     bindSoloSelect(projectSelect, (value) => {
       vscode.postMessage({
-        command: 'selectProject',
+        command: 'project.select',
         projectPath: value
       });
     });
@@ -3629,7 +3622,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     btnRemoveProject.addEventListener('click', () => {
       const projectPath = getSoloSelectValue(projectSelect);
       if (!projectPath) return;
-      vscode.postMessage({ command: 'removeProject', projectPath });
+      vscode.postMessage({ command: 'project.remove', projectPath });
     });
 
     function renderProjects(projects, selectedProjectPath) {
@@ -3842,7 +3835,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function bindOnboardingActions(container) {
       container.querySelectorAll('[data-onboarding-add-project]').forEach(button => {
         button.addEventListener('click', () => {
-          vscode.postMessage({ command: 'addProject' });
+          vscode.postMessage({ command: 'project.add' });
         });
       });
     }
@@ -4065,7 +4058,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         row.querySelectorAll('[data-attach-node-id]').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
-            vscode.postMessage({ command: 'chooseSupplementFiles', nodeId: node.id });
+            vscode.postMessage({ command: 'attachment.choose', nodeId: node.id });
           });
         });
         row.querySelectorAll('[data-conversation-input-id]').forEach(input => {
@@ -4128,7 +4121,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             const conversationId = item.getAttribute('data-retry-conversation-id');
             if (!conversationId) return;
             vscode.postMessage({
-              command: 'retryConversation',
+              command: 'conversation.retry',
               nodeId: node.id,
               conversationId
             });
@@ -4138,7 +4131,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           item.addEventListener('click', (event) => {
             event.stopPropagation();
             vscode.postMessage({
-              command: 'showAgentTerminal',
+              command: 'conversation.openTerminal',
               conversationId: item.getAttribute('data-show-agent-terminal')
             });
           });
@@ -4147,7 +4140,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           item.addEventListener('click', (event) => {
             event.stopPropagation();
             vscode.postMessage({
-              command: 'continueNativeConversation',
+              command: 'conversation.continue',
               nodeId: item.getAttribute('data-continue-native-node-id') || node.id,
               conversationId: item.getAttribute('data-continue-native-conversation-id')
             });
@@ -4157,7 +4150,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           item.addEventListener('click', (event) => {
             event.stopPropagation();
             vscode.postMessage({
-              command: 'stopAgentRun',
+              command: 'conversation.stop',
               nodeId: node.id,
               conversationId: item.getAttribute('data-stop-agent-run')
             });
@@ -4168,7 +4161,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             event.stopPropagation();
             const relativePath = item.getAttribute('data-open-file-path');
             if (!relativePath) return;
-            vscode.postMessage({ command: 'openProjectFile', relativePath });
+            vscode.postMessage({ command: 'project.openFile', relativePath });
           });
         });
         bindSoloSelects(row);
@@ -4232,7 +4225,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const attachButton = soloBody.querySelector('[data-attach-solo]');
       if (attachButton) {
         attachButton.addEventListener('click', () => {
-          vscode.postMessage({ command: 'chooseSupplementFiles', nodeId: soloConversationId });
+          vscode.postMessage({ command: 'attachment.choose', nodeId: soloConversationId });
         });
       }
       if (sendButton) {
@@ -4243,7 +4236,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const request = input ? input.value.trim() : '';
           if (!request) return;
           vscode.postMessage({
-            command: 'runSoloConversation',
+            command: 'conversation.runSolo',
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
             model: getSoloSelectValue(modelSelect),
@@ -4307,7 +4300,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         const upgradeButton = flowBody.querySelector('[data-open-flow-pro]');
         if (upgradeButton) {
           upgradeButton.addEventListener('click', () => {
-            vscode.postMessage({ command: 'openProAuthorization' });
+            vscode.postMessage({ command: 'entitlement.login' });
           });
         }
         return;
@@ -4401,7 +4394,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const attachButton = flowBody.querySelector('[data-attach-flow]');
       if (attachButton) {
         attachButton.addEventListener('click', () => {
-          vscode.postMessage({ command: 'chooseSupplementFiles', nodeId: flowTargetId });
+          vscode.postMessage({ command: 'attachment.choose', nodeId: flowTargetId });
         });
       }
       if (sendButton) {
@@ -4412,7 +4405,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const goal = input ? input.value.trim() : '';
           if (!goal) return;
           vscode.postMessage({
-            command: 'runFlow',
+            command: 'flow.run',
             goal,
             agentCli: getSoloSelectValue(agentSelect),
             model: getSoloSelectValue(modelSelect),
@@ -4452,14 +4445,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (pauseBtn) {
         pauseBtn.addEventListener('click', () => {
           const flowId = pauseBtn.getAttribute('data-pause-flow');
-          vscode.postMessage({ command: 'pauseFlow', flowId });
+          vscode.postMessage({ command: 'flow.pause', flowId });
         });
       }
       const abandonBtn = flowBody.querySelector('[data-abandon-flow]');
       if (abandonBtn) {
         abandonBtn.addEventListener('click', () => {
           const flowId = abandonBtn.getAttribute('data-abandon-flow');
-          vscode.postMessage({ command: 'abandonFlow', flowId });
+          vscode.postMessage({ command: 'flow.abandon', flowId });
         });
       }
 
@@ -4532,7 +4525,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const request = input ? input.value.trim() : '';
           if (!request) return;
           vscode.postMessage({
-            command: 'runRoadmapRevision',
+            command: 'conversation.runRoadmapRevision',
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
             supplementFiles: nodeSupplementFiles[roadmapRevisionId] || []
@@ -4564,7 +4557,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const targetNodeId = getSoloSelectValue(select);
           if (!targetNodeId) return;
           vscode.postMessage({
-            command: 'linkSoloConversation',
+            command: 'conversation.linkToStep',
             conversationId: item.getAttribute('data-link-solo-id'),
             nodeId: targetNodeId
           });
@@ -4578,7 +4571,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           roadmapRevisionPanel.classList.add('open');
           btnToggleRoadmapRevision.classList.add('active');
           if (!nodeConversations[roadmapRevisionId]) {
-            vscode.postMessage({ command: 'getNodeConversations', nodeId: roadmapRevisionId });
+            vscode.postMessage({ command: 'conversation.getHistory', nodeId: roadmapRevisionId });
           }
           renderRoadmapRevisionPanel(currentNodes);
         });
@@ -4610,7 +4603,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
-            command: 'retryConversation',
+            command: 'conversation.retry',
             nodeId,
             conversationId: item.getAttribute('data-retry-conversation-id')
           });
@@ -4620,7 +4613,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
-            command: 'showAgentTerminal',
+            command: 'conversation.openTerminal',
             conversationId: item.getAttribute('data-show-agent-terminal')
           });
         });
@@ -4629,7 +4622,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         item.addEventListener('click', (event) => {
           event.stopPropagation();
             vscode.postMessage({
-              command: 'continueNativeConversation',
+              command: 'conversation.continue',
               nodeId: item.getAttribute('data-continue-native-node-id') || nodeId,
               conversationId: item.getAttribute('data-continue-native-conversation-id')
             });
@@ -4639,7 +4632,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
-            command: 'stopAgentRun',
+            command: 'conversation.stop',
             nodeId,
             conversationId: item.getAttribute('data-stop-agent-run')
           });
@@ -4651,7 +4644,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const relativePath = item.getAttribute('data-open-file-path');
           if (relativePath) {
             vscode.postMessage({
-              command: 'openProjectFile',
+              command: 'project.openFile',
               relativePath,
               gitHash: item.getAttribute('data-open-file-hash') || ''
             });
@@ -4687,17 +4680,17 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const runtimeLabel = duration
         ? (conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration
         : '';
-      const preGitHash = extractConversationPreGitHash(conversation.output);
-      const rollbackButton = (preGitHash && conversation.status !== 'Running')
+      const preGitHash = extractConversationPreGitHash(conversation);
+      const rollbackButton = (preGitHash && conversation.capabilities && conversation.capabilities.canRollback)
         ? \`<button class="conversation-control-btn rollback-btn" data-rollback-hash="\${escapeHtml(preGitHash)}" title="\${escapeHtml(t('rollbackChange'))}"><span class="codicon codicon-discard"></span> \${escapeHtml(t('rollbackChange'))}</button>\`
         : '';
-      const retryButton = conversation.status === 'Failed'
+      const retryButton = conversation.capabilities && conversation.capabilities.canRetry
         ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
         : '';
-      const continueButton = conversation.status !== 'Running' && extractNativeSessionId(conversation)
+      const continueButton = conversation.capabilities && conversation.capabilities.canContinue
         ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(rootConversationId)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
         : '';
-      const runningButtons = conversation.status === 'Running'
+      const runningButtons = conversation.capabilities && conversation.capabilities.canStop
         ? \`
           <button class="conversation-control-btn" data-show-agent-terminal="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('openTerminal'))}">\${t('openTerminal')}</button>
           <button class="conversation-control-btn stop" data-stop-agent-run="\${escapeHtml(conversation.id)}" title="\${escapeHtml(t('stopRun'))}">\${t('stopRun')}</button>
@@ -4758,7 +4751,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const currentId = String(current.id || '');
           if (!currentId || seen[currentId]) return current;
           seen[currentId] = true;
-          const parentId = extractContinuationParentConversationId(current.output);
+          const parentId = extractContinuationParentConversationId(current);
           const parent = parentId ? byId[String(parentId)] : null;
           if (!parent) return current;
           current = parent;
@@ -4768,13 +4761,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       conversations.forEach((conversation) => {
         const sessionId = extractNativeSessionId(conversation);
         if (sessionId) {
-          const parentId = extractContinuationParentConversationId(conversation.output);
+          const parentId = extractContinuationParentConversationId(conversation);
           const candidateRoot = parentId && byId[String(parentId)]
             ? findRootByParent(conversation)
             : conversation;
           const currentRoot = sessionRoots[sessionId];
-          const currentHasParent = currentRoot ? Boolean(extractContinuationParentConversationId(currentRoot.output)) : false;
-          const candidateHasParent = Boolean(extractContinuationParentConversationId(candidateRoot.output));
+          const currentHasParent = currentRoot ? Boolean(extractContinuationParentConversationId(currentRoot)) : false;
+          const candidateHasParent = Boolean(extractContinuationParentConversationId(candidateRoot));
           if (!currentRoot
             || (currentHasParent && !candidateHasParent)
             || (currentHasParent === candidateHasParent && Number(candidateRoot.id || 0) < Number(currentRoot.id || 0))) {
@@ -4783,13 +4776,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         }
       });
       conversations.forEach((conversation) => {
-        const reviewParentId = extractReviewParentConversationId(conversation.output);
+        const reviewParentId = extractReviewParentConversationId(conversation);
         if (reviewParentId && byId[String(reviewParentId)]) {
           conversationChildrenMap[String(reviewParentId)] = conversationChildrenMap[String(reviewParentId)] || [];
           conversationChildrenMap[String(reviewParentId)].push(conversation);
           return;
         }
-        const parentId = extractContinuationParentConversationId(conversation.output);
+        const parentId = extractContinuationParentConversationId(conversation);
         if (parentId && byId[String(parentId)]) {
           const root = findRootByParent(conversation);
           const key = String(root.id || parentId);
@@ -4875,10 +4868,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     }
 
     function formatConversationDuration(conversation) {
-      const output = String(conversation.output || '');
-      const storedDuration = output.match(/Run duration ms:\\s*(\\d+)/);
-      if (storedDuration) {
-        return formatDurationMs(Number(storedDuration[1]));
+      if (Number.isFinite(conversation && conversation.durationMs)) {
+        return formatDurationMs(Number(conversation.durationMs));
       }
       if (conversation.status !== 'Running' || !conversation.timestamp) {
         return '';
@@ -4887,10 +4878,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     }
 
     function renderConversationOutcome(conversation, nodeId = '') {
-      const output = String(conversation.output || '');
-      const failureCategory = (output.match(/Failure category:\\s*([^\\n]+)/) || [])[1] || '';
-      const failureReason = (output.match(/Failure reason:\\n([\\s\\S]*?)(?:\\n\\n|$)/) || [])[1] || '';
-      const files = extractConversationFiles(output);
+      const failureCategory = String(conversation.failureCategory || '');
+      const failureReason = String(conversation.failureReason || '');
+      const files = extractConversationFiles(conversation);
       let result = '';
       if (conversation.status === 'Running') {
         result = t('stillWorking');
@@ -4911,7 +4901,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         result += ' ' + t('changedCount') + ': ' + files.length + '.';
       }
       const label = conversation.status === 'Failed' ? t('failureLabel') : t('runResult');
-      const conclusion = conversation.status === 'Running' ? '' : extractAgentConclusion(output);
+      const conclusion = conversation.status === 'Running' ? '' : extractAgentConclusion(conversation);
       return \`
         <div class="conversation-outcome \${conversation.status === 'Failed' ? 'failed' : ''}">
           <div><strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}</div>
@@ -4920,19 +4910,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       \`;
     }
 
-    function extractAgentConclusion(output) {
-      const match = String(output || '').match(/Agent output tail:\\n([\\s\\S]*)$/);
-      if (!match || !match[1]) {
-        return '';
-      }
-      return match[1]
-        .split('\\n')
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith('SoloMap:'))
-        .slice(-3)
-        .join(' ')
-        .replace(/\\s+/g, ' ')
-        .slice(0, 240);
+    function extractAgentConclusion(conversation) {
+      return String(conversation && conversation.conclusion || '');
     }
 
     function getAgentOptions(node) {
@@ -5022,7 +5001,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
         if (!attachments.length) return;
         vscode.postMessage({
-          command: 'savePastedAttachments',
+          command: 'attachment.save',
           nodeId,
           attachments
         });
@@ -5052,58 +5031,23 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     }
 
     function summarizeConversation(conversation) {
-      const output = String(conversation.output || '');
-      const continuationFirstMessage = output.match(/Continuation first message:\\n([\\s\\S]*?)(\\n\\n|$)/);
-      if (continuationFirstMessage && continuationFirstMessage[1].trim()) {
-        return continuationFirstMessage[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const userMatch = output.match(/User supplement:\\n([\\s\\S]*?)(\\n\\n|$)/);
-      if (userMatch && userMatch[1].trim()) {
-        return userMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const changedMatch = output.match(/Touched project files:\\n([\\s\\S]*?)(\\n\\n|$)/);
-      if (changedMatch && changedMatch[1].trim() && !changedMatch[1].includes('No project files')) {
-        return changedMatch[1].trim().replace(/\\s+/g, ' ').slice(0, 120);
-      }
-      const tailMatch = output.match(/Agent output tail:\\n([\\s\\S]*)$/);
-      const fallback = tailMatch ? tailMatch[1] : output;
-      return fallback.trim().replace(/\\s+/g, ' ').slice(0, 120) || statusText(conversation.status);
+      return String(conversation && conversation.summary || '') || statusText(conversation.status);
     }
 
-    function extractConversationFiles(output) {
-      const text = String(output || '');
-      const sections = [
-        /Touched project files:\\n([\\s\\S]*?)(?:\\n\\n|$)/,
-        /Workspace changes:\\n([\\s\\S]*?)(?:\\n\\nTouched project files:|\\n\\n|$)/
-      ];
-      const files = [];
-      const seen = new Set();
-      for (const pattern of sections) {
-        const match = text.match(pattern);
-        if (!match || !match[1]) continue;
-        const lines = match[1].split('\\n').map(line => line.trim()).filter(Boolean);
-        for (const line of lines) {
-          if (/^No (workspace|git|project) /i.test(line)) continue;
-          const normalized = line.replace(/^(?:[AMDRC?U!]{1,2}|[A-Z])\\s+/, '').trim();
-          if (!normalized || seen.has(normalized)) continue;
-          seen.add(normalized);
-          files.push({ label: line, path: normalized });
-        }
-      }
-      return files;
+    function extractConversationFiles(conversation) {
+      return Array.isArray(conversation && conversation.changedFiles) ? conversation.changedFiles : [];
     }
 
-    function extractConversationPreGitHash(output) {
-      const match = String(output || '').match(/SoloMapPreGitHash:\\s*([a-f0-9]+)/i);
-      return match ? match[1] : '';
+    function extractConversationPreGitHash(conversation) {
+      return String(conversation && conversation.rollbackGitHash || '');
     }
 
     function renderConversationFiles(conversation) {
-      const files = extractConversationFiles(conversation.output);
+      const files = extractConversationFiles(conversation);
       if (!files.length) {
         return '';
       }
-      const preGitHash = extractConversationPreGitHash(conversation.output);
+      const preGitHash = extractConversationPreGitHash(conversation);
       return \`
         <strong>\${escapeHtml(t('changedFiles'))}</strong>
         <div class="conversation-files">
@@ -5126,7 +5070,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       expandedNodeId = expandedNodeId === nodeId ? '' : nodeId;
       activeConversationId = '';
       if (expandedNodeId && !nodeConversations[nodeId]) {
-        vscode.postMessage({ command: 'getNodeConversations', nodeId });
+        vscode.postMessage({ command: 'conversation.getHistory', nodeId });
       }
       if (expandedNodeId) {
         const node = (currentNodes || []).find(candidate => candidate.id === nodeId);
@@ -5144,7 +5088,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles) {
       vscode.postMessage({
-        command: 'runAgent',
+        command: 'conversation.runStep',
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',

@@ -13,6 +13,15 @@ import { getAgentImpactStatus, buildAgentImpactSummary } from './agentImpact';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
+import {
+  closeProjectIssue,
+  createProjectIssue,
+  loadExternalDeliverySummary,
+  loadExternalIssueSummary,
+  loadExternalSecuritySummary,
+  readCachedIssueDetails,
+  readProjectIssueDetails
+} from './projectExternalSignals';
 import { getWebviewHtml } from './roadmapWebview';
 import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
@@ -62,7 +71,6 @@ import {
   recordSolomapLearningCycle,
   refreshSolomapEnhancementStatusSummaries,
   setSolomapEnhancementEnabled,
-  SolomapEnhancementStatusSummary,
   uninstallSolomapEnhancement,
   upsertEnhancementRegistryEntry,
   validateAndRegisterEnhancementInstall,
@@ -91,16 +99,13 @@ import {
   shellQuote,
   supportsSdkContinuation
 } from './agentCli';
-import {
-  AgentModelCatalog,
-  AgentModelOption,
-  createAutoOnlyModelCatalog
-} from './agentModels';
+import { SolopreneurSettings } from './pluginContracts';
+import { buildConversationPresentations } from './conversationPresentation';
+import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import {
   buildAgentModelsLoadedMessage,
   mergeAgentModelPreferences,
   normalizeAgentModelPreferences,
-  resolveAgentModelCatalog
 } from './agentModelSelection';
 import {
   chooseSupplementFilesForProject,
@@ -137,7 +142,6 @@ import {
   passportGrantOfflineGraceMs,
   PassportGrantCache,
   PassportVerifyResult,
-  ProAccountStatus,
   readLocalProEntitlements,
   strategyPyramidFeature,
   verifyPassportGrant as verifyPassportGrantWithFetch
@@ -161,7 +165,6 @@ import {
   getAgentSessionKey,
   getStepSessionFilePath,
   getStoredAgentSession,
-  hydrateConversationContinuations,
   readRunSessionId,
   readRunTextFile,
   readStepSessionState,
@@ -189,23 +192,6 @@ const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
 
 const hasProEntitlement = hasProEntitlementForSettings;
-
-interface SolopreneurSettings {
-  cliPath: string;
-  agentModelPreferences?: Record<string, string>;
-  language: string;
-  globalPrompt: string;
-  globalDataPath: string;
-  taskPermissionMode?: string;
-  reviewerCliPath?: string;
-  collaborationReviewMode?: string;
-  proEntitlements?: Record<string, boolean>;
-  proAccount?: ProAccountStatus;
-  enabledEnhancements?: Record<string, boolean>;
-  enhancementStatuses?: SolomapEnhancementStatusSummary[];
-  skills?: any[];
-  connectors?: any[];
-}
 
 interface SolopreneurProject {
   name: string;
@@ -322,148 +308,14 @@ export async function activate(context: vscode.ExtensionContext) {
   sidebarProvider = new SolopreneurSidebarProvider(
     context.extensionUri,
     syncEngineWrapper,
-    async (nodeId, userMessage = '', agentCli = '', model = '', supplementFiles: string[] = []) => {
-      const ready = await ensureSyncEngine(context);
-      if (ready) {
-        await handleRunAgent(context, nodeId, userMessage, agentCli, model, normalizeSupplementFiles(supplementFiles));
-      }
-    },
-    () => getPersistedSettings(context),
-    async (settings) => {
-      await updatePersistedSettings(context, settings);
-    },
-    () => getProjectState(context),
-    async (projectPath) => {
-      await selectProject(context, projectPath);
-    },
-    async () => {
-      await addProjectFromDialog(context);
-    },
-    async (projectPath, userMessage = '', agentCli = '', model = '', supplementFiles: string[] = []) => {
-      if (!getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
-        return;
-      }
-      if (getSelectedProjectPath(context) !== projectPath) {
-        await selectProject(context, projectPath);
-      }
-      const ready = await ensureSyncEngine(context);
-      if (ready && activeProjectRoot === projectPath) {
-        await handleRunSoloConversation(context, userMessage, agentCli, model, normalizeSupplementFiles(supplementFiles));
-      }
-    },
-    async (projectPath, goal = '', agentCli = '', model = '', supplementFiles: string[] = []) => {
-      if (!getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
-        return;
-      }
-      if (getSelectedProjectPath(context) !== projectPath) {
-        await selectProject(context, projectPath);
-      }
-      const ready = await ensureSyncEngine(context);
-      if (ready && activeProjectRoot === projectPath) {
-        await handleRunFlow(context, goal, agentCli, model, normalizeSupplementFiles(supplementFiles));
-      }
-    },
-    async (agentCli) => resolveAgentModelCatalog(agentCli || '', getPersistedSettings(context).cliPath || 'agy').catalog,
-    async (projectPath) => {
-      if (!getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
-        return [];
-      }
-      return chooseSupplementFilesForProject(projectPath);
-    },
-    async (projectPath) => {
-      return getSoloConversationHistoryForProject(context, projectPath);
-    },
-    async (projectPath, conversationId) => {
-      if (!getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
-        return;
-      }
-      if (getSelectedProjectPath(context) !== projectPath) {
-        await selectProject(context, projectPath);
-      }
-      const ready = await ensureSyncEngine(context);
-      if (ready && activeProjectRoot === projectPath) {
-        await handleContinueNativeConversation(context, soloConversationId, Number(conversationId || 0));
-      }
-    },
-    async (projectPath, nodeId, conversationId) => {
-      if (!getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
-        return;
-      }
-      if (getSelectedProjectPath(context) !== projectPath) {
-        await selectProject(context, projectPath);
-      }
-      const ready = await ensureSyncEngine(context);
-      if (ready && activeProjectRoot === projectPath) {
-        await handleContinueNativeConversation(context, String(nodeId || ''), Number(conversationId || 0));
-      }
-    },
-    async (projectPath, nodeId) => {
-      return getStepConversationHistoryForProject(context, projectPath, nodeId);
-    },
-    async (projectPath) => {
-      return getProjectConversationHistoryForProject(context, projectPath);
-    },
-    async (projectPath) => {
-      await toggleProjectPinned(context, projectPath);
-    },
-    async (projectPath, scope, attachments) => {
-      if (!getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
-        return [];
-      }
-      return savePastedImageAttachments(projectPath, scope, attachments);
-    },
-    async (skillInput) => {
-      await handleInstallSolomapSkill(context, skillInput);
-    },
-    async (mcpInput) => {
-      await handleInstallSolomapMcp(context, mcpInput);
-    },
-    async (enhancementId) => {
-      await handleInstallSolomapEnhancement(context, enhancementId);
-    },
-    async (enhancementId) => {
-      await handleCheckSolomapEnhancement(context, enhancementId);
-    },
-    async (enhancementId, enabled) => {
-      await handleSetSolomapEnhancementEnabled(context, enhancementId, enabled);
-    },
-    async (enhancementId) => {
-      await handleUninstallSolomapEnhancement(context, enhancementId);
-    },
-    async (skillId) => {
-      await handleUninstallSolomapSkill(context, skillId);
-    },
-    async (mcpId) => {
-      await handleUninstallSolomapMcp(context, mcpId);
-    },
-    () => buildFeedbackUsageSummary(context),
-    async (projectPath, nodeId, conversationId) => {
-      if (!getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage(`Project folder is not registered: ${projectPath}`);
-        return;
-      }
-      if (getSelectedProjectPath(context) !== projectPath) {
-        await selectProject(context, projectPath);
-      }
-      const ready = await ensureSyncEngine(context);
-      if (ready && activeProjectRoot === projectPath) {
-        await stopAgentRun(String(nodeId || ''), Number(conversationId || 0));
-      }
-    },
-    async (projectPath, gitHash) => {
-      await rollbackProjectToPreSessionGitHash(context, projectPath, gitHash);
-    },
-    async (action) => {
-      await handleManageProAuthorization(context, action);
-    },
-    async () => {
-      await refreshProAccountStatus(context);
+    {
+      getSettings: () => getPersistedSettings(context),
+      updateSettings: async (settings) => updatePersistedSettings(context, settings),
+      getProjects: () => getProjectState(context),
+      getSoloConversationHistory: async (projectPath) => getSoloConversationHistoryForProject(context, projectPath),
+      getStepConversationHistory: async (projectPath, nodeId) => getStepConversationHistoryForProject(context, projectPath, nodeId),
+      getProjectConversationHistory: async (projectPath) => getProjectConversationHistoryForProject(context, projectPath),
+      dispatchSharedAction: async (message, target) => handleSharedWebviewAction(context, message, 'sidebar', target)
     }
   );
 
@@ -476,6 +328,349 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize storage in the background after the UI provider is registered.
   void ensureSyncEngine(context);
+}
+
+async function ensureActionProject(context: vscode.ExtensionContext, projectPath: string): Promise<string> {
+  const requestedPath = String(projectPath || getSelectedProjectPath(context) || '');
+  if (!requestedPath || !getProjects(context).some((project) => project.path === requestedPath)) {
+    return '';
+  }
+  if (getSelectedProjectPath(context) !== requestedPath) {
+    await selectProject(context, requestedPath);
+  }
+  const ready = await ensureSyncEngine(context);
+  return ready && activeProjectRoot === requestedPath ? requestedPath : '';
+}
+
+async function handleSharedWebviewAction(
+  context: vscode.ExtensionContext,
+  message: PluginActionRequest,
+  surface: PluginSurface,
+  target?: vscode.Webview
+): Promise<boolean> {
+  const respond = (payload: Record<string, unknown>) => postWebviewMessage(target, payload);
+  const refreshConversation = (nodeId: string) => {
+    if (nodeId) {
+      postNodeConversations(nodeId);
+    }
+  };
+  return dispatchPluginAction(message, surface, {
+    'conversation.runStep': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      await handleRunAgent(
+        context,
+        String(request.nodeId || ''),
+        String(request.userMessage || ''),
+        String(request.agentCli || ''),
+        String(request.model || ''),
+        normalizeSupplementFiles(request.supplementFiles)
+      );
+    },
+    'conversation.runSolo': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      await handleRunSoloConversation(
+        context,
+        String(request.userMessage || ''),
+        String(request.agentCli || ''),
+        String(request.model || ''),
+        normalizeSupplementFiles(request.supplementFiles)
+      );
+    },
+    'conversation.runRoadmapRevision': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      await handleRoadmapRevision(
+        context,
+        String(request.userMessage || ''),
+        String(request.agentCli || ''),
+        String(request.model || ''),
+        normalizeSupplementFiles(request.supplementFiles)
+      );
+    },
+    'flow.run': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      await handleRunFlow(
+        context,
+        String(request.goal || ''),
+        String(request.agentCli || ''),
+        String(request.model || ''),
+        normalizeSupplementFiles(request.supplementFiles)
+      );
+    },
+    'flow.pause': async (request) => {
+      if (!activeProjectRoot || !request.flowId) return;
+      updateFlowTrace(activeProjectRoot, request.flowId, (trace) => {
+        trace.status = 'paused';
+        trace.latestSummary = 'Flow 已被用户手动暂停推进。';
+        return trace;
+      });
+      await postFlowStateToWebview(context);
+    },
+    'flow.abandon': async (request) => {
+      if (!activeProjectRoot || !request.flowId) return;
+      updateFlowTrace(activeProjectRoot, request.flowId, (trace) => {
+        trace.status = 'abandoned';
+        trace.latestSummary = 'Flow 已被用户手动放弃。';
+        if (trace.loops.length > 0) {
+          trace.loops[trace.loops.length - 1].status = 'abandoned';
+        }
+        return trace;
+      });
+      await postFlowStateToWebview(context);
+    },
+    'conversation.getHistory': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const nodeId = String(request.nodeId || (request.originalCommand === 'getSoloConversationHistory' ? soloConversationId : ''));
+      if (surface === 'sidebar' && sidebarProvider) {
+        if (nodeId === soloConversationId) {
+          await sidebarProvider.sendSoloConversationHistory(projectPath);
+        } else {
+          await sidebarProvider.sendStepConversationHistory(projectPath, nodeId);
+        }
+        return;
+      }
+      if (syncEngine && target && nodeId) {
+        const conversations = buildConversationPresentations(activeProjectRoot || '', nodeId, syncEngine.getAgentExecutions(nodeId));
+        await respond({ command: 'nodeConversationsLoaded', nodeId, conversations, projectPath: activeProjectRoot || '' });
+      }
+    },
+    'conversation.getProjectHistory': async (request) => {
+      if (sidebarProvider) {
+        await sidebarProvider.sendProjectConversationHistory(String(request.projectPath || getSelectedProjectPath(context) || ''));
+      }
+    },
+    'conversation.continue': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      const nodeId = String(request.nodeId || '');
+      await handleContinueNativeConversation(context, nodeId, Number(request.conversationId || 0));
+      refreshConversation(nodeId);
+    },
+    'conversation.stop': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      const nodeId = String(request.nodeId || '');
+      await stopAgentRun(nodeId, Number(request.conversationId || 0));
+      refreshConversation(nodeId);
+    },
+    'conversation.retry': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      await handleRetryConversation(context, String(request.nodeId || ''), Number(request.conversationId || 0));
+    },
+    'conversation.continueTurn': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath && request.projectPath) return;
+      await handleContinueConversationTurn(
+        context,
+        String(request.nodeId || ''),
+        Number(request.conversationId || 0),
+        String(request.userMessage || ''),
+        String(request.model || ''),
+        normalizeSupplementFiles(request.supplementFiles)
+      );
+    },
+    'conversation.linkToStep': async (request) => {
+      linkSoloConversationToNode(Number(request.conversationId || 0), String(request.nodeId || ''));
+    },
+    'conversation.rollback': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      await rollbackProjectToPreSessionGitHash(context, projectPath, String(request.gitHash || ''));
+      refreshConversation(String(request.nodeId || ''));
+    },
+    'conversation.openTerminal': async (request) => {
+      showAgentTerminal(Number(request.conversationId || 0));
+    },
+    'attachment.choose': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage('Choose a project folder before attaching task files.');
+        return;
+      }
+      const files = await chooseSupplementFilesForProject(projectPath);
+      if (surface === 'sidebar') {
+        await respond({ command: 'soloSupplementFilesSelected', targetId: request.targetId || '', files });
+      } else {
+        await respond({ command: 'supplementFilesSelected', nodeId: request.nodeId || request.targetId || '', files });
+      }
+    },
+    'attachment.save': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) {
+        vscode.window.showErrorMessage('Choose a project folder before attaching images.');
+        return;
+      }
+      const scope = String(request.scope || request.targetId || request.nodeId || 'conversation');
+      const files = savePastedImageAttachments(projectPath, scope, request.attachments || []);
+      if (surface === 'sidebar') {
+        await respond({ command: 'pastedAttachmentsSaved', targetId: request.targetId || '', files });
+      } else {
+        await respond({ command: 'supplementFilesSelected', nodeId: request.nodeId || '', files });
+      }
+    },
+    'agentModels.get': async (request) => {
+      await postAgentModelsLoaded(target, buildAgentModelsLoadedMessage({
+        requestId: request.requestId,
+        targetId: request.targetId,
+        agentCli: request.agentCli || '',
+        configuredCliPath: getPersistedSettings(context).cliPath || 'agy'
+      }));
+    },
+    'agent.testCli': async (request) => {
+      const cliToTest = resolveAgentCli('antigravity-cli', request.cliPath || '');
+      await new Promise<void>((resolve) => {
+        childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
+          const success = !error;
+          const message = success
+            ? formatCliTestMessage(cliToTest, stdout, stderr)
+            : `Command not found or failed. Tried: ${getAgentCliCandidates('antigravity-cli', request.cliPath || '').join(', ')}`;
+          void respond({ command: 'cliTestResult', success, message });
+          resolve();
+        });
+      });
+    },
+    'agentImpact.get': async () => {
+      await respond({ command: 'agentImpactLoaded', status: getAgentImpactStatus(getProjects(context)) });
+    },
+    'settings.get': async () => {
+      await refreshProAccountStatus(context);
+      await postSettingsLoaded(target, getPersistedSettings(context));
+    },
+    'settings.update': async (request) => {
+      await updatePersistedSettings(context, {
+        cliPath: request.cliPath,
+        agentModelPreferences: request.agentModelPreferences,
+        language: request.language,
+        globalPrompt: request.globalPrompt,
+        globalDataPath: request.globalDataPath,
+        reviewerCliPath: request.reviewerCliPath,
+        collaborationReviewMode: request.collaborationReviewMode
+      });
+      vscode.window.showInformationMessage('SoloMap settings saved successfully!');
+      await broadcastSettings(context);
+    },
+    'entitlement.login': async () => {
+      await handleManageProAuthorization(context, 'login');
+      await broadcastSettings(context);
+    },
+    'entitlement.paste': async () => {
+      await handleManageProAuthorization(context, 'paste');
+      await broadcastSettings(context);
+    },
+    'ability.installSkill': async (request) => handleInstallSolomapSkill(context, request.skillInput || ''),
+    'ability.installMcp': async (request) => handleInstallSolomapMcp(context, request.mcpInput || ''),
+    'ability.installEnhancement': async (request) => handleInstallSolomapEnhancement(context, request.enhancementId || ''),
+    'ability.checkEnhancement': async (request) => handleCheckSolomapEnhancement(context, request.enhancementId || ''),
+    'ability.setEnhancementEnabled': async (request) => handleSetSolomapEnhancementEnabled(context, request.enhancementId || '', Boolean(request.enabled)),
+    'ability.uninstallEnhancement': async (request) => handleUninstallSolomapEnhancement(context, request.enhancementId || ''),
+    'ability.uninstallSkill': async (request) => handleUninstallSolomapSkill(context, request.skillId || ''),
+    'ability.uninstallMcp': async (request) => handleUninstallSolomapMcp(context, request.mcpId || ''),
+    'project.getAll': async () => {
+      if (surface === 'sidebar' && sidebarProvider) {
+        sidebarProvider.sendProjects();
+      } else {
+        await postProjectsLoaded(target, getProjectState(context));
+      }
+    },
+    'project.select': async (request) => selectProject(context, String(request.projectPath || '')),
+    'project.add': async () => addProjectFromDialog(context),
+    'project.remove': async (request) => removeProject(context, String(request.projectPath || '')),
+    'project.updateMetadata': async (request) => updateProjectMetadata(context, String(request.projectPath || ''), {
+      name: request.name,
+      type: request.projectType,
+      priority: request.priority,
+      description: request.description,
+      notes: request.notes
+    }),
+    'project.togglePinned': async (request) => toggleProjectPinned(context, String(request.projectPath || '')),
+    'project.openRoadmap': async (request) => {
+      await selectProject(context, String(request.projectPath || ''));
+      await vscode.commands.executeCommand('solopreneur.showRoadmap');
+    },
+    'project.continue': async (request) => {
+      const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
+      if (!projectPath) return;
+      if (request.nodeId) {
+        await handleRunAgent(context, String(request.nodeId), '', '');
+      } else {
+        await vscode.commands.executeCommand('solopreneur.showRoadmap');
+      }
+    },
+    'issue.getDetails': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      const issueNumber = Number(request.issueNumber || 0);
+      const cached = readCachedIssueDetails(projectPath, issueNumber);
+      if (cached) {
+        await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, ...cached });
+      }
+      await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, ...readProjectIssueDetails(projectPath, issueNumber) });
+    },
+    'issue.create': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      const result = createProjectIssue(
+        projectPath,
+        String(request.title || '').trim(),
+        String(request.body || '').trim(),
+        String(request.category || 'discussion'),
+        String(request.priority || '')
+      );
+      await respond({ command: 'issueActionCompleted', projectPath, success: result.ok, message: result.message });
+      sendProjectsToWebviews(context);
+    },
+    'issue.close': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      const result = closeProjectIssue(projectPath, Number(request.issueNumber || 0));
+      await respond({ command: 'issueActionCompleted', projectPath, success: result.ok, message: result.message });
+      sendProjectsToWebviews(context);
+    },
+    'project.refreshExternalData': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      const [issues, delivery, security] = await Promise.all([
+        loadExternalIssueSummary(projectPath, { force: true }).catch(() => null),
+        loadExternalDeliverySummary(projectPath, { force: true }).catch(() => null),
+        loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null)
+      ]);
+      if (issues) await respond({ command: 'projectIssuesLoaded', projectPath, issues });
+      if (delivery) await respond({ command: 'projectDeliveryLoaded', projectPath, delivery });
+      if (security) await respond({ command: 'projectSecurityLoaded', projectPath, security });
+      await respond({
+        command: 'projectRefreshCompleted',
+        projectPath,
+        success: Boolean(issues?.available || delivery?.available || security?.available),
+        message: issues?.message || delivery?.message || security?.message || ''
+      });
+    },
+    'project.openFile': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const relativePath = String(request.relativePath || '');
+      if (!projectPath || !relativePath) return;
+      const candidatePath = path.resolve(projectPath, relativePath);
+      const relativeToRoot = path.relative(projectPath, candidatePath);
+      if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) return;
+      const openedDiff = await openProjectFileDiff(projectPath, relativePath, String(request.gitHash || ''));
+      if (openedDiff) return;
+      if (fs.existsSync(candidatePath)) {
+        const doc = await vscode.workspace.openTextDocument(candidatePath);
+        await vscode.window.showTextDocument(doc, { preview: false });
+      }
+    },
+    'external.open': async (request) => {
+      if (request.url) {
+        await vscode.env.openExternal(vscode.Uri.parse(String(request.url)));
+      }
+    },
+    'feedback.open': async (request) => {
+      await vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(
+        request.title || '',
+        request.body || '',
+        request.category || '',
+        buildFeedbackUsageSummary(context)
+      )));
+    }
+  });
 }
 
 function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSettings {
@@ -1429,19 +1624,6 @@ function ensureCompletionCriteriaForNodes(workspaceRoot: string, nodes: RoadmapN
   });
 }
 
-async function chooseSupplementFilesForNode(nodeId: string): Promise<void> {
-  if (!activeProjectRoot || !activePanel) {
-    vscode.window.showErrorMessage('Choose a project folder before attaching task files.');
-    return;
-  }
-
-  const files = await chooseSupplementFilesForProject(activeProjectRoot);
-  activePanel.webview.postMessage({
-    command: 'supplementFilesSelected',
-    nodeId,
-    files
-  });
-}
 async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<void> {
   const result = await vscode.window.showOpenDialog({
     canSelectFiles: false,
@@ -1566,7 +1748,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return hydrateConversationContinuations(projectPath, soloConversationId, syncEngine.getAgentExecutions(soloConversationId)).slice(0, 1);
+    return buildConversationPresentations(projectPath, soloConversationId, syncEngine.getAgentExecutions(soloConversationId)).slice(0, 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -1575,7 +1757,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return hydrateConversationContinuations(projectPath, soloConversationId, store.getExecutionLogs(soloConversationId)).slice(0, 1);
+    return buildConversationPresentations(projectPath, soloConversationId, store.getExecutionLogs(soloConversationId)).slice(0, 1);
   } finally {
     store.close();
   }
@@ -1586,7 +1768,7 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return hydrateConversationContinuations(projectPath, nodeId, syncEngine.getAgentExecutions(nodeId)).slice(0, 1);
+    return buildConversationPresentations(projectPath, nodeId, syncEngine.getAgentExecutions(nodeId)).slice(0, 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -1595,7 +1777,7 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return hydrateConversationContinuations(projectPath, nodeId, store.getExecutionLogs(nodeId)).slice(0, 1);
+    return buildConversationPresentations(projectPath, nodeId, store.getExecutionLogs(nodeId)).slice(0, 1);
   } finally {
     store.close();
   }
@@ -1639,7 +1821,7 @@ function hydrateProjectConversationContinuations(projectPath: string, conversati
   }
   const hydratedById = new Map<number, AgentConversation>();
   for (const [nodeId, group] of byNode.entries()) {
-    hydrateConversationContinuations(projectPath, nodeId, group)
+    buildConversationPresentations(projectPath, nodeId, group)
       .forEach((conversation) => hydratedById.set(Number(conversation.id || 0), conversation));
   }
   return conversations.map((conversation) => hydratedById.get(Number(conversation.id || 0)) || conversation);
@@ -1751,6 +1933,9 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
   // Handle messages from Webview
   activePanel.webview.onDidReceiveMessage(
     async (message) => {
+      if (await handleSharedWebviewAction(context, message, 'roadmap', activePanel?.webview)) {
+        return;
+      }
       switch (message.command) {
         case 'getNodes':
           if (syncEngine && activeProjectRoot === getSelectedProjectPath(context)) {
@@ -1776,260 +1961,8 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
           completeNodeManually(message.nodeId);
           break;
 
-        case 'runAgent':
-          await handleRunAgent(context, message.nodeId, message.userMessage || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
-          break;
-
-        case 'runRoadmapRevision':
-          await handleRoadmapRevision(context, message.userMessage || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
-          break;
-
-        case 'runSoloConversation':
-          await handleRunSoloConversation(context, message.userMessage || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
-          break;
-
-        case 'runFlow':
-          await handleRunFlow(context, message.goal || '', message.agentCli || '', message.model || '', normalizeSupplementFiles(message.supplementFiles));
-          break;
-
-        case 'pauseFlow':
-          if (activeProjectRoot && message.flowId) {
-            updateFlowTrace(activeProjectRoot, message.flowId, (trace) => {
-              trace.status = 'paused';
-              trace.latestSummary = 'Flow 已被用户手动暂停推进。';
-              return trace;
-            });
-            await postFlowStateToWebview(context);
-          }
-          break;
-
-        case 'abandonFlow':
-          if (activeProjectRoot && message.flowId) {
-            updateFlowTrace(activeProjectRoot, message.flowId, (trace) => {
-              trace.status = 'abandoned';
-              trace.latestSummary = 'Flow 已被用户手动放弃。';
-              if (trace.loops.length > 0) {
-                const latestLoop = trace.loops[trace.loops.length - 1];
-                latestLoop.status = 'abandoned';
-              }
-              return trace;
-            });
-            await postFlowStateToWebview(context);
-          }
-          break;
-
-        case 'rollbackChanges':
-          await rollbackProjectToPreSessionGitHash(context, message.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '', message.gitHash);
-          break;
-
-        case 'linkSoloConversation':
-          linkSoloConversationToNode(Number(message.conversationId || 0), String(message.nodeId || ''));
-          break;
-
-        case 'chooseSupplementFiles':
-          await chooseSupplementFilesForNode(message.nodeId);
-          break;
-
-        case 'savePastedAttachments':
-          if (!activeProjectRoot || !activePanel) {
-            vscode.window.showErrorMessage('Choose a project folder before attaching images.');
-            return;
-          }
-          activePanel.webview.postMessage({
-            command: 'supplementFilesSelected',
-            nodeId: message.nodeId,
-            files: savePastedImageAttachments(activeProjectRoot, message.nodeId || 'conversation', message.attachments || [])
-          });
-          break;
-
-        case 'retryConversation':
-          await handleRetryConversation(context, message.nodeId, Number(message.conversationId || 0));
-          break;
-
-        case 'showAgentTerminal':
-          showAgentTerminal(Number(message.conversationId || 0));
-          break;
-
-        case 'continueNativeConversation':
-          await handleContinueNativeConversation(context, message.nodeId, Number(message.conversationId || 0));
-          break;
-
-        case 'continueConversationTurn':
-          await handleContinueConversationTurn(
-            context,
-            String(message.nodeId || ''),
-            Number(message.conversationId || 0),
-            String(message.userMessage || ''),
-            String(message.model || ''),
-            normalizeSupplementFiles(message.supplementFiles)
-          );
-          break;
-
-        case 'stopAgentRun':
-          await stopAgentRun(message.nodeId, Number(message.conversationId || 0));
-          break;
-
-        case 'openProjectFile':
-          if (activeProjectRoot && message.relativePath) {
-            const candidatePath = path.resolve(activeProjectRoot, String(message.relativePath));
-            const relativeToRoot = path.relative(activeProjectRoot, candidatePath);
-            if (!relativeToRoot.startsWith('..') && !path.isAbsolute(relativeToRoot)) {
-              const openedDiff = await openProjectFileDiff(activeProjectRoot, String(message.relativePath), String(message.gitHash || ''));
-              if (openedDiff) {
-                break;
-              }
-            }
-            if (!relativeToRoot.startsWith('..') && !path.isAbsolute(relativeToRoot) && fs.existsSync(candidatePath)) {
-              const doc = await vscode.workspace.openTextDocument(candidatePath);
-              await vscode.window.showTextDocument(doc, { preview: false });
-            }
-          }
-          break;
-
-        case 'getSettings':
-          if (activePanel) {
-            postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
-          }
-          break;
-
         case 'getFlowState':
           await postFlowStateToWebview(context);
-          break;
-
-        case 'getAgentModels':
-          if (activePanel) {
-            postAgentModelsLoaded(activePanel.webview, buildAgentModelsLoadedMessage({
-              requestId: message.requestId,
-              targetId: message.targetId,
-              agentCli: message.agentCli || '',
-              configuredCliPath: getPersistedSettings(context).cliPath || 'agy'
-            }));
-          }
-          break;
-
-        case 'openProAuthorization':
-          await handleManageProAuthorization(context, 'login');
-          break;
-
-        case 'pasteProAuthorizationCode':
-          await handleManageProAuthorization(context, 'paste');
-          break;
-
-        case 'updateSettings':
-          await updatePersistedSettings(context, {
-            cliPath: message.cliPath,
-            agentModelPreferences: message.agentModelPreferences,
-            language: message.language,
-            globalPrompt: message.globalPrompt,
-            globalDataPath: message.globalDataPath,
-            reviewerCliPath: message.reviewerCliPath,
-            collaborationReviewMode: message.collaborationReviewMode
-          });
-          vscode.window.showInformationMessage('SoloMap settings saved successfully!');
-          // Broadcast to sync both Webviews
-          vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
-          break;
-
-        case 'installSkill':
-          await handleInstallSolomapSkill(context, message.skillInput || '');
-          break;
-
-        case 'installMcp':
-          await handleInstallSolomapMcp(context, message.mcpInput || '');
-          break;
-
-        case 'installEnhancement':
-          await handleInstallSolomapEnhancement(context, message.enhancementId || '');
-          break;
-
-        case 'checkEnhancement':
-          await handleCheckSolomapEnhancement(context, message.enhancementId || '');
-          break;
-
-        case 'setEnhancementEnabled':
-          await handleSetSolomapEnhancementEnabled(context, message.enhancementId || '', Boolean(message.enabled));
-          break;
-
-        case 'uninstallEnhancement':
-          await handleUninstallSolomapEnhancement(context, message.enhancementId || '');
-          break;
-
-        case 'uninstallSkill':
-          await handleUninstallSolomapSkill(context, message.skillId || '');
-          break;
-
-        case 'uninstallMcp':
-          await handleUninstallSolomapMcp(context, message.mcpId || '');
-          break;
-
-        case 'openFeedbackIssue':
-          vscode.env.openExternal(vscode.Uri.parse(buildFeedbackIssueUrl(message.title || '', message.body || '', message.category || '', buildFeedbackUsageSummary(context))));
-          break;
-
-        case 'getNodeConversations':
-          if (syncEngine && activePanel) {
-            const rawConversations = syncEngine.getAgentExecutions(message.nodeId);
-            activePanel.webview.postMessage({
-              command: 'nodeConversationsLoaded',
-              nodeId: message.nodeId,
-              conversations: hydrateConversationContinuations(activeProjectRoot || '', message.nodeId, rawConversations),
-              projectPath: activeProjectRoot || ''
-            });
-          }
-          break;
-
-        case 'getProjects':
-          postProjectsLoaded(activePanel?.webview, getProjectState(context));
-          break;
-
-        case 'selectProject':
-          await selectProject(context, message.projectPath);
-          break;
-
-        case 'updateProjectMetadata':
-          await updateProjectMetadata(context, message.projectPath, {
-            name: message.name,
-            type: message.projectType,
-            priority: message.priority,
-            description: message.description,
-            notes: message.notes
-          });
-          break;
-
-        case 'addProject':
-          await addProjectFromDialog(context);
-          break;
-
-        case 'removeProject':
-          await removeProject(context, message.projectPath);
-          break;
-
-        case 'testCli':
-          const cliToTest = resolveAgentCli('antigravity-cli', message.cliPath || '');
-          childProcess.execFile(cliToTest, getCliVersionArgs(cliToTest), (error: any, stdout: string, stderr: string) => {
-            const success = !error;
-            let msg = error ? error.message : formatCliTestMessage(cliToTest, stdout, stderr);
-            if (!success) {
-              const candidates = getAgentCliCandidates('antigravity-cli', message.cliPath || '').join(', ');
-              msg = `Command not found or failed. Tried: ${candidates}`;
-            }
-            if (activePanel) {
-              activePanel.webview.postMessage({
-                command: 'cliTestResult',
-                success,
-                message: msg
-              });
-            }
-          });
-          break;
-
-        case 'getAgentImpact':
-          if (activePanel) {
-            activePanel.webview.postMessage({
-              command: 'agentImpactLoaded',
-              status: getAgentImpactStatus(getProjects(context))
-            });
-          }
           break;
       }
     },
@@ -3780,7 +3713,7 @@ function postNodeConversations(nodeId: string, fallbackConversations: import('./
     activePanel.webview.postMessage({
       command: 'nodeConversationsLoaded',
       nodeId,
-      conversations: hydrateConversationContinuations(activeProjectRoot || '', nodeId, payloadConversations),
+      conversations: buildConversationPresentations(activeProjectRoot || '', nodeId, payloadConversations),
       projectPath: activeProjectRoot || ''
     });
   }
