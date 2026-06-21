@@ -2,7 +2,7 @@
   "name": "solopreneur-roadmap",
   "displayName": "SoloMap - Local AI Agent Cockpit & Coding Roadmap Assistant",
   "description": "Stop losing momentum in scattered AI chats. SoloMap is a local AI Agent cockpit and coding roadmap assistant for solo developers. / 别让项目迷失在零散 AI 对话里。SoloMap 是专为独立开发者打造的本地 AI Agent 驾驶舱与编码路线图助手。",
-  "version": "0.0.253",
+  "version": "0.0.254",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
   "repository": {
