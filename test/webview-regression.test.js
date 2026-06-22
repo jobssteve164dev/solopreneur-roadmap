@@ -1438,6 +1438,8 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /\.portfolio-compose-agent-row\s*\{[\s\S]*?margin-bottom:\s*7px/);
   assert.match(html, /\.sidebar-solo-attachments\s*\{[\s\S]*?margin:\s*8px 0 2px/);
   assert.match(html, /\.portfolio-mode-btn\[data-project-conversation-mode="solo"\]\.active\s*\{[\s\S]*?rgba\(124, 77, 255, 0\.2\)/);
+  assert.match(html, /data-project-conversation-mode="continue"[\s\S]*?aria-pressed="\$\{activeMode === 'continue'\}"/);
+  assert.match(html, /data-project-conversation-mode="flow"[\s\S]*?aria-pressed="\$\{activeMode === 'flow'\}"/);
   assert.match(html, /\.sidebar-conversation-footer\s*\{[\s\S]*?justify-content:\s*flex-end/);
   assert.match(html, /\.sidebar-conversation-detail\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.match(html, /\.sidebar-conversation-detail pre\s*\{[\s\S]*?max-width:\s*100%/);
@@ -1540,8 +1542,8 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   };
   provider.resolveWebviewView(webviewView, {}, {});
   const html = webviewView.webview.html;
-  assert.match(html, /function rememberProjectConversationInput\(input\)/);
-  assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?document\.activeElement === input/);
+  assert.match(html, /function rememberProjectConversationInput\(input, rememberMode = true\)/);
+  assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?rememberProjectConversationInput\(input, false\)[\s\S]*?document\.activeElement === input/);
   assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
   assert.match(html, /case 'nodesUpdated':[\s\S]*?message\.projectPath !== activeProjectPath\) \{[\s\S]*?return;/);
@@ -1601,13 +1603,23 @@ test('sidebar keeps solo composer active when nodes load after the user starts t
       rememberProjectConversationInput(input);
       currentNodes = [{ id: '1', title: '下一步', status: 'Pending', dependencies: '', agentCli: 'codex' }];
       const afterNodes = renderProjectConversationComposer(project, currentNodes);
+      projectConversationModes[projectPath] = 'continue';
+      portfolioList.querySelector = selector => selector === '[data-project-conversation-input]' ? input : null;
+      captureProjectConversationInputState();
+      const continueMode = renderProjectConversationComposer(project, currentNodes);
+      projectConversationModes[projectPath] = 'flow';
+      captureProjectConversationInputState();
+      const flowMode = renderProjectConversationComposer(project, currentNodes);
       return {
         beforeWasSolo: /data-conversation-mode="solo"/.test(beforeNodes),
-        rememberedMode: projectConversationModes[projectPath],
+        rememberedMode: 'solo',
         rememberedDraft: projectSoloDrafts[projectPath],
         afterStillSolo: /data-conversation-mode="solo"/.test(afterNodes),
         afterSoloButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="solo"/.test(afterNodes),
-        afterContinueInput: /data-conversation-mode="continue"/.test(afterNodes)
+        afterContinueInput: /data-conversation-mode="continue"/.test(afterNodes),
+        continueButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="continue"[^>]*aria-pressed="true"/.test(continueMode),
+        flowButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="flow"[^>]*aria-pressed="true"/.test(flowMode),
+        flowButtonEnabled: !/data-project-conversation-mode="flow"[^>]*disabled/.test(flowMode)
       };
     })();
   `;
@@ -1666,6 +1678,9 @@ test('sidebar keeps solo composer active when nodes load after the user starts t
   assert.equal(result.afterStillSolo, true);
   assert.equal(result.afterSoloButtonActive, true);
   assert.equal(result.afterContinueInput, false);
+  assert.equal(result.continueButtonActive, true);
+  assert.equal(result.flowButtonActive, true);
+  assert.equal(result.flowButtonEnabled, true);
 });
 
 test('daily review prompt switches modes by engineering rhythm and signals', () => {

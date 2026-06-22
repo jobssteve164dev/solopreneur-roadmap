@@ -3325,12 +3325,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectRefreshPaths = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
 
-    function rememberProjectConversationInput(input) {
+    function rememberProjectConversationInput(input, rememberMode = true) {
       if (!input) return;
       const mode = input.getAttribute('data-conversation-mode') || 'continue';
       const projectPath = input.getAttribute('data-project-path') || currentProjects.selectedProjectPath || '';
       const targetId = input.getAttribute('data-conversation-target-id') || '';
-      if (projectPath && (mode === 'solo' || mode === 'flow')) {
+      if (rememberMode && projectPath && (mode === 'solo' || mode === 'flow')) {
         projectConversationModes[projectPath] = mode;
       }
       if (mode === 'solo') {
@@ -3345,7 +3345,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function captureProjectConversationInputState() {
       const input = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('[data-project-conversation-input]') : null;
       if (!input) return null;
-      rememberProjectConversationInput(input);
+      rememberProjectConversationInput(input, false);
       return {
         projectPath: input.getAttribute('data-project-path') || currentProjects.selectedProjectPath || '',
         mode: input.getAttribute('data-conversation-mode') || 'continue',
@@ -5171,9 +5171,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return \`
         <div class="portfolio-compose" data-project-continue-composer>
           <div class="portfolio-mode-toggle">
-            <button class="portfolio-mode-btn \${activeMode === 'continue' ? 'active' : ''}" data-project-conversation-mode="continue" data-project-path="\${escapeHtml(projectPath)}" \${node ? '' : 'disabled'}>\${escapeHtml(t('projectModeContinue'))}</button>
-            <button class="portfolio-mode-btn \${activeMode === 'solo' ? 'active' : ''}" data-project-conversation-mode="solo" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('projectModeSolo'))}</button>
-            <button class="portfolio-mode-btn \${activeMode === 'flow' ? 'active' : ''}" data-project-conversation-mode="flow" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('projectModeFlow'))}</button>
+            <button class="portfolio-mode-btn \${activeMode === 'continue' ? 'active' : ''}" data-project-conversation-mode="continue" data-project-path="\${escapeHtml(projectPath)}" aria-pressed="\${activeMode === 'continue'}" \${node ? '' : 'disabled'}>\${escapeHtml(t('projectModeContinue'))}</button>
+            <button class="portfolio-mode-btn \${activeMode === 'solo' ? 'active' : ''}" data-project-conversation-mode="solo" data-project-path="\${escapeHtml(projectPath)}" aria-pressed="\${activeMode === 'solo'}">\${escapeHtml(t('projectModeSolo'))}</button>
+            <button class="portfolio-mode-btn \${activeMode === 'flow' ? 'active' : ''}" data-project-conversation-mode="flow" data-project-path="\${escapeHtml(projectPath)}" aria-pressed="\${activeMode === 'flow'}">\${escapeHtml(t('projectModeFlow'))}</button>
           </div>
           \${activeMode === 'flow' && !flowUnlocked ? \`
             <div class="sidebar-solo-history">
