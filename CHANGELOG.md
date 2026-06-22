@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.258 - 2026-06-22
+
+### Fixed
+- stabilize project card and roadmap revision inputs (560228e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.257 - 2026-06-22
 
 ### Fixed
