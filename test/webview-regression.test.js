@@ -1222,6 +1222,10 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /conversation\.runRoadmapRevision/);
   assert.match(script, /Roadmap Revision History|路线图调整历史/);
   assert.match(script, /No roadmap revisions yet|还没有路线图调整记录/);
+  assert.match(script, /data-attach-roadmap-revision/);
+  assert.match(script, /data-roadmap-revision-model/);
+  assert.match(script, /roadmapRevisionDraft/);
+  assert.match(script, /model:\s*getSoloSelectValue\(modelSelect\)/);
   assert.match(script, /conversation\.runSolo/);
   assert.match(script, /conversation\.linkToStep/);
   assert.match(script, /soloTitle:\s*'Free Work'|soloTitle:\s*'自由研讨'/);
@@ -1583,6 +1587,8 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function rememberProjectConversationInput\(input, rememberMode = true\)/);
   assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?rememberProjectConversationInput\(input, false\)[\s\S]*?document\.activeElement === input/);
   assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
+  assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
+  assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
   assert.match(html, /case 'nodesUpdated':[\s\S]*?message\.projectPath !== activeProjectPath\) \{[\s\S]*?return;/);
   assert.doesNotMatch(html, /Object\.keys\(projectSoloDrafts\)\.forEach\(key => delete projectSoloDrafts\[key\]\)/);
@@ -1877,6 +1883,8 @@ test('local project actions use local refresh instead of external portfolio refr
     assert.match(body, /sendLocalProjectsToWebviews\(context\)/);
     assert.doesNotMatch(body, /sendProjectsToWebviews\(context\)/);
   });
+  assert.match(source, /sidebarProvider\.sendLocalProjects\(\)/);
+  assert.doesNotMatch(source, /sidebarProvider\.sendProjects\(\);\n\s*}\n\s*return true;\n\s*} catch \(error\) \{/);
 });
 
 test('sidebar local project refresh keeps reusable signal enrichment without external data loads', () => {

@@ -3325,6 +3325,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectRefreshPaths = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
 
+    function getProjectContinueDraftKey(projectPath) {
+      return 'continue:' + String(projectPath || '');
+    }
+
     function rememberProjectConversationInput(input, rememberMode = true) {
       if (!input) return;
       const mode = input.getAttribute('data-conversation-mode') || 'continue';
@@ -3339,6 +3343,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         projectContinueDrafts['flow:' + projectPath] = input.value || '';
       } else if (targetId) {
         projectContinueDrafts[targetId] = input.value || '';
+        if (projectPath) {
+          projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = input.value || '';
+        }
       }
     }
 
@@ -3360,11 +3367,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function restoreProjectConversationInputState(state) {
       if (!state || !portfolioList || !portfolioList.querySelectorAll) return;
-      const input = Array.from(portfolioList.querySelectorAll('[data-project-conversation-input]')).find(candidate => (
+      const inputs = Array.from(portfolioList.querySelectorAll('[data-project-conversation-input]'));
+      const input = inputs.find(candidate => (
         (candidate.getAttribute('data-project-path') || '') === state.projectPath
         && (candidate.getAttribute('data-conversation-mode') || 'continue') === state.mode
         && (candidate.getAttribute('data-conversation-target-id') || '') === state.targetId
-      ));
+      )) || (state.mode === 'continue'
+        ? inputs.find(candidate => (
+          (candidate.getAttribute('data-project-path') || '') === state.projectPath
+          && (candidate.getAttribute('data-conversation-mode') || 'continue') === 'continue'
+        ))
+        : null);
       if (!input) return;
       if (input.value !== state.value) {
         input.value = state.value;
@@ -5162,7 +5175,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         ? (projectSoloDrafts[projectPath] || '')
         : activeMode === 'flow'
           ? (projectContinueDrafts['flow:' + projectPath] || '')
-          : (projectContinueDrafts[targetId] || '');
+          : (projectContinueDrafts[targetId] || projectContinueDrafts[getProjectContinueDraftKey(projectPath)] || '');
       const agentOptions = activeMode === 'solo'
         ? getAgentOptions({ agentCli: getEffectiveSettingCliPath() || 'agy' })
         : activeMode === 'flow'
@@ -5286,10 +5299,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             return;
           }
           const nodeId = sendButton.getAttribute('data-next-node-id');
-          runNodeAgent(nodeId, userMessage, getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), projectContinueFiles[nodeId] || []);
-          if (input) input.value = '';
-          projectContinueDrafts[nodeId] = '';
-          projectContinueFiles[nodeId] = [];
+        runNodeAgent(nodeId, userMessage, getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), projectContinueFiles[nodeId] || []);
+        if (input) input.value = '';
+        projectContinueDrafts[nodeId] = '';
+        projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = '';
+        projectContinueFiles[nodeId] = [];
           if (projectPath && nodeId) {
             requestSidebarProjectConversationHistory(projectPath, true);
           }

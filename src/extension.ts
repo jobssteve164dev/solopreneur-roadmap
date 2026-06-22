@@ -1873,10 +1873,11 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
       syncEngineReady = true;
       ensureCompletionCriteriaForNodes(projectRoot, syncEngine.getNodes());
       setupFileSentinelWatcher(projectRoot);
-      // Refresh sidebar when successfully initialized
+      // Project switching should stay local-first; avoid re-triggering
+      // full external-card refreshes while short-lived caches are still warm.
       if (sidebarProvider) {
         sidebarProvider.sendNodesToWebview();
-        sidebarProvider.sendProjects();
+        sidebarProvider.sendLocalProjects();
       }
       return true;
     } catch (error) {

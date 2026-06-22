@@ -2158,6 +2158,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const agentModelPreferenceMap = {};
     let soloAgentSelection = '';
     let flowAgentSelection = '';
+    let roadmapRevisionAgentSelection = '';
+    let roadmapRevisionDraft = '';
     let currentFlowState = { hasProAccess: false, flow: null, history: [] };
     let agentModelRequestSeq = 0;
     const i18n = {
@@ -3064,6 +3066,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           applySettingCliPath(message.settings.cliPath || 'agy');
           soloAgentSelection = getEffectiveSettingCliPath();
           flowAgentSelection = getEffectiveSettingCliPath();
+          roadmapRevisionAgentSelection = getEffectiveSettingCliPath();
           if (settingGlobalPrompt) settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
@@ -4073,12 +4076,18 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       roadmapRevisionBody.innerHTML = \`
         <div class="conversation-composer">
-          <div class="conversation-compose">
-            <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" \${disabled}>
-            \${renderSoloSelect('conversation-agent-select', 'data-roadmap-revision-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false)}
+          <div class="conversation-compose conversation-compose-main">
+            <button class="conversation-tool-btn" data-attach-roadmap-revision title="\${escapeHtml(t('attachFiles'))}" \${disabled}>
+              <span class="codicon codicon-attach"></span>
+            </button>
+            <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" value="\${escapeHtml(roadmapRevisionDraft)}" \${disabled}>
             <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${disabled}>
               <span class="codicon codicon-send"></span>
             </button>
+          </div>
+          <div class="conversation-compose conversation-compose-meta">
+            \${renderSoloSelect('conversation-agent-select', 'data-roadmap-revision-agent title="' + escapeHtml(t('agentSelector')) + '"', getAgentOptions({ agentCli: currentCliPath || 'agy' }), false, roadmapRevisionAgentSelection || currentCliPath || 'agy')}
+            \${renderModelSelect('conversation-model-select', 'data-roadmap-revision-model title="Model"', roadmapRevisionAgentSelection || currentCliPath || 'agy', roadmapRevisionId)}
           </div>
           \${renderSupplementFiles(roadmapRevisionId, nodeSupplementFiles[roadmapRevisionId] || [])}
         </div>
@@ -4087,26 +4096,54 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           \${renderConversations(roadmapRevisionId, conversations, t('noRevisionConversations'))}
         </div>
       \`;
+      const attachButton = roadmapRevisionBody.querySelector('[data-attach-roadmap-revision]');
+      if (attachButton) {
+        attachButton.addEventListener('click', () => {
+          vscode.postMessage({ command: 'attachment.choose', nodeId: roadmapRevisionId });
+        });
+      }
       const sendButton = roadmapRevisionBody.querySelector('[data-send-roadmap-revision]');
       if (sendButton) {
         sendButton.addEventListener('click', () => {
           const input = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
           const agentSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-agent]');
+          const modelSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-model]');
           const request = input ? input.value.trim() : '';
           if (!request) return;
           vscode.postMessage({
             command: 'conversation.runRoadmapRevision',
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
+            model: getSoloSelectValue(modelSelect),
             supplementFiles: nodeSupplementFiles[roadmapRevisionId] || []
           });
           input.value = '';
+          roadmapRevisionDraft = '';
           nodeSupplementFiles[roadmapRevisionId] = [];
           renderRoadmapRevisionPanel(currentNodes);
         });
       }
       const revisionInput = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
+      if (revisionInput) {
+        revisionInput.addEventListener('input', () => {
+          roadmapRevisionDraft = revisionInput.value || '';
+        });
+      }
       bindPastedImageAttachments(revisionInput, roadmapRevisionId, () => renderRoadmapRevisionPanel(currentNodes));
+      const revisionAgentSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-agent]');
+      const revisionModelSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-model]');
+      if (revisionAgentSelect) {
+        bindSoloSelect(revisionAgentSelect, (value) => {
+          roadmapRevisionAgentSelection = value || currentCliPath || 'agy';
+          ensureAgentModelsLoaded(roadmapRevisionAgentSelection, roadmapRevisionId);
+          renderRoadmapRevisionPanel(currentNodes);
+        });
+      }
+      if (revisionModelSelect) {
+        bindSoloSelect(revisionModelSelect, (value) => {
+          setTargetModelValue(roadmapRevisionId, roadmapRevisionAgentSelection || currentCliPath || 'agy', value, true);
+        });
+      }
       roadmapRevisionBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
         item.addEventListener('click', () => {
           const file = item.getAttribute('data-remove-supplement-file');
