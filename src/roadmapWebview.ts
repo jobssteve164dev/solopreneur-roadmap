@@ -1424,7 +1424,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     }
 
     .roadmap-revision-body {
+      flex: 1 1 auto;
+      min-height: 0;
       min-width: 0;
+      overflow-y: auto;
       max-width: 100%;
       overflow-x: hidden;
     }

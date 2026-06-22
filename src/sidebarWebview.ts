@@ -1746,6 +1746,86 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       flex-wrap: wrap;
     }
 
+    .project-loop-panel {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 10px;
+      background: rgba(255,255,255,0.03);
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+    }
+
+    .project-loop-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .project-loop-title {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
+    .project-loop-focus {
+      font-size: 10px;
+      color: #67e8f9;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .project-loop-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .project-loop-chip {
+      min-width: 0;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.02);
+      padding: 7px 6px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .project-loop-chip.is-focus {
+      border-color: rgba(0,229,255,0.42);
+      background: rgba(0,229,255,0.08);
+      box-shadow: 0 0 0 1px rgba(0,229,255,0.08);
+    }
+
+    .project-loop-chip.is-missing {
+      border-color: rgba(245,158,11,0.35);
+      background: rgba(245,158,11,0.10);
+    }
+
+    .project-loop-chip-label {
+      font-size: 10px;
+      font-weight: 800;
+      color: var(--text-main);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .project-loop-chip-meta {
+      font-size: 9px;
+      color: var(--text-muted);
+      line-height: 1.35;
+    }
+
+    .project-loop-copy {
+      font-size: 10px;
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+
     .portfolio-project-name {
       font-size: 12px;
       font-weight: 700;
@@ -3325,6 +3405,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectRefreshPaths = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
 
+    function conversationsSignature(conversations) {
+      return JSON.stringify(Array.isArray(conversations) ? conversations : []);
+    }
+
+    function sameConversations(left, right) {
+      return conversationsSignature(left) === conversationsSignature(right);
+    }
+
     function getProjectContinueDraftKey(projectPath) {
       return 'continue:' + String(projectPath || '');
     }
@@ -3603,6 +3691,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         currentStage: '当前阶段',
         nextAction: '下一步',
         nextActionSubtitle: '当前最该推进',
+        projectLoopTitle: '循环判断',
+        projectLoopReasonPrefix: '现在该补',
+        projectLoopMissing: '缺口',
+        projectLoopProgress: '已完成',
         nextActionReasonRunning: 'Agent 正在处理这个环节，先查看运行状态。',
         nextActionReasonFailed: '这个环节失败过，优先重试或补充要求。',
         nextActionReasonInProgress: '这个环节已经开始，继续推进最容易形成闭环。',
@@ -3890,6 +3982,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         currentStage: 'Stage',
         nextAction: 'Next',
         nextActionSubtitle: 'Current focus',
+        projectLoopTitle: 'Loop focus',
+        projectLoopReasonPrefix: 'Fill next',
+        projectLoopMissing: 'Missing',
+        projectLoopProgress: 'Done',
         nextActionReasonRunning: 'The Agent is already working on this step. Check the running state first.',
         nextActionReasonFailed: 'This step failed before. Retry it with clearer guidance.',
         nextActionReasonInProgress: 'This step is already in motion. Continue it to close the loop.',
@@ -4481,6 +4577,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'sidebarSoloConversationLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          if (sameConversations(sidebarSoloConversations, message.conversations || [])) return;
           sidebarSoloConversations = message.conversations || [];
           for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
           for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
@@ -4490,6 +4587,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         case 'sidebarStepConversationLoaded': {
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           const key = stepConversationKey(message.projectPath, message.nodeId);
+          if (sameConversations(sidebarStepConversations[key], message.conversations || [])) {
+            sidebarStepConversationRequested[key] = true;
+            return;
+          }
           sidebarStepConversations[key] = message.conversations || [];
           sidebarStepConversationRequested[key] = true;
           for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
@@ -4500,6 +4601,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'sidebarProjectConversationLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          if (sameConversations(sidebarProjectConversations[message.projectPath], message.conversations || [])) {
+            sidebarProjectConversationRequested[message.projectPath] = true;
+            return;
+          }
           sidebarProjectConversations[message.projectPath] = message.conversations || [];
           sidebarProjectConversationRequested[message.projectPath] = true;
           for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
@@ -5155,6 +5260,29 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function projectSoloTargetId(projectPath) {
       return 'solo:' + String(projectPath || '');
+    }
+
+    function renderProjectLoopPanel(project) {
+      const summary = project && project.loopSummary ? project.loopSummary : null;
+      const stages = summary && Array.isArray(summary.stages) ? summary.stages : [];
+      if (!summary || !stages.length) return '';
+      return \`
+        <div class="project-loop-panel">
+          <div class="project-loop-head">
+            <span class="project-loop-title">\${escapeHtml(t('projectLoopTitle'))}</span>
+            <span class="project-loop-focus">\${escapeHtml(t('projectLoopReasonPrefix'))} \${escapeHtml(summary.focusLabel || '-')}</span>
+          </div>
+          <div class="project-loop-grid">
+            \${stages.map(stage => \`
+              <div class="project-loop-chip\${stage.focus ? ' is-focus' : ''}\${stage.missing ? ' is-missing' : ''}">
+                <span class="project-loop-chip-label">\${escapeHtml(stage.label)}</span>
+                <span class="project-loop-chip-meta">\${stage.missing ? escapeHtml(t('projectLoopMissing')) : escapeHtml(t('projectLoopProgress') + ' ' + stage.completed + '/' + stage.total)}</span>
+              </div>
+            \`).join('')}
+          </div>
+          <div class="project-loop-copy">\${escapeHtml(summary.focusReason || '')} · \${escapeHtml(summary.nextTask || '')}</div>
+        </div>
+      \`;
     }
 
     function renderProjectConversationComposer(project, nodes) {
@@ -6161,6 +6289,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
             </div>
+            \${isSelected ? renderProjectLoopPanel(project) : ''}
             <div class="portfolio-card-meta">
               <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}

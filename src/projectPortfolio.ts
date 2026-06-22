@@ -54,7 +54,25 @@ export interface ProjectPortfolioSummary {
   documentationDocumentCount: number;
   documentationPendingReview: number;
   pinnedAt?: string;
+  loopSummary: ProjectLoopSummary;
   nodes: RoadmapNodeLike[];
+}
+
+export interface ProjectLoopStageSummary {
+  key: MethodologyStageKey;
+  label: string;
+  total: number;
+  completed: number;
+  focus: boolean;
+  missing: boolean;
+}
+
+export interface ProjectLoopSummary {
+  stages: ProjectLoopStageSummary[];
+  focusKey: MethodologyStageKey;
+  focusLabel: string;
+  focusReason: string;
+  nextTask: string;
 }
 
 export interface RoadmapNodeLike {
@@ -178,6 +196,41 @@ function summarizeMethodologyStages(nodes: RoadmapNodeLike[]): { counts: Record<
   });
   const gap = methodologyStages.find((stage) => counts[stage.key] === 0)?.label || '';
   return { counts, gap };
+}
+
+function buildProjectLoopSummary(
+  nodes: RoadmapNodeLike[],
+  recommendedNode: RoadmapNodeLike | null,
+  stageSummary: { counts: Record<MethodologyStageKey, number>; gap: string }
+): ProjectLoopSummary {
+  const completedCounts: Record<MethodologyStageKey, number> = { build: 0, sell: 0, learn: 0, improve: 0 };
+  nodes.forEach((node) => {
+    if (node.status === 'Completed') {
+      completedCounts[inferMethodologyStage(node)] += 1;
+    }
+  });
+  const recommendedStage = recommendedNode ? inferMethodologyStage(recommendedNode) : null;
+  const missingStage = methodologyStages.find((stage) => stageSummary.counts[stage.key] === 0) || null;
+  const focusKey = (recommendedStage || missingStage?.key || 'build') as MethodologyStageKey;
+  const focusLabel = methodologyStages.find((stage) => stage.key === focusKey)?.label || 'Build';
+  return {
+    stages: methodologyStages.map((stage) => ({
+      key: stage.key,
+      label: stage.label,
+      total: stageSummary.counts[stage.key] || 0,
+      completed: completedCounts[stage.key] || 0,
+      focus: stage.key === focusKey,
+      missing: (stageSummary.counts[stage.key] || 0) === 0
+    })),
+    focusKey,
+    focusLabel,
+    focusReason: recommendedNode
+      ? `${focusLabel} 里最该推进的是 ${recommendedNode.title}`
+      : missingStage
+        ? `当前缺少 ${missingStage.label} 环节`
+        : `先从 ${focusLabel} 形成下一步`,
+    nextTask: recommendedNode?.title || (missingStage ? `调整路线图：补齐 ${missingStage.label}` : '开始下一步推进')
+  };
 }
 
 function rankNodeForStageGap(node: RoadmapNodeLike, stageSummary: { gap: string }): number {
@@ -359,6 +412,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
   const securitySignal = inferSecuritySignal(baseSummary.security);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
   const documentationSummary = summarizeDocumentationForReview(project.path);
+  const loopSummary = buildProjectLoopSummary(nodes, recommendedNode, stageSummary);
   return {
     ...baseSummary,
     nodes,
@@ -380,7 +434,8 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
     foundation: baseSummary.foundation,
     documentationDocumentCount: documentationSummary.documentCount,
     documentationPendingReview: documentationSummary.pendingReviewCount,
-    pinnedAt: project.pinnedAt || ''
+    pinnedAt: project.pinnedAt || '',
+    loopSummary
   };
 }
 

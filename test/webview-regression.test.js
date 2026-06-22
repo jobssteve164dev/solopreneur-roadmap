@@ -1587,12 +1587,23 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function rememberProjectConversationInput\(input, rememberMode = true\)/);
   assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?rememberProjectConversationInput\(input, false\)[\s\S]*?document\.activeElement === input/);
   assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
+  assert.match(html, /function sameConversations\(left,\s*right\)/);
   assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
+  assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?sameConversations\(sidebarProjectConversations\[message\.projectPath\], message\.conversations \|\| \[\]\)/);
   assert.match(html, /case 'nodesUpdated':[\s\S]*?message\.projectPath !== activeProjectPath\) \{[\s\S]*?return;/);
   assert.doesNotMatch(html, /Object\.keys\(projectSoloDrafts\)\.forEach\(key => delete projectSoloDrafts\[key\]\)/);
   assert.doesNotMatch(html, /Object\.keys\(projectConversationAgentSelections\)\.forEach\(key => delete projectConversationAgentSelections\[key\]\)/);
+});
+
+test('roadmap revision panel keeps its own scroll container', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  assert.match(html, /\.roadmap-revision-body\s*\{[\s\S]*?min-height:\s*0;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overflow-x:\s*hidden;/);
 });
 
 test('sidebar keeps solo composer active when nodes load after the user starts typing', () => {
@@ -1987,8 +1998,11 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
   assert.equal(summaries[0].globalPriority, 'P0');
   assert.equal(summaries[0].globalNextAction, 'Build MVP');
   assert.equal(summaries[0].projectType, 'content');
+  assert.equal(summaries[0].loopSummary.focusKey, 'build');
+  assert.match(summaries[0].loopSummary.focusReason, /Build/);
   assert.equal(summaries[1].overallStatus, 'In Progress');
   assert.equal(summaries[1].recommendedNodeTitle, 'Implement');
+  assert.equal(summaries[1].loopSummary.stages.length, 4);
   assert.equal(summaries.find((summary) => summary.name === 'CRM')?.globalPriority, 'P1');
   assert.equal(summaries.find((summary) => summary.name === 'Backlog')?.globalPriority, 'P2');
   assert.equal(summaries.find((summary) => summary.name === 'Done')?.globalPriority, 'P3');
