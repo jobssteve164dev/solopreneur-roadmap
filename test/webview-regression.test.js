@@ -1389,6 +1389,31 @@ test('full roadmap conversation history folds review runs under the reviewed con
   assert.match(expanded, /后续记录|Follow-up Records/);
 });
 
+test('rollback action is rendered for every completed conversation mode with a pre-session hash', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
+  const conversation = {
+    id: 91,
+    status: 'Completed',
+    agentCli: 'codex',
+    command: 'codex exec',
+    output: 'SoloMapPreGitHash: abc1234\\n\\nAgent output tail:\\nDone.',
+    rollbackGitHash: 'abc1234'
+  };
+
+  for (const nodeId of ['9', '__solo__', '__roadmap_revision__']) {
+    const rendered = context.__renderConversationsForTest(nodeId, [{ ...conversation, nodeId }], 'empty');
+    assert.match(rendered, /data-rollback-hash="abc1234"/);
+    assert.match(rendered, /撤销修改|Undo changes/);
+  }
+});
+
 test('sidebar conversation result cards expose rollback actions for pre-session git hashes', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarWebview.js'), 'utf8');
   const extensionSource = [
@@ -1588,6 +1613,12 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?rememberProjectConversationInput\(input, false\)[\s\S]*?document\.activeElement === input/);
   assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
   assert.match(html, /function sameConversations\(left,\s*right\)/);
+  assert.match(html, /function renderPortfolioFromAsyncUpdate\(portfolio, selectedProjectPath\)/);
+  assert.match(html, /isConversationCardInteractionActive\(\)[\s\S]*?pendingAsyncPortfolioRender/);
+  assert.match(html, /portfolioList\.addEventListener\('pointerover'[\s\S]*?hoveredConversationCard/);
+  assert.match(html, /portfolioList\.addEventListener\('focusin'[\s\S]*?focusedConversationCard/);
+  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
+  assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
@@ -1595,6 +1626,7 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /case 'nodesUpdated':[\s\S]*?message\.projectPath !== activeProjectPath\) \{[\s\S]*?return;/);
   assert.doesNotMatch(html, /Object\.keys\(projectSoloDrafts\)\.forEach\(key => delete projectSoloDrafts\[key\]\)/);
   assert.doesNotMatch(html, /Object\.keys\(projectConversationAgentSelections\)\.forEach\(key => delete projectConversationAgentSelections\[key\]\)/);
+  assert.doesNotMatch(html, /project-loop-panel|循环判断|Loop focus/);
 });
 
 test('roadmap revision panel keeps its own scroll container', () => {
@@ -1603,7 +1635,25 @@ test('roadmap revision panel keeps its own scroll container', () => {
     'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
   );
   const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
-  assert.match(html, /\.roadmap-revision-body\s*\{[\s\S]*?min-height:\s*0;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overflow-x:\s*hidden;/);
+  assert.match(html, /\.roadmap-revision-popover\s*\{[\s\S]*?top:\s*75px;[\s\S]*?bottom:\s*24px;[\s\S]*?overflow-y:\s*hidden;/);
+  assert.match(html, /\.roadmap-revision-body\s*\{[\s\S]*?min-height:\s*0;[\s\S]*?overflow-y:\s*auto;[\s\S]*?overflow-x:\s*hidden;[\s\S]*?scrollbar-gutter:\s*stable;/);
+  assert.match(html, /\.roadmap-revision-body\s*>\s*\*\s*\{[\s\S]*?flex:\s*0 0 auto;/);
+});
+
+test('full roadmap composers preserve active input while running durations update in place', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+
+  assert.match(script, /function captureComposerInputState\(container, selector\)[\s\S]*?document\.activeElement === input/);
+  assert.match(script, /function restoreComposerInputState\(container, selector, state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
+  assert.match(script, /function renderSoloPanel\(nodes\)[\s\S]*?captureComposerInputState\(soloBody, '\[data-solo-input\]'\)[\s\S]*?restoreComposerInputState\(soloBody, '\[data-solo-input\]'/);
+  assert.match(script, /function renderRoadmapRevisionPanel\(nodes\)[\s\S]*?captureComposerInputState\(roadmapRevisionBody, '\[data-roadmap-revision-input\]'\)[\s\S]*?restoreComposerInputState\(roadmapRevisionBody, '\[data-roadmap-revision-input\]'/);
+  assert.match(script, /setInterval\(\(\) => \{[\s\S]*?updateRunningConversationDurations\(soloBody/);
+  assert.doesNotMatch(script, /setInterval\(\(\) => \{[\s\S]*?soloRunning[\s\S]*?renderSoloPanel/);
 });
 
 test('sidebar keeps solo composer active when nodes load after the user starts typing', () => {

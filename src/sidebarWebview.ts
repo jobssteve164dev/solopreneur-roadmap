@@ -1746,86 +1746,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       flex-wrap: wrap;
     }
 
-    .project-loop-panel {
-      margin-top: 10px;
-      padding: 10px;
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 10px;
-      background: rgba(255,255,255,0.03);
-      display: flex;
-      flex-direction: column;
-      gap: 9px;
-    }
-
-    .project-loop-head {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 8px;
-    }
-
-    .project-loop-title {
-      font-size: 11px;
-      font-weight: 800;
-      color: var(--text-main);
-    }
-
-    .project-loop-focus {
-      font-size: 10px;
-      color: #67e8f9;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    .project-loop-grid {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 6px;
-    }
-
-    .project-loop-chip {
-      min-width: 0;
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.02);
-      padding: 7px 6px;
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-    }
-
-    .project-loop-chip.is-focus {
-      border-color: rgba(0,229,255,0.42);
-      background: rgba(0,229,255,0.08);
-      box-shadow: 0 0 0 1px rgba(0,229,255,0.08);
-    }
-
-    .project-loop-chip.is-missing {
-      border-color: rgba(245,158,11,0.35);
-      background: rgba(245,158,11,0.10);
-    }
-
-    .project-loop-chip-label {
-      font-size: 10px;
-      font-weight: 800;
-      color: var(--text-main);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .project-loop-chip-meta {
-      font-size: 9px;
-      color: var(--text-muted);
-      line-height: 1.35;
-    }
-
-    .project-loop-copy {
-      font-size: 10px;
-      line-height: 1.45;
-      color: var(--text-muted);
-    }
-
     .portfolio-project-name {
       font-size: 12px;
       font-weight: 700;
@@ -3404,6 +3324,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectSoloDrafts = {};
     const projectRefreshPaths = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
+    let hoveredConversationCard = null;
+    let focusedConversationCard = null;
+    let pendingAsyncPortfolioRender = null;
 
     function conversationsSignature(conversations) {
       return JSON.stringify(Array.isArray(conversations) ? conversations : []);
@@ -3411,6 +3334,50 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function sameConversations(left, right) {
       return conversationsSignature(left) === conversationsSignature(right);
+    }
+
+    function isConversationCardInteractionActive() {
+      return Boolean(hoveredConversationCard || focusedConversationCard);
+    }
+
+    function renderPortfolioFromAsyncUpdate(portfolio, selectedProjectPath) {
+      if (isConversationCardInteractionActive()) {
+        pendingAsyncPortfolioRender = { portfolio, selectedProjectPath };
+        return;
+      }
+      pendingAsyncPortfolioRender = null;
+      renderPortfolio(portfolio, selectedProjectPath);
+    }
+
+    function flushPendingAsyncPortfolioRender() {
+      if (isConversationCardInteractionActive() || !pendingAsyncPortfolioRender) return;
+      const pending = pendingAsyncPortfolioRender;
+      pendingAsyncPortfolioRender = null;
+      renderPortfolio(pending.portfolio, pending.selectedProjectPath);
+    }
+
+    if (portfolioList) {
+      portfolioList.addEventListener('pointerover', (event) => {
+        const card = event.target.closest ? event.target.closest('[data-card-trigger-id]') : null;
+        if (card) hoveredConversationCard = card;
+      });
+      portfolioList.addEventListener('pointerout', (event) => {
+        if (!hoveredConversationCard) return;
+        const nextTarget = event.relatedTarget;
+        if (nextTarget && hoveredConversationCard.contains(nextTarget)) return;
+        hoveredConversationCard = null;
+        setTimeout(flushPendingAsyncPortfolioRender, 0);
+      });
+      portfolioList.addEventListener('focusin', (event) => {
+        focusedConversationCard = event.target.closest ? event.target.closest('[data-card-trigger-id]') : null;
+      });
+      portfolioList.addEventListener('focusout', () => {
+        setTimeout(() => {
+          const active = document.activeElement;
+          focusedConversationCard = active && active.closest ? active.closest('[data-card-trigger-id]') : null;
+          flushPendingAsyncPortfolioRender();
+        }, 0);
+      });
     }
 
     function getProjectContinueDraftKey(projectPath) {
@@ -3691,10 +3658,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         currentStage: '当前阶段',
         nextAction: '下一步',
         nextActionSubtitle: '当前最该推进',
-        projectLoopTitle: '循环判断',
-        projectLoopReasonPrefix: '现在该补',
-        projectLoopMissing: '缺口',
-        projectLoopProgress: '已完成',
         nextActionReasonRunning: 'Agent 正在处理这个环节，先查看运行状态。',
         nextActionReasonFailed: '这个环节失败过，优先重试或补充要求。',
         nextActionReasonInProgress: '这个环节已经开始，继续推进最容易形成闭环。',
@@ -3982,10 +3945,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         currentStage: 'Stage',
         nextAction: 'Next',
         nextActionSubtitle: 'Current focus',
-        projectLoopTitle: 'Loop focus',
-        projectLoopReasonPrefix: 'Fill next',
-        projectLoopMissing: 'Missing',
-        projectLoopProgress: 'Done',
         nextActionReasonRunning: 'The Agent is already working on this step. Check the running state first.',
         nextActionReasonFailed: 'This step failed before. Retry it with clearer guidance.',
         nextActionReasonInProgress: 'This step is already in motion. Continue it to close the loop.',
@@ -4401,7 +4360,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           currentNodes = message.nodes || [];
           renderSidebar(message.nodes);
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'settingsLoaded':
@@ -4426,7 +4385,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
           agentModelCatalogs[String(catalog.family || getAgentFamilyKey(message.agentCli || currentCliPath || 'agy')).toLowerCase()] = catalog;
           syncSettingAgentModelSelect();
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
         }
 
@@ -4451,7 +4410,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           currentProjects.globalStore = message.projects.globalStore || null;
           renderProjects(message.projects.projects, currentProjects.selectedProjectPath);
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolio(message.projects.portfolio || [], currentProjects.selectedProjectPath || '');
+          renderPortfolioFromAsyncUpdate(message.projects.portfolio || [], currentProjects.selectedProjectPath || '');
           break;
 
         case 'projectIssuesLoaded':
@@ -4459,7 +4418,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             project.path === message.projectPath ? { ...project, issues: message.issues } : project
           ));
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'projectDeliveryLoaded':
@@ -4470,7 +4429,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             deliveryActionMessage = '';
           }
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'projectSecurityLoaded':
@@ -4481,7 +4440,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             deliveryActionMessage = '';
           }
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'projectRefreshCompleted':
@@ -4489,7 +4448,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (message.projectPath === currentProjects.selectedProjectPath) {
             deliveryActionMessage = message.success ? t('refreshProjectDataDone') : (message.message || '');
           }
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'cliTestResult':
@@ -4518,7 +4477,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             cliTestBadge.className = 'cli-badge error';
             cliTestBadge.textContent = message.message || '';
           }
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'dailyReviewLoaded':
@@ -4559,19 +4518,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
               projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
             }
-            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           }
           break;
 
         case 'pastedAttachmentsSaved':
           if (message.targetId && String(message.targetId).startsWith('solo:')) {
             projectSoloFiles[message.targetId] = mergeAttachmentFiles(projectSoloFiles[message.targetId] || [], message.files || []);
-            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           } else if (message.targetId) {
             const input = portfolioList.querySelector('[data-project-conversation-input]');
             projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
             projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
-            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           }
           break;
 
@@ -4581,7 +4540,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           sidebarSoloConversations = message.conversations || [];
           for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
           for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'sidebarStepConversationLoaded': {
@@ -4595,7 +4554,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           sidebarStepConversationRequested[key] = true;
           for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
           for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
         }
 
@@ -4609,13 +4568,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           sidebarProjectConversationRequested[message.projectPath] = true;
           for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
           for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'issueDetailsLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           issueDetails = message.ok ? { issue: message.issue, comments: message.comments || [], stale: !!message.stale } : { error: message.message || '' };
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'issueActionCompleted':
@@ -4631,7 +4590,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             expandedIssueNumber = 0;
             issueDetails = null;
           }
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
       }
     });
@@ -4818,7 +4777,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function extractPreGitHash(conversation) {
-      return String(conversation && conversation.rollbackGitHash || '');
+      const directHash = String(conversation && conversation.rollbackGitHash || '');
+      if (directHash) return directHash;
+      const match = String(conversation && conversation.output || '').match(/SoloMapPreGitHash:\s*([a-f0-9]+)/i);
+      return match ? match[1] : '';
     }
 
     function formatDurationMs(durationMs) {
@@ -4896,7 +4858,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const hasLogs = !!(conversation.command || conversation.output);
       const conversationNodeId = String(conversation.nodeId || nodeId || '');
       
-      const rollbackBtn = preGitHash && conversation.capabilities && conversation.capabilities.canRollback
+      const rollbackBtn = preGitHash && statusKey !== 'Running'
         ? '<button class="sidebar-conv-action-btn rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-rollback-sidebar-solo-hash="' + escapeHtml(preGitHash) + '" data-rollback-sidebar-step-hash="' + escapeHtml(preGitHash) + '" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>'
         : '';
         
@@ -5260,29 +5222,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function projectSoloTargetId(projectPath) {
       return 'solo:' + String(projectPath || '');
-    }
-
-    function renderProjectLoopPanel(project) {
-      const summary = project && project.loopSummary ? project.loopSummary : null;
-      const stages = summary && Array.isArray(summary.stages) ? summary.stages : [];
-      if (!summary || !stages.length) return '';
-      return \`
-        <div class="project-loop-panel">
-          <div class="project-loop-head">
-            <span class="project-loop-title">\${escapeHtml(t('projectLoopTitle'))}</span>
-            <span class="project-loop-focus">\${escapeHtml(t('projectLoopReasonPrefix'))} \${escapeHtml(summary.focusLabel || '-')}</span>
-          </div>
-          <div class="project-loop-grid">
-            \${stages.map(stage => \`
-              <div class="project-loop-chip\${stage.focus ? ' is-focus' : ''}\${stage.missing ? ' is-missing' : ''}">
-                <span class="project-loop-chip-label">\${escapeHtml(stage.label)}</span>
-                <span class="project-loop-chip-meta">\${stage.missing ? escapeHtml(t('projectLoopMissing')) : escapeHtml(t('projectLoopProgress') + ' ' + stage.completed + '/' + stage.total)}</span>
-              </div>
-            \`).join('')}
-          </div>
-          <div class="project-loop-copy">\${escapeHtml(summary.focusReason || '')} · \${escapeHtml(summary.nextTask || '')}</div>
-        </div>
-      \`;
     }
 
     function renderProjectConversationComposer(project, nodes) {
@@ -6237,6 +6176,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderPortfolio(portfolio, selectedProjectPath) {
       const preservedComposerState = captureProjectConversationInputState();
+      hoveredConversationCard = null;
+      focusedConversationCard = null;
       if (!portfolio || portfolio.length === 0) {
         portfolioList.innerHTML = renderOnboardingPanel();
         bindOnboardingActions(portfolioList);
@@ -6289,7 +6230,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="portfolio-card-meta">
               <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
             </div>
-            \${isSelected ? renderProjectLoopPanel(project) : ''}
             <div class="portfolio-card-meta">
               <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}

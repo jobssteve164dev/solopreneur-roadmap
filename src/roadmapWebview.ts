@@ -1403,6 +1403,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     .roadmap-revision-popover {
       position: absolute;
       top: 75px;
+      bottom: 24px;
       right: 24px;
       width: clamp(340px, 42vw, 560px);
       max-width: calc(100vw - 32px);
@@ -1417,8 +1418,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       display: none;
       flex-direction: column;
       gap: 12px;
-      max-height: calc(100vh - 110px);
-      overflow-y: auto;
+      max-height: none;
+      overflow-y: hidden;
       overflow-x: hidden;
       animation: slide-down 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     }
@@ -1430,6 +1431,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       overflow-y: auto;
       max-width: 100%;
       overflow-x: hidden;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+
+    .roadmap-revision-body > * {
+      flex: 0 0 auto;
     }
 
     .roadmap-revision-body .conversation-compose {
@@ -1887,6 +1894,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       .feedback-overlay,
       .roadmap-revision-popover {
         top: 118px;
+        bottom: 12px;
         left: 12px;
         right: 12px;
         width: auto;
@@ -2162,6 +2170,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let soloAgentSelection = '';
     let flowAgentSelection = '';
     let roadmapRevisionAgentSelection = '';
+    let soloDraft = '';
     let roadmapRevisionDraft = '';
     let currentFlowState = { hasProAccess: false, flow: null, history: [] };
     let agentModelRequestSeq = 0;
@@ -2597,6 +2606,38 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return (i18n[currentLanguage].failureCategories || {})[category] || '';
     }
 
+    function captureComposerInputState(container, selector) {
+      const input = container && container.querySelector ? container.querySelector(selector) : null;
+      if (!input) return null;
+      return {
+        value: input.value || '',
+        wasFocused: document.activeElement === input,
+        selectionStart: typeof input.selectionStart === 'number' ? input.selectionStart : null,
+        selectionEnd: typeof input.selectionEnd === 'number' ? input.selectionEnd : null,
+        scrollLeft: typeof input.scrollLeft === 'number' ? input.scrollLeft : 0
+      };
+    }
+
+    function restoreComposerInputState(container, selector, state) {
+      if (!state || !container || !container.querySelector) return;
+      const input = container.querySelector(selector);
+      if (!input) return;
+      input.value = state.value;
+      if (typeof input.scrollLeft === 'number') {
+        input.scrollLeft = state.scrollLeft || 0;
+      }
+      if (state.wasFocused && typeof input.focus === 'function') {
+        input.focus();
+        if (
+          typeof input.setSelectionRange === 'function'
+          && state.selectionStart !== null
+          && state.selectionEnd !== null
+        ) {
+          input.setSelectionRange(state.selectionStart, state.selectionEnd);
+        }
+      }
+    }
+
     function extractContinuationParentConversationId(conversation) {
       return Number(conversation && conversation.continuationParentConversationId || 0);
     }
@@ -3011,19 +3052,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     vscode.postMessage({ command: 'getFlowState' });
     if (typeof setInterval === 'function') {
       setInterval(() => {
-        if (expandedNodeId && currentNodes.some(node => node.status === 'Running')) {
-          renderRoadmap(currentNodes);
-        }
-        const revisionRunning = (nodeConversations[roadmapRevisionId] || [])
-          .some(conversation => conversation.status === 'Running');
-        if (roadmapRevisionExpanded && revisionRunning) {
-          renderRoadmapRevisionPanel(currentNodes);
-        }
-        const soloRunning = (nodeConversations[soloConversationId] || [])
-          .some(conversation => conversation.status === 'Running');
-        if (soloExpanded && soloRunning) {
-          renderSoloPanel(currentNodes);
-        }
+        updateRunningConversationDurations(canvas, nodeConversations);
+        updateRunningConversationDurations(roadmapRevisionBody, {
+          [roadmapRevisionId]: nodeConversations[roadmapRevisionId] || []
+        });
+        updateRunningConversationDurations(soloBody, {
+          [soloConversationId]: nodeConversations[soloConversationId] || []
+        });
         if (flowExpanded && currentFlowState.flow && currentFlowState.flow.status === 'running') {
           renderFlowPanel();
         }
@@ -3765,6 +3800,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (!soloPanel || !soloBody) {
         return;
       }
+      const preservedInputState = captureComposerInputState(soloBody, '[data-solo-input]');
+      if (preservedInputState) {
+        soloDraft = preservedInputState.value;
+      }
       const conversations = nodeConversations[soloConversationId] || [];
       const supplementFiles = nodeSupplementFiles[soloConversationId] || [];
       const disabled = '';
@@ -3781,7 +3820,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             <button class="conversation-tool-btn" data-attach-solo title="\${escapeHtml(t('attachFiles'))}" \${disabled}>
               <span class="codicon codicon-attach"></span>
             </button>
-            <input type="text" class="conversation-input" data-solo-input placeholder="\${escapeHtml(t('soloPlaceholder'))}" \${disabled}>
+            <input type="text" class="conversation-input" data-solo-input placeholder="\${escapeHtml(t('soloPlaceholder'))}" value="\${escapeHtml(soloDraft)}" \${disabled}>
             <button class="btn-send-conversation" data-send-solo title="\${escapeHtml(t('sendSolo'))}" \${disabled}>
               <span class="codicon codicon-send"></span>
             </button>
@@ -3819,6 +3858,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             supplementFiles: nodeSupplementFiles[soloConversationId] || []
           });
           input.value = '';
+          soloDraft = '';
           nodeSupplementFiles[soloConversationId] = [];
           renderSoloPanel(currentNodes);
         });
@@ -3831,6 +3871,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         });
       });
       const soloInput = soloBody.querySelector('[data-solo-input]');
+      if (soloInput) {
+        soloInput.addEventListener('input', () => {
+          soloDraft = soloInput.value || '';
+        });
+      }
       bindPastedImageAttachments(soloInput, soloConversationId, () => renderSoloPanel(currentNodes));
       const soloAgentSelect = soloBody.querySelector('[data-solo-agent]');
       const soloModelSelect = soloBody.querySelector('[data-solo-model]');
@@ -3848,6 +3893,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       bindSoloSelects(soloBody);
       bindConversationActions(soloBody, soloConversationId);
+      restoreComposerInputState(soloBody, '[data-solo-input]', preservedInputState);
     }
 
     function renderFlowPanel() {
@@ -4069,6 +4115,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (!roadmapRevisionPanel || !roadmapRevisionBody) {
         return;
       }
+      const preservedInputState = captureComposerInputState(roadmapRevisionBody, '[data-roadmap-revision-input]');
+      if (preservedInputState) {
+        roadmapRevisionDraft = preservedInputState.value;
+      }
       const conversations = nodeConversations[roadmapRevisionId] || [];
       const disabled = '';
       roadmapRevisionPanel.classList.toggle('open', roadmapRevisionExpanded);
@@ -4156,6 +4206,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       });
       bindSoloSelects(roadmapRevisionBody);
       bindConversationActions(roadmapRevisionBody, roadmapRevisionId);
+      restoreComposerInputState(roadmapRevisionBody, '[data-roadmap-revision-input]', preservedInputState);
     }
 
     function bindConversationActions(container, nodeId) {
@@ -4291,7 +4342,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         ? (conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration
         : '';
       const preGitHash = extractConversationPreGitHash(conversation);
-      const rollbackButton = (preGitHash && conversation.capabilities && conversation.capabilities.canRollback)
+      const rollbackButton = (preGitHash && conversation.status !== 'Running')
         ? \`<button class="conversation-control-btn rollback-btn" data-rollback-hash="\${escapeHtml(preGitHash)}" title="\${escapeHtml(t('rollbackChange'))}"><span class="codicon codicon-discard"></span> \${escapeHtml(t('rollbackChange'))}</button>\`
         : '';
       const retryButton = conversation.capabilities && conversation.capabilities.canRetry
@@ -4313,7 +4364,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               <span class="conversation-cli">\${escapeHtml(conversation.agentCli || '')}</span>
               <span class="conversation-summary">\${escapeHtml(summary)}</span>
               <span class="conversation-time">\${escapeHtml(when)}</span>
-              \${runtimeLabel ? \`<span class="conversation-runtime">\${escapeHtml(runtimeLabel)}</span>\` : ''}
+              \${runtimeLabel ? \`<span class="conversation-runtime" data-running-duration-node-id="\${escapeHtml(nodeId)}" data-running-duration-conversation-id="\${escapeHtml(conversation.id)}">\${escapeHtml(runtimeLabel)}</span>\` : ''}
               \${continuationChildrenCount > 0 ? \`<span class="conversation-runtime">\${escapeHtml(t('continuationCount'))} \${continuationChildrenCount}</span>\` : ''}
               \${reviewChildrenCount > 0 ? \`<span class="conversation-runtime">\${escapeHtml(t('reviewCount'))} \${reviewChildrenCount}</span>\` : ''}
             </div>
@@ -4481,6 +4532,19 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return formatDurationMs(Date.now() - new Date(conversation.timestamp).getTime());
     }
 
+    function updateRunningConversationDurations(container, conversationsByNode) {
+      if (!container || !container.querySelectorAll) return;
+      container.querySelectorAll('[data-running-duration-node-id][data-running-duration-conversation-id]').forEach(element => {
+        const nodeId = element.getAttribute('data-running-duration-node-id') || '';
+        const conversationId = element.getAttribute('data-running-duration-conversation-id') || '';
+        const conversation = (conversationsByNode[nodeId] || [])
+          .find(candidate => String(candidate.id || '') === conversationId);
+        if (!conversation || conversation.status !== 'Running') return;
+        const duration = formatConversationDuration(conversation);
+        element.textContent = duration ? t('elapsed') + ': ' + duration : '';
+      });
+    }
+
     function renderConversationOutcome(conversation, nodeId = '') {
       const failureCategory = String(conversation.failureCategory || '');
       const failureReason = String(conversation.failureReason || '');
@@ -4578,7 +4642,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     }
 
     function extractConversationPreGitHash(conversation) {
-      return String(conversation && conversation.rollbackGitHash || '');
+      const directHash = String(conversation && conversation.rollbackGitHash || '');
+      if (directHash) return directHash;
+      const match = String(conversation && conversation.output || '').match(/SoloMapPreGitHash:\s*([a-f0-9]+)/i);
+      return match ? match[1] : '';
     }
 
     function renderConversationFiles(conversation) {
