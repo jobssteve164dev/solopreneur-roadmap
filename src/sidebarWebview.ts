@@ -5145,8 +5145,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function renderProjectConversationComposer(project, nodes) {
-      const node = getNextActionNode(nodes || []);
       const projectPath = project.path || '';
+      const localNodes = Array.isArray(project.nodes) ? project.nodes : [];
+      const availableNodes = Array.isArray(nodes) && nodes.length > 0 ? nodes : localNodes;
+      const node = getNextActionNode(availableNodes);
       const mode = projectConversationModes[projectPath] || (projectSoloDrafts[projectPath] ? 'solo' : 'continue');
       const soloTargetId = projectSoloTargetId(projectPath);
       const activeMode = mode === 'flow'

@@ -54,6 +54,7 @@ export interface ProjectPortfolioSummary {
   documentationDocumentCount: number;
   documentationPendingReview: number;
   pinnedAt?: string;
+  nodes: RoadmapNodeLike[];
 }
 
 export interface RoadmapNodeLike {
@@ -360,6 +361,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
   const documentationSummary = summarizeDocumentationForReview(project.path);
   return {
     ...baseSummary,
+    nodes,
     globalPriority,
     projectType: project.type || detectProjectType(nodes),
     blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : '',

@@ -6165,8 +6165,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
     const continuationParentId = extractContinuationParentConversationId(existingConversationOutput);
     const continuationSessionId = String(nativeSessionId || '').trim();
-    const continuationMetadataSummary = continuationParentId && continuationSessionId
-      ? buildContinuationMetadataBlock(continuationParentId, continuationSessionId)
+    const continuationMetadataSummary = continuationParentId
+      ? (continuationSessionId
+          ? buildContinuationMetadataBlock(continuationParentId, continuationSessionId)
+          : `Continuation parent conversation: ${continuationParentId}`)
       : '';
     let codexContinuationFirstMessage = '';
     if ((runKind === 'solo_continue' || runKind === 'step_continue') && getAgentProvider(String(agentCli || commandPreview || command || '')) === 'codex' && continuationSessionId) {

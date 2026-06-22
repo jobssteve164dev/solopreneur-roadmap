@@ -143,6 +143,19 @@ export function extractNativeSessionIdFromExecutionOutput(output: string): strin
     || extractContinuationSessionIdFromExecutionOutput(output);
 }
 
+export function extractNativeSessionIdFromConversation(conversation: AgentConversation | null): string {
+  if (!conversation) {
+    return '';
+  }
+  const outputSessionId = extractNativeSessionIdFromExecutionOutput(conversation.output || '');
+  if (outputSessionId) {
+    return outputSessionId;
+  }
+  const command = String(conversation.command || '');
+  const resumeMatch = command.match(/\bresume\b[\s\S]*?['"]?([0-9a-fA-F-]{36})['"]?/);
+  return resumeMatch ? resumeMatch[1] : '';
+}
+
 export function extractContinuationParentConversationId(output: string): number {
   const match = String(output || '').match(/Continuation parent conversation:\s*(\d+)/);
   return match ? Number(match[1]) : 0;
@@ -327,11 +340,15 @@ export function resolveContinuationRootConversationFromList(conversations: Agent
   if (!start) {
     return null;
   }
-  const sessionId = extractSavedNativeSessionIdFromExecutionOutput(start.output || '');
+  const sessionId = extractNativeSessionIdFromConversation(start);
   if (sessionId) {
     return conversations
-      .filter((conversation) => extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '') === sessionId)
-      .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))[0] || start;
+      .filter((conversation) => extractNativeSessionIdFromConversation(conversation) === sessionId)
+      .sort((a, b) => {
+        const leftHasParent = extractContinuationParentConversationId(a.output || '') ? 1 : 0;
+        const rightHasParent = extractContinuationParentConversationId(b.output || '') ? 1 : 0;
+        return leftHasParent - rightHasParent || Number(a.id || 0) - Number(b.id || 0);
+      })[0] || start;
   }
   let current = start;
   const seen = new Set<number>();
@@ -357,8 +374,9 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
   }
   const savedSessionId = extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '');
   const continuationSessionId = extractContinuationSessionIdFromExecutionOutput(conversation.output || '');
+  const commandSessionId = extractNativeSessionIdFromConversation(conversation);
   if (getContinuationAgentProvider(conversation.agentCli || '') !== 'codex' || !workspaceRoot) {
-    return savedSessionId || continuationSessionId;
+    return savedSessionId || continuationSessionId || commandSessionId;
   }
   const conversationId = Number(conversation.id || 0);
   const recordedCodexHome = readRunTextFile(workspaceRoot, nodeId, conversationId, 'codex-home.txt').trim();
@@ -366,7 +384,7 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
   const runSessionId = readRunSessionId(workspaceRoot, nodeId, conversationId);
   const outputText = readRunTextFile(workspaceRoot, nodeId, conversationId, 'output.log');
   const outputSessionId = extractCodexSessionIdFromOutputText(outputText);
-  const candidates = [runSessionId, outputSessionId, savedSessionId, continuationSessionId]
+  const candidates = [runSessionId, outputSessionId, savedSessionId, continuationSessionId, commandSessionId]
     .map((sessionId) => String(sessionId || '').trim())
     .filter(Boolean)
     .filter((sessionId, index, all) => all.indexOf(sessionId) === index);

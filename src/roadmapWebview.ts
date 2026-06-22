@@ -293,8 +293,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     .view-tabs {
       display: flex;
+      align-items: center;
       gap: 8px;
-      padding: 10px 24px 0;
+      padding: 8px 24px;
       background: rgba(15, 17, 26, 0.7);
       border-bottom: 1px solid rgba(255, 255, 255, 0.04);
       z-index: 8;

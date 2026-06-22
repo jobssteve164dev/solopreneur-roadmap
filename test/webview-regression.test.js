@@ -770,6 +770,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
         recommendedStatus: 'Pending',
         overallStatus: 'Pending',
         recentActivityAt: '2026-05-26T10:00:00.000Z',
+        nodes: [{ id: 'step-1', title: '验证首页', stage: '产品', status: 'Pending', dependencies: '', agentCli: 'codex' }],
         issues: {
           available: true,
           repo: 'owner/repo',
@@ -791,6 +792,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /codicon-refresh/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-expand-issue-number="12"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
+  const continueModeButton = elements['portfolio-list'].innerHTML.match(/<button[^>]*data-project-conversation-mode="continue"[^>]*>/)?.[0] || '';
+  assert.match(continueModeButton, /aria-pressed="true"/);
+  assert.doesNotMatch(continueModeButton, /\sdisabled(?:\s|>)/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-open-pro-upgrade|了解 Pro|Unlock Pro/);
@@ -1240,6 +1244,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(html, /id="roadmap-revision-body"/);
   assert.match(html, /id="btn-toggle-roadmap-view"/);
   assert.match(html, /id="btn-toggle-solo"/);
+  assert.match(html, /\.view-tabs\s*\{[\s\S]*?align-items:\s*center[\s\S]*?padding:\s*8px 24px/);
   assert.match(html, /id="solo-panel"/);
   assert.match(html, /id="solo-body"/);
   assert.match(html, /class="view-tab solo-tab"/);
@@ -1301,6 +1306,39 @@ test('full roadmap conversation history keeps failed continuations under the mai
 
   assert.match(rendered, /data-conversation-id="__solo__:20"/);
   assert.doesNotMatch(rendered, /data-conversation-id="__solo__:12"/);
+  assert.match(rendered, /续聊 1|Continuation/);
+});
+
+test('full roadmap conversation history recovers continuation parent from the resume command session', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
+  const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const sessionId = '019eec98-c441-7a40-bc15-eaa1fb1f10dc';
+  const rendered = context.__renderConversationsForTest('__solo__', presentation.buildConversationPresentations('', '__solo__', [
+    {
+      id: 116,
+      status: 'Recorded',
+      agentCli: 'codex',
+      command: `codex resume -C /workspace/app ${sessionId}`,
+      output: 'Continuation record state: Recorded'
+    },
+    {
+      id: 114,
+      status: 'Completed',
+      agentCli: 'codex',
+      command: 'codex exec',
+      output: `User supplement:\n主对话\n\nNative Agent session saved: session.json (${sessionId})`
+    }
+  ]), 'empty');
+
+  assert.match(rendered, /data-conversation-id="__solo__:114"/);
+  assert.doesNotMatch(rendered, /data-conversation-id="__solo__:116"[^]*data-conversation-id="__solo__:114"/);
   assert.match(rendered, /续聊 1|Continuation/);
 });
 
@@ -3046,6 +3084,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildInteractiveContinuationPrompt = buildInteractiveContinuationPrompt;',
       'module.exports.__buildCodexContinuationRunnerScript = buildCodexContinuationRunnerScript;',
       'module.exports.__extractContinuationParentConversationId = continuation_1.extractContinuationParentConversationId;',
+      'module.exports.__extractNativeSessionIdFromConversation = continuation_1.extractNativeSessionIdFromConversation;',
       'module.exports.__resolveContinuationLeafConversationFromList = continuation_1.resolveContinuationLeafConversationFromList;',
       'module.exports.__resolveContinuationSessionConversationFromList = continuation_1.resolveContinuationSessionConversationFromList;',
       'module.exports.__hydrateConversationContinuations = continuation_1.hydrateConversationContinuations;',
@@ -3128,6 +3167,13 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Ship the MVP', '/workspace/app'),
     "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Ship the MVP'"
+  );
+  assert.equal(
+    extensionModule.__extractNativeSessionIdFromConversation({
+      command: "codex resume -C /workspace/app '019eec98-c441-7a40-bc15-eaa1fb1f10dc'",
+      output: ''
+    }),
+    '019eec98-c441-7a40-bc15-eaa1fb1f10dc'
   );
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategy_pyramid'), true);
   assert.equal(extensionModule.__hasProEntitlement({
