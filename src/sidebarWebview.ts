@@ -5443,8 +5443,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const projectPath = currentProjects.selectedProjectPath;
       if (projectPath) {
         bindConversationsTree(container, projectPath, '__solo__', true);
-        const project = currentProjects.portfolio && currentProjects.portfolio.projects
-          ? currentProjects.portfolio.projects.find(p => p.path === projectPath)
+        const portfolioProjects = Array.isArray(currentProjects.portfolio) ? currentProjects.portfolio : [];
+        const project = portfolioProjects.length > 0
+          ? portfolioProjects.find(p => p.path === projectPath)
           : null;
         const node = project ? getNextActionNode(project.nodes || []) : null;
         if (node) {

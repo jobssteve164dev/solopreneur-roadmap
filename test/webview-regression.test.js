@@ -1436,6 +1436,14 @@ test('sidebar conversation result cards expose rollback actions for pre-session 
   assert.doesNotMatch(extensionSource, /\['clean', '-fd'\]/);
 });
 
+test('sidebar project continuation history binds step actions from the portfolio array', () => {
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarWebview.js'), 'utf8');
+
+  assert.match(sidebarSource, /Array\.isArray\(currentProjects\.portfolio\)/);
+  assert.doesNotMatch(sidebarSource, /currentProjects\.portfolio\.projects/);
+  assert.match(sidebarSource, /bindConversationsTree\(container, projectPath, node\.id, false\)/);
+});
+
 test('sidebar keeps project creation focused on the project switcher', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
