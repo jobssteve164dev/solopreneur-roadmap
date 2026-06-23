@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.265 - 2026-06-23
+
+### Changed
+- add marketplace keyword opportunity research (87501f8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.264 - 2026-06-23
 
 ### Docs
