@@ -106,6 +106,7 @@ Open VSX 默认搜索接口 `/api/-/search` 使用 `sortBy=relevance` 和 `sortO
 npm run openvsx:rank
 npm run openvsx:rank -- --queries agent,ai,"ai agent","coding agent" --sort-by relevance,downloadCount,timestamp,rating --scan-limit 1000 --top 10
 npm run openvsx:rank -- --queries agent,roadmap --sort-by relevance,downloadCount --json
+npm --silent run openvsx:rank -- --preset growth --marketplaces openvsx,vscode --sort-by relevance --scan-limit 1000 --top 10 --json
 ```
 
 默认关注关键词：
@@ -124,6 +125,8 @@ npm run openvsx:rank -- --queries agent,roadmap --sort-by relevance,downloadCoun
 - downloadCount 排名：下载势能是否足够。
 - timestamp 排名：新版发布新鲜度是否起作用。
 - rating 排名：评分/评论是否是短板。
+
+脚本现在也支持 VS Code Marketplace。`--marketplaces openvsx,vscode` 会同时查询 Open VSX 与 Visual Studio Marketplace；如果需要机器可解析 JSON，应使用 `npm --silent run` 避免 npm banner 混入输出。
 
 ## 当前判断
 
