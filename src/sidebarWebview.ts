@@ -4710,6 +4710,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     bindSoloSelect(projectSelect, (value) => {
       activateProjectInSidebar(value);
+      requestSidebarProjectConversationHistory(value, true);
       vscode.postMessage({
         command: 'project.select',
         projectPath: value
@@ -5030,6 +5031,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         requestSidebarProjectConversationHistory(projectPath);
       }
 
+      function isConversationActionForTree(item) {
+        return String(item.getAttribute('data-is-solo') || 'false') === String(!!isSolo);
+      }
+
       container.querySelectorAll('[data-card-trigger-id]').forEach(card => {
         card.addEventListener('click', (event) => {
           if (event.target.closest('button') || event.target.closest('.sidebar-conversation-mini-actions') || event.target.closest('span.codicon')) {
@@ -5053,6 +5058,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
 
       container.querySelectorAll('[data-continue-id]').forEach(item => {
+        if (!isConversationActionForTree(item)) return;
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           const conversationId = item.getAttribute('data-continue-id');
@@ -5076,6 +5082,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
 
       container.querySelectorAll('[data-stop-id]').forEach(item => {
+        if (!isConversationActionForTree(item)) return;
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           const conversationId = item.getAttribute('data-stop-id');
@@ -5090,6 +5097,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
 
       container.querySelectorAll('[data-rollback-hash]').forEach(item => {
+        if (!isConversationActionForTree(item)) return;
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           const gitHash = item.getAttribute('data-rollback-hash');

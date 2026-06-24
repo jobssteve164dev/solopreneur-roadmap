@@ -3095,6 +3095,28 @@ test('legacy and canonical webview commands dispatch through one plugin action c
   assert.equal(received[1].command, 'conversation.continue');
 });
 
+test('sidebar conversation controls are scoped to one history tree', () => {
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+
+  assert.match(sidebarSource, /function isConversationActionForTree\(item\)/);
+  assert.equal(
+    (sidebarSource.match(/if \(!isConversationActionForTree\(item\)\) return;/g) || []).length,
+    3
+  );
+  assert.match(sidebarSource, /querySelectorAll\('\[data-continue-id\]'\)[\s\S]*?if \(!isConversationActionForTree\(item\)\) return;[\s\S]*?command: 'conversation\.continue'/);
+  assert.match(sidebarSource, /querySelectorAll\('\[data-stop-id\]'\)[\s\S]*?if \(!isConversationActionForTree\(item\)\) return;[\s\S]*?command: 'conversation\.stop'/);
+  assert.match(sidebarSource, /querySelectorAll\('\[data-rollback-hash\]'\)[\s\S]*?if \(!isConversationActionForTree\(item\)\) return;[\s\S]*?command: 'conversation\.rollback'/);
+});
+
+test('native continuation can recover the real node from a project conversation id', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+
+  assert.match(extensionSource, /function resolveConversationNodeIdForContinuation/);
+  assert.match(extensionSource, /syncEngine\.getProjectAgentExecutions\(\)/);
+  assert.match(extensionSource, /const resolvedNodeId = resolveConversationNodeIdForContinuation\(nodeId, conversationId\)/);
+  assert.match(extensionSource, /const resolvedNodeId = resolveConversationNodeIdForContinuation\(nodeId, parentConversationId\)/);
+});
+
 test('roadmap and sidebar keep one shared application action boundary', () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
