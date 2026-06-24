@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.267 - 2026-06-24
+
+### Changed
+- SoloMap pre-session auto-backup [2026-06-24T03:17:25.477Z] (309f13f)
+
+### Fixed
+- scope sidebar continuation actions (95c1ef3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.266 - 2026-06-23
 
 ### Fixed
