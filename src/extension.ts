@@ -4256,6 +4256,25 @@ function resolveContinuationLeafConversation(nodeId: string, conversationId: num
   return resolveContinuationLeafConversationFromList(conversations, conversationId);
 }
 
+function resolveConversationNodeIdForContinuation(nodeId: string, conversationId: number): string {
+  if (!syncEngine || !conversationId) {
+    return '';
+  }
+  const requestedNodeId = String(nodeId || '');
+  if (requestedNodeId) {
+    const requestedConversations = syncEngine.getAgentExecutions(requestedNodeId);
+    if (requestedConversations.some((entry) => Number(entry.id) === Number(conversationId))
+      || resolveContinuationLeafConversationFromList(requestedConversations, conversationId)) {
+      return requestedNodeId;
+    }
+  }
+  const projectConversations = typeof syncEngine.getProjectAgentExecutions === 'function'
+    ? syncEngine.getProjectAgentExecutions()
+    : [];
+  const matchedConversation = projectConversations.find((entry) => Number(entry.id) === Number(conversationId));
+  return String(matchedConversation?.nodeId || '');
+}
+
 function resolveContinuationSessionConversation(nodeId: string, conversationId: number): AgentConversation | null {
   if (!syncEngine || !nodeId || !conversationId) {
     return null;
@@ -4280,6 +4299,10 @@ async function handleContinueConversationTurn(
 ): Promise<void> {
   if (!syncEngine || !activeProjectRoot || !nodeId || !parentConversationId) {
     return;
+  }
+  const resolvedNodeId = resolveConversationNodeIdForContinuation(nodeId, parentConversationId);
+  if (resolvedNodeId) {
+    nodeId = resolvedNodeId;
   }
   const request = String(userMessage || '').trim();
   if (!request) {
@@ -4389,6 +4412,10 @@ async function handleContinueConversationTurn(
 async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
   if (!syncEngine || !activeProjectRoot || !nodeId || !conversationId) {
     return;
+  }
+  const resolvedNodeId = resolveConversationNodeIdForContinuation(nodeId, conversationId);
+  if (resolvedNodeId) {
+    nodeId = resolvedNodeId;
   }
 
   const conversation = resolveContinuationLeafConversation(nodeId, conversationId)
