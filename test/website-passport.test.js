@@ -490,6 +490,7 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     assert.match(html, /最多 5 台个人设备/);
     assert.match(html, /pro@solomap\.app/);
     assert.match(html, /打开账户页面/);
+    assert.match(html, /href="https:\/\/passport\.szlk\.ai\/passport\/account"/);
     assert.ok(grant);
     assert.equal(verify.status, 200);
     assert.equal(verifyBody.allowed, true);
@@ -565,6 +566,7 @@ test('paid website users can recover an activation code from the Pro page', asyn
     assert.match(accountHtml, /SoloMap Pro 已授权/);
     assert.match(accountHtml, /复制下面的激活码/);
     assert.match(accountHtml, /最多 5 台个人设备/);
+    assert.match(accountHtml, /href="https:\/\/passport\.szlk\.ai\/passport\/account"/);
     assert.ok(grant);
     assert.equal(verifiedBody.allowed, true);
     assert.equal(verifiedBody.deviceLimit, 5);
