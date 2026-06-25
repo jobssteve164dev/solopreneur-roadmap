@@ -13,7 +13,7 @@ SoloMap 发布不到一个月，在 **Open VSX 市场下载量已顺利突破 20
 
 为了庆祝这一里程碑，我们生成了一张社交媒体宣传海报，用于在 X (Twitter)、小红书、V2EX 等渠道进行下一轮的 Sell 与推广：
 
-![SoloMap 20k Downloads Milestone Poster](file:///home/ubuntu/.gemini/antigravity-cli/brain/319456a1-ad09-4c96-9a84-9361f6f3926f/solomap_20k_milestone_1782381341945.jpg)
+![SoloMap 20k Downloads Milestone Poster](assets/solomap_20k_milestone.jpg)
 
 ---
 
