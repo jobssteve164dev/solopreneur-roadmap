@@ -766,6 +766,7 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
     email: String(result.email || ''),
     userId: String(result.userId || ''),
     entitlements: Array.isArray(result.entitlements) ? result.entitlements.map((item) => String(item || '')).filter(Boolean) : [],
+    deviceLimit: Number(result.deviceLimit || 0) || undefined,
     expiresAt: String(result.expiresAt || new Date(Date.now() + passportGrantOfflineGraceMs).toISOString()),
     checkedAt: new Date().toISOString()
   };

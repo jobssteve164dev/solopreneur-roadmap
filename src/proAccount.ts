@@ -12,6 +12,7 @@ export interface PassportGrantCache {
   email: string;
   userId: string;
   entitlements: string[];
+  deviceLimit?: number;
   expiresAt: string;
   checkedAt: string;
 }
@@ -23,6 +24,7 @@ export interface PassportVerifyResult {
   email?: string;
   userId?: string;
   entitlements?: string[];
+  deviceLimit?: number;
   expiresAt?: string;
 }
 

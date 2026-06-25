@@ -82,6 +82,7 @@ test('Pro subscription page carries signed upgrade state into Passport start', a
   assert.match(html, /Strategy Pyramid/);
   assert.match(html, /Reliable progress history/);
   assert.match(html, /Goal-driven autopilot/);
+  assert.match(html, /Already subscribed\? Get activation code/);
   assert.match(html, /VS Code Marketplace/);
   assert.match(html, /Privacy \/ Local-first note/);
   assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP|Planner|Builder|Verifier|scoring|micro execution|exchange code/);
@@ -112,6 +113,7 @@ test('Chinese Pro subscription page stays inside the website frame and explains 
   assert.match(html, /战略金字塔/);
   assert.match(html, /可靠推进历史/);
   assert.match(html, /目标自动推进/);
+  assert.match(html, /已订阅？取回激活码/);
   assert.match(html, /仍然本地优先/);
   assert.match(html, /href="\/pro\?lang=en" hreflang="en"/);
   assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP|Planner|Builder|Verifier|scoring|微观|证据链|exchange code/);
@@ -129,7 +131,8 @@ test('Pro subscription page remains readable when signing is unavailable', async
 
   assert.equal(response.status, 200);
   assert.match(html, /Free 与 Pro 的区别/);
-  assert.match(html, /href="\/api\/passport\/start"/);
+  assert.match(html, /href="\/api\/passport\/recover\?intent=checkout"/);
+  assert.match(html, /href="\/api\/passport\/recover\?intent=recover"/);
   assert.doesNotMatch(html, /missing_product_secret|Passport|CloudMCP/);
 });
 
@@ -405,6 +408,8 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
     assert.equal(checkoutPayload.planId, 'solomap_pro_early_access_yearly');
     assert.equal(checkoutPayload.customerEmail, 'free@solomap.app');
     assert.equal(checkoutPayload.userId, 'passport-user-free');
+    assert.equal(checkoutPayload.metadata.deviceLimit, 5);
+    assert.equal(checkoutPayload.metadata.maxDevices, 5);
     assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/checkout\/success\?/);
     const successUrl = new URL(checkoutPayload.successUrl);
     assert.ok(successUrl.searchParams.get('state'));
@@ -482,10 +487,87 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     assert.equal(authorizeLocation.origin, 'https://passport.szlk.ai');
     assert.equal(callback.status, 200);
     assert.match(html, /SoloMap Pro 已授权/);
+    assert.match(html, /最多 5 台个人设备/);
+    assert.match(html, /pro@solomap\.app/);
+    assert.match(html, /打开账户页面/);
     assert.ok(grant);
     assert.equal(verify.status, 200);
     assert.equal(verifyBody.allowed, true);
     assert.deepEqual(verifyBody.entitlements, ['strategy_pyramid']);
+    assert.equal(verifyBody.deviceLimit, 5);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('paid website users can recover an activation code from the Pro page', async () => {
+  const worker = await loadWebsiteWorker();
+  const originalFetch = global.fetch;
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/oidc/token') {
+      assert.equal(init.method, 'POST');
+      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
+      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          allowed: true,
+          email: 'pro@solomap.app',
+          userId: 'passport-user',
+          entitlements: ['strategy_pyramid'],
+          deviceLimit: 5
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const env = {
+      SITE_ORIGIN: 'https://solomap.app',
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+      SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
+    };
+    const page = await worker.default.fetch(new Request('https://solomap.app/zh/pro'), env);
+    const html = await page.text();
+    const recoverHref = html.match(/href="([^"]*\/api\/passport\/recover\?intent=recover[^"]*)"/)?.[1] || '';
+    const recover = await worker.default.fetch(new Request(new URL(recoverHref, 'https://solomap.app').toString()), env);
+    const recoverLocation = recover.headers.get('location') || '';
+    const deviceCode = new URL(recoverLocation).searchParams.get('device') || '';
+    const authorize = await worker.default.fetch(new Request(recoverLocation), env);
+    const state = new URL(authorize.headers.get('location') || '').searchParams.get('state');
+    const callback = await worker.default.fetch(
+      new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
+      env
+    );
+    const accountHtml = await callback.text();
+    const grant = accountHtml.match(/<textarea id="code" readonly>([^<]+)<\/textarea>/)?.[1] || '';
+    const verified = await worker.default.fetch(
+      new Request('https://solomap.app/api/passport/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ grant, deviceCode })
+      }),
+      env
+    );
+    const verifiedBody = await verified.json();
+
+    assert.equal(page.status, 200);
+    assert.ok(recoverHref);
+    assert.equal(recover.status, 302);
+    assert.match(recoverLocation, /^https:\/\/solomap\.app\/api\/passport\/device\/authorize\?device=/);
+    assert.equal(authorize.status, 302);
+    assert.equal(callback.status, 200);
+    assert.match(accountHtml, /SoloMap Pro 已授权/);
+    assert.match(accountHtml, /复制下面的激活码/);
+    assert.match(accountHtml, /最多 5 台个人设备/);
+    assert.ok(grant);
+    assert.equal(verifiedBody.allowed, true);
+    assert.equal(verifiedBody.deviceLimit, 5);
   } finally {
     global.fetch = originalFetch;
   }
@@ -745,5 +827,3 @@ test('Privacy Policy and Terms of Service endpoints render correct bilingual cop
   assert.match(termsZh, /<h1>用户协议<\/h1>/);
   assert.match(termsZh, /许可授予与使用范围/);
 });
-
-

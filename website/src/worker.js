@@ -18,8 +18,10 @@ const PASSPORT_OIDC_TOKEN_URL = `${PASSPORT_ISSUER}/api/oidc/token`;
 const PASSPORT_OIDC_USERINFO_URL = `${PASSPORT_ISSUER}/api/oidc/userinfo`;
 const PASSPORT_ACCESS_CHECK_URL = `${PASSPORT_ISSUER}/api/v1/entitlements/access-check`;
 const PASSPORT_CHECKOUT_LINK_URL = `${PASSPORT_ISSUER}/api/v1/billing/checkout-link`;
+const PASSPORT_ACCOUNT_URL = `${PASSPORT_ISSUER}/account`;
 const SOLOMAP_OIDC_CLIENT_ID = "solomap-vscode";
 const SOLOMAP_PRO_PLAN_ID = "solomap_pro_early_access_yearly";
+const SOLOMAP_PRO_DEVICE_LIMIT = 5;
 const SITEMAP_LASTMOD = "2026-06-06";
 
 const securityHeaders = {
@@ -552,6 +554,15 @@ function getProPlanId(env) {
   return String(env.SOLOMAP_PRO_PLAN_ID || SOLOMAP_PRO_PLAN_ID);
 }
 
+function getProDeviceLimit(env) {
+  const value = Number(env.SOLOMAP_PRO_DEVICE_LIMIT || SOLOMAP_PRO_DEVICE_LIMIT);
+  return Number.isFinite(value) && value >= 3 ? Math.floor(value) : SOLOMAP_PRO_DEVICE_LIMIT;
+}
+
+function getPassportAccountUrl(env) {
+  return String(env.SOLOMAP_PASSPORT_ACCOUNT_URL || PASSPORT_ACCOUNT_URL);
+}
+
 async function getPassportCheckoutSuccessUrl(env, requestUrl, state, userinfo = {}) {
   const payload = {
     mode: state.mode,
@@ -656,6 +667,7 @@ async function createDeviceCode(env, options = {}) {
     mode: "device",
     nonce: randomString(24),
     authNonce: normalizeAuthNonce(options.authNonce),
+    intent: String(options.intent || "device").slice(0, 40),
     issuedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString()
   });
@@ -671,6 +683,7 @@ async function issueSoloMapGrant(env, email = "pro-test@solomap.app", options = 
     email,
     userId: options.userId || `passport:${email}`,
     entitlements: Array.isArray(options.entitlements) && options.entitlements.length ? options.entitlements : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"],
+    deviceLimit: getProDeviceLimit(env),
     issuedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
   };
@@ -750,6 +763,7 @@ async function verifySignedGrant(env, grant) {
     email: String(payload.email || ""),
     userId: String(payload.userId || ""),
     entitlements,
+    deviceLimit: Number(payload.deviceLimit || payload.maxDevices || SOLOMAP_PRO_DEVICE_LIMIT),
     expiresAt: String(payload.expiresAt || "")
   };
 }
@@ -775,13 +789,15 @@ async function verifyGrantWithPassport(env, grant) {
     return { allowed: false, reason: `passport_http_${response.status}` };
   }
   const body = await response.json();
+  const data = body && typeof body === "object" && body.ok === true && body.data ? body.data : body;
   return {
-    allowed: Boolean(body.allowed),
-    reason: String(body.reason || ""),
-    email: String(body.email || ""),
-    userId: String(body.userId || body.user_id || ""),
-    entitlements: Array.isArray(body.entitlements) ? body.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
-    expiresAt: String(body.expiresAt || body.expires_at || "")
+    allowed: Boolean(data.allowed),
+    reason: String(data.reason || ""),
+    email: String(data.email || ""),
+    userId: String(data.userId || data.user_id || ""),
+    entitlements: Array.isArray(data.entitlements) ? data.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
+    deviceLimit: Number(data.deviceLimit || data.device_limit || data.maxDevices || data.max_devices || SOLOMAP_PRO_DEVICE_LIMIT),
+    expiresAt: String(data.expiresAt || data.expires_at || "")
   };
 }
 
@@ -823,7 +839,8 @@ async function checkPassportAccessForUser(env, userinfo) {
       reason: String(data.reason || ""),
       email: String(data.email || email),
       userId: String(data.userId || data.user_id || userId),
-      entitlements: Array.isArray(data.entitlements) ? data.entitlements.map((item) => String(item || "")).filter(Boolean) : []
+      entitlements: Array.isArray(data.entitlements) ? data.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
+      deviceLimit: Number(data.deviceLimit || data.device_limit || data.maxDevices || data.max_devices || getProDeviceLimit(env))
     };
   }
   if (env.SOLOMAP_PASSPORT_REQUIRE_UPSTREAM === "1") {
@@ -834,7 +851,8 @@ async function checkPassportAccessForUser(env, userinfo) {
     reason: "passport_verify_not_configured",
     email,
     userId,
-    entitlements: []
+    entitlements: [],
+    deviceLimit: getProDeviceLimit(env)
   };
 }
 
@@ -889,8 +907,14 @@ function buildPassportUpgradeUnavailablePage() {
 </html>`;
 }
 
-function buildDeviceGrantPage(grant) {
+function buildDeviceGrantPage(grant, context = {}) {
   const escapedGrant = escapeHtml(grant);
+  const email = String(context.email || "").trim();
+  const deviceLimit = Number(context.deviceLimit || SOLOMAP_PRO_DEVICE_LIMIT);
+  const accountUrl = escapeHtml(String(context.accountUrl || PASSPORT_ACCOUNT_URL));
+  const activationCopy = deviceLimit >= 3
+    ? `你的 SoloMap Pro 可在最多 ${deviceLimit} 台个人设备上激活。`
+    : "你的 SoloMap Pro 已可在多台个人设备上激活。";
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -903,15 +927,21 @@ function buildDeviceGrantPage(grant) {
     h1 { font-size: 30px; margin: 0 0 12px; }
     p { color: #ded4c8; line-height: 1.6; }
     textarea { width: 100%; min-height: 140px; margin-top: 12px; padding: 14px; border-radius: 8px; border: 1px solid rgba(246,240,232,.24); background: #1a1714; color: #f6f0e8; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
-    button { margin-top: 14px; border: 0; border-radius: 8px; padding: 11px 16px; background: #f6f0e8; color: #11100e; font-weight: 700; cursor: pointer; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    button, a.button { border: 0; border-radius: 8px; padding: 11px 16px; background: #f6f0e8; color: #11100e; font-weight: 700; cursor: pointer; text-decoration: none; }
+    a.button.secondary { background: transparent; color: #f6f0e8; border: 1px solid rgba(246,240,232,.24); }
   </style>
 </head>
 <body>
   <main>
     <h1>SoloMap Pro 已授权</h1>
-    <p>复制下面的授权码，回到 SoloMap 粘贴后即可打开战略金字塔视图。</p>
+    <p>复制下面的激活码，回到 SoloMap 粘贴后即可打开 Pro 功能。${email ? `当前账户：${escapeHtml(email)}。` : ""}</p>
+    <p>${escapeHtml(activationCopy)}</p>
     <textarea id="code" readonly>${escapedGrant}</textarea>
-    <button id="copy" type="button">复制授权码</button>
+    <div class="actions">
+      <button id="copy" type="button">复制激活码</button>
+      <a class="button secondary" href="${accountUrl}">打开账户页面</a>
+    </div>
   </main>
   <script>
     document.getElementById('copy').addEventListener('click', async () => {
@@ -932,6 +962,8 @@ function getProPageCopy(locale) {
       title: "Know which project deserves your next month.",
       lead: "SoloMap Pro is for solo founders who have more ideas than time. It helps you decide what to double down on, what to pause, and where your work is starting to compound into a real business.",
       primaryCta: "Join Pro Early Access",
+      recoverCta: "Already subscribed? Get activation code",
+      accountCta: "Open account",
       secondaryCta: "Install Free first",
       bullets: [
         ["Choose with confidence", "Stop spreading attention across every unfinished idea and see which bet has the strongest reason to continue."],
@@ -982,7 +1014,7 @@ function getProPageCopy(locale) {
       faqTitle: "Pro Subscription FAQ",
       faqItems: [
         ["Is my code sent to any servers if I subscribe to Pro?", "No. SoloMap Pro remains fully local-first. Your code, project memory, and strategic cockpit configurations never leave your machine."],
-        ["How do I activate the Pro features after payment?", "Once payment is completed, you will be redirected to VS Code to activate your workspace instantly. The authorization is bound to your device securely."],
+        ["How do I activate the Pro features after payment?", "After payment, SoloMap will guide you back to VS Code. If you use another machine later, open this page and get a fresh activation code from the same account."],
         ["Can I use SoloMap Pro on multiple devices?", "Yes. You can authorize up to 5 devices (like your personal laptop and work desktop) with a single subscription."],
         ["What is the refund policy?", "We offer a 14-day refund policy. If SoloMap Pro doesn't help you build and manage your solo projects better, just request a refund and we'll issue it, no questions asked."]
       ]
@@ -995,6 +1027,8 @@ function getProPageCopy(locale) {
     title: "看清下个月最值得投入的项目。",
     lead: "当你的想法、项目和机会越来越多时，真正稀缺的不是任务列表，而是取舍判断。SoloMap Pro 帮你判断该加码什么、暂停什么，以及哪些投入正在形成一人公司的复利。",
     primaryCta: "加入 Pro Early Access",
+    recoverCta: "已订阅？取回激活码",
+    accountCta: "打开账户页面",
     secondaryCta: "先安装 Free",
     bullets: [
       ["更果断地取舍", "不再平均分配注意力，而是看清哪个项目最值得继续押注。"],
@@ -1045,7 +1079,7 @@ function getProPageCopy(locale) {
     faqTitle: "Pro 订阅常见问题",
     faqItems: [
       ["订阅 Pro 后，我的代码会被上传到服务器吗？", "不会。SoloMap Pro 依然遵循绝对的本地优先原则。你的代码、项目记忆和战略驾驶舱数据仅保留在你的本地，绝不会上传。"],
-      ["付款后如何激活 Pro 权益？", "付款成功后，网页会自动引导你唤起 VS Code 插件完成一键安全激活。不需要复杂的配置。"],
+      ["付款后如何激活 Pro 权益？", "付款成功后，网页会引导你回到 VS Code 完成激活。之后换电脑时，也可以回到这个页面，用同一个账户取回新的激活码。"],
       ["我可以在多台设备上使用同一个订阅吗？", "可以。单个订阅支持激活最多 5 台你个人拥有的工作设备（如日常笔记本和工作台式机）。"],
       ["有退款保证吗？", "有的。我们提供 14 天退款承诺。如果 SoloMap Pro 没有达到你的预期，你可以随时申请全额退款。"]
     ]
@@ -1112,7 +1146,11 @@ async function buildProSubscriptionPage(request, env) {
   }
   const ctaHref = upgradeState
     ? `/api/passport/start?upgrade_state=${encodeURIComponent(upgradeState)}`
-    : "/api/passport/start";
+    : "/api/passport/recover?intent=checkout";
+  const recoverHref = upgradeState
+    ? `/api/passport/start?upgrade_state=${encodeURIComponent(upgradeState)}`
+    : "/api/passport/recover?intent=recover";
+  const accountHref = getPassportAccountUrl(env);
   const installHref = `${t.homePath}#install`;
   return `<!doctype html>
 <html lang="${t.lang}">
@@ -1137,6 +1175,7 @@ async function buildProSubscriptionPage(request, env) {
           <p class="pro-hero-copy">${escapeHtml(copy.lead)}</p>
           <div class="cta-row">
             <a class="button primary" href="${escapeHtml(ctaHref)}">${escapeHtml(copy.primaryCta)}</a>
+            <a class="button secondary" href="${escapeHtml(recoverHref)}">${escapeHtml(copy.recoverCta)}</a>
             <a class="button ghost" href="${escapeHtml(installHref)}">${escapeHtml(copy.secondaryCta)}</a>
           </div>
           <div class="pro-bullets">
@@ -1148,6 +1187,7 @@ async function buildProSubscriptionPage(request, env) {
           <div class="pro-price">${escapeHtml(copy.price)} <span>${escapeHtml(copy.priceSuffix)}</span></div>
           <p>${escapeHtml(copy.offerCopy)}</p>
           <a class="button primary" href="${escapeHtml(ctaHref)}">${escapeHtml(copy.primaryCta)}</a>
+          <a class="button ghost" href="${escapeHtml(recoverHref)}">${escapeHtml(copy.recoverCta)}</a>
           <span class="pro-note">${escapeHtml(copy.offerNote)}</span>
         </aside>
       </div>
@@ -1220,6 +1260,7 @@ async function buildProSubscriptionPage(request, env) {
         </div>
         <div>
           <a class="button primary" href="${escapeHtml(ctaHref)}">${escapeHtml(copy.primaryCta)}</a>
+          <a class="button ghost" href="${escapeHtml(accountHref)}">${escapeHtml(copy.accountCta)}</a>
         </div>
       </div>
     </section>
@@ -1283,7 +1324,9 @@ async function createPassportCheckoutRedirect(request, env, state, userinfo, acc
       clientReferenceId: userId || customerEmail,
       metadata: {
         feature: STRATEGY_PYRAMID_FEATURE,
-        source: "solomap_pro_upgrade"
+        source: "solomap_pro_upgrade",
+        deviceLimit: getProDeviceLimit(env),
+        maxDevices: getProDeviceLimit(env)
       }
     })
   });
@@ -1317,11 +1360,23 @@ async function handlePassportCheckoutSuccess(request, env) {
   });
   const exchangeCode = state.authNonce ? await issueSoloMapExchangeCode(env, grant, state) : grant;
   if (state.mode === "device") {
-    return htmlResponse(buildDeviceGrantPage(exchangeCode), 200);
+    return htmlResponse(buildDeviceGrantPage(exchangeCode, {
+      email: access.email || userinfo.email,
+      deviceLimit: getProDeviceLimit(env),
+      accountUrl: getPassportAccountUrl(env)
+    }), 200);
   }
   const callbackUrl = new URL(state.callback);
   callbackUrl.searchParams.set(state.authNonce ? "code" : "grant", exchangeCode);
   return Response.redirect(callbackUrl.toString(), 302);
+}
+
+async function handlePassportRecover(request, env) {
+  const url = new URL(request.url);
+  const deviceCode = await createDeviceCode(env, {
+    intent: url.searchParams.get("intent") || "recover"
+  });
+  return Response.redirect(getDeviceAuthorizeUrl(url, deviceCode), 302);
 }
 
 async function buildPassportAuthorizeRedirect(request, env, payload) {
@@ -1457,7 +1512,11 @@ async function handlePassportOidcCallback(request, env) {
   });
   const exchangeCode = state.authNonce ? await issueSoloMapExchangeCode(env, grant, state) : grant;
   if (state.mode === "device") {
-    return htmlResponse(buildDeviceGrantPage(exchangeCode), 200);
+    return htmlResponse(buildDeviceGrantPage(exchangeCode, {
+      email: access.email || userinfo.email,
+      deviceLimit: getProDeviceLimit(env),
+      accountUrl: getPassportAccountUrl(env)
+    }), 200);
   }
   const callbackUrl = new URL(state.callback);
   callbackUrl.searchParams.set(state.authNonce ? "code" : "grant", exchangeCode);
@@ -4355,6 +4414,10 @@ export default {
 
     if (url.pathname === "/api/passport/start") {
       return handlePassportStart(request, env);
+    }
+
+    if (url.pathname === "/api/passport/recover") {
+      return handlePassportRecover(request, env);
     }
 
     if (url.pathname === "/pro" || url.pathname === "/zh/pro") {
