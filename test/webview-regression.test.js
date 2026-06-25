@@ -3373,15 +3373,23 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('cursor-agent', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
-    "(cd '/workspace/app' && 'cursor-agent' resume '3350a3b7-7761-4ed5-9661-2e9c9de8f924')"
+    "(cd '/workspace/app' && 'cursor-agent' --resume '3350a3b7-7761-4ed5-9661-2e9c9de8f924')"
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('agy', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
     "'agy' --conversation '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --add-dir='/workspace/app'"
   );
   assert.equal(
+    extensionModule.__buildNativeContinueCommand('claude', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
+    "'claude' --resume '3350a3b7-7761-4ed5-9661-2e9c9de8f924' --add-dir '/workspace/app'"
+  );
+  assert.equal(
     extensionModule.__buildNativeContinueCommand('copilot', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
-    "'copilot' --connect '3350a3b7-7761-4ed5-9661-2e9c9de8f924' -C '/workspace/app' --add-dir '/workspace/app'"
+    "'copilot' --resume='3350a3b7-7761-4ed5-9661-2e9c9de8f924' -C '/workspace/app' --add-dir '/workspace/app' --allow-all --no-ask-user"
+  );
+  assert.equal(
+    extensionModule.__buildNativeContinueCommand('opencode', 'ses_13abdae1dffekQpdcehmyyexoY', '/workspace/app'),
+    "(cd '/workspace/app' && 'opencode' --session 'ses_13abdae1dffekQpdcehmyyexoY')"
   );
   assert.equal(
     extensionModule.__buildSdkSentinelCommandLabel('codex', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
@@ -3407,6 +3415,10 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(
     extensionModule.__extractNativeSessionIdFromExecutionOutput('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11'),
     '019dc472-6a80-7c70-99a4-b2593a641d11'
+  );
+  assert.equal(
+    extensionModule.__extractNativeSessionIdFromExecutionOutput('Native Agent session saved: session.json (ses_13abdae1dffekQpdcehmyyexoY)'),
+    'ses_13abdae1dffekQpdcehmyyexoY'
   );
   assert.equal(
     extensionModule.__extractSavedNativeSessionIdFromExecutionOutput('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11'),
@@ -3545,6 +3557,20 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.equal(
     JSON.parse(fs.readFileSync(sessionFilePath, 'utf8')).sessionId,
     '019ecd99-4325-7050-8e71-7def92359c9f'
+  );
+  const openCodeCaptureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-opencode-capture-'));
+  const openCodeOutputFilePath = path.join(openCodeCaptureDir, 'output.log');
+  const openCodeStartedAtFilePath = path.join(openCodeCaptureDir, 'started_at');
+  const openCodeSessionFilePath = path.join(openCodeCaptureDir, 'session.json');
+  fs.writeFileSync(openCodeStartedAtFilePath, '', 'utf8');
+  fs.writeFileSync(openCodeOutputFilePath, 'Continue  opencode -s ses_13abdae1dffekQpdcehmyyexoY\n', 'utf8');
+  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript('opencode', '/workspace/app', openCodeStartedAtFilePath, openCodeOutputFilePath, openCodeSessionFilePath)], {
+    cwd: openCodeCaptureDir,
+    env: { ...process.env, HOME: openCodeCaptureDir }
+  });
+  assert.equal(
+    JSON.parse(fs.readFileSync(openCodeSessionFilePath, 'utf8')).sessionId,
+    'ses_13abdae1dffekQpdcehmyyexoY'
   );
   assert.equal(
     extensionModule.__extractCodexSessionIdFromOutputText('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11\nsession id: 019ecd99-4325-7050-8e71-7def92359c9f'),

@@ -2360,8 +2360,8 @@ function buildSessionCaptureScript(
         'process.stdout.write(data[workspace] || "");',
         '} catch {}'
       ].join(''))} "$HOME/.gemini/antigravity-cli/cache/last_conversations.json" ${shellQuote(workspaceRoot)}); session_source="antigravity-cache"; fi`,
-      // Fallback: if provider-specific extraction fails, capture the last UUID in the run output log.
-      `if [ -z "$session_id" ]; then session_id=$(grep -Eo '[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | tail -1 || true); session_source="generic-output"; fi`,
+      // Fallback: if provider-specific extraction fails, capture a recognizable session token in the run output log.
+      `if [ -z "$session_id" ]; then session_id=$(grep -Eo 'ses_[A-Za-z0-9_.:-]+|[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | tail -1 || true); session_source="generic-output"; fi`,
       sessionWriter
     ].join('; ');
   }
@@ -2398,7 +2398,7 @@ function buildSessionCaptureScript(
   }
 
   return [
-    `session_id=$(grep -Eo '[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | tail -1 || true)`,
+    `session_id=$(grep -Eo 'ses_[A-Za-z0-9_.:-]+|[0-9a-fA-F-]{36}' ${shellQuote(outputFilePath)} 2>/dev/null | tail -1 || true)`,
     `session_source="generic-output"`,
     sessionWriter
   ].filter(Boolean).join('; ');
@@ -4439,70 +4439,63 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
 
-  if (supportsSdkContinuation(agentCli)) {
-    const settings = getPersistedSettings(context);
-    const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
-    const rootConversationId = Number(rootConversation.id || conversationId);
-    if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
-      const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
-      if (currentNode && currentNode.status !== 'Completed') {
-        syncEngine.updateNode(nodeId, { status: 'Running' });
-        sendNodesToWebview();
-        refreshSidebarProjectCards();
-      }
+  const settings = getPersistedSettings(context);
+  const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
+  const rootConversationId = Number(rootConversation.id || conversationId);
+  if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
+    const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
+    if (currentNode && currentNode.status !== 'Completed') {
+      syncEngine.updateNode(nodeId, { status: 'Running' });
+      sendNodesToWebview();
+      refreshSidebarProjectCards();
     }
-    const preGitHash = createPreSessionGitCommit(activeProjectRoot);
-    const launchSummary = [
-      preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
-      'Agent continuation started.',
-      `Run started at: ${new Date().toISOString()}`,
-      buildContinuationMetadataBlock(rootConversationId, sessionId),
-      'Continuation mode: direct terminal with tracked sentinel recording.'
-    ].filter(Boolean).join('\n\n');
-    const executionLogId = syncEngine.logAgentExecution(
-      nodeId,
-      agentCli,
-      `${agentCli} [preparing tracked continuation terminal]`,
-      launchSummary,
-      'Running'
-    );
-    const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
-    const statusFilePath = getAgentStatusFilePath(activeProjectRoot, executionLogId);
-    fs.mkdirSync(runDir, { recursive: true });
-    const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot);
-    const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
-    syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
-    postNodeConversations(nodeId);
-    const { finalCommand } = buildAgentShellScript(
-      agentCli,
-      '',
-      'SoloMap tracked continuation terminal',
-      activeProjectRoot,
-      nodeId,
-      executionLogId,
-      '',
-      undefined,
-      sessionId,
-      directExecutionCommand,
-      nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
-      '',
-      settings.globalDataPath,
-      settings.taskPermissionMode,
-      settings.reviewerCliPath,
-      settings.collaborationReviewMode,
-      settings.enabledEnhancements,
-      runDir,
-      statusFilePath
-    );
-    const terminal = createAgentTerminal(activeProjectRoot, `continue-${nodeId}-${executionLogId}`, executionLogId);
-    terminal.show(true);
-    terminal.sendText(finalCommand);
-    return;
   }
-
-  const terminal = createAgentTerminal(activeProjectRoot, `native-${sessionId.slice(0, 8)}`, conversationId);
+  const preGitHash = createPreSessionGitCommit(activeProjectRoot);
+  const launchSummary = [
+    preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
+    'Agent continuation started.',
+    `Run started at: ${new Date().toISOString()}`,
+    buildContinuationMetadataBlock(rootConversationId, sessionId),
+    'Continuation mode: direct terminal with tracked sentinel recording.'
+  ].filter(Boolean).join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
+    nodeId,
+    agentCli,
+    `${agentCli} [preparing tracked continuation terminal]`,
+    launchSummary,
+    'Running'
+  );
+  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
+  const statusFilePath = getAgentStatusFilePath(activeProjectRoot, executionLogId);
+  fs.mkdirSync(runDir, { recursive: true });
+  const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot);
+  const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
+  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
+  postNodeConversations(nodeId);
+  const { finalCommand } = buildAgentShellScript(
+    agentCli,
+    '',
+    'SoloMap tracked continuation terminal',
+    activeProjectRoot,
+    nodeId,
+    executionLogId,
+    '',
+    undefined,
+    sessionId,
+    directExecutionCommand,
+    nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
+    '',
+    settings.globalDataPath,
+    settings.taskPermissionMode,
+    settings.reviewerCliPath,
+    settings.collaborationReviewMode,
+    settings.enabledEnhancements,
+    runDir,
+    statusFilePath
+  );
+  const terminal = createAgentTerminal(activeProjectRoot, `continue-${nodeId}-${executionLogId}`, executionLogId);
   terminal.show(true);
-  terminal.sendText(buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot));
+  terminal.sendText(finalCommand);
 }
 
 function readAgentStatus(statusFilePath: string): any | null {

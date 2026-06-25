@@ -129,12 +129,12 @@ export function extractCodexSessionIdFromOutputText(output: string): string {
 
 export function extractSavedNativeSessionIdFromExecutionOutput(output: string): string {
   const text = String(output || '');
-  const match = text.match(/Native Agent session saved:[^\n]*\(([0-9a-fA-F-]{36})\)/);
+  const match = text.match(/Native Agent session saved:[^\n]*\(([A-Za-z0-9_.:-]+)\)/);
   return match ? match[1] : '';
 }
 
 export function extractContinuationSessionIdFromExecutionOutput(output: string): string {
-  const match = String(output || '').match(/Continuation session id:\s*([0-9a-fA-F-]{36})/);
+  const match = String(output || '').match(/Continuation session id:\s*([A-Za-z0-9_.:-]+)/);
   return match ? match[1] : '';
 }
 
@@ -152,8 +152,12 @@ export function extractNativeSessionIdFromConversation(conversation: AgentConver
     return outputSessionId;
   }
   const command = String(conversation.command || '');
-  const resumeMatch = command.match(/\bresume\b[\s\S]*?['"]?([0-9a-fA-F-]{36})['"]?/);
-  return resumeMatch ? resumeMatch[1] : '';
+  const optionMatch = command.match(/\b(?:--resume|--conversation|--session|-s|--connect)(?:=|\s+)['"]?([A-Za-z0-9_][A-Za-z0-9_.:-]*)['"]?/);
+  if (optionMatch) {
+    return optionMatch[1];
+  }
+  const resumeCommandMatch = command.match(/\bresume\b[\s\S]*?['"]?([A-Za-z0-9_][A-Za-z0-9_.:-]*)['"]?\s*$/);
+  return resumeCommandMatch ? resumeCommandMatch[1] : '';
 }
 
 export function extractContinuationParentConversationId(output: string): number {

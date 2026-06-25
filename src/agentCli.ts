@@ -428,19 +428,27 @@ export function buildNativeContinueCommand(agentCli: string, sessionId: string, 
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedSessionId = shellQuote(sessionId);
+  const permissionArgs = getTaskPermissionArgs(agentCli);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `${quotedCli} resume --include-non-interactive --all -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
   }
   if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} resume ${quotedSessionId})`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId})`;
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `${quotedCli} --conversation ${quotedSessionId} --add-dir=${shellQuote(workspaceRoot)}`;
   }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} --resume ${quotedSessionId} --add-dir ${shellQuote(workspaceRoot)}`;
+  }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} --connect ${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}`;
+    return `${quotedCli} --resume=${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --session ${quotedSessionId})`;
   }
 
   return `${quotedCli} ${quotedSessionId}`;
