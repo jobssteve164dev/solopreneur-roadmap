@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.269 - 2026-06-25
+
+### Changed
+- Complete Pro activation recovery flow (8b48dea)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.268 - 2026-06-25
 
 ### Added
