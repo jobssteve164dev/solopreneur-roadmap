@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.271 - 2026-06-26
+
+### Changed
+- Add automation tasks for agent runs (4fc1331)
+
+### Docs
+- Update milestone poster with methodology loop and pain point hook (ce0a573)
+- Update milestone poster to reflect VS Code and visual agent features (5beeb39)
+- Append output folder constraint to agent.md (67eb9be)
+- Move milestone poster to project directory and update reference (022b6b7)
+- Scale review and milestone celebration (f72ed1e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.270 - 2026-06-25
 
 ### Changed
