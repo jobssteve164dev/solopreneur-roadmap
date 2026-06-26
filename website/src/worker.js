@@ -3270,11 +3270,12 @@ function buildHeader(t, locale, currentPath) {
     ? currentPath
     : (currentPath === t.homePath ? "#pro" : `${t.homePath}#pro`);
   const installHref = currentPath === t.homePath ? "#install" : `${t.homePath}#install`;
+  const brandName = (locale === "zh" || t.lang === "zh-Hans") ? "独道 SoloMap" : "SoloMap";
   return `<header class="topbar">
     <nav class="shell nav" aria-label="Primary">
       <a class="brand" href="${t.homePath}" aria-label="SoloMap home">
         <img src="${LOGO_URL}" width="34" height="34" alt="">
-        <span>SoloMap</span>
+        <span>${brandName}</span>
       </a>
       <div class="links">
         <a href="${productHref}">${escapeHtml(t.nav.product)}</a>
