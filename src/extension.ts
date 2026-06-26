@@ -99,7 +99,7 @@ import {
   shellQuote,
   supportsSdkContinuation
 } from './agentCli';
-import { SolopreneurSettings } from './pluginContracts';
+import { SolomapAutomationSettings, SolomapAutomationTrigger, SolopreneurSettings } from './pluginContracts';
 import { buildConversationPresentations } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import {
@@ -222,8 +222,11 @@ const soloConversationId = '__solo__';
 const sidebarProjectConversationHistoryLimit = 10;
 const agentTerminalBaseName = 'solomap';
 const agentStatusDirName = 'agent-status';
+const automationRetryConversationIds = new Set<number>();
+const automationPromptConversationIds = new Set<string>();
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
+let focusReminderTimer: NodeJS.Timeout | null = null;
 const agentTerminalNamesByConversationId = new Map<number, string>();
 const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 
@@ -328,6 +331,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize storage in the background after the UI provider is registered.
   void ensureSyncEngine(context);
+  scheduleFocusReminder(context);
 }
 
 async function ensureActionProject(context: vscode.ExtensionContext, projectPath: string): Promise<string> {
@@ -547,7 +551,8 @@ async function handleSharedWebviewAction(
         globalPrompt: request.globalPrompt,
         globalDataPath: request.globalDataPath,
         reviewerCliPath: request.reviewerCliPath,
-        collaborationReviewMode: request.collaborationReviewMode
+        collaborationReviewMode: request.collaborationReviewMode,
+        automationTasks: request.automationTasks
       });
       vscode.window.showInformationMessage('SoloMap settings saved successfully!');
       await broadcastSettings(context);
@@ -686,6 +691,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     taskPermissionMode: 'auto',
     reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
     collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
+    automationTasks: normalizeAutomationSettings(saved.automationTasks ?? config.get('automationTasks') ?? {}),
     proEntitlements: {
       ...(saved.proEntitlements || {}),
       ...readLocalProEntitlements()
@@ -996,6 +1002,33 @@ function normalizeEnabledEnhancements(value: unknown): Record<string, boolean> {
   }, {});
 }
 
+function normalizeAutomationTriggerSettings(value: unknown) {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    notify: Boolean(source.notify),
+    sound: Boolean(source.sound),
+    retry: Boolean(source.retry),
+    prompt: String(source.prompt || '').trim()
+  };
+}
+
+function normalizeAutomationSettings(value: unknown): SolomapAutomationSettings {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const rawTriggers = source.triggers && typeof source.triggers === 'object'
+    ? source.triggers as Record<string, unknown>
+    : {};
+  const focusMinutes = Math.max(1, Math.min(240, Number(source.focusMinutes || 25) || 25));
+  return {
+    focusMinutes,
+    triggers: {
+      completed: normalizeAutomationTriggerSettings(rawTriggers.completed),
+      failed: normalizeAutomationTriggerSettings(rawTriggers.failed),
+      stopped: normalizeAutomationTriggerSettings(rawTriggers.stopped),
+      focus_time: normalizeAutomationTriggerSettings(rawTriggers.focus_time)
+    }
+  };
+}
+
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
   const currentSettings = getPersistedSettings(context);
   const nextSettings: SolopreneurSettings = {
@@ -1007,6 +1040,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     taskPermissionMode: 'auto',
     reviewerCliPath: String(settings.reviewerCliPath ?? currentSettings.reviewerCliPath ?? '').trim(),
     collaborationReviewMode: normalizeCollaborationReviewMode(settings.collaborationReviewMode ?? currentSettings.collaborationReviewMode),
+    automationTasks: normalizeAutomationSettings(settings.automationTasks ?? currentSettings.automationTasks),
     proEntitlements: currentSettings.proEntitlements || {},
     proAccount: currentSettings.proAccount,
     enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim())
@@ -1020,6 +1054,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
   await config.update('reviewerCliPath', nextSettings.reviewerCliPath, vscode.ConfigurationTarget.Global);
   await config.update('collaborationReviewMode', nextSettings.collaborationReviewMode, vscode.ConfigurationTarget.Global);
+  await config.update('automationTasks', nextSettings.automationTasks, vscode.ConfigurationTarget.Global);
+  scheduleFocusReminder(context);
 }
 
 function projectName(projectPath: string): string {
@@ -4598,6 +4634,20 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   sendNodesToWebview();
   postNodeConversations(nodeId);
   vscode.window.showInformationMessage(isContinuationRun ? 'Continuation conversation was recorded.' : `Agent task [${nodeId}] was stopped.`);
+  if (!isContinuationRun && extensionContextRef) {
+    scheduleAutomationTasksAfterRun(extensionContextRef, {
+      workspaceRoot: activeProjectRoot,
+      nodeId,
+      runKind: nodeId === soloConversationId ? 'solo' : nodeId === roadmapRevisionId ? 'roadmap_revision' : 'step',
+      nextStatus: 'Failed',
+      failureCode: 'stopped_by_user',
+      executionLogId: Number(conversationId || 0),
+      agentCli: String(conversation.agentCli || ''),
+      userMessage: extractUserSupplementFromExecutionOutput(conversation.output || ''),
+      isReviewRun: false,
+      isContinuationRun: false
+    });
+  }
 }
 
 async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
@@ -5364,6 +5414,217 @@ async function handleRetryConversation(context: vscode.ExtensionContext, nodeId:
     return;
   }
   await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '');
+}
+
+function automationTriggerFromRunStatus(nextStatus: string, failureCode: string): SolomapAutomationTrigger | '' {
+  if (failureCode === 'stopped_by_user') {
+    return 'stopped';
+  }
+  if (nextStatus === 'Completed') {
+    return 'completed';
+  }
+  if (nextStatus === 'Failed') {
+    return 'failed';
+  }
+  return '';
+}
+
+function hasAutomationAction(settings: SolomapAutomationSettings, trigger: SolomapAutomationTrigger): boolean {
+  const rule = settings.triggers?.[trigger] || {};
+  return Boolean(rule.notify || rule.sound || rule.retry || String(rule.prompt || '').trim());
+}
+
+function getAutomationLogPath(workspaceRoot: string): string {
+  return path.join(workspaceRoot, '.solopreneur', 'automation-tasks.jsonl');
+}
+
+function recordAutomationTaskEvent(workspaceRoot: string, event: Record<string, unknown>): void {
+  try {
+    const logPath = getAutomationLogPath(workspaceRoot);
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, `${JSON.stringify({ ...event, recordedAt: new Date().toISOString() })}\n`, 'utf8');
+  } catch (error) {
+    console.warn('Failed to record SoloMap automation task event:', error);
+  }
+}
+
+function playAutomationSound(): void {
+  try {
+    activePanel?.webview.postMessage({ command: 'automationPlaySound' });
+    sidebarProvider?.postMessage({ command: 'automationPlaySound' });
+  } catch (error) {
+    console.warn('Failed to play SoloMap automation sound:', error);
+  }
+}
+
+function showAutomationNotification(trigger: SolomapAutomationTrigger, nodeId: string, status: string): void {
+  const label = trigger === 'completed'
+    ? '任务已完成'
+    : trigger === 'stopped'
+      ? '任务已停止'
+      : trigger === 'focus_time'
+        ? '专注时间到了'
+        : '任务失败';
+  const message = nodeId && trigger !== 'focus_time'
+    ? `SoloMap 自动化任务：${label}（${nodeId}）。`
+    : `SoloMap 自动化任务：${label}。`;
+  if (status === 'Failed' || trigger === 'failed') {
+    vscode.window.showWarningMessage(message);
+  } else {
+    vscode.window.showInformationMessage(message);
+  }
+}
+
+function scheduleFocusReminder(context: vscode.ExtensionContext): void {
+  if (focusReminderTimer) {
+    clearTimeout(focusReminderTimer);
+    focusReminderTimer = null;
+  }
+  const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
+  const rule = settings.triggers?.focus_time || {};
+  if (!rule.notify && !rule.sound) {
+    return;
+  }
+  const minutes = Math.max(1, Math.min(240, Number(settings.focusMinutes || 25) || 25));
+  focusReminderTimer = setTimeout(() => {
+    const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || getWorkspaceRoot();
+    if (rule.notify) {
+      showAutomationNotification('focus_time', '', 'Completed');
+    }
+    if (rule.sound) {
+      playAutomationSound();
+    }
+    if (workspaceRoot) {
+      recordAutomationTaskEvent(workspaceRoot, {
+        trigger: 'focus_time',
+        action: 'reminder',
+        status: 'ok',
+        focusMinutes: minutes
+      });
+    }
+    scheduleFocusReminder(context);
+  }, minutes * 60 * 1000);
+}
+
+function scheduleAutomationTasksAfterRun(context: vscode.ExtensionContext, input: {
+  workspaceRoot: string;
+  nodeId: string;
+  runKind: string;
+  nextStatus: string;
+  failureCode: string;
+  executionLogId: number;
+  agentCli: string;
+  userMessage: string;
+  isReviewRun: boolean;
+  isContinuationRun: boolean;
+}): void {
+  const trigger = automationTriggerFromRunStatus(input.nextStatus, input.failureCode);
+  if (!trigger || input.isReviewRun || input.isContinuationRun || !input.workspaceRoot || !input.executionLogId) {
+    return;
+  }
+  const automationTasks = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
+  if (!hasAutomationAction(automationTasks, trigger)) {
+    return;
+  }
+  setTimeout(() => {
+    void runAutomationTasksAfterRun(context, trigger, input).catch((error) => {
+      recordAutomationTaskEvent(input.workspaceRoot, {
+        trigger,
+        nodeId: input.nodeId,
+        executionLogId: input.executionLogId,
+        action: 'automation',
+        status: 'failed',
+        message: error instanceof Error ? error.message : String(error)
+      });
+      console.warn('SoloMap automation task failed:', error);
+    });
+  }, 0);
+}
+
+async function runAutomationTasksAfterRun(context: vscode.ExtensionContext, trigger: SolomapAutomationTrigger, input: {
+  workspaceRoot: string;
+  nodeId: string;
+  runKind: string;
+  nextStatus: string;
+  failureCode: string;
+  executionLogId: number;
+  agentCli: string;
+  userMessage: string;
+}): Promise<void> {
+  const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
+  const rule = settings.triggers?.[trigger] || {};
+  if (rule.notify) {
+    showAutomationNotification(trigger, input.nodeId, input.nextStatus);
+    recordAutomationTaskEvent(input.workspaceRoot, {
+      trigger,
+      nodeId: input.nodeId,
+      executionLogId: input.executionLogId,
+      action: 'notification',
+      status: 'ok'
+    });
+  }
+  if (rule.sound) {
+    playAutomationSound();
+    recordAutomationTaskEvent(input.workspaceRoot, {
+      trigger,
+      nodeId: input.nodeId,
+      executionLogId: input.executionLogId,
+      action: 'sound',
+      status: 'ok'
+    });
+  }
+  if ((trigger === 'failed' || trigger === 'stopped') && rule.retry) {
+    if (!automationRetryConversationIds.has(input.executionLogId)) {
+      automationRetryConversationIds.add(input.executionLogId);
+      recordAutomationTaskEvent(input.workspaceRoot, {
+        trigger,
+        nodeId: input.nodeId,
+        executionLogId: input.executionLogId,
+        action: 'retry',
+        status: 'started'
+      });
+      await handleRetryConversation(context, input.nodeId, input.executionLogId);
+    } else {
+      recordAutomationTaskEvent(input.workspaceRoot, {
+        trigger,
+        nodeId: input.nodeId,
+        executionLogId: input.executionLogId,
+        action: 'retry',
+        status: 'skipped',
+        message: 'Already retried this conversation in the current extension session.'
+      });
+    }
+  }
+  const prompt = String(rule.prompt || '').trim();
+  if (prompt) {
+    const promptKey = `${trigger}:${input.executionLogId}`;
+    if (automationPromptConversationIds.has(promptKey)) {
+      recordAutomationTaskEvent(input.workspaceRoot, {
+        trigger,
+        nodeId: input.nodeId,
+        executionLogId: input.executionLogId,
+        action: 'prompt',
+        status: 'skipped',
+        message: 'Already launched this automation prompt in the current extension session.'
+      });
+      return;
+    }
+    automationPromptConversationIds.add(promptKey);
+    recordAutomationTaskEvent(input.workspaceRoot, {
+      trigger,
+      nodeId: input.nodeId,
+      executionLogId: input.executionLogId,
+      action: 'prompt',
+      status: 'started'
+    });
+    if (input.runKind === 'roadmap_revision' || input.nodeId === roadmapRevisionId) {
+      await handleRoadmapRevision(context, prompt, input.agentCli || '');
+    } else if (input.runKind === 'solo' || input.nodeId === soloConversationId) {
+      await handleRunSoloConversation(context, prompt, input.agentCli || '');
+    } else {
+      await handleRunAgent(context, input.nodeId, prompt, input.agentCli || '');
+    }
+  }
 }
 
 function didRoadmapCsvChange(changedFilesSummary: string, touchedFilesSummary: string): boolean {
@@ -6302,6 +6563,20 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     sendNodesToWebview();
     refreshSidebarProjectCards();
     postNodeConversations(nodeId);
+    if (extensionContextRef) {
+      scheduleAutomationTasksAfterRun(extensionContextRef, {
+        workspaceRoot,
+        nodeId,
+        runKind: String(runKind || (isSoloConversation ? 'solo' : 'step')),
+        nextStatus,
+        failureCode,
+        executionLogId: Number(executionLogId || 0),
+        agentCli: String(agentCli || commandPreview || command || ''),
+        userMessage: String(userMessage || ''),
+        isReviewRun,
+        isContinuationRun
+      });
+    }
     if (isContinuationRun) {
       vscode.window.showInformationMessage('Continuation conversation was recorded.');
     } else if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {

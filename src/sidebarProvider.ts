@@ -75,6 +75,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  public postMessage(message: Record<string, unknown>): void {
+    this._view?.webview.postMessage(message);
+  }
+
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,

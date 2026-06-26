@@ -4341,6 +4341,27 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       abilityController.render(settings);
     }
 
+    function playAutomationTone() {
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return;
+        const audioContext = new AudioContextClass();
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = 880;
+        gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.08, audioContext.currentTime + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.28);
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+        oscillator.start();
+        oscillator.stop(audioContext.currentTime + 0.3);
+      } catch (error) {
+        console.warn('SoloMap automation sound failed:', error);
+      }
+    }
+
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'settings.get' });
@@ -4379,6 +4400,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
+          break;
+
+        case 'automationPlaySound':
+          playAutomationTone();
           break;
 
         case 'agentModelsLoaded': {

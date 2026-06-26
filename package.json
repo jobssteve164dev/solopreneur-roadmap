@@ -1,7 +1,7 @@
 {
   "name": "solopreneur-roadmap",
-  "displayName": "SoloMap AI Coding Agent Roadmap",
-  "description": "AI coding agent cockpit for solo developers. Run Claude Code, Codex, Cursor Agent and other local agents, keep sessions organized, and turn scattered AI chats into a Git-friendly project roadmap. / 面向独立开发者的 AI 编码智能体驾驶舱：运行 Claude Code、Codex、Cursor Agent 等本地智能体，整理会话，并把零散 AI 对话沉淀为 Git 友好的项目路线图。",
+  "displayName": "SoloMap - Local AI Agent Cockpit & Coding Roadmap Assistant",
+  "description": "Stop losing momentum in scattered AI chats. SoloMap is a local AI Agent cockpit and coding roadmap assistant for solo developers. / 别让项目迷失在零散 AI 对话里。SoloMap 是专为独立开发者打造的本地 AI Agent 驾驶舱与编码路线图助手。",
   "version": "0.0.270",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
@@ -115,6 +115,39 @@
             "all"
           ],
           "description": "Controls when SoloMap runs a secondary read-only Agent review after a task run."
+        },
+        "solopreneur.automationTasks": {
+          "type": "object",
+          "default": {
+            "focusMinutes": 25,
+            "triggers": {
+              "completed": {
+                "notify": false,
+                "sound": false,
+                "retry": false,
+                "prompt": ""
+              },
+              "failed": {
+                "notify": false,
+                "sound": false,
+                "retry": false,
+                "prompt": ""
+              },
+              "stopped": {
+                "notify": false,
+                "sound": false,
+                "retry": false,
+                "prompt": ""
+              },
+              "focus_time": {
+                "notify": false,
+                "sound": false,
+                "retry": false,
+                "prompt": ""
+              }
+            }
+          },
+          "description": "Optional SoloMap automation tasks. Actions are disabled by default and run after task state updates without blocking the main task."
         }
       }
     }

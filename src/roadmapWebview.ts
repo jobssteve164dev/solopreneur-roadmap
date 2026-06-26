@@ -1548,6 +1548,71 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       color: var(--text-main);
     }
 
+    .automation-details {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.035);
+      overflow: hidden;
+    }
+
+    .automation-details summary {
+      cursor: pointer;
+      padding: 8px;
+      color: var(--text-main);
+      font-size: 11px;
+      font-weight: 800;
+      list-style: none;
+    }
+
+    .automation-details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .automation-body {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding: 0 8px 8px;
+    }
+
+    .automation-trigger-row {
+      display: grid;
+      grid-template-columns: 92px repeat(3, minmax(0, 1fr));
+      gap: 7px;
+      align-items: center;
+    }
+
+    .automation-trigger-title {
+      color: var(--text-main);
+      font-size: 10.5px;
+      font-weight: 800;
+    }
+
+    .automation-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--text-muted);
+      font-size: 9.5px;
+      min-width: 0;
+    }
+
+    .automation-check input {
+      margin: 0;
+    }
+
+    .automation-prompt {
+      grid-column: 2 / -1;
+      min-height: 42px;
+    }
+
+    .automation-focus-row {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 7px;
+      align-items: center;
+    }
+
     .enhancement-list {
       display: flex;
       flex-direction: column;
@@ -2058,6 +2123,20 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       </div>
     </div>
 
+    <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-bell"></span><span id="settings-section-automation">Automation Tasks</span></div>
+      <details class="automation-details" id="automation-details">
+        <summary id="automation-summary">Configure automation tasks</summary>
+        <div class="automation-body">
+          <div class="automation-focus-row">
+            <label class="settings-lbl-title" id="label-automation-focus-minutes">Focus minutes</label>
+            <input type="number" class="settings-input" id="automation-focus-minutes" min="1" max="240" value="25">
+          </div>
+          <div id="automation-trigger-list"></div>
+        </div>
+      </details>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
     </div>
@@ -2140,6 +2219,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectNameInput = document.getElementById('project-name-input');
     const projectDescriptionInput = document.getElementById('project-description-input');
     const projectNotesInput = document.getElementById('project-notes-input');
+    const automationTriggerList = document.getElementById('automation-trigger-list');
+    const automationFocusMinutesInput = document.getElementById('automation-focus-minutes');
     let currentLanguage = 'zh';
     let currentNodes = [];
     let expandedNodeId = '';
@@ -2212,6 +2293,17 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         settingsSectionData: '项目数据',
         settingsSectionInstructions: '默认指令',
         settingsSectionAbilities: '能力扩展',
+        settingsSectionAutomation: '自动化任务',
+        automationSummary: '选择触发点和动作',
+        automationFocusMinutes: '专注分钟',
+        automationNotify: '通知',
+        automationSound: '声音',
+        automationRetry: '重试',
+        automationPromptPlaceholder: '触发后自动发送的新任务提示词...',
+        automationTriggerCompleted: '任务完成后',
+        automationTriggerFailed: '任务失败时',
+        automationTriggerStopped: '手动停止时',
+        automationTriggerFocus: '专注时间到',
         proFeatureName: '战略金字塔',
         proUnlocked: '已解锁',
         proLocked: '未解锁',
@@ -2417,6 +2509,17 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         settingsSectionData: 'Project Data',
         settingsSectionInstructions: 'Instructions',
         settingsSectionAbilities: 'Abilities',
+        settingsSectionAutomation: 'Automation Tasks',
+        automationSummary: 'Choose triggers and actions',
+        automationFocusMinutes: 'Focus minutes',
+        automationNotify: 'Notify',
+        automationSound: 'Sound',
+        automationRetry: 'Retry',
+        automationPromptPlaceholder: 'Prompt to auto-send after this trigger...',
+        automationTriggerCompleted: 'After completion',
+        automationTriggerFailed: 'When failed',
+        automationTriggerStopped: 'When stopped',
+        automationTriggerFocus: 'Focus time',
         proFeatureName: 'Strategy Pyramid',
         proUnlocked: 'Unlocked',
         proLocked: 'Locked',
@@ -2606,6 +2709,27 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return (i18n[currentLanguage].failureCategories || {})[category] || '';
     }
 
+    function playAutomationTone() {
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return;
+        const audioContext = new AudioContextClass();
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = 880;
+        gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.08, audioContext.currentTime + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.28);
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+        oscillator.start();
+        oscillator.stop(audioContext.currentTime + 0.3);
+      } catch (error) {
+        console.warn('SoloMap automation sound failed:', error);
+      }
+    }
+
     function captureComposerInputState(container, selector) {
       const input = container && container.querySelector ? container.querySelector(selector) : null;
       if (!input) return null;
@@ -2728,6 +2852,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('settings-section-data', t('settingsSectionData'));
       setText('settings-section-instructions', t('settingsSectionInstructions'));
       setText('settings-section-abilities', t('settingsSectionAbilities'));
+      setText('settings-section-automation', t('settingsSectionAutomation'));
+      setText('automation-summary', t('automationSummary'));
+      setText('label-automation-focus-minutes', t('automationFocusMinutes'));
       setText('option-review-high-risk', t('reviewHighRisk'));
       setText('option-review-all', t('reviewAll'));
       setText('option-review-off', t('reviewOff'));
@@ -2756,6 +2883,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (projectNameInput) projectNameInput.placeholder = t('projectNamePlaceholder');
       if (projectDescriptionInput) projectDescriptionInput.placeholder = t('projectDescriptionPlaceholder');
       if (projectNotesInput) projectNotesInput.placeholder = t('projectNotesPlaceholder');
+      renderAutomationSettings(currentSettings);
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderRoadmap(currentNodes);
       renderSoloPanel(currentNodes);
@@ -3113,6 +3241,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
           renderAbilitiesAndEnhancements(message.settings);
+          renderAutomationSettings(message.settings);
           if (settingLanguage) setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage) || currentLanguage;
           applyLanguage();
@@ -3135,6 +3264,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         case 'flowStateLoaded':
           currentFlowState = message.state || { hasProAccess: false, flow: null, history: [] };
           renderFlowPanel();
+          break;
+        case 'automationPlaySound':
+          playAutomationTone();
           break;
         case 'setMainView':
           if (message.view === 'flow' && !currentFlowState.hasProAccess) {
@@ -3251,6 +3383,17 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         notes: projectNotesInput ? projectNotesInput.value.trim() : '',
         projectType: getSoloSelectValue(projectTypeSelect),
         priority: getSoloSelectValue(projectPrioritySelect)
+      });
+      vscode.postMessage({
+        command: 'settings.update',
+        cliPath: getEffectiveSettingCliPath(),
+        agentModelPreferences: agentModelPreferenceMap,
+        language: getSoloSelectValue(settingLanguage) || currentLanguage,
+        globalPrompt: settingGlobalPrompt ? settingGlobalPrompt.value : (currentSettings.globalPrompt || ''),
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value : (currentSettings.globalDataPath || ''),
+        reviewerCliPath: getEffectiveReviewerCliPath(),
+        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : (currentSettings.collaborationReviewMode || 'high_risk'),
+        automationTasks: collectAutomationSettings()
       });
       settingsPanel.style.display = 'none';
       if (cliTestBadge) cliTestBadge.style.display = 'none';
@@ -3381,6 +3524,74 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function getSelectedProject() {
       const selectedPath = getSoloSelectValue(projectSelect) || currentProjects.selectedProjectPath || '';
       return (currentProjects.projects || []).find(project => project.path === selectedPath) || (currentProjects.projects || [])[0] || null;
+    }
+
+    const automationTriggers = [
+      { key: 'completed', labelKey: 'automationTriggerCompleted', allowRetry: false, allowPrompt: true },
+      { key: 'failed', labelKey: 'automationTriggerFailed', allowRetry: true, allowPrompt: true },
+      { key: 'stopped', labelKey: 'automationTriggerStopped', allowRetry: true, allowPrompt: true },
+      { key: 'focus_time', labelKey: 'automationTriggerFocus', allowRetry: false, allowPrompt: false }
+    ];
+
+    function normalizeAutomationSettings(settings) {
+      const automation = settings && settings.automationTasks ? settings.automationTasks : {};
+      const triggers = automation.triggers || {};
+      const normalized = {
+        focusMinutes: Math.max(1, Math.min(240, Number(automation.focusMinutes || 25) || 25)),
+        triggers: {}
+      };
+      automationTriggers.forEach(trigger => {
+        const value = triggers[trigger.key] || {};
+        normalized.triggers[trigger.key] = {
+          notify: Boolean(value.notify),
+          sound: Boolean(value.sound),
+          retry: Boolean(value.retry),
+          prompt: String(value.prompt || '')
+        };
+      });
+      return normalized;
+    }
+
+    function renderAutomationSettings(settings) {
+      if (!automationTriggerList) return;
+      const automation = normalizeAutomationSettings(settings || {});
+      if (automationFocusMinutesInput) automationFocusMinutesInput.value = String(automation.focusMinutes || 25);
+      automationTriggerList.innerHTML = automationTriggers.map(trigger => {
+        const rule = automation.triggers[trigger.key] || {};
+        return \`
+          <div class="automation-trigger-row" data-automation-trigger="\${escapeHtml(trigger.key)}">
+            <div class="automation-trigger-title">\${escapeHtml(t(trigger.labelKey))}</div>
+            <label class="automation-check"><input type="checkbox" data-automation-field="notify" \${rule.notify ? 'checked' : ''}> \${escapeHtml(t('automationNotify'))}</label>
+            <label class="automation-check"><input type="checkbox" data-automation-field="sound" \${rule.sound ? 'checked' : ''}> \${escapeHtml(t('automationSound'))}</label>
+            \${trigger.allowRetry ? \`<label class="automation-check"><input type="checkbox" data-automation-field="retry" \${rule.retry ? 'checked' : ''}> \${escapeHtml(t('automationRetry'))}</label>\` : '<span></span>'}
+            \${trigger.allowPrompt ? \`<textarea class="settings-input settings-textarea automation-prompt" data-automation-field="prompt" placeholder="\${escapeHtml(t('automationPromptPlaceholder'))}">\${escapeHtml(rule.prompt || '')}</textarea>\` : ''}
+          </div>
+        \`;
+      }).join('');
+    }
+
+    function collectAutomationSettings() {
+      const result = {
+        focusMinutes: Math.max(1, Math.min(240, Number(automationFocusMinutesInput ? automationFocusMinutesInput.value : 25) || 25)),
+        triggers: {}
+      };
+      automationTriggers.forEach(trigger => {
+        result.triggers[trigger.key] = { notify: false, sound: false, retry: false, prompt: '' };
+      });
+      if (!automationTriggerList) return result;
+      automationTriggerList.querySelectorAll('[data-automation-trigger]').forEach(row => {
+        const trigger = row.getAttribute('data-automation-trigger') || '';
+        if (!result.triggers[trigger]) return;
+        row.querySelectorAll('[data-automation-field]').forEach(field => {
+          const key = field.getAttribute('data-automation-field') || '';
+          if (key === 'prompt') {
+            result.triggers[trigger].prompt = field.value || '';
+          } else {
+            result.triggers[trigger][key] = Boolean(field.checked);
+          }
+        });
+      });
+      return result;
     }
 
     function renderProjectSettings(project = getSelectedProject()) {

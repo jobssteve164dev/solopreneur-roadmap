@@ -1112,7 +1112,12 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     && message.priority === 'P0'
   ));
   assert.ok(!postedMessages.some((message) => message.command === 'settings.get'));
-  assert.ok(!postedMessages.some((message) => message.command === 'settings.update'));
+  assert.ok(postedMessages.some((message) =>
+    message.command === 'settings.update'
+    && message.automationTasks
+    && message.automationTasks.focusMinutes === 25
+    && message.automationTasks.triggers.completed.notify === false
+  ));
   elements['btn-toggle-feedback'].listeners.click();
   assert.equal(elements['feedback-panel'].style.display, 'flex');
   elements['setting-feedback-title'].value = '看不懂下一步';
