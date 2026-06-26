@@ -269,6 +269,26 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       color: var(--text-main);
     }
 
+    .automation-select-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 6px;
+      align-items: center;
+    }
+
+    .automation-summary-line {
+      color: var(--text-muted);
+      font-size: 9.5px;
+      line-height: 1.35;
+    }
+
+    .automation-focus-row {
+      display: grid;
+      grid-template-columns: 90px 1fr;
+      gap: 6px;
+      align-items: center;
+    }
+
     .enhancement-list {
       display: flex;
       flex-direction: column;
@@ -3159,6 +3179,35 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
 
     <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-bell"></span><span id="settings-section-automation">Automation Tasks</span></div>
+      <div class="settings-field">
+        <label class="settings-lbl-title" id="label-automation-task">Automation task</label>
+        <div class="automation-select-row">
+          <div class="solo-select settings-select" id="automation-trigger-select" data-solo-select data-value="completed">
+            <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+              <span class="solo-select-trigger-label" data-solo-label>After completion</span>
+              <span class="codicon codicon-chevron-down solo-select-caret"></span>
+            </button>
+            <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+          </div>
+          <div class="solo-select settings-select" id="automation-action-select" data-solo-select data-value="none">
+            <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+              <span class="solo-select-trigger-label" data-solo-label>No action</span>
+              <span class="codicon codicon-chevron-down solo-select-caret"></span>
+            </button>
+            <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+          </div>
+        </div>
+        <div class="automation-focus-row" id="automation-focus-row" style="display:none;">
+          <label class="settings-lbl-title" id="label-automation-focus-minutes">Focus minutes</label>
+          <input type="number" class="settings-input" id="automation-focus-minutes" min="1" max="240" value="25">
+        </div>
+        <textarea class="settings-input settings-textarea" id="automation-prompt-input" style="display:none;" rows="2" placeholder="Prompt to auto-send after this trigger..."></textarea>
+        <div class="automation-summary-line" id="automation-current-summary"></div>
+      </div>
+    </div>
+
+    <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-checklist"></span><span id="settings-section-readiness">Readiness</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
@@ -3280,6 +3329,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnPrepareAgentAutomation = document.getElementById('btn-prepare-agent-automation');
     const btnOpenAgentCheck = document.getElementById('btn-open-agent-check');
     const btnOpenGithubAuth = document.getElementById('btn-open-github-auth');
+    const automationTriggerSelect = document.getElementById('automation-trigger-select');
+    const automationActionSelect = document.getElementById('automation-action-select');
+    const automationPromptInput = document.getElementById('automation-prompt-input');
+    const automationFocusRow = document.getElementById('automation-focus-row');
+    const automationFocusMinutesInput = document.getElementById('automation-focus-minutes');
+    const automationCurrentSummary = document.getElementById('automation-current-summary');
     let currentLanguage = 'zh';
     let currentNodes = [];
     let activeProjectPath = '';
@@ -3503,6 +3558,21 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionInstructions: '默认指令',
         settingsSectionAbilities: '能力扩展',
         settingsSectionReadiness: '本地状态',
+        settingsSectionAutomation: '自动化任务',
+        automationTask: '触发点和动作',
+        automationFocusMinutes: '专注分钟',
+        automationActionNone: '不动作',
+        automationActionNotify: '系统通知',
+        automationActionSound: '播放声音',
+        automationActionPomodoro: '番茄钟提醒',
+        automationActionRetry: '重试任务',
+        automationActionPrompt: '唤起新任务对话',
+        automationSummaryPattern: '当前：{trigger} -> {action}',
+        automationPromptPlaceholder: '触发后自动发送的新任务提示词...',
+        automationTriggerCompleted: '任务完成后',
+        automationTriggerFailed: '任务失败时',
+        automationTriggerStopped: '手动停止时',
+        automationTriggerFocus: '专注时间到',
         proFeatureName: '战略金字塔',
         proUnlocked: '已解锁',
         proLocked: '未解锁',
@@ -3790,6 +3860,21 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionInstructions: 'Instructions',
         settingsSectionAbilities: 'Abilities',
         settingsSectionReadiness: 'Readiness',
+        settingsSectionAutomation: 'Automation Tasks',
+        automationTask: 'Trigger and action',
+        automationFocusMinutes: 'Focus minutes',
+        automationActionNone: 'No action',
+        automationActionNotify: 'System notification',
+        automationActionSound: 'Play sound',
+        automationActionPomodoro: 'Pomodoro reminder',
+        automationActionRetry: 'Retry task',
+        automationActionPrompt: 'Start new task conversation',
+        automationSummaryPattern: 'Current: {trigger} -> {action}',
+        automationPromptPlaceholder: 'Prompt to auto-send after this trigger...',
+        automationTriggerCompleted: 'After completion',
+        automationTriggerFailed: 'When failed',
+        automationTriggerStopped: 'When stopped',
+        automationTriggerFocus: 'Focus time',
         proFeatureName: 'Strategy Pyramid',
         proUnlocked: 'Unlocked',
         proLocked: 'Locked',
@@ -4133,6 +4218,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('settings-section-instructions', t('settingsSectionInstructions'));
       setText('settings-section-abilities', t('settingsSectionAbilities'));
       setText('settings-section-readiness', t('settingsSectionReadiness'));
+      setText('settings-section-automation', t('settingsSectionAutomation'));
+      setText('label-automation-task', t('automationTask'));
+      setText('label-automation-focus-minutes', t('automationFocusMinutes'));
+      if (automationPromptInput) automationPromptInput.placeholder = t('automationPromptPlaceholder');
       setText('option-review-high-risk', t('reviewHighRisk'));
       setText('option-review-all', t('reviewAll'));
       setText('option-review-off', t('reviewOff'));
@@ -4169,6 +4258,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderProAccount(currentSettings);
+      renderAutomationSettings(currentSettings);
       renderSidebar(currentNodes);
     }
 
@@ -4240,6 +4330,20 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
     });
     bindSoloSelect(settingCollaborationReviewMode, () => {});
+    bindSoloSelect(automationTriggerSelect, () => {
+      syncAutomationControlsFromTrigger();
+    });
+    bindSoloSelect(automationActionSelect, () => {
+      updateAutomationDraftFromControls();
+    });
+    if (automationPromptInput) {
+      automationPromptInput.addEventListener('input', updateAutomationDraftFromControls);
+      automationPromptInput.addEventListener('change', updateAutomationDraftFromControls);
+    }
+    if (automationFocusMinutesInput) {
+      automationFocusMinutesInput.addEventListener('input', updateAutomationDraftFromControls);
+      automationFocusMinutesInput.addEventListener('change', updateAutomationDraftFromControls);
+    }
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
@@ -4341,6 +4445,139 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       abilityController.render(settings);
     }
 
+    const automationTriggers = [
+      { key: 'completed', labelKey: 'automationTriggerCompleted' },
+      { key: 'failed', labelKey: 'automationTriggerFailed' },
+      { key: 'stopped', labelKey: 'automationTriggerStopped' },
+      { key: 'focus_time', labelKey: 'automationTriggerFocus' }
+    ];
+    const automationActions = [
+      { key: 'none', labelKey: 'automationActionNone' },
+      { key: 'notify', labelKey: 'automationActionNotify' },
+      { key: 'sound', labelKey: 'automationActionSound' },
+      { key: 'pomodoro', labelKey: 'automationActionPomodoro' },
+      { key: 'retry', labelKey: 'automationActionRetry' },
+      { key: 'prompt', labelKey: 'automationActionPrompt' }
+    ];
+    let automationDraftSettings = null;
+
+    function normalizeAutomationSettings(settings) {
+      const automation = settings && settings.automationTasks ? settings.automationTasks : {};
+      const triggers = automation.triggers || {};
+      const normalized = {
+        focusMinutes: Math.max(1, Math.min(240, Number(automation.focusMinutes || 25) || 25)),
+        triggers: {}
+      };
+      automationTriggers.forEach(trigger => {
+        const value = triggers[trigger.key] || {};
+        normalized.triggers[trigger.key] = {
+          notify: Boolean(value.notify),
+          sound: Boolean(value.sound),
+          retry: Boolean(value.retry),
+          prompt: String(value.prompt || '')
+        };
+      });
+      return normalized;
+    }
+
+    function getAutomationTriggerLabel(triggerKey) {
+      const trigger = automationTriggers.find(item => item.key === triggerKey) || automationTriggers[0];
+      return t(trigger.labelKey);
+    }
+
+    function getAutomationActionLabel(actionKey) {
+      const action = automationActions.find(item => item.key === actionKey) || automationActions[0];
+      return t(action.labelKey);
+    }
+
+    function getAutomationActionFromRule(triggerKey, rule) {
+      if (!rule) return 'none';
+      if (String(rule.prompt || '').trim()) return 'prompt';
+      if (rule.retry) return 'retry';
+      if (rule.sound) return 'sound';
+      if (rule.notify && triggerKey === 'focus_time') return 'pomodoro';
+      if (rule.notify) return 'notify';
+      return 'none';
+    }
+
+    function applyAutomationActionToRule(triggerKey, actionKey, promptValue) {
+      const rule = { notify: false, sound: false, retry: false, prompt: '' };
+      if (actionKey === 'notify') {
+        rule.notify = true;
+      } else if (actionKey === 'sound') {
+        rule.sound = true;
+      } else if (actionKey === 'pomodoro') {
+        rule.notify = true;
+      } else if (actionKey === 'retry') {
+        rule.retry = true;
+      } else if (actionKey === 'prompt') {
+        rule.prompt = String(promptValue || '').trim();
+      }
+      if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+      automationDraftSettings.triggers[triggerKey] = rule;
+    }
+
+    function syncAutomationSummary(triggerKey, actionKey) {
+      if (!automationCurrentSummary) return;
+      automationCurrentSummary.textContent = t('automationSummaryPattern')
+        .replace('{trigger}', getAutomationTriggerLabel(triggerKey))
+        .replace('{action}', getAutomationActionLabel(actionKey));
+    }
+
+    function syncAutomationControlsFromTrigger() {
+      if (!automationTriggerSelect || !automationActionSelect) return;
+      if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+      const triggerKey = getSoloSelectValue(automationTriggerSelect) || 'completed';
+      const rule = automationDraftSettings.triggers[triggerKey] || {};
+      const actionKey = getAutomationActionFromRule(triggerKey, rule);
+      setSoloSelectValue(automationActionSelect, actionKey);
+      if (automationPromptInput) {
+        automationPromptInput.style.display = actionKey === 'prompt' ? 'block' : 'none';
+        automationPromptInput.value = actionKey === 'prompt' ? String(rule.prompt || '') : '';
+      }
+      if (automationFocusRow) {
+        automationFocusRow.style.display = triggerKey === 'focus_time' || actionKey === 'pomodoro' ? 'grid' : 'none';
+      }
+      if (automationFocusMinutesInput) automationFocusMinutesInput.value = String(automationDraftSettings.focusMinutes || 25);
+      syncAutomationSummary(triggerKey, actionKey);
+    }
+
+    function updateAutomationDraftFromControls() {
+      if (!automationTriggerSelect || !automationActionSelect) return;
+      if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+      automationDraftSettings.focusMinutes = Math.max(1, Math.min(240, Number(automationFocusMinutesInput ? automationFocusMinutesInput.value : automationDraftSettings.focusMinutes || 25) || 25));
+      const triggerKey = getSoloSelectValue(automationTriggerSelect) || 'completed';
+      const actionKey = getSoloSelectValue(automationActionSelect) || 'none';
+      applyAutomationActionToRule(triggerKey, actionKey, automationPromptInput ? automationPromptInput.value : '');
+      if (automationPromptInput) automationPromptInput.style.display = actionKey === 'prompt' ? 'block' : 'none';
+      if (automationFocusRow) automationFocusRow.style.display = triggerKey === 'focus_time' || actionKey === 'pomodoro' ? 'grid' : 'none';
+      syncAutomationSummary(triggerKey, actionKey);
+    }
+
+    function renderAutomationSettings(settings) {
+      automationDraftSettings = normalizeAutomationSettings(settings || {});
+      if (automationTriggerSelect) {
+        setSoloSelectOptions(automationTriggerSelect, automationTriggers.map(trigger => ({
+          value: trigger.key,
+          label: t(trigger.labelKey)
+        })));
+        setSoloSelectValue(automationTriggerSelect, getSoloSelectValue(automationTriggerSelect) || 'completed');
+      }
+      if (automationActionSelect) {
+        setSoloSelectOptions(automationActionSelect, automationActions.map(action => ({
+          value: action.key,
+          label: t(action.labelKey)
+        })));
+      }
+      syncAutomationControlsFromTrigger();
+    }
+
+    function collectAutomationSettings() {
+      if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+      updateAutomationDraftFromControls();
+      return automationDraftSettings;
+    }
+
     function playAutomationTone() {
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -4397,6 +4634,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
           renderAbilitiesAndEnhancements(message.settings);
+          renderAutomationSettings(message.settings);
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
@@ -4631,7 +4869,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalPrompt: settingGlobalPrompt.value.trim(),
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
         reviewerCliPath: getEffectiveReviewerCliPath(),
-        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk'
+        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
+        automationTasks: collectAutomationSettings()
       });
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';

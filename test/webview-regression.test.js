@@ -398,6 +398,20 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
     { value: 'P3', label: 'P3' }
   ]);
   wireSoloSelect(elements['setting-ability-select'], []);
+  wireSoloSelect(elements['automation-trigger-select'], [
+    { value: 'completed', label: '任务完成后' },
+    { value: 'failed', label: '任务失败时' },
+    { value: 'stopped', label: '手动停止时' },
+    { value: 'focus_time', label: '专注时间到' }
+  ]);
+  wireSoloSelect(elements['automation-action-select'], [
+    { value: 'none', label: '不动作' },
+    { value: 'notify', label: '系统通知' },
+    { value: 'sound', label: '播放声音' },
+    { value: 'pomodoro', label: '番茄钟提醒' },
+    { value: 'retry', label: '重试任务' },
+    { value: 'prompt', label: '唤起新任务对话' }
+  ]);
   const context = {
     document: {
       getElementById: (id) => elements[id] || null,
@@ -624,6 +638,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /id="pro-account-panel"/);
   assert.match(html, /id="btn-open-pro-authorization"/);
   assert.match(html, /id="btn-paste-pro-code"/);
+  assert.match(html, /id="automation-trigger-select"/);
+  assert.match(html, /id="automation-action-select"/);
+  assert.match(script, /automationActionNone/);
+  assert.doesNotMatch(html, /automation-trigger-row|automation-check/);
   assert.match(script, /entitlement\.login/);
   assert.match(script, /entitlement\.paste/);
   assert.match(html, /data-issue-panel/);
@@ -658,6 +676,12 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'pro-account-panel',
     'btn-open-pro-authorization',
     'btn-paste-pro-code',
+    'automation-trigger-select',
+    'automation-action-select',
+    'automation-prompt-input',
+    'automation-focus-row',
+    'automation-focus-minutes',
+    'automation-current-summary',
     'setting-feedback-title',
     'setting-feedback-body',
     'btn-open-feedback',
@@ -746,8 +770,23 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'agy');
   assert.equal(elements['setting-clipath-custom'].style.display, 'none');
   postedMessages.length = 0;
+  elements['automation-trigger-select'].listeners.click({
+    target: elements['automation-trigger-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'stopped'),
+    stopPropagation() {}
+  });
+  elements['automation-action-select'].listeners.click({
+    target: elements['automation-action-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'retry'),
+    stopPropagation() {}
+  });
   elements['btn-save-settings'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.cliPath === '/workspace/.solomap-global/agent-cli/agy'));
+  assert.ok(postedMessages.some((message) =>
+    message.command === 'settings.update'
+    && message.automationTasks
+    && message.automationTasks.triggers.completed.notify === false
+    && message.automationTasks.triggers.completed.sound === false
+    && message.automationTasks.triggers.stopped.retry === true
+  ));
 
   dispatchMessage({
     command: 'projectsLoaded',
@@ -1112,11 +1151,9 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     && message.priority === 'P0'
   ));
   assert.ok(!postedMessages.some((message) => message.command === 'settings.get'));
-  assert.ok(postedMessages.some((message) =>
+  assert.ok(!postedMessages.some((message) =>
     message.command === 'settings.update'
-    && message.automationTasks
-    && message.automationTasks.focusMinutes === 25
-    && message.automationTasks.triggers.completed.notify === false
+    && Object.prototype.hasOwnProperty.call(message, 'automationTasks')
   ));
   elements['btn-toggle-feedback'].listeners.click();
   assert.equal(elements['feedback-panel'].style.display, 'flex');
