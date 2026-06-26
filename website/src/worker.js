@@ -1021,11 +1021,11 @@ function getProPageCopy(locale) {
     };
   }
   return {
-    metaTitle: "SoloMap Pro - 一人公司的战略驾驶舱",
-    metaDescription: "SoloMap Pro 帮独立开发者判断哪些项目该加码、暂停或收缩，把多个项目经营成更清晰的一人公司系统。",
+    metaTitle: "独道 (SoloMap) Pro - 一人公司的战略驾驶舱",
+    metaDescription: "独道 (SoloMap) Pro 帮独立开发者判断哪些项目该加码、暂停或收缩，把多个项目经营成更清晰的一人公司系统。",
     eyebrow: "给独立开发者的 Pro Early Access",
     title: "看清下个月最值得投入的项目。",
-    lead: "当你的想法、项目和机会越来越多时，真正稀缺的不是任务列表，而是取舍判断。SoloMap Pro 帮你判断该加码什么、暂停什么，以及哪些投入正在形成一人公司的复利。",
+    lead: "当你的想法、项目和机会越来越多时，真正稀缺的不是任务列表，而是取舍判断。独道 (SoloMap) Pro 帮你判断该加码什么、暂停什么，以及哪些投入正在形成一人公司的复利。",
     primaryCta: "加入 Pro Early Access",
     recoverCta: "已订阅？取回激活码",
     accountCta: "打开账户页面",
@@ -1038,7 +1038,7 @@ function getProPageCopy(locale) {
     offerLabel: "Early Access",
     price: "$29",
     priceSuffix: "/ 年",
-    offerCopy: "用首批价格解锁一人公司驾驶舱，并参与塑造 SoloMap Pro 的后续能力。",
+    offerCopy: "用首批价格解锁一人公司驾驶舱，并参与塑造独道 (SoloMap) Pro 的后续能力。",
     offerNote: "Free 保留项目推进主路径。Pro 解锁面向认真独立开发者的经营判断。",
     previewTitle: "现在 Pro 解锁什么",
     previewLead: "首个付费验收石是战略金字塔：它不是任务看板，而是一人公司的战略驾驶舱。",
@@ -1050,7 +1050,7 @@ function getProPageCopy(locale) {
       ["战略库存", "未来 30 天该把时间押在哪里？"]
     ],
     comparisonTitle: "Free 与 Pro 的区别",
-    comparisonLead: "Free 让你形成 SoloMap 使用习惯；Pro 面向已经需要跨项目经营判断的人。",
+    comparisonLead: "Free 让你形成独道 (SoloMap) 使用习惯；Pro 面向已经需要跨项目经营判断的人。",
     planHeader: ["能力", "Free", "Pro Early Access"],
     plans: [
       ["项目推进", "单项目路线图、今日安排、基础推进历史。", "包含 Free 全部能力，并增加一人公司层面的项目组合上下文。"],
@@ -1060,28 +1060,28 @@ function getProPageCopy(locale) {
       ["路线图共创", "使用公开 Free 主路径并提交反馈。", "参与塑造 Pro 路线图，同时锁定 Early Access 价格。"]
     ],
     roadmapTitle: "Pro 接下来会长成什么",
-    roadmapLead: "先解锁战略驾驶舱，随后获得更清楚的推进历史和更少的手工重启成本。",
+    roadmapLead: "先解锁战略驾驶舱，随后获得更清楚的推进历史 and 更少的手工重启成本。", // 等等，view_file 1063 行是 "并获得更清楚..."
     roadmap: [
         ["已优先开放", "战略金字塔", "面向一人公司的经营驾驶舱，覆盖项目组合、能力复利、市场信誉和战略取舍。"],
         ["下一根支柱", "可靠推进历史", "让你更容易看懂项目哪里真的变好了，哪里还会继续制造返工。"],
-        ["旗舰方向", "目标自动推进", "给 SoloMap 一个具体结果，让它减少手工重启和反复追问，把工作持续推向完成。"]
+        ["旗舰方向", "目标自动推进", "给独道 (SoloMap) 一个具体结果，让它减少手工重启和反复追问，把工作持续推向完成。"]
     ],
     trustTitle: "仍然本地优先。",
     trustCopy: "你的项目计划、推进历史和本地经验仍留在工作区。Pro 只解锁付费产品能力。",
     trustItems: [
-      "核心工作流不需要托管的 SoloMap 项目数据库。",
+      "核心工作流不需要托管的独道 (SoloMap) 项目数据库。",
       "你继续使用自己信任的工具和本地工作区。",
       "Free 仍然可用；Pro 解决更清晰的经营判断和更可靠的执行。"
     ],
-    finalTitle: "如果 SoloMap 已经帮你重新打开项目时不丢线索，Pro 就是下一步。",
+    finalTitle: "如果独道 (SoloMap) 已经帮你重新打开项目时不丢线索，Pro 就是下一步。",
     finalLead: "现在加入，锁定首批年付价格，并参与塑造你未来每天都会用来做项目取舍的经营驾驶舱。",
-    metaKeywords: "SoloMap Pro, 战略驾驶舱, 一人公司, 独立开发变现, 订阅价格, 项目取舍, 多项目管理, 独立变现",
+    metaKeywords: "独道, SoloMap Pro, 战略驾驶舱, 一人公司, 独立开发变现, 订阅价格, 项目取舍, 多项目管理, 独立变现",
     faqTitle: "Pro 订阅常见问题",
     faqItems: [
-      ["订阅 Pro 后，我的代码会被上传到服务器吗？", "不会。SoloMap Pro 依然遵循绝对的本地优先原则。你的代码、项目记忆和战略驾驶舱数据仅保留在你的本地，绝不会上传。"],
+      ["订阅 Pro 后，我的代码会被上传到服务器吗？", "不会。独道 (SoloMap) Pro 依然遵循绝对的本地优先原则。你的代码、项目记忆和战略驾驶舱数据仅保留在你的本地，绝不会上传。"],
       ["付款后如何激活 Pro 权益？", "付款成功后，网页会引导你回到 VS Code 完成激活。之后换电脑时，也可以回到这个页面，用同一个账户取回新的激活码。"],
       ["我可以在多台设备上使用同一个订阅吗？", "可以。单个订阅支持激活最多 5 台你个人拥有的工作设备（如日常笔记本和工作台式机）。"],
-      ["有退款保证吗？", "有的。我们提供 14 天退款承诺。如果 SoloMap Pro 没有达到你的预期，你可以随时申请全额退款。"]
+      ["有退款保证吗？", "有的。我们提供 14 天退款承诺。如果独道 (SoloMap) Pro 没有达到你的预期，你可以随时申请全额退款。"]
     ]
   };
 }
@@ -3398,15 +3398,15 @@ function buildHtmlSitemapPage(locale, origin) {
 function buildPrivacyPolicyPage(locale, origin) {
   const t = content[locale];
   const isZh = locale === "zh";
-  const title = isZh ? "SoloMap 隐私政策" : "SoloMap Privacy Policy";
+  const title = isZh ? "独道 (SoloMap) 隐私政策" : "SoloMap Privacy Policy";
   
   const contentHtml = isZh ? `
     <h1>隐私政策</h1>
     <p>更新日期：2026年6月6日</p>
-    <p>我们非常重视您的隐私。本隐私政策适用于由 SZLK LTD（运营方，注册于英国伦敦，公司编号 16843016）提供服务的 SoloMap 插件、官方网站（solomap.app）及相关授权同步服务。请在使用我们的产品前仔细阅读以下条款：</p>
+    <p>我们非常重视您的隐私。本隐私政策适用于由 SZLK LTD（运营方，注册于英国伦敦，公司编号 16843016）提供服务的独道 (SoloMap) 插件、官方网站（solomap.app）及相关授权同步服务。请在使用我们的产品前仔细阅读以下条款：</p>
     
     <h2>1. 核心本地优先（Local-First）数据架构</h2>
-    <p>SoloMap 的核心功能基于“本地优先”架构设计：</p>
+    <p>独道 (SoloMap) 的核心功能基于“本地优先”架构设计：</p>
     <ul>
       <li>您的项目路线图、推进环节、历史 Agent 执行记录（Journal Logs）、意图与判断，全部存储在您本地的 <code>.solopreneur</code> 文件夹中。</li>
       <li>我们没有云端数据库来同步或备份您的项目数据，我们也绝不会在后台静默收集、扫描或传输您的项目源代码、文件结构或业务机密。</li>
@@ -3416,7 +3416,7 @@ function buildPrivacyPolicyPage(locale, origin) {
     <h2>2. 信息收集类型与合法处理目的</h2>
     <p>当您与我们的服务进行交互时，我们仅会基于合法的商业目的收集以下必要的信息：</p>
     <ul>
-      <li><strong>账户与订阅激活数据</strong>：为了支持您使用 SoloMap Pro，我们会使用 OIDC 流程通过 SZLK Passport 安全登录以激活您的授权。我们只拉取您的加密用户 ID 和邮箱地址作为判定订阅状态的唯一凭证，我们不拉取也不存储您的 GitHub 密码或其他账户凭证。</li>
+      <li><strong>账户与订阅激活数据</strong>：为了支持您使用独道 (SoloMap) Pro，我们会使用 OIDC 流程通过 SZLK Passport 安全登录以激活您的授权。我们只拉取您的加密用户 ID 和邮箱地址作为判定订阅状态的唯一凭证，我们不拉取也不存储您的 GitHub 密码或其他账户凭证。</li>
       <li><strong>支付与交易数据</strong>：所有的付款和订阅账单均由 Stripe 独立且安全地进行托管处理，严格遵循 PCI-DSS 支付安全标准。我们不接触、不收集、不存储您的任何信用卡号、CVV 码或敏感的交易财务数据。</li>
       <li><strong>自愿提交的环境与错误日志</strong>：仅在您主动点击“提交反馈”并选择提交 GitHub Issue 时，会上传您同意披露的必要环境数据（如插件版本号、VS Code 版本号和脱敏后的错误日志）。</li>
     </ul>
@@ -3522,30 +3522,30 @@ function buildPrivacyPolicyPage(locale, origin) {
 function buildTermsOfServicePage(locale, origin) {
   const t = content[locale];
   const isZh = locale === "zh";
-  const title = isZh ? "SoloMap 用户协议" : "SoloMap Terms of Service";
+  const title = isZh ? "独道 (SoloMap) 用户协议" : "SoloMap Terms of Service";
   
   const contentHtml = isZh ? `
     <h1>用户协议</h1>
     <p>更新日期：2026年6月6日</p>
-    <p>欢迎使用 SoloMap！本用户协议是您与 SoloMap 服务提供商（由 SZLK 提供）之间关于您下载、安装和使用 SoloMap 软件所订立的法律合同。请在使用我们的产品前仔细阅读以下条款：</p>
+    <p>欢迎使用独道 (SoloMap)！本用户协议是您与独道 (SoloMap) 服务提供商（由 SZLK 提供）之间关于您下载、安装和使用 SoloMap 软件所订立的法律合同。请在使用我们的产品前仔细阅读以下条款：</p>
     
     <h2>1. 许可授予与使用范围</h2>
     <p>我们授予您一项有限的、非独占的、不可转让的、可撤销的软件使用许可：</p>
     <ul>
-      <li><strong>免费版（Free）</strong>：SoloMap 核心本地路线图功能免费向个人及商业项目开放。</li>
-      <li><strong>专业版（Pro）</strong>：SoloMap Pro 授权属于个人单人订阅。单个 Pro 订阅支持您在最多 5 台您个人拥有的设备（如工作站和笔记本电脑）上激活并运行 Pro 特性（如战略驾驶舱与多项目组合管理）。</li>
+      <li><strong>免费版（Free）</strong>：独道 (SoloMap) 核心本地路线图功能免费向个人及商业项目开放。</li>
+      <li><strong>专业版（Pro）</strong>：独道 (SoloMap) Pro 授权属于个人单人订阅。单个 Pro 订阅支持您在最多 5 台您个人拥有的设备（如工作站和笔记本电脑）上激活并运行 Pro 特性（如战略驾驶舱与多项目组合管理）。</li>
     </ul>
 
     <h2>2. 第三方 AI 提供商与费用分担（BYO-API）</h2>
-    <p>SoloMap 支持并鼓励您带上自己喜欢的本地 AI 编码 Agent CLI（如 Cursor, Claude Code, Cline 等）。在运行这些 AI 代理工具的过程中，产生的任何第三方 API 提供商（如 OpenAI, Anthropic, DeepSeek 等）的 Token 消耗、API 计费或服务费用，均需由您自行承担。SoloMap 不对此类费用承担任何责任。</p>
+    <p>独道 (SoloMap) 支持并鼓励您带上自己喜欢的本地 AI 编码 Agent CLI（如 Cursor, Claude Code, Cline 等）。在运行这些 AI 代理工具的过程中，产生的任何第三方 API 提供商（如 OpenAI, Anthropic, DeepSeek 等）的 Token 消耗、API 计费或服务费用，均需由您自行承担。独道 (SoloMap) 不对此类费用承担任何责任。</p>
 
     <h2>3. 本地数据与备份义务</h2>
-    <p>由于 SoloMap 的数据默认存放在您的本地计算机上，我们不提供云端路线图同步或历史记录托管服务。<strong>您有责任对自己的项目代码和 <code>.solopreneur</code> 文件夹进行日常备份（如通过 Git 提交或文件同步系统）。</strong> 我们不对任何由于硬盘故障、文件删除、操作系统问题或插件更新引发的数据丢失承担赔偿或找回责任。</p>
+    <p>由于独道 (SoloMap) 的数据默认存放在您的本地计算机上，我们不提供云端路线图同步或历史记录托管服务。<strong>您有责任对自己的项目代码和 <code>.solopreneur</code> 文件夹进行日常备份（如通过 Git 提交或文件同步系统）。</strong> 我们不对任何由于硬盘故障、文件删除、操作系统问题或插件更新引发的数据丢失承担赔偿或找回责任。</p>
 
     <h2>4. 禁止行为</h2>
     <p>您不得进行以下行为：</p>
     <ul>
-      <li>对 SoloMap 进行逆向工程、反编译或尝试提取其专有组件源代码；</li>
+      <li>对独道 (SoloMap) 进行逆向工程、反编译或尝试提取其专有组件源代码；</li>
       <li>利用我们的 Passport 登录机制进行未经授权的订阅共享或转售；</li>
       <li>违反适用的出口管制法律或用于危害国家安全的商业行为。</li>
     </ul>
