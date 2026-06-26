@@ -12,6 +12,7 @@
 6. [Agent 协作机制产品边界](./architecture/agent-collaboration-boundary.zh.md)：理解主副 Agent 协作如何进入任务闭环，同时避免把内部编排负担暴露给用户。
 7. [Agent Task Flow 方法论](./methodology/agent-task-flow-methodology.zh.md)：理解 SoloMap 如何从 Agent 启动器升级为可复核、可续推、可验收的任务流。
 8. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
+9. [中文品牌命名与定位分析](./product/chinese-naming-analysis.zh.md)：关于项目中文命名的多维度头脑风暴与品牌定位思考。
 
 ## 目录职责
 
