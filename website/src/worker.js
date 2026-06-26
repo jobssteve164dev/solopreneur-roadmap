@@ -202,14 +202,14 @@ const content = {
       install: "安装"
     },
     meta: {
-      title: "SoloMap - 给 AI Agent 项目的本地优先路线图与战略驾驶舱",
-      description: "SoloMap 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。",
-      ogDescription: "让 AI Agent 负责执行，让 SoloMap 负责不丢方向。",
-      keywords: "SoloMap, VS Code插件, 本地优先路线图, AI Agent, 独立开发, 独立创始人, 战略驾驶舱, 项目管理, 个人商业, 独立变现"
+      title: "独道 (SoloMap) - 给 AI Agent 项目的本地优先路线图与战略驾驶舱",
+      description: "独道 (SoloMap) 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。",
+      ogDescription: "让 AI Agent 负责执行，让独道负责不丢方向。",
+      keywords: "独道, SoloMap, VS Code插件, 本地优先路线图, AI Agent, 独立开发, 独立创始人, 战略驾驶舱, 项目管理, 个人商业, 独立变现"
     },
     hero: {
       eyebrow: "本地优先的 VS Code 插件",
-      title: "AI 负责编写代码，SoloMap 负责掌控方向。",
+      title: "AI 负责编写代码，独道负责掌控方向。",
       copy: "为独立开发者与个人创业者打造的本地优先战略驾驶舱。把想法变成路线图，让 Agent 奔跑在正确的道路上。",
       support: "把产品想法、路线图、Agent 执行历史和下一步动作放回你的本地工作区。",
       primaryCta: "从 VS Code Marketplace 安装",
@@ -217,13 +217,13 @@ const content = {
       githubCta: "查看 GitHub",
       proofLabel: "产品亮点",
       proof: ["在你的工作区里运行", "使用你已有的 Agent CLI", "Free 主路径保持可用"],
-      trustBadge: "超过 1,200+ 位独立开发者正在使用 SoloMap 保持推进",
-      screenshotLabel: "SoloMap 在 VS Code 中运行",
-      screenshotAlt: "SoloMap 路线图和 Agent 终端在 Visual Studio Code 中运行"
+      trustBadge: "超过 1,200+ 位独立开发者正在使用独道保持推进",
+      screenshotLabel: "独道在 VS Code 中运行",
+      screenshotAlt: "独道 (SoloMap) 路线图和 Agent 终端在 Visual Studio Code 中运行"
     },
     problem: {
       title: "AI 能写代码，但不会自动帮你经营项目方向。",
-      lead: "SoloMap 把计划、Agent 执行、下一步动作和项目记忆留在你真正工作的地方。",
+      lead: "独道 (SoloMap) 把计划、Agent 执行、下一步动作和项目记忆留在你真正工作的地方。",
       cards: [
         ["上下文散落", "项目计划、AI 对话、终端输出、TODO 和代码修改不再散落在不同地方。"],
         ["下一步清楚", "几天后重新打开项目，也能立刻看见当前该处理什么。"],
@@ -234,16 +234,16 @@ const content = {
       title: "从想法到真实推进，不丢掉上下文。",
       lead: "从一个真实项目开始，只需要四个动作。",
       steps: [
-        ["添加本地项目", "选择一个工作区文件夹，让 SoloMap 在那里建立项目推进界面。"],
+        ["添加本地项目", "选择一个工作区文件夹，让独道 (SoloMap) 在那里建立项目推进界面。"],
         ["生成路线图", "描述目标，得到一组可执行、可调整的路线图环节。"],
         ["运行你的 AI Agent", "从正确的路线图环节启动本地 Agent CLI，并自动带上上下文。"],
         ["回来继续推进", "下次打开 VS Code 时，直接看到今日安排、项目状态和最近进展。"]
       ]
     },
     answer: {
-      title: "SoloMap 是什么？",
-      lead: "SoloMap 是一个本地优先的 VS Code 插件，帮助独立开发者把 AI Agent 项目整理成清晰路线图、可执行 Agent 任务和可继续推进的下一步。它不替代编码 Agent，而是给编码 Agent 外层补上产品方向，让一个人也能持续 Build、Sell、Learn、Improve。",
-      comparisonTitle: "SoloMap 与 AI 编码工具的区别",
+      title: "独道 (SoloMap) 是什么？",
+      lead: "独道 (SoloMap) 是一个本地优先的 VS Code 插件，帮助独立开发者把 AI Agent 项目整理成清晰路线图、可执行 Agent 任务和可继续推进的下一步。它不替代编码 Agent，而是给编码 Agent 外层补上产品方向，让一个人也能持续 Build、Sell、Learn、Improve。",
+      comparisonTitle: "独道与 AI 编码工具的区别",
       comparison: [
         ["管理对象", "项目方向、路线图环节、Agent 执行上下文、推进记忆", "代码生成、编辑、问答、审查和终端执行"],
         ["工作位置", "用户已有的 VS Code 本地工作区", "通常在 IDE、终端、托管聊天或 Agent 运行环境中"],
@@ -251,14 +251,14 @@ const content = {
         ["数据姿态", "核心工作流默认本地优先", "取决于用户选择的 AI provider 和工具"]
       ],
       modules: [
-        ["选择 SoloMap，如果", "你已经在用 AI Agent，但项目计划、对话、代码修改和后续动作总是散落。"],
+        ["选择独道，如果", "你已经在用 AI Agent，但项目计划、对话、代码修改和后续动作总是散落。"],
         ["选择编码 Agent，如果", "你当前只需要完成一个具体的写代码、改代码、解释代码或审查任务。"],
-        ["两者一起用，当", "你希望 Agent 负责执行，同时 SoloMap 保持路线图、项目记忆和下一步动作清楚可见。"]
+        ["两者一起用，当", "你希望 Agent 负责执行，同时独道保持路线图、项目记忆和下一步动作清楚可见。"]
       ]
     },
     trust: {
       title: "默认本地优先。",
-      copy: "SoloMap 的核心工作流不要求托管后端。路线图、任务记录和项目记忆优先留在你的本地工作区。",
+      copy: "独道 (SoloMap) 的核心工作流不要求托管后端。路线图、任务记录和项目记忆优先留在你的本地工作区。",
       items: [
         "项目路线图和记忆跟随你的本地项目保存。",
         "你继续使用自己已经安装的 AI Agent CLI。",
@@ -281,7 +281,7 @@ const content = {
       cta: "加入 Pro Early Access"
     },
     install: {
-      title: "先用一个项目试试 SoloMap。",
+      title: "先用一个项目试试独道 (SoloMap)。",
       lead: "如果它帮你保持推进，请告诉我们金字塔战略驾驶舱下一步应该看见什么。",
       marketplace: "VS Code Marketplace",
       openVsx: "Open VSX",
@@ -293,13 +293,13 @@ const content = {
       feedback: "提交反馈"
     },
     faq: {
-      title: "SoloMap 常见问题",
+      title: "独道 (SoloMap) 常见问题",
       items: [
-        ["SoloMap 是 AI 编码 Agent 吗？", "不是。SoloMap 是你已有编码 Agent 外层的路线图和战略层。"],
-        ["SoloMap 必须使用托管后端吗？", "不需要。核心工作流默认把路线图状态、任务记录和项目记忆保存在本地工作区。"],
-        ["谁适合使用 SoloMap？", "SoloMap 适合在 VS Code 中用 AI Agent 构建产品的独立开发者和 solo founder。"],
-        ["SoloMap 解决什么问题？", "它让项目方向、下一步动作和 AI 执行历史保持可见，避免一个人做产品时在多次编码会话之间丢掉节奏。"],
-        ["SoloMap 能配合不同 Agent CLI 吗？", "可以。SoloMap 的设计是带上你自己的本地 Agent CLI，而不是强迫你使用某一个托管编码 Agent。"]
+        ["独道 (SoloMap) 是 AI 编码 Agent 吗？", "不是。独道 (SoloMap) 是你已有编码 Agent 外层的路线图和战略层。"],
+        ["独道 (SoloMap) 必须使用托管后端吗？", "不需要。核心工作流默认把路线图状态、任务记录和项目记忆保存在本地工作区。"],
+        ["谁适合使用独道 (SoloMap)？", "独道 (SoloMap) 适合在 VS Code 中用 AI Agent 构建产品的独立开发者和 solo founder。"],
+        ["独道 (SoloMap) 解决什么问题？", "它让项目方向、下一步动作和 AI 执行历史保持可见，避免一个人做产品时在多次编码会话之间丢掉节奏。"],
+        ["独道 (SoloMap) 能配合不同 Agent CLI 吗？", "可以。独道 (SoloMap) 的设计是带上你自己的本地 Agent CLI，而不是强迫你使用某一个托管编码 Agent。"]
       ]
     },
     footer: {
@@ -307,10 +307,10 @@ const content = {
       privacy: "隐私 / 本地优先说明"
     },
     privacy: {
-      title: "SoloMap 本地优先说明",
-      back: "返回 SoloMap",
+      title: "独道 (SoloMap) 本地优先说明",
+      back: "返回独道 (SoloMap)",
       heading: "本地优先说明",
-      copy: "SoloMap 的核心工作流默认把路线图状态、任务记录和项目记忆保存在你的本地工作区。主项目推进流程不要求托管的 SoloMap 后端。",
+      copy: "独道 (SoloMap) 的核心工作流默认把路线图状态、任务记录和项目记忆保存在你的本地工作区。主项目推进流程不要求托管的独道 (SoloMap) 后端。",
       items: [
         "AI 服务的使用取决于你选择的本地 Agent CLI。",
         "GitHub 数据只在你连接或刷新相关信号时使用。",
