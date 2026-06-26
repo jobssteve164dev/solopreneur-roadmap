@@ -3300,7 +3300,7 @@ function buildFooter(t) {
         <div class="footer-brand">
           <div class="footer-brand-title">
             <img src="${LOGO_URL}" width="28" height="28" alt="">
-            <span>SoloMap</span>
+            <span>${isZh ? "独道 SoloMap" : "SoloMap"}</span>
           </div>
           <div class="footer-brand-desc">${escapeHtml(desc)}</div>
         </div>
