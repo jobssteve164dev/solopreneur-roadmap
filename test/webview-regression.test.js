@@ -3238,7 +3238,11 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
       'module.exports.__buildSoloConversationPrompt = buildSoloConversationPrompt;',
+      'module.exports.__buildFlowPlannerPrompt = buildFlowPlannerPrompt;',
+      'module.exports.__buildFlowBuilderPrompt = buildFlowBuilderPrompt;',
+      'module.exports.__buildFlowVerifierPrompt = buildFlowVerifierPrompt;',
       'module.exports.__buildSoloMapSystemMemoryPrompt = solomapGlobal_1.buildSoloMapSystemMemoryPrompt;',
+      'module.exports.__buildSolomapStartupPackInstructions = solomapGlobal_1.buildSolomapStartupPackInstructions;',
       'module.exports.__ensureSolomapMemoryStore = solomapGlobal_1.ensureSolomapMemoryStore;',
       'module.exports.__ensureSolomapSkillStore = solomapGlobal_1.ensureSolomapSkillStore;',
       'module.exports.__readSolomapSkillRegistry = solomapGlobal_1.readSolomapSkillRegistry;',
@@ -3872,6 +3876,26 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(defaultMemoryPrompt, /当前用户请求、当前项目文件、测试、日志和命令输出/);
   assert.match(defaultMemoryPrompt, /新项目或新环节开始时/);
   assert.match(defaultMemoryPrompt, /项目类型用于选择路线图形态/);
+  const patternFile = path.join(ensuredMemory.memoryRoot, 'patterns', 'problem-closure-mindset.md');
+  fs.writeFileSync(patternFile, '# Problem Closure\n\nUI 问题必须先读取记忆并做二次检查。\n', 'utf8');
+  const startupPack = extensionModule.__buildSolomapStartupPackInstructions({
+    workspaceRoot: '/workspace/app',
+    globalDataPath: memoryRoot,
+    runKind: 'solo',
+    contextText: '修复 UI 问题并确认记忆机制生效',
+    learningSummaryContext: 'SoloMap 跨项目学习信号：\n- 待审核学习候选：1',
+    learningRetrievalContext: 'SoloMap 统一学习账本召回：\n1. 用户纠偏应成为后续执行约束',
+    executionExperienceContext: 'SoloMap 相关执行经验（自动召回，最多 3 条）：\n1. 命中原因：同类运行'
+  });
+  assert.match(startupPack, /SoloMap 启动包（插件生成，执行前硬门禁）/);
+  assert.match(startupPack, /统一入口/);
+  assert.match(startupPack, /在做任何实现、判断、规划、验证或最终回答前，必须先完成本启动包/);
+  assert.match(startupPack, /memory\/profile\.md/);
+  assert.match(startupPack, /memory\/operating-rules\.md/);
+  assert.match(startupPack, /projects\/app\.md/);
+  assert.match(startupPack, /problem-closure-mindset\.md/);
+  assert.match(startupPack, /SoloMap 统一学习账本召回/);
+  assert.match(startupPack, /自动建议写入合适的 memory\/pattern\/decision\/domain 或学习候选/);
 
   const skillStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-skill-store-'));
   const skillStore = extensionModule.__ensureSolomapSkillStore('/workspace/app', skillStoreRoot);
@@ -3933,7 +3957,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   const skillInstructions = extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '修复侧边栏 UI 交互问题');
   assert.match(skillInstructions, /Frontend UI/);
   assert.match(skillInstructions, /installed\/frontend-ui\/package\/SKILL\.md/);
-  assert.match(skillInstructions, /这些只是候选，不是强制项/);
+  assert.match(skillInstructions, /必须在执行前判定 used \/ skipped-not-applicable/);
   assert.doesNotMatch(skillInstructions, /Manual Only/);
 
   const installPrompt = extensionModule.__buildSkillInstallPrompt('https://skills.sh/owner/repo/skill-name', '/workspace/app', skillStoreRoot, path.join(skillStore.runsRoot, 'run', 'result.json'));
@@ -4402,9 +4426,10 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(prompt, /正常退出 CLI 进程/);
   assert.match(prompt, /唯一任务/);
   assert.match(prompt, /SoloMap/);
-  assert.match(prompt, /SoloMap 默认系统提示词/);
+  assert.match(prompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
+  assert.match(prompt, /运行类型：step/);
   assert.match(prompt, /\.solomap-global\/memory/);
-  assert.match(prompt, /待沉淀候选目录/);
+  assert.match(prompt, /学习候选的晋升不要求用户手工确认/);
 
   const followupPrompt = extensionModule.__buildAgentConversationPrompt(
     {
@@ -4461,7 +4486,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(attachedPrompt, /Always preserve public API compatibility/);
   assert.match(attachedPrompt, /本次用户补充为准/);
   assert.match(attachedPrompt, /本环节完成标准/);
-  assert.match(attachedPrompt, new RegExp(`${attachedRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\/\\.solomap-global\\/memory`));
+  assert.match(attachedPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
+  assert.match(attachedPrompt, /\.solomap-global\/memory/);
   const issueContextPrompt = extensionModule.__buildAgentConversationPrompt(
     {
       title: 'Fix onboarding bug',
@@ -4503,7 +4529,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /核心产品（商业化产品）/);
   assert.match(revisionPrompt, /不可强行套用营销或销售任务/);
   assert.match(revisionPrompt, /Always run focused checks/);
-  assert.match(revisionPrompt, /SoloMap 默认系统提示词/);
+  assert.match(revisionPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
+  assert.match(revisionPrompt, /运行类型：roadmap_revision/);
   assert.match(revisionPrompt, /\/workspace\/\.solomap-global\/memory/);
 
   const soloPrompt = extensionModule.__buildSoloConversationPrompt(
@@ -4518,7 +4545,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /不要求产生文件修改/);
   assert.match(soloPrompt, /关联某个已有环节/);
   assert.match(soloPrompt, /Keep answers brief/);
-  assert.match(soloPrompt, /SoloMap 默认系统提示词/);
+  assert.match(soloPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
+  assert.match(soloPrompt, /运行类型：solo/);
   assert.match(soloPrompt, /\/workspace\/\.solomap-global\/memory/);
   assert.match(soloPrompt, /SoloMap 项目文档 Harness/);
   assert.match(soloPrompt, /documentation\.json/);
@@ -4537,6 +4565,35 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(attachedSoloPrompt, /用户为本次 Solo 对话选择了补充文件/);
   assert.match(attachedSoloPrompt, /docs\/brief\.md/);
   assert.doesNotMatch(attachedSoloPrompt, /\.\.\/outside\.md/);
+  const flowPlannerPrompt = extensionModule.__buildFlowPlannerPrompt({
+    goal: '让 Flow 使用统一记忆机制',
+    workspaceRoot: '/workspace/app',
+    flowId: 'flow-1',
+    loopId: 'loop-1',
+    globalDataPath: '/workspace/.solomap-global'
+  });
+  assert.match(flowPlannerPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
+  assert.match(flowPlannerPrompt, /运行类型：flow \/ 角色：planner/);
+  const flowBuilderPrompt = extensionModule.__buildFlowBuilderPrompt({
+    goal: '让 Flow 使用统一记忆机制',
+    workspaceRoot: '/workspace/app',
+    flowId: 'flow-1',
+    loopId: 'loop-1',
+    planner: { plan: ['wire startup pack'] },
+    globalDataPath: '/workspace/.solomap-global'
+  });
+  assert.match(flowBuilderPrompt, /运行类型：flow \/ 角色：builder/);
+  const flowVerifierPrompt = extensionModule.__buildFlowVerifierPrompt({
+    goal: '让 Flow 使用统一记忆机制',
+    workspaceRoot: '/workspace/app',
+    flowId: 'flow-1',
+    loopId: 'loop-1',
+    planner: { plan: ['wire startup pack'] },
+    builder: { actions: ['changed prompt builder'] },
+    evidence: { changedFilesSummary: 'M src/extension.ts', touchedFilesSummary: 'src/extension.ts', outputTail: 'ok' },
+    globalDataPath: '/workspace/.solomap-global'
+  });
+  assert.match(flowVerifierPrompt, /运行类型：flow \/ 角色：verifier/);
 
   const manifestPath = path.join(soloAttachmentRoot, '.solopreneur', 'documentation.json');
   assert.ok(fs.existsSync(manifestPath));

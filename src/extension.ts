@@ -47,13 +47,12 @@ import {
 import {
   buildEnhancementInstallPrompt,
   buildEnhancementUninstallPrompt,
-  buildSoloMapSystemMemoryPrompt,
   buildSolomapEnhancementCandidateInstructions,
   buildSolomapEnhancementContextPreflight,
   buildSolomapEnhancementRuntimeInstructions,
   buildSolomapLearningContext,
   buildSolomapMcpCandidateInstructions,
-  buildSolomapSkillCandidateInstructions,
+  buildSolomapStartupPackInstructions,
   buildMcpInstallPrompt,
   buildSkillInstallPrompt,
   checkAndRegisterEnhancement,
@@ -2329,7 +2328,36 @@ function buildInteractiveContinuationPrompt(
       '继续推进当前环节，不要切换到其他环节。'
     ].join('\n')
     : '这是同一项目中的续聊，请延续当前项目语境回答和行动。';
-  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
+  const continuationRunKind = node && node.id && node.id !== soloConversationId ? 'step_continue' : 'solo_continue';
+  const startupContextText = [
+    normalizedUserMessage,
+    node?.title || '',
+    node?.stage || '',
+    node?.description || '',
+    attachedFiles.join('\n')
+  ].join('\n');
+  const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
+  const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
+    projectPath: workspaceRoot,
+    runKind: continuationRunKind,
+    contextText: startupContextText,
+    files: attachedFiles
+  });
+  const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
+    nodeId: node?.id || soloConversationId,
+    runKind: continuationRunKind,
+    contextText: startupContextText,
+    supplementFiles: attachedFiles
+  });
+  const solomapStartupPackInstructions = buildSolomapStartupPackInstructions({
+    workspaceRoot,
+    globalDataPath,
+    runKind: continuationRunKind,
+    contextText: startupContextText,
+    learningSummaryContext: solomapLearningContext,
+    learningRetrievalContext: solomapLearningRetrievalContext,
+    executionExperienceContext: solomapExecutionExperienceContext
+  });
   return [
     '你正在继续 SoloMap 中已经存在的一段对话。',
     `项目目录：${workspaceRoot}`,
@@ -2350,7 +2378,7 @@ function buildInteractiveContinuationPrompt(
     stepMemoryInstructions,
     ...(completionCriteriaInstructions ? ['', completionCriteriaInstructions] : []),
     '',
-    solomapMemoryInstructions,
+    solomapStartupPackInstructions,
     '',
     '闭环要求：',
     '1. 保持这是同一次任务的续聊，不要把它改造成新的无关任务。',
@@ -2603,22 +2631,17 @@ function buildAgentConversationPrompt(
       '- 即使你查看上一轮对话，本轮仍必须以当前环节任务和本次用户补充为准，不要被旧结论带偏。'
     ].join('\n')
     : '';
-  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
-  const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(
-    workspaceRoot,
-    globalDataPath,
-    [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
-  );
+  const startupContextText = [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n');
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(
     workspaceRoot,
     globalDataPath,
-    [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n')
+    startupContextText
   );
   const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(
     workspaceRoot,
     globalDataPath,
-    [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n'),
+    startupContextText,
     enabledEnhancements
   );
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
@@ -2627,7 +2650,7 @@ function buildAgentConversationPrompt(
   const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
     runKind: 'step',
-    contextText: [node.title, node.stage, node.description, node.agentPrompt, normalizedUserMessage, normalizedGithubIssueContext].join('\n'),
+    contextText: startupContextText,
     files: attachedFiles
   });
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
@@ -2643,6 +2666,15 @@ function buildAgentConversationPrompt(
       attachedFiles.join('\n')
     ].join('\n'),
     supplementFiles: attachedFiles
+  });
+  const solomapStartupPackInstructions = buildSolomapStartupPackInstructions({
+    workspaceRoot,
+    globalDataPath,
+    runKind: 'step',
+    contextText: startupContextText,
+    learningSummaryContext: solomapLearningContext,
+    learningRetrievalContext: solomapLearningRetrievalContext,
+    executionExperienceContext: solomapExecutionExperienceContext
   });
   const crossAgentHandoffInstructions = buildCrossAgentHandoffInstructions(workspaceRoot, node.id || '', 'step');
 
@@ -2668,15 +2700,11 @@ function buildAgentConversationPrompt(
     ...(githubSecurityContext ? ['', githubSecurityContext] : []),
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
-    solomapMemoryInstructions,
+    solomapStartupPackInstructions,
     '',
     solomapDocumentationInstructions,
-    ...(solomapLearningContext ? ['', solomapLearningContext] : []),
-    ...(solomapLearningRetrievalContext ? ['', solomapLearningRetrievalContext] : []),
-    ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     '',
     crossAgentHandoffInstructions,
-    ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
@@ -2718,25 +2746,33 @@ function buildRoadmapRevisionPrompt(
       '如与本次路线图调整要求冲突，始终以本次路线图调整要求为准。'
     ].join('\n')
     : '';
-  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
-  const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
-  const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
-  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage, enabledEnhancements);
+  const startupContextText = [normalizedUserMessage, attachedFiles.join('\n')].join('\n');
+  const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, startupContextText);
+  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, startupContextText, enabledEnhancements);
   const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
   const githubSecurityContext = buildGithubSecurityContext(workspaceRoot);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
     runKind: 'roadmap_revision',
-    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    contextText: startupContextText,
     files: attachedFiles
   });
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
     nodeId: roadmapRevisionId,
     runKind: 'roadmap_revision',
-    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    contextText: startupContextText,
     supplementFiles: attachedFiles
+  });
+  const solomapStartupPackInstructions = buildSolomapStartupPackInstructions({
+    workspaceRoot,
+    globalDataPath,
+    runKind: 'roadmap_revision',
+    contextText: startupContextText,
+    learningSummaryContext: solomapLearningContext,
+    learningRetrievalContext: solomapLearningRetrievalContext,
+    executionExperienceContext: solomapExecutionExperienceContext
   });
   const crossAgentHandoffInstructions = buildCrossAgentHandoffInstructions(workspaceRoot, roadmapRevisionId, 'roadmap_revision');
   return [
@@ -2749,17 +2785,13 @@ function buildRoadmapRevisionPrompt(
     normalizedUserMessage,
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
-    solomapMemoryInstructions,
+    solomapStartupPackInstructions,
     '',
     solomapDocumentationInstructions,
-    ...(solomapLearningContext ? ['', solomapLearningContext] : []),
-    ...(solomapLearningRetrievalContext ? ['', solomapLearningRetrievalContext] : []),
-    ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     '',
     crossAgentHandoffInstructions,
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(githubSecurityContext ? ['', githubSecurityContext] : []),
-    ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
@@ -2801,23 +2833,31 @@ function buildSoloConversationPrompt(
       '如与本次用户要求冲突，始终以本次用户要求为准。'
     ].join('\n')
     : '';
-  const solomapMemoryInstructions = buildSoloMapSystemMemoryPrompt(workspaceRoot, globalDataPath);
   const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
-  const solomapSkillInstructions = buildSolomapSkillCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
-  const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage);
-  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, normalizedUserMessage, enabledEnhancements);
+  const startupContextText = [normalizedUserMessage, attachedFiles.join('\n')].join('\n');
+  const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, startupContextText);
+  const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, startupContextText, enabledEnhancements);
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
     runKind: 'solo',
-    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    contextText: startupContextText,
     files: attachedFiles
   });
   const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
     nodeId: soloConversationId,
     runKind: 'solo',
-    contextText: [normalizedUserMessage, attachedFiles.join('\n')].join('\n'),
+    contextText: startupContextText,
     supplementFiles: attachedFiles
+  });
+  const solomapStartupPackInstructions = buildSolomapStartupPackInstructions({
+    workspaceRoot,
+    globalDataPath,
+    runKind: 'solo',
+    contextText: startupContextText,
+    learningSummaryContext: solomapLearningContext,
+    learningRetrievalContext: solomapLearningRetrievalContext,
+    executionExperienceContext: solomapExecutionExperienceContext
   });
   const crossAgentHandoffInstructions = buildCrossAgentHandoffInstructions(workspaceRoot, soloConversationId, 'solo');
   return [
@@ -2830,15 +2870,11 @@ function buildSoloConversationPrompt(
     normalizedUserMessage,
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
-    solomapMemoryInstructions,
+    solomapStartupPackInstructions,
     '',
     solomapDocumentationInstructions,
-    ...(solomapLearningContext ? ['', solomapLearningContext] : []),
-    ...(solomapLearningRetrievalContext ? ['', solomapLearningRetrievalContext] : []),
-    ...(solomapExecutionExperienceContext ? ['', solomapExecutionExperienceContext] : []),
     '',
     crossAgentHandoffInstructions,
-    ...(solomapSkillInstructions ? ['', solomapSkillInstructions] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
     ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
@@ -2927,12 +2963,29 @@ function buildFlowPlannerPrompt(input: {
   globalDataPath?: string;
   supplementFiles?: string[];
 }): string {
+  const contextText = [input.goal, input.relatedRoadmapStepTitle || '', (input.supplementFiles || []).join('\n')].join('\n');
   const learningContext = buildLearningRetrievalContext(input.workspaceRoot, input.globalDataPath || '', {
     projectPath: input.workspaceRoot,
     runKind: 'flow',
     role: 'planner',
-    contextText: [input.goal, input.relatedRoadmapStepTitle || '', (input.supplementFiles || []).join('\n')].join('\n'),
+    contextText,
     files: input.supplementFiles || []
+  });
+  const executionExperienceContext = buildExecutionExperiencePrompt(input.workspaceRoot, {
+    nodeId: buildFlowExecutionNodeId(input.flowId, input.loopId, 'planner'),
+    runKind: 'flow',
+    contextText,
+    supplementFiles: input.supplementFiles || []
+  });
+  const startupPack = buildSolomapStartupPackInstructions({
+    workspaceRoot: input.workspaceRoot,
+    globalDataPath: input.globalDataPath || '',
+    runKind: 'flow',
+    role: 'planner',
+    contextText,
+    learningSummaryContext: buildSolomapLearningContext(input.workspaceRoot, input.globalDataPath || ''),
+    learningRetrievalContext: learningContext,
+    executionExperienceContext
   });
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Planner。',
@@ -2945,7 +2998,8 @@ function buildFlowPlannerPrompt(input: {
     ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.relatedRoadmapStepTitle ? [`相关路线图环节：${input.relatedRoadmapStepTitle}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
-    ...(learningContext ? ['', learningContext] : []),
+    '',
+    startupPack,
     '',
     '执行要求：',
     '1. 先阅读相关代码、文档和当前项目事实，不要空想方案。',
@@ -2969,12 +3023,29 @@ function buildFlowBuilderPrompt(input: {
   globalDataPath?: string;
   supplementFiles?: string[];
 }): string {
+  const contextText = [input.goal, JSON.stringify(input.planner), (input.supplementFiles || []).join('\n')].join('\n');
   const learningContext = buildLearningRetrievalContext(input.workspaceRoot, input.globalDataPath || '', {
     projectPath: input.workspaceRoot,
     runKind: 'flow',
     role: 'builder',
-    contextText: [input.goal, JSON.stringify(input.planner), (input.supplementFiles || []).join('\n')].join('\n'),
+    contextText,
     files: input.supplementFiles || []
+  });
+  const executionExperienceContext = buildExecutionExperiencePrompt(input.workspaceRoot, {
+    nodeId: buildFlowExecutionNodeId(input.flowId, input.loopId, 'builder'),
+    runKind: 'flow',
+    contextText,
+    supplementFiles: input.supplementFiles || []
+  });
+  const startupPack = buildSolomapStartupPackInstructions({
+    workspaceRoot: input.workspaceRoot,
+    globalDataPath: input.globalDataPath || '',
+    runKind: 'flow',
+    role: 'builder',
+    contextText,
+    learningSummaryContext: buildSolomapLearningContext(input.workspaceRoot, input.globalDataPath || ''),
+    learningRetrievalContext: learningContext,
+    executionExperienceContext
   });
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Builder。',
@@ -2986,7 +3057,8 @@ function buildFlowBuilderPrompt(input: {
     `用户目标：${input.goal}`,
     ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
-    ...(learningContext ? ['', learningContext] : []),
+    '',
+    startupPack,
     '',
     'Planner 结构化计划：',
     JSON.stringify(input.planner, null, 2),
@@ -3018,18 +3090,36 @@ function buildFlowVerifierPrompt(input: {
   globalDataPath?: string;
   supplementFiles?: string[];
 }): string {
+  const touchedFiles = (input.evidence.touchedFilesSummary || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const contextText = [
+    input.goal,
+    JSON.stringify(input.planner),
+    JSON.stringify(input.builder),
+    input.evidence.changedFilesSummary,
+    input.evidence.touchedFilesSummary
+  ].join('\n');
   const learningContext = buildLearningRetrievalContext(input.workspaceRoot, input.globalDataPath || '', {
     projectPath: input.workspaceRoot,
     runKind: 'flow',
     role: 'verifier',
-    contextText: [
-      input.goal,
-      JSON.stringify(input.planner),
-      JSON.stringify(input.builder),
-      input.evidence.changedFilesSummary,
-      input.evidence.touchedFilesSummary
-    ].join('\n'),
-    files: (input.evidence.touchedFilesSummary || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    contextText,
+    files: touchedFiles
+  });
+  const executionExperienceContext = buildExecutionExperiencePrompt(input.workspaceRoot, {
+    nodeId: buildFlowExecutionNodeId(input.flowId, input.loopId, 'verifier'),
+    runKind: 'flow',
+    contextText,
+    supplementFiles: touchedFiles
+  });
+  const startupPack = buildSolomapStartupPackInstructions({
+    workspaceRoot: input.workspaceRoot,
+    globalDataPath: input.globalDataPath || '',
+    runKind: 'flow',
+    role: 'verifier',
+    contextText,
+    learningSummaryContext: buildSolomapLearningContext(input.workspaceRoot, input.globalDataPath || ''),
+    learningRetrievalContext: learningContext,
+    executionExperienceContext
   });
   return [
     '你正在 SoloMap 的 Flow 模式中担任 Verifier。',
@@ -3041,7 +3131,8 @@ function buildFlowVerifierPrompt(input: {
     `用户目标：${input.goal}`,
     ...(Array.isArray(input.supplementFiles) && input.supplementFiles.length ? [`补充文件：${input.supplementFiles.join(', ')}`] : []),
     ...(input.globalPrompt ? ['', '用户设置的全局默认要求：', input.globalPrompt] : []),
-    ...(learningContext ? ['', learningContext] : []),
+    '',
+    startupPack,
     '',
     'Planner JSON：',
     JSON.stringify(input.planner, null, 2),

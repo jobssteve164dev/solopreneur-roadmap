@@ -1148,8 +1148,135 @@ export function buildSolomapSkillCandidateInstructions(workspaceRoot: string, gl
         `   - 风险：${risk}`
       ].filter(Boolean).join('\n');
     }),
-    '技能使用协议：这些只是候选，不是强制项。开始执行前快速判断是否适用，只读取真正相关的 SKILL.md；如果跳过候选，用一句话说明原因。不要自行安装新 skill。最终输出中简短列出本轮实际使用的 skill。'
+    '技能使用协议：命中的技能必须在执行前判定 used / skipped-not-applicable；判定为 used 的技能必须先读取对应 SKILL.md。不要自行安装新 skill。最终输出中简短列出本轮实际使用的 skill。'
   ].join('\n');
+}
+
+function fileExists(filePath: string): boolean {
+  try {
+    return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function listMemoryMarkdownFiles(dirPath: string, limit = 40): string[] {
+  try {
+    return fs.readdirSync(dirPath)
+      .filter((name) => name.endsWith('.md') && name !== '_example.md')
+      .map((name) => path.join(dirPath, name))
+      .filter(fileExists)
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+function tokenizeStartupContext(value: string): Set<string> {
+  return new Set(String(value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9_\-/.一-龥]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+    .slice(0, 120));
+}
+
+function scoreMemoryFile(filePath: string, contextTokens: Set<string>): number {
+  const baseName = path.basename(filePath).toLowerCase();
+  let score = 0;
+  for (const token of contextTokens) {
+    if (baseName.includes(token)) {
+      score += 5;
+    }
+  }
+  try {
+    const sample = fs.readFileSync(filePath, 'utf8').slice(0, 6000).toLowerCase();
+    for (const token of contextTokens) {
+      if (sample.includes(token)) {
+        score += 1;
+      }
+    }
+  } catch {
+    return score;
+  }
+  return score;
+}
+
+function selectRelevantMemoryFiles(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 8): string[] {
+  const memoryRoot = getSolomapMemoryRoot(workspaceRoot, globalDataPath);
+  const contextTokens = tokenizeStartupContext(contextText);
+  const candidates = [
+    ...listMemoryMarkdownFiles(path.join(memoryRoot, 'patterns')),
+    ...listMemoryMarkdownFiles(path.join(memoryRoot, 'decisions')),
+    ...listMemoryMarkdownFiles(path.join(memoryRoot, 'domains')),
+    ...listMemoryMarkdownFiles(path.join(memoryRoot, 'inbox'), 20)
+  ];
+  return candidates
+    .map((filePath) => ({ filePath, score: scoreMemoryFile(filePath, contextTokens) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.filePath.localeCompare(b.filePath))
+    .slice(0, limit)
+    .map((entry) => entry.filePath);
+}
+
+function relativeOrAbsolute(workspaceRoot: string, filePath: string): string {
+  const rel = path.relative(workspaceRoot, filePath).replace(/\\/g, '/');
+  return rel && !rel.startsWith('..') ? rel : filePath;
+}
+
+export function buildSolomapStartupPackInstructions(input: {
+  workspaceRoot: string;
+  globalDataPath?: string;
+  runKind: string;
+  role?: string;
+  contextText: string;
+  learningSummaryContext?: string;
+  learningRetrievalContext?: string;
+  executionExperienceContext?: string;
+}): string {
+  const workspaceRoot = input.workspaceRoot;
+  const globalDataPath = input.globalDataPath || '';
+  const memoryRoot = getSolomapMemoryRoot(workspaceRoot, globalDataPath);
+  const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
+  const requiredReadFiles = [
+    path.join(workspaceRoot, 'agent.md'),
+    path.join(memoryRoot, 'profile.md'),
+    path.join(memoryRoot, 'operating-rules.md'),
+    projectMemoryFile,
+    path.join(memoryRoot, 'active', 'current-session.md'),
+    ...selectRelevantMemoryFiles(workspaceRoot, globalDataPath, input.contextText)
+  ].filter((filePath, index, all) => filePath && all.indexOf(filePath) === index);
+  const skillCandidates = selectSolomapSkillCandidates(workspaceRoot, globalDataPath, input.contextText, 6);
+  const skillBlocks = skillCandidates.map(({ skill, reasons }, index) => {
+    const entry = skill.entry || `installed/${skill.id}/package/SKILL.md`;
+    const entryPath = path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), entry);
+    const useWhen = normalizeSkillKeywords(skill.activation?.useWhen).slice(0, 3).join('；');
+    const doNotUseWhen = normalizeSkillKeywords(skill.activation?.doNotUseWhen).slice(0, 3).join('；');
+    return [
+      `${index + 1}. ${skill.title || skill.id}`,
+      `   - 入口：${entryPath}`,
+      `   - 命中原因：${reasons.join(', ') || '任务上下文相关'}`,
+      useWhen ? `   - 适用：${useWhen}` : '',
+      doNotUseWhen ? `   - 不适用：${doNotUseWhen}` : ''
+    ].filter(Boolean).join('\n');
+  });
+  return [
+    'SoloMap 启动包（插件生成，执行前硬门禁）：',
+    `- 运行类型：${input.runKind}${input.role ? ` / 角色：${input.role}` : ''}`,
+    '- 这是记忆、学习、技能和执行经验的统一入口；不要再另起一套读取、沉淀或晋升机制。',
+    '- 在做任何实现、判断、规划、验证或最终回答前，必须先完成本启动包。',
+    '- 先读取下列存在的文件；文件不存在时记录为 skipped，不得因此中断主任务：',
+    ...requiredReadFiles.map((filePath) => `  - ${relativeOrAbsolute(workspaceRoot, filePath)}`),
+    '- 读取后用一句话形成本轮约束：用户目标、必须保留的边界、适用经验、最窄验证。',
+    skillBlocks.length
+      ? ['- 命中的技能必须逐一判定 used / skipped-not-applicable；判定为 used 的技能必须先读取入口 SKILL.md：', ...skillBlocks].join('\n')
+      : '- 本轮没有命中需要读取的 SoloMap 技能；继续按记忆与当前项目事实执行。',
+    input.learningSummaryContext ? ['', input.learningSummaryContext].join('\n') : '',
+    input.learningRetrievalContext ? ['', input.learningRetrievalContext].join('\n') : '',
+    input.executionExperienceContext ? ['', input.executionExperienceContext].join('\n') : '',
+    '- 学习候选的晋升不要求用户手工确认；如果本轮验证出可复用规则，自动建议写入合适的 memory/pattern/decision/domain 或学习候选，并避免把审核负担转嫁给用户。',
+    '- 经验库只能约束执行方式，不能覆盖本轮用户最新要求、当前代码、测试、日志和命令输出。'
+  ].filter(Boolean).join('\n');
 }
 
 export function buildSkillInstallPrompt(skillInput: string, workspaceRoot: string, globalDataPath: string, resultFilePath: string): string {
