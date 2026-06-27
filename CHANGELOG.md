@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.273 - 2026-06-27
+
+### Changed
+- Add SoloMap startup pack memory gate (0c40021)
+
+### Docs
+- update brand name '独道' on pro subscription, terms of service and privacy policy pages (73ce694)
+- conditionally display '独道 SoloMap' in footer for Chinese locale (91027ee)
+- conditionally display '独道 SoloMap' in top header for Chinese locale (9e6f979)
+- use brand name '独道' for Chinese website title and localization (5a9c0bc)
+- add chinese naming analysis report and index (5e523af)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.272 - 2026-06-26
 
 ### Changed
