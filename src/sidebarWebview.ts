@@ -163,8 +163,28 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       color: #00e5ff;
     }
 
+    .btn-focus-timer {
+      width: 23px;
+      height: 23px;
+      border-radius: 999px;
+      justify-content: center;
+      background:
+        radial-gradient(circle at center, rgba(15, 17, 26, 0.95) 0 56%, transparent 58%),
+        conic-gradient(#00e5ff var(--focus-progress, 0deg), rgba(255,255,255,0.12) 0deg);
+      color: var(--text-muted);
+      border: 1px solid rgba(255,255,255,0.08);
+      padding: 0;
+    }
+
+    .btn-focus-timer.is-active {
+      color: #00e5ff;
+      border-color: rgba(0, 229, 255, 0.28);
+      box-shadow: 0 0 10px rgba(0, 229, 255, 0.16);
+    }
+
     /* Settings Panel Overlay */
     .settings-overlay,
+    .focus-timer-overlay,
     .feedback-overlay {
       position: absolute;
       top: 45px;
@@ -181,6 +201,48 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       max-height: calc(100vh - 70px);
       overflow-y: auto;
       animation: slide-down 0.2s ease-out;
+    }
+
+    .focus-timer-card {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .focus-timer-status {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 10px;
+      border: 1px solid rgba(0, 229, 255, 0.18);
+      border-radius: 7px;
+      background: rgba(0, 229, 255, 0.055);
+    }
+
+    .focus-timer-countdown {
+      font-size: 18px;
+      font-weight: 850;
+      color: var(--text-main);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .focus-timer-state {
+      font-size: 10px;
+      color: var(--text-muted);
+      line-height: 1.35;
+      text-align: right;
+    }
+
+    .focus-timer-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 6px;
+      align-items: end;
+    }
+
+    .focus-timer-row .settings-input {
+      min-width: 0;
     }
 
     .feedback-type-row {
@@ -2887,6 +2949,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
   <div class="header-container">
     <h2 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="120" height="31" alt="SoloMap"></h2>
     <div class="header-actions">
+      <button class="btn-gear btn-focus-timer" id="btn-toggle-focus-timer" title="Focus Timer"><span class="codicon codicon-clock"></span></button>
       <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
       <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
     </div>
@@ -2904,6 +2967,27 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
   </div>
 
   <div class="global-focus-panel" id="global-focus-panel"></div>
+
+  <div class="focus-timer-overlay" id="focus-timer-panel">
+    <div class="settings-header">
+      <h3><span class="codicon codicon-clock"></span> <span id="focus-timer-title">Focus Timer</span></h3>
+      <button class="btn-close-settings" id="btn-close-focus-timer"><span class="codicon codicon-close"></span></button>
+    </div>
+    <div class="focus-timer-card">
+      <div class="focus-timer-status">
+        <span class="focus-timer-countdown" id="focus-timer-countdown">--:--</span>
+        <span class="focus-timer-state" id="focus-timer-state">Not started</span>
+      </div>
+      <div class="focus-timer-row">
+        <label class="settings-lbl-title">
+          <span id="label-focus-timer-minutes">Focus minutes</span>
+          <input type="number" class="settings-input" id="focus-timer-minutes" min="1" max="240" value="25">
+        </label>
+        <button class="settings-action-btn save-btn" id="btn-start-focus-timer"><span class="codicon codicon-play"></span><span id="text-start-focus-timer">Start</span></button>
+        <button class="settings-action-btn test-btn" id="btn-stop-focus-timer"><span class="codicon codicon-debug-stop"></span><span id="text-stop-focus-timer">Stop</span></button>
+      </div>
+    </div>
+  </div>
 
   <div class="feedback-overlay" id="feedback-panel">
     <div class="settings-header">
@@ -3286,6 +3370,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const portfolioFilters = document.getElementById('portfolio-filters');
 
     // Settings elements
+    const btnToggleFocusTimer = document.getElementById('btn-toggle-focus-timer');
+    const btnCloseFocusTimer = document.getElementById('btn-close-focus-timer');
+    const focusTimerPanel = document.getElementById('focus-timer-panel');
+    const focusTimerCountdown = document.getElementById('focus-timer-countdown');
+    const focusTimerState = document.getElementById('focus-timer-state');
+    const focusTimerMinutesInput = document.getElementById('focus-timer-minutes');
+    const btnStartFocusTimer = document.getElementById('btn-start-focus-timer');
+    const btnStopFocusTimer = document.getElementById('btn-stop-focus-timer');
     const btnToggleFeedback = document.getElementById('btn-toggle-feedback');
     const btnCloseFeedback = document.getElementById('btn-close-feedback');
     const feedbackPanel = document.getElementById('feedback-panel');
@@ -3335,6 +3427,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const automationFocusRow = document.getElementById('automation-focus-row');
     const automationFocusMinutesInput = document.getElementById('automation-focus-minutes');
     const automationCurrentSummary = document.getElementById('automation-current-summary');
+    let focusTimerTick = null;
     let currentLanguage = 'zh';
     let currentNodes = [];
     let activeProjectPath = '';
@@ -3559,6 +3652,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionAbilities: '能力扩展',
         settingsSectionReadiness: '本地状态',
         settingsSectionAutomation: '自动化任务',
+        focusTimerTitle: '专注提醒',
+        focusTimerMinutes: '专注分钟',
+        focusTimerStart: '开始',
+        focusTimerStop: '关闭',
+        focusTimerIdle: '未开启',
+        focusTimerRunning: '下次提醒',
+        focusTimerDue: '提醒已到',
+        focusTimerSaved: '专注提醒已更新',
         automationTask: '触发点和动作',
         automationFocusMinutes: '专注分钟',
         automationActionNone: '不动作',
@@ -3861,6 +3962,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionAbilities: 'Abilities',
         settingsSectionReadiness: 'Readiness',
         settingsSectionAutomation: 'Automation Tasks',
+        focusTimerTitle: 'Focus Timer',
+        focusTimerMinutes: 'Focus minutes',
+        focusTimerStart: 'Start',
+        focusTimerStop: 'Stop',
+        focusTimerIdle: 'Not started',
+        focusTimerRunning: 'Next reminder',
+        focusTimerDue: 'Reminder due',
+        focusTimerSaved: 'Focus timer updated',
         automationTask: 'Trigger and action',
         automationFocusMinutes: 'Focus minutes',
         automationActionNone: 'No action',
@@ -4181,8 +4290,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('sidebar-title', t('title'));
       setText('portfolio-title', t('portfolioTitle'));
       btnToggleSettings.title = t('settingsTitle');
+      if (btnToggleFocusTimer) btnToggleFocusTimer.title = t('focusTimerTitle');
       if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
       btnAddProject.title = t('chooseProject');
+      setText('focus-timer-title', t('focusTimerTitle'));
+      setText('label-focus-timer-minutes', t('focusTimerMinutes'));
+      setText('text-start-focus-timer', t('focusTimerStart'));
+      setText('text-stop-focus-timer', t('focusTimerStop'));
       setText('feedback-title', t('feedbackPanelTitle'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
       setText('text-rating-title', t('feedbackRatingTitle'));
@@ -4263,12 +4377,52 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     // Toggle settings panel
+    if (btnToggleFocusTimer) {
+      btnToggleFocusTimer.addEventListener('click', () => {
+        if (focusTimerPanel.style.display === 'block') {
+          focusTimerPanel.style.display = 'none';
+        } else {
+          settingsPanel.style.display = 'none';
+          if (feedbackPanel) feedbackPanel.style.display = 'none';
+          focusTimerPanel.style.display = 'block';
+          updateFocusTimerView();
+        }
+      });
+    }
+
+    if (btnCloseFocusTimer) {
+      btnCloseFocusTimer.addEventListener('click', () => {
+        focusTimerPanel.style.display = 'none';
+      });
+    }
+
+    if (btnStartFocusTimer) {
+      btnStartFocusTimer.addEventListener('click', () => {
+        setFocusTimerEnabled(true);
+      });
+    }
+
+    if (btnStopFocusTimer) {
+      btnStopFocusTimer.addEventListener('click', () => {
+        setFocusTimerEnabled(false);
+      });
+    }
+
+    if (focusTimerMinutesInput) {
+      focusTimerMinutesInput.addEventListener('input', () => {
+        if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+        automationDraftSettings.focusMinutes = Math.max(1, Math.min(240, Number(focusTimerMinutesInput.value || 25) || 25));
+        updateFocusTimerView();
+      });
+    }
+
     if (btnToggleFeedback) {
       btnToggleFeedback.addEventListener('click', () => {
         if (feedbackPanel.style.display === 'block') {
           feedbackPanel.style.display = 'none';
         } else {
           settingsPanel.style.display = 'none';
+          if (focusTimerPanel) focusTimerPanel.style.display = 'none';
           feedbackPanel.style.display = 'block';
         }
       });
@@ -4285,6 +4439,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsPanel.style.display = 'none';
       } else {
         feedbackPanel.style.display = 'none';
+        if (focusTimerPanel) focusTimerPanel.style.display = 'none';
         settingsPanel.style.display = 'block';
         vscode.postMessage({ command: 'settings.get' });
         requestAgentImpact();
@@ -4466,6 +4621,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const triggers = automation.triggers || {};
       const normalized = {
         focusMinutes: Math.max(1, Math.min(240, Number(automation.focusMinutes || 25) || 25)),
+        nextFocusReminderAt: String(automation.nextFocusReminderAt || ''),
         triggers: {}
       };
       automationTriggers.forEach(trigger => {
@@ -4578,6 +4734,97 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return automationDraftSettings;
     }
 
+    function isFocusTimerEnabled(settings) {
+      const rule = settings && settings.triggers && settings.triggers.focus_time ? settings.triggers.focus_time : {};
+      return Boolean(rule.notify || rule.sound);
+    }
+
+    function formatFocusRemaining(milliseconds) {
+      const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+    }
+
+    function updateFocusTimerView() {
+      const automation = automationDraftSettings || normalizeAutomationSettings(currentSettings || {});
+      const enabled = isFocusTimerEnabled(automation);
+      const minutes = Math.max(1, Math.min(240, Number(automation.focusMinutes || 25) || 25));
+      const nextAt = automation.nextFocusReminderAt ? Date.parse(automation.nextFocusReminderAt) : 0;
+      const now = Date.now();
+      const totalMs = minutes * 60 * 1000;
+      const remainingMs = enabled && nextAt ? nextAt - now : 0;
+      const progress = enabled && nextAt ? Math.max(0, Math.min(1, 1 - (remainingMs / totalMs))) : 0;
+      if (focusTimerMinutesInput && document.activeElement !== focusTimerMinutesInput) {
+        focusTimerMinutesInput.value = String(minutes);
+      }
+      if (focusTimerCountdown) {
+        focusTimerCountdown.textContent = enabled ? formatFocusRemaining(remainingMs) : '--:--';
+      }
+      if (focusTimerState) {
+        focusTimerState.textContent = enabled
+          ? (remainingMs <= 0 ? t('focusTimerDue') : t('focusTimerRunning'))
+          : t('focusTimerIdle');
+      }
+      if (btnToggleFocusTimer) {
+        btnToggleFocusTimer.classList.toggle('is-active', enabled);
+        if (typeof btnToggleFocusTimer.style.setProperty === 'function') {
+          btnToggleFocusTimer.style.setProperty('--focus-progress', Math.round(progress * 360) + 'deg');
+        } else {
+          btnToggleFocusTimer.style['--focus-progress'] = Math.round(progress * 360) + 'deg';
+        }
+      }
+      if (btnStopFocusTimer) {
+        btnStopFocusTimer.disabled = !enabled;
+      }
+    }
+
+    function restartFocusTimerTick() {
+      if (focusTimerTick) {
+        clearTimeout(focusTimerTick);
+        focusTimerTick = null;
+      }
+      const tick = () => {
+        updateFocusTimerView();
+        focusTimerTick = setTimeout(tick, 1000);
+        if (focusTimerTick && typeof focusTimerTick.unref === 'function') {
+          focusTimerTick.unref();
+        }
+      };
+      tick();
+    }
+
+    function buildSettingsUpdatePayload(automationTasks) {
+      return {
+        command: 'settings.update',
+        cliPath: getEffectiveSettingCliPath(),
+        agentModelPreferences: agentModelPreferenceMap,
+        language: getSoloSelectValue(settingLanguage),
+        globalPrompt: settingGlobalPrompt.value.trim(),
+        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
+        reviewerCliPath: getEffectiveReviewerCliPath(),
+        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
+        automationTasks
+      };
+    }
+
+    function setFocusTimerEnabled(enabled) {
+      const automation = normalizeAutomationSettings({ automationTasks: automationDraftSettings || (currentSettings && currentSettings.automationTasks) || {} });
+      const minutes = Math.max(1, Math.min(240, Number(focusTimerMinutesInput ? focusTimerMinutesInput.value : automation.focusMinutes || 25) || 25));
+      automation.focusMinutes = minutes;
+      automation.nextFocusReminderAt = enabled ? new Date(Date.now() + minutes * 60 * 1000).toISOString() : '';
+      automation.triggers.focus_time = {
+        notify: Boolean(enabled),
+        sound: false,
+        retry: false,
+        prompt: ''
+      };
+      automationDraftSettings = automation;
+      syncAutomationControlsFromTrigger();
+      updateFocusTimerView();
+      vscode.postMessage(buildSettingsUpdatePayload(automation));
+    }
+
     function playAutomationTone() {
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -4638,6 +4885,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
+          restartFocusTimerTick();
           break;
 
         case 'automationPlaySound':
@@ -4860,18 +5108,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     // Save Settings
     btnSaveSettings.addEventListener('click', () => {
-      const effectiveCliPath = getEffectiveSettingCliPath();
-      vscode.postMessage({
-        command: 'settings.update',
-        cliPath: effectiveCliPath,
-        agentModelPreferences: agentModelPreferenceMap,
-        language: getSoloSelectValue(settingLanguage),
-        globalPrompt: settingGlobalPrompt.value.trim(),
-        globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
-        reviewerCliPath: getEffectiveReviewerCliPath(),
-        collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
-        automationTasks: collectAutomationSettings()
-      });
+      vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
     });

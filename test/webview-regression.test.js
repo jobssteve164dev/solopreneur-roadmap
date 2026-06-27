@@ -604,6 +604,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /attachment\.save/);
   assert.match(script, /checkDependencies/);
   assert.match(script, /feedback\.open/);
+  assert.match(html, /id="btn-toggle-focus-timer"/);
+  assert.match(html, /id="focus-timer-panel"/);
+  assert.match(script, /nextFocusReminderAt/);
   assert.match(html, /id="btn-toggle-feedback"/);
   assert.match(html, /id="feedback-panel"/);
   assert.match(html, /id="btn-open-strategy-pyramid"/);
@@ -658,6 +661,18 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
+    'btn-toggle-focus-timer',
+    'btn-close-focus-timer',
+    'focus-timer-panel',
+    'focus-timer-title',
+    'focus-timer-countdown',
+    'focus-timer-state',
+    'focus-timer-minutes',
+    'label-focus-timer-minutes',
+    'btn-start-focus-timer',
+    'btn-stop-focus-timer',
+    'text-start-focus-timer',
+    'text-stop-focus-timer',
     'btn-toggle-feedback',
     'btn-close-feedback',
     'feedback-panel',
@@ -765,10 +780,46 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
 
   dispatchMessage({
     command: 'settingsLoaded',
-    settings: { cliPath: '/workspace/.solomap-global/agent-cli/agy', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }
+    settings: {
+      cliPath: '/workspace/.solomap-global/agent-cli/agy',
+      language: 'zh',
+      globalPrompt: '',
+      globalDataPath: '/workspace/.solomap-global',
+      automationTasks: {
+        focusMinutes: 25,
+        nextFocusReminderAt: '',
+        triggers: {
+          completed: { notify: false, sound: false, retry: false, prompt: '' },
+          failed: { notify: false, sound: false, retry: false, prompt: '' },
+          stopped: { notify: false, sound: false, retry: false, prompt: '' },
+          focus_time: { notify: false, sound: false, retry: false, prompt: '' }
+        }
+      }
+    }
   });
   assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'agy');
   assert.equal(elements['setting-clipath-custom'].style.display, 'none');
+  postedMessages.length = 0;
+  elements['btn-toggle-focus-timer'].listeners.click();
+  assert.equal(elements['focus-timer-panel'].style.display, 'block');
+  elements['focus-timer-minutes'].value = '15';
+  elements['focus-timer-minutes'].listeners.input();
+  elements['btn-start-focus-timer'].listeners.click();
+  assert.ok(postedMessages.some((message) =>
+    message.command === 'settings.update'
+    && message.automationTasks
+    && message.automationTasks.focusMinutes === 15
+    && message.automationTasks.triggers.focus_time.notify === true
+    && message.automationTasks.triggers.focus_time.sound === false
+  ));
+  postedMessages.length = 0;
+  elements['btn-stop-focus-timer'].listeners.click();
+  assert.ok(postedMessages.some((message) =>
+    message.command === 'settings.update'
+    && message.automationTasks
+    && message.automationTasks.triggers.focus_time.notify === false
+    && message.automationTasks.triggers.focus_time.sound === false
+  ));
   postedMessages.length = 0;
   elements['automation-trigger-select'].listeners.click({
     target: elements['automation-trigger-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'stopped'),

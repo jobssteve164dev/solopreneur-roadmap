@@ -226,6 +226,7 @@ const automationPromptConversationIds = new Set<string>();
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
 let focusReminderTimer: NodeJS.Timeout | null = null;
+let focusReminderNextAt = '';
 const agentTerminalNamesByConversationId = new Map<number, string>();
 const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 
@@ -292,7 +293,7 @@ export async function activate(context: vscode.ExtensionContext) {
         sidebarProvider.sendProjects();
       }
       if (activePanel) {
-        postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
+        postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
         postProjectsLoaded(activePanel.webview, getProjectState(context));
       }
     }
@@ -311,7 +312,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.extensionUri,
     syncEngineWrapper,
     {
-      getSettings: () => getPersistedSettings(context),
+      getSettings: () => getSettingsWithRuntimeState(context),
       updateSettings: async (settings) => updatePersistedSettings(context, settings),
       getProjects: () => getProjectState(context),
       getSoloConversationHistory: async (projectPath) => getSoloConversationHistoryForProject(context, projectPath),
@@ -540,7 +541,7 @@ async function handleSharedWebviewAction(
     },
     'settings.get': async () => {
       await refreshProAccountStatus(context);
-      await postSettingsLoaded(target, getPersistedSettings(context));
+      await postSettingsLoaded(target, getSettingsWithRuntimeState(context));
     },
     'settings.update': async (request) => {
       await updatePersistedSettings(context, {
@@ -725,7 +726,7 @@ async function broadcastSettings(context: vscode.ExtensionContext): Promise<void
     sidebarProvider.sendSettings();
   }
   if (activePanel) {
-    postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
+    postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
     if (activeProjectRoot) {
       postFlowStateLoaded(activePanel.webview, buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context)));
     }
@@ -1024,6 +1025,18 @@ function normalizeAutomationSettings(value: unknown): SolomapAutomationSettings 
       failed: normalizeAutomationTriggerSettings(rawTriggers.failed),
       stopped: normalizeAutomationTriggerSettings(rawTriggers.stopped),
       focus_time: normalizeAutomationTriggerSettings(rawTriggers.focus_time)
+    }
+  };
+}
+
+function getSettingsWithRuntimeState(context: vscode.ExtensionContext): SolopreneurSettings {
+  const settings = getPersistedSettings(context);
+  const automationTasks = normalizeAutomationSettings(settings.automationTasks || {});
+  return {
+    ...settings,
+    automationTasks: {
+      ...automationTasks,
+      nextFocusReminderAt: focusReminderNextAt
     }
   };
 }
@@ -1962,7 +1975,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
   // Load basic HTML into Webview
   activePanel.webview.html = getWebviewHtml(activePanel.webview, context);
   postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
-  postSettingsLoaded(activePanel.webview, getPersistedSettings(context));
+  postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
   postProjectsLoaded(activePanel.webview, getProjectState(context));
   postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
   void postFlowStateToWebview(context);
@@ -5574,9 +5587,11 @@ function scheduleFocusReminder(context: vscode.ExtensionContext): void {
   const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
   const rule = settings.triggers?.focus_time || {};
   if (!rule.notify && !rule.sound) {
+    focusReminderNextAt = '';
     return;
   }
   const minutes = Math.max(1, Math.min(240, Number(settings.focusMinutes || 25) || 25));
+  focusReminderNextAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
   focusReminderTimer = setTimeout(() => {
     const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || getWorkspaceRoot();
     if (rule.notify) {
@@ -5595,6 +5610,7 @@ function scheduleFocusReminder(context: vscode.ExtensionContext): void {
     }
     scheduleFocusReminder(context);
   }, minutes * 60 * 1000);
+  void broadcastSettings(context);
 }
 
 function scheduleAutomationTasksAfterRun(context: vscode.ExtensionContext, input: {

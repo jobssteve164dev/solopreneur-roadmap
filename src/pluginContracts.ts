@@ -46,5 +46,6 @@ export interface SolomapAutomationTriggerSettings {
 
 export interface SolomapAutomationSettings {
   focusMinutes?: number;
+  nextFocusReminderAt?: string;
   triggers?: Partial<Record<SolomapAutomationTrigger, SolomapAutomationTriggerSettings>>;
 }
