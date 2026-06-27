@@ -49,6 +49,24 @@ export interface LessonCandidate {
   updatedAt: string;
 }
 
+export interface LearningPromotionSuggestion {
+  schemaVersion: 1;
+  id: string;
+  candidateId: string;
+  projectId: string;
+  projectPath: string;
+  projectName: string;
+  lessonType: LessonType;
+  promotionTarget: LessonCandidate['promotionTarget'];
+  targetPath: string;
+  reason: string;
+  status: 'suggested';
+  draftMarkdown: string;
+  evidenceRefs: LearningEvidenceRef[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface LearningSummary {
   globalRoot: string;
   eventCount: number;
@@ -121,6 +139,7 @@ export function getLearningLedgerPaths(workspaceRoot: string, globalDataPath = '
   candidatesRoot: string;
   approvedRoot: string;
   rejectedRoot: string;
+  promotionSuggestionsRoot: string;
 } {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const learningRoot = path.join(globalRoot, 'learning');
@@ -134,13 +153,14 @@ export function getLearningLedgerPaths(workspaceRoot: string, globalDataPath = '
     indexPath: path.join(ledgerRoot, 'index.json'),
     candidatesRoot: path.join(learningRoot, 'candidates'),
     approvedRoot: path.join(learningRoot, 'approved'),
-    rejectedRoot: path.join(learningRoot, 'rejected')
+    rejectedRoot: path.join(learningRoot, 'rejected'),
+    promotionSuggestionsRoot: path.join(learningRoot, 'promotion-suggestions')
   };
 }
 
 export function ensureLearningLedgerStore(workspaceRoot: string, globalDataPath = ''): ReturnType<typeof getLearningLedgerPaths> {
   const paths = getLearningLedgerPaths(workspaceRoot, globalDataPath);
-  [paths.learningRoot, paths.ledgerRoot, paths.sourcesRoot, paths.candidatesRoot, paths.approvedRoot, paths.rejectedRoot].forEach(ensureDir);
+  [paths.learningRoot, paths.ledgerRoot, paths.sourcesRoot, paths.candidatesRoot, paths.approvedRoot, paths.rejectedRoot, paths.promotionSuggestionsRoot].forEach(ensureDir);
   if (!fs.existsSync(paths.eventsPath)) {
     fs.writeFileSync(paths.eventsPath, '', 'utf8');
   }
@@ -329,12 +349,134 @@ export function extractLessonCandidatesFromEvent(workspaceRoot: string, globalDa
       written.push(candidate);
     }
   }
+  maybeWritePromotionSuggestions(workspaceRoot, globalDataPath, written);
   return written;
 }
 
 function readCandidates(paths: ReturnType<typeof getLearningLedgerPaths>): LessonCandidate[] {
   const roots = [paths.candidatesRoot, paths.approvedRoot];
   return roots.flatMap((root) => listJsonFiles(root).map((file) => safeReadJson<LessonCandidate>(file)).filter((item): item is LessonCandidate => Boolean(item && item.schemaVersion === 1)));
+}
+
+function readPromotionSuggestions(paths: ReturnType<typeof getLearningLedgerPaths>): LearningPromotionSuggestion[] {
+  return listJsonFiles(paths.promotionSuggestionsRoot)
+    .map((file) => safeReadJson<LearningPromotionSuggestion>(file))
+    .filter((item): item is LearningPromotionSuggestion => Boolean(item && item.schemaVersion === 1));
+}
+
+function getProjectMemoryFilePath(projectPath: string, globalRoot: string): string {
+  const projectSlug = slugify(path.basename(projectPath || 'project').toLowerCase());
+  return path.join(globalRoot, 'memory', 'projects', `${projectSlug}.md`);
+}
+
+function promotionTargetPath(candidate: LessonCandidate, globalRoot: string): string {
+  const memoryRoot = path.join(globalRoot, 'memory');
+  if (candidate.promotionTarget === 'operating_rule') {
+    return path.join(memoryRoot, 'operating-rules.md');
+  }
+  if (candidate.promotionTarget === 'project_memory') {
+    return getProjectMemoryFilePath(candidate.projectPath, globalRoot);
+  }
+  if (candidate.promotionTarget === 'pattern') {
+    return path.join(memoryRoot, 'patterns', `${slugify(candidate.lessonType)}.md`);
+  }
+  if (candidate.promotionTarget === 'decision') {
+    return path.join(memoryRoot, 'decisions', `${new Date().toISOString().slice(0, 10)}-${slugify(candidate.lessonType)}.md`);
+  }
+  if (candidate.promotionTarget === 'domain') {
+    return path.join(memoryRoot, 'domains', `${slugify(candidate.lessonType)}.md`);
+  }
+  return path.join(memoryRoot, 'inbox', 'strategy-signals.md');
+}
+
+function normalizedLessonKey(candidate: LessonCandidate): string {
+  return [
+    candidate.projectId,
+    candidate.lessonType,
+    candidate.promotionTarget,
+    compactLine(candidate.summary, 120).toLowerCase().replace(/[^a-z0-9一-龥]+/g, ' ').trim()
+  ].join('|');
+}
+
+function countSimilarCandidates(candidate: LessonCandidate, allCandidates: LessonCandidate[]): number {
+  const key = normalizedLessonKey(candidate);
+  return allCandidates.filter((item) => normalizedLessonKey(item) === key).length;
+}
+
+function hasEvidence(candidate: LessonCandidate): boolean {
+  return Array.isArray(candidate.evidenceRefs) && candidate.evidenceRefs.length > 0;
+}
+
+function promotionReason(candidate: LessonCandidate, allCandidates: LessonCandidate[]): string {
+  if (candidate.confidence === 'high' && hasEvidence(candidate)) {
+    return 'high_confidence_with_evidence';
+  }
+  if (candidate.lessonType === 'verification_pattern' && candidate.evidenceRefs.some((ref) => ref.type === 'command')) {
+    return 'verified_command_pattern';
+  }
+  if (countSimilarCandidates(candidate, allCandidates) >= 2 && hasEvidence(candidate)) {
+    return 'repeated_candidate_with_evidence';
+  }
+  return '';
+}
+
+function buildPromotionDraft(candidate: LessonCandidate, reason: string): string {
+  return [
+    `## ${candidate.summary}`,
+    '',
+    `- Source candidate: ${candidate.id}`,
+    `- Lesson type: ${candidate.lessonType}`,
+    `- Promotion reason: ${reason}`,
+    `- Applies when: ${candidate.appliesWhen}`,
+    `- Do this: ${candidate.doThis}`,
+    `- Avoid: ${candidate.avoidThis}`,
+    candidate.evidenceRefs.length
+      ? `- Evidence: ${candidate.evidenceRefs.slice(0, 5).map((ref) => `${ref.type}:${ref.ref}`).join('；')}`
+      : '- Evidence: none',
+    ''
+  ].join('\n');
+}
+
+function maybeWritePromotionSuggestions(workspaceRoot: string, globalDataPath: string, candidates: LessonCandidate[]): LearningPromotionSuggestion[] {
+  if (candidates.length === 0) {
+    return [];
+  }
+  const paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
+  const allCandidates = readCandidates(paths);
+  const written: LearningPromotionSuggestion[] = [];
+  for (const candidate of candidates) {
+    if (candidate.status !== 'candidate') {
+      continue;
+    }
+    const reason = promotionReason(candidate, allCandidates);
+    if (!reason) {
+      continue;
+    }
+    const now = new Date().toISOString();
+    const suggestion: LearningPromotionSuggestion = {
+      schemaVersion: 1,
+      id: stableId('promote', [candidate.id, candidate.promotionTarget, reason]),
+      candidateId: candidate.id,
+      projectId: candidate.projectId,
+      projectPath: candidate.projectPath,
+      projectName: candidate.projectName,
+      lessonType: candidate.lessonType,
+      promotionTarget: candidate.promotionTarget,
+      targetPath: promotionTargetPath(candidate, paths.globalRoot),
+      reason,
+      status: 'suggested',
+      draftMarkdown: buildPromotionDraft(candidate, reason),
+      evidenceRefs: candidate.evidenceRefs,
+      createdAt: now,
+      updatedAt: now
+    };
+    const suggestionPath = path.join(paths.promotionSuggestionsRoot, `${suggestion.id}.json`);
+    if (!fs.existsSync(suggestionPath)) {
+      fs.writeFileSync(suggestionPath, JSON.stringify(suggestion, null, 2) + '\n', 'utf8');
+      written.push(suggestion);
+    }
+  }
+  return written;
 }
 
 function scoreCandidate(candidate: LessonCandidate, query: LearningRetrievalQuery): number {
@@ -383,6 +525,32 @@ export function buildLearningRetrievalContext(workspaceRoot: string, globalDataP
       `   - 本轮应做：${candidate.doThis}`,
       `   - 避免：${candidate.avoidThis}`
     ].join('\n'))
+  ].join('\n');
+}
+
+export function buildLearningPromotionContext(workspaceRoot: string, globalDataPath: string, limit = 5): string {
+  let paths: ReturnType<typeof getLearningLedgerPaths>;
+  try {
+    paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
+  } catch {
+    return '';
+  }
+  maybeWritePromotionSuggestions(workspaceRoot, globalDataPath, readCandidates(paths).filter((candidate) => candidate.status === 'candidate'));
+  const suggestions = readPromotionSuggestions(paths)
+    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+    .slice(0, limit);
+  if (suggestions.length === 0) {
+    return '';
+  }
+  return [
+    'SoloMap 自动晋升建议（插件侧生成）：',
+    ...suggestions.map((suggestion, index) => [
+      `${index + 1}. ${suggestion.reason} -> ${suggestion.promotionTarget}`,
+      `   - 候选：${suggestion.candidateId}`,
+      `   - 目标位置：${suggestion.targetPath}`,
+      `   - 摘要：${compactLine(suggestion.draftMarkdown.replace(/\s+/g, ' '), 260)}`
+    ].join('\n')),
+    '   - 执行规则：如本轮继续验证该建议成立，Agent 应直接写入目标位置；若证据不足，保留建议，不要求用户手工筛选。'
   ].join('\n');
 }
 

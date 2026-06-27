@@ -1944,10 +1944,17 @@ test('learning ledger writes events, extracts candidates, and retrieves reusable
 
   const eventsPath = path.join(globalRoot, 'learning', 'ledger', 'events.jsonl');
   const candidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  const promotionSuggestionsDir = path.join(globalRoot, 'learning', 'promotion-suggestions');
   assert.ok(fs.existsSync(eventsPath));
   assert.match(fs.readFileSync(eventsPath, 'utf8'), new RegExp(event.id));
   const candidateFiles = fs.readdirSync(candidatesDir).filter((name) => name.endsWith('.json'));
   assert.ok(candidateFiles.length >= 1);
+  const promotionSuggestionFiles = fs.readdirSync(promotionSuggestionsDir).filter((name) => name.endsWith('.json'));
+  assert.ok(promotionSuggestionFiles.length >= 1);
+  const promotionSuggestion = JSON.parse(fs.readFileSync(path.join(promotionSuggestionsDir, promotionSuggestionFiles[0]), 'utf8'));
+  assert.equal(promotionSuggestion.promotionTarget, 'project_memory');
+  assert.match(promotionSuggestion.reason, /high_confidence_with_evidence/);
+  assert.match(promotionSuggestion.targetPath, /memory\/projects\/app\.md/);
 
   const summary = ledger.readLearningSummary(projectPath, globalRoot);
   assert.equal(summary.eventCount, 1);
@@ -1964,6 +1971,37 @@ test('learning ledger writes events, extracts candidates, and retrieves reusable
   });
   assert.match(retrieval, /统一学习账本召回/);
   assert.match(retrieval, /Flow 验证暴露未闭环风险/);
+  const promotionContext = ledger.buildLearningPromotionContext(projectPath, globalRoot);
+  assert.match(promotionContext, /SoloMap 自动晋升建议/);
+  assert.match(promotionContext, /project_memory/);
+
+  const existingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-existing-learning-ledger-'));
+  const existingProjectPath = path.join(existingRoot, 'existing-app');
+  const existingGlobalRoot = path.join(existingRoot, '.solomap-global');
+  fs.mkdirSync(path.join(existingGlobalRoot, 'learning', 'candidates'), { recursive: true });
+  fs.writeFileSync(path.join(existingGlobalRoot, 'learning', 'candidates', 'existing-candidate.json'), JSON.stringify({
+    schemaVersion: 1,
+    id: 'lesson-existing',
+    projectId: 'existing-app',
+    projectPath: existingProjectPath,
+    projectName: 'existing-app',
+    sourceEventIds: ['evt-existing'],
+    sourceType: 'solo',
+    lessonType: 'user_preference',
+    summary: '用户纠偏应成为后续执行约束：不要把明确目标降级成最小工程动作。',
+    appliesWhen: '后续用户已经把目标说清时。',
+    doThis: '按用户语义本身交付完整可验证结果。',
+    avoidThis: '不要只改提示词或交给下一轮 Agent。',
+    evidenceRefs: [{ type: 'user', ref: 'explicit correction', summary: 'User correction' }],
+    confidence: 'high',
+    status: 'candidate',
+    promotionTarget: 'operating_rule',
+    createdAt: '2026-06-27T00:00:00.000Z',
+    updatedAt: '2026-06-27T00:00:00.000Z'
+  }, null, 2), 'utf8');
+  const existingPromotionContext = ledger.buildLearningPromotionContext(existingProjectPath, existingGlobalRoot);
+  assert.match(existingPromotionContext, /operating_rule/);
+  assert.ok(fs.readdirSync(path.join(existingGlobalRoot, 'learning', 'promotion-suggestions')).some((name) => name.endsWith('.json')));
 });
 
 test('adding a project asks for a global methodology project type', () => {

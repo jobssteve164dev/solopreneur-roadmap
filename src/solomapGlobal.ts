@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as childProcess from 'child_process';
 import { RoadmapNode } from './db/types';
-import { appendLearningEvent, readLearningSummary, LearningEvidenceRef } from './learningLedger';
+import { appendLearningEvent, buildLearningPromotionContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { shellQuote } from './agentCli';
 
 export interface SolomapSkillRegistryEntry {
@@ -1238,6 +1238,7 @@ export function buildSolomapStartupPackInstructions(input: {
   const globalDataPath = input.globalDataPath || '';
   const memoryRoot = getSolomapMemoryRoot(workspaceRoot, globalDataPath);
   const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
+  const promotionContext = buildLearningPromotionContext(workspaceRoot, globalDataPath, 5);
   const requiredReadFiles = [
     path.join(workspaceRoot, 'agent.md'),
     path.join(memoryRoot, 'profile.md'),
@@ -1273,6 +1274,7 @@ export function buildSolomapStartupPackInstructions(input: {
       : '- 本轮没有命中需要读取的 SoloMap 技能；继续按记忆与当前项目事实执行。',
     input.learningSummaryContext ? ['', input.learningSummaryContext].join('\n') : '',
     input.learningRetrievalContext ? ['', input.learningRetrievalContext].join('\n') : '',
+    promotionContext ? ['', promotionContext].join('\n') : '',
     input.executionExperienceContext ? ['', input.executionExperienceContext].join('\n') : '',
     '- 学习候选的晋升不要求用户手工确认；如果本轮验证出可复用规则，自动建议写入合适的 memory/pattern/decision/domain 或学习候选，并避免把审核负担转嫁给用户。',
     '- 经验库只能约束执行方式，不能覆盖本轮用户最新要求、当前代码、测试、日志和命令输出。'
