@@ -78,7 +78,7 @@ Open VSX 默认搜索接口 `/api/-/search` 使用 `sortBy=relevance` 和 `sortO
 
 - `extensionId`: `SZLK.solopreneur-roadmap`
 - `name`: `solopreneur-roadmap`
-- `displayName`: `SoloMap AI Coding Agent Roadmap`
+- `displayName`: `SoloMap - AI Coding Agent Roadmap`
 - `description`: 首句包含 `AI coding agent cockpit`
 - `keywords`: 包含 `agent`、`ai-agent`、`ai-coding`、`cursor-agent` 等
 

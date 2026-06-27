@@ -2,7 +2,7 @@
   <img src="https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo_with_text.png" width="320" alt="SoloMap Logo" />
 </p>
 
-<h1 align="center">SoloMap - Local AI Agent Cockpit & Coding Roadmap Assistant</h1>
+<h1 align="center">SoloMap - AI Coding Agent Roadmap</h1>
 
 <p align="center">
   <strong>Stop losing momentum in scattered AI chats. Turn your local folder into a visual cockpit for autonomous agents.</strong><br />

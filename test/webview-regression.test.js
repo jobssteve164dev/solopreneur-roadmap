@@ -457,8 +457,8 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
 test('extension manifest uses SoloMap visible branding', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
 
-  assert.equal(manifest.displayName, 'SoloMap - Local AI Agent Cockpit & Coding Roadmap Assistant');
-  assert.equal(manifest.description, 'Stop losing momentum in scattered AI chats. SoloMap is a local AI Agent cockpit and coding roadmap assistant for solo developers. / 别让项目迷失在零散 AI 对话里。SoloMap 是专为独立开发者打造的本地 AI Agent 驾驶舱与编码路线图助手。');
+  assert.equal(manifest.displayName, 'SoloMap - AI Coding Agent Roadmap');
+  assert.equal(manifest.description, 'AI coding agent cockpit for solo developers. Run Claude Code, Codex, Cursor Agent and other local agents, keep sessions organized, and turn scattered AI chats into a Git-friendly project roadmap. / 面向独立开发者的 AI 编码智能体驾驶舱：运行 Claude Code、Codex、Cursor Agent 等本地智能体，整理会话，并把零散 AI 对话沉淀为 Git 友好的项目路线图。');
   assert.deepEqual(manifest.categories, ['AI', 'Chat', 'Machine Learning', 'Visualization', 'Other']);
   assert.ok(manifest.keywords.includes('ai-agent'));
   assert.ok(manifest.keywords.includes('ai-coding'));

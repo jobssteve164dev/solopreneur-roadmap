@@ -1963,7 +1963,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
   // Create Webview Panel
   activePanel = vscode.window.createWebviewPanel(
     'solopreneurRoadmap',
-    'SoloMap - Local AI Agent Cockpit & Coding Roadmap Assistant',
+    'SoloMap - AI Coding Agent Roadmap',
     vscode.ViewColumn.One,
     {
       enableScripts: true,
