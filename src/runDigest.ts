@@ -103,6 +103,23 @@ export function isArtifactOrTempFile(filePath: string): boolean {
   return false;
 }
 
+function escapeRegExp(string: string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function sanitizeProjectPaths(text: string, workspaceRoot: string): string {
+  if (!text) return '';
+  let cleaned = text;
+  const normalizedWorkspace = path.resolve(workspaceRoot).replace(/\\/g, '/');
+  cleaned = cleaned.replace(new RegExp(escapeRegExp(normalizedWorkspace), 'gi'), '<projectRoot>');
+  cleaned = cleaned.replace(/\/home\/[a-zA-Z0-9_-]+/gi, '<home>');
+  cleaned = cleaned.replace(/\/Users\/[a-zA-Z0-9_-]+/gi, '<home>');
+  cleaned = cleaned.replace(/\/tmp\/[a-zA-Z0-9_-]+/gi, '<tmp>');
+  cleaned = cleaned.replace(/__solo__\/[0-9]+/gi, '__solo__/<runId>');
+  cleaned = cleaned.replace(/agent-runs\/[^\/]+/gi, 'agent-runs/<runGroup>');
+  return cleaned;
+}
+
 export function buildRunHandoffEntry(
   status: string,
   changedFilesSummary: string,
@@ -490,20 +507,35 @@ export function buildRunDigest(input: RunDigestInput): RunDigest {
     .filter((file) => !isArtifactOrTempFile(file));
   const touchedFiles = parseFileSummaryLines(input.touchedFilesSummary)
     .filter((file) => !isArtifactOrTempFile(file));
+
+  const cleanUserMessage = sanitizeProjectPaths(input.userMessage || '', input.workspaceRoot);
+  const cleanCompletionReason = sanitizeProjectPaths(input.completionReason || '', input.workspaceRoot);
+  const cleanFailureReason = sanitizeProjectPaths(input.failureReason || '', input.workspaceRoot);
+
   const commandSignals = extractCommandSignals(input.resolvedCommand);
   const verification = extractVerificationSignals(input.outputTail, input.resolvedCommand, input.status);
   const failures = extractFailureSignals(input.outputTail, input.failureCode, input.failureReason, input.status);
   const reusableSignals = extractReusableSignals(input.outputTail, input.completionReason, changedFiles);
+
+  const cleanVerification = verification
+    .filter((v) => v && !v.includes('Run completed without explicit verification signal'))
+    .map((v) => sanitizeProjectPaths(v, input.workspaceRoot));
+  const cleanFailures = failures
+    .map((f) => sanitizeProjectPaths(f, input.workspaceRoot));
+  const cleanReusableSignals = reusableSignals
+    .map((s) => sanitizeProjectPaths(s, input.workspaceRoot));
+
   const runId = `${sanitizeRunDigestSegment(input.nodeId)}-${input.executionLogId || Date.parse(input.finishedAt) || Date.now()}`;
   const contextTokens = Array.from(tokenizeExperienceText([
     input.nodeId,
     input.runKind,
-    input.userMessage,
+    cleanUserMessage,
     changedFiles.join(' '),
     touchedFiles.join(' '),
-    input.completionReason,
-    input.failureReason
+    cleanCompletionReason,
+    cleanFailureReason
   ].join('\n'))).slice(0, 24);
+
   return {
     schemaVersion: 2,
     runId,
@@ -512,8 +544,8 @@ export function buildRunDigest(input: RunDigestInput): RunDigest {
     nodeId: String(input.nodeId || ''),
     runKind: String(input.runKind || 'step'),
     agentCli: String(input.agentCli || 'unknown'),
-    userIntent: compactLine(input.userMessage || '', 500),
-    outcome: compactLine(input.completionReason || input.failureReason || '', 500),
+    userIntent: compactLine(cleanUserMessage || '', 500),
+    outcome: compactLine(cleanCompletionReason || cleanFailureReason || '', 500),
     status: String(input.status || ''),
     startedAt: String(input.startedAt || ''),
     finishedAt: String(input.finishedAt || new Date().toISOString()),
@@ -521,17 +553,17 @@ export function buildRunDigest(input: RunDigestInput): RunDigest {
     changedFiles,
     touchedFiles,
     commandSignals,
-    verification,
-    failures,
-    reusableSignals,
+    verification: cleanVerification,
+    failures: cleanFailures,
+    reusableSignals: cleanReusableSignals,
     tags: contextTokens,
     handoff: buildAgentHandoff(
       input,
       changedFiles,
       touchedFiles,
-      verification,
-      failures,
-      reusableSignals
+      cleanVerification,
+      cleanFailures,
+      cleanReusableSignals
     ),
     rawRefs: {
       sqliteTable: 'execution_logs',

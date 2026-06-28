@@ -212,3 +212,41 @@ test('buildExecutionExperiencePrompt filters compiler artifacts and temp files f
   assert.ok(!prompt.includes('without explicit verification signal'));
   assert.ok(!prompt.includes('cat /home/ubuntu'));
 });
+
+test('sanitizeProjectPaths correctly sanitizes local absolute paths and temp directories', () => {
+  const ws = '/home/ubuntu/project/solopreneur-roadmap';
+  const raw = 'Run command on /home/ubuntu/project/solopreneur-roadmap/src/extension.ts in /home/otheruser/foo and /tmp/run-123 and __solo__/153/prompt.txt';
+  const cleaned = ledger.sanitizeProjectPaths(raw, ws);
+  
+  assert.equal(cleaned.includes('/home/ubuntu/project/solopreneur-roadmap'), false);
+  assert.equal(cleaned.includes('<projectRoot>'), true);
+  assert.equal(cleaned.includes('<home>'), true);
+  assert.equal(cleaned.includes('<tmp>'), true);
+  assert.equal(cleaned.includes('<runId>'), true);
+});
+
+test('appendLearningEvent filters and rejects pure junk events from ledger index', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-junk-test-'));
+  const projectPath = path.join(root, 'app');
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(projectPath, { recursive: true });
+
+  const ret = ledger.appendLearningEvent(projectPath, globalRoot, {
+    sourceType: 'solo',
+    sourceRef: 'solo-junk',
+    eventType: 'verified',
+    summary: 'Run completed without explicit verification signal in captured tail',
+    evidenceRefs: [],
+    tags: [],
+    metadata: {}
+  });
+
+  assert.equal(ret.id, 'skipped-junk-event');
+  
+  // 确认 events.jsonl 文件中不包含该 skipped-junk-event
+  const eventsPath = path.join(globalRoot, 'learning', 'ledger', 'events.jsonl');
+  if (fs.existsSync(eventsPath)) {
+    const fileContent = fs.readFileSync(eventsPath, 'utf8');
+    assert.equal(fileContent.includes('skipped-junk-event'), false);
+  }
+});

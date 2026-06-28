@@ -174,6 +174,23 @@ export function isTrashOrLocalPrivate(candidate: {
   return false;
 }
 
+function escapeRegExp(string: string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function sanitizeProjectPaths(text: string, workspaceRoot: string): string {
+  if (!text) return '';
+  let cleaned = text;
+  const normalizedWorkspace = path.resolve(workspaceRoot).replace(/\\/g, '/');
+  cleaned = cleaned.replace(new RegExp(escapeRegExp(normalizedWorkspace), 'gi'), '<projectRoot>');
+  cleaned = cleaned.replace(/\/home\/[a-zA-Z0-9_-]+/gi, '<home>');
+  cleaned = cleaned.replace(/\/Users\/[a-zA-Z0-9_-]+/gi, '<home>');
+  cleaned = cleaned.replace(/\/tmp\/[a-zA-Z0-9_-]+/gi, '<tmp>');
+  cleaned = cleaned.replace(/__solo__\/[0-9]+/gi, '__solo__/<runId>');
+  cleaned = cleaned.replace(/agent-runs\/[^\/]+/gi, 'agent-runs/<runGroup>');
+  return cleaned;
+}
+
 function ensureDir(dirPath: string): void {
   fs.mkdirSync(dirPath, { recursive: true });
 }
@@ -279,20 +296,59 @@ export function appendLearningEvent(
   const projectName = input.projectName || path.basename(eventProjectPath || workspaceRoot || 'project');
   const projectId = slugify(projectName);
   const createdAt = input.createdAt || new Date().toISOString();
+
+  // 1. 垃圾与绝对路径前置过滤 (Shift Left)
+  let cleanSummary = input.summary || '';
+  if (cleanSummary.includes('Run completed without explicit verification signal')) {
+    const hasNoSignals = (!input.metadata?.verification?.length) && (!input.metadata?.failures?.length) && (!input.evidenceRefs?.length);
+    if (hasNoSignals) {
+      return {
+        schemaVersion: 1,
+        id: 'skipped-junk-event',
+        projectId,
+        projectPath: eventProjectPath,
+        projectName,
+        sourceType: input.sourceType,
+        sourceRef: input.sourceRef,
+        eventType: input.eventType,
+        summary: 'Skipped junk event',
+        evidenceRefs: [],
+        tags: [],
+        createdAt,
+        metadata: {}
+      };
+    }
+  }
+
+  // 对 summary 脱敏
+  cleanSummary = sanitizeProjectPaths(cleanSummary, eventProjectPath);
+
+  // 对 metadata 脱敏
+  const metadata = { ...(input.metadata || {}) };
+  if (Array.isArray(metadata.verification)) {
+    metadata.verification = metadata.verification
+      .filter((v) => v && !v.includes('Run completed without explicit verification signal'))
+      .map((v) => sanitizeProjectPaths(String(v), eventProjectPath));
+  }
+  if (Array.isArray(metadata.failures)) {
+    metadata.failures = metadata.failures
+      .map((f) => sanitizeProjectPaths(String(f), eventProjectPath));
+  }
+
   const event: LearningEvent = {
     schemaVersion: 1,
-    id: stableId('evt', [projectId, input.sourceType, input.sourceRef, input.eventType, createdAt, input.summary]),
+    id: stableId('evt', [projectId, input.sourceType, input.sourceRef, input.eventType, createdAt, cleanSummary]),
     projectId,
     projectPath: eventProjectPath,
     projectName,
     sourceType: input.sourceType,
     sourceRef: input.sourceRef,
     eventType: input.eventType,
-    summary: compactLine(input.summary, 600),
+    summary: compactLine(cleanSummary, 600),
     evidenceRefs: input.evidenceRefs || [],
     tags: (input.tags || []).map((tag) => slugify(tag.toLowerCase())).filter(Boolean).slice(0, 24),
     createdAt,
-    metadata: input.metadata || {}
+    metadata
   };
   const paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
   fs.appendFileSync(paths.eventsPath, JSON.stringify(event) + '\n', 'utf8');
