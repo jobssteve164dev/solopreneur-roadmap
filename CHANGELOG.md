@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.285 - 2026-06-28
+
+### Fixed
+- filter low value learning prompt signals (875e92a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.284 - 2026-06-28
 
 ### Fixed
