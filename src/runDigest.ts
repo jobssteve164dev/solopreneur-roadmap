@@ -76,6 +76,33 @@ export function compactLine(value: string, maxLength: number): string {
   return compacted.length > maxLength ? `${compacted.slice(0, maxLength)}...` : compacted;
 }
 
+export function isArtifactOrTempFile(filePath: string): boolean {
+  if (!filePath) return true;
+  const lower = filePath.toLowerCase();
+  if (
+    lower.includes('/out/') ||
+    lower.startsWith('out/') ||
+    lower.includes('/dist/') ||
+    lower.startsWith('dist/') ||
+    lower.includes('/build/') ||
+    lower.startsWith('build/') ||
+    lower.includes('/node_modules/') ||
+    lower.startsWith('node_modules/') ||
+    lower.includes('/.next/') ||
+    lower.startsWith('.next/') ||
+    lower.includes('/.solopreneur/') ||
+    lower.startsWith('.solopreneur/') ||
+    lower.includes('/.gemini/') ||
+    lower.startsWith('.gemini/')
+  ) {
+    return true;
+  }
+  if (lower.endsWith('.map') || lower.endsWith('.db') || lower.endsWith('.db-journal') || lower.endsWith('.log')) {
+    return true;
+  }
+  return false;
+}
+
 export function buildRunHandoffEntry(
   status: string,
   changedFilesSummary: string,
@@ -371,16 +398,36 @@ function buildAgentHandoff(input: RunDigestInput, changedFiles: string[], touche
   const status = String(input.status || '');
   const isFailed = status === 'Failed' || failures.length > 0;
   const summary = compactLine(input.completionReason || input.failureReason || (isFailed ? '上一轮未完成。' : '上一轮已结束。'), 500);
-  const fileSignals = uniqueCompactList([...changedFiles, ...touchedFiles], 8);
+  const fileSignals = uniqueCompactList([...changedFiles, ...touchedFiles], 8)
+    .filter((file) => !isArtifactOrTempFile(file));
+
+  const cleanVerification = (verification || []).filter((v) => {
+    if (!v) return false;
+    const lower = v.toLowerCase();
+    if (lower.includes('run completed without explicit verification signal in captured tail')) {
+      return false;
+    }
+    if (
+      lower.includes('/home/') ||
+      lower.includes('/users/') ||
+      lower.includes('/tmp/') ||
+      lower.includes('__solo__') ||
+      lower.includes('/agent-runs/')
+    ) {
+      return false;
+    }
+    return true;
+  });
+
   const actionLines = extractHandoffActionLines(input.outputTail);
   const firstActions = uniqueCompactList([
     isFailed && input.failureReason ? `先复核上一轮失败原因：${compactLine(input.failureReason, 180)}` : '',
     fileSignals.length > 0 ? `先阅读上一轮改动/触达文件：${fileSignals.slice(0, 4).join(', ')}` : '',
     ...actionLines,
-    verification.length > 0 ? `复用或复跑验证信号：${verification.slice(0, 2).join(' / ')}` : ''
+    cleanVerification.length > 0 ? `复用或复跑验证信号：${cleanVerification.slice(0, 2).join(' / ')}` : ''
   ], 6);
   const commandsToRunNext = uniqueCompactList([
-    ...verification
+    ...cleanVerification
       .map((signal) => {
         const match = signal.match(/^Command:\s*(.+)$/i);
         return match ? match[1] : '';
@@ -411,7 +458,7 @@ function buildAgentHandoff(input: RunDigestInput, changedFiles: string[], touche
     openQuestions: isFailed ? uniqueCompactList(failures, 4) : [],
     blockedBy,
     assumptions: uniqueCompactList(
-      status === 'Completed' && verification.length === 0
+      status === 'Completed' && cleanVerification.length === 0
         ? ['上一轮记录显示完成，但 captured tail 中没有明确验证信号；接手时应先补最窄验证。']
         : [],
       4
@@ -423,8 +470,8 @@ function buildAgentHandoff(input: RunDigestInput, changedFiles: string[], touche
         failures[0] ? `先处理风险信号再继续：${failures[0]}` : ''
       ], 4)
       : [],
-    confidence: isFailed ? 'low' : verification.length > 0 ? 'high' : 'medium',
-    riskLevel: isFailed ? 'high' : verification.length > 0 ? 'low' : 'medium'
+    confidence: isFailed ? 'low' : cleanVerification.length > 0 ? 'high' : 'medium',
+    riskLevel: isFailed ? 'high' : cleanVerification.length > 0 ? 'low' : 'medium'
   };
 }
 
@@ -439,8 +486,10 @@ function tokenizeExperienceText(value: string): Set<string> {
 }
 
 export function buildRunDigest(input: RunDigestInput): RunDigest {
-  const changedFiles = parseFileSummaryLines(input.changedFilesSummary);
-  const touchedFiles = parseFileSummaryLines(input.touchedFilesSummary);
+  const changedFiles = parseFileSummaryLines(input.changedFilesSummary)
+    .filter((file) => !isArtifactOrTempFile(file));
+  const touchedFiles = parseFileSummaryLines(input.touchedFilesSummary)
+    .filter((file) => !isArtifactOrTempFile(file));
   const commandSignals = extractCommandSignals(input.resolvedCommand);
   const verification = extractVerificationSignals(input.outputTail, input.resolvedCommand, input.status);
   const failures = extractFailureSignals(input.outputTail, input.failureCode, input.failureReason, input.status);
@@ -896,9 +945,62 @@ export function buildExecutionExperiencePrompt(workspaceRoot: string, query: Exe
     const digest = entry.digest;
     const fileSignals = [...(digest.changedFiles || []), ...(digest.touchedFiles || [])]
       .filter((file, fileIndex, all) => file && all.indexOf(file) === fileIndex)
+      .filter((file) => !isArtifactOrTempFile(file))
       .slice(0, 6);
     const handoff = digest.handoff;
     const experienceHints = buildExecutionGraphExperienceHints(graph, digest.runId, 2);
+
+    const filesToInspectFirst = (handoff?.filesToInspectFirst || [])
+      .filter((file: string) => !isArtifactOrTempFile(file));
+
+    const cleanVerification = (digest.verification || []).filter((v: string) => {
+      if (!v) return false;
+      const lower = v.toLowerCase();
+      if (lower.includes('run completed without explicit verification signal in captured tail')) {
+        return false;
+      }
+      if (
+        lower.includes('/home/') ||
+        lower.includes('/users/') ||
+        lower.includes('/tmp/') ||
+        lower.includes('__solo__') ||
+        lower.includes('/agent-runs/')
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const cleanCommandsToRunNext = (handoff?.commandsToRunNext || []).filter((cmd: string) => {
+      if (!cmd) return false;
+      const lower = cmd.toLowerCase();
+      if (
+        lower.includes('/home/') ||
+        lower.includes('/users/') ||
+        lower.includes('/tmp/') ||
+        lower.includes('__solo__') ||
+        lower.includes('/agent-runs/')
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const cleanFailures = (digest.failures || []).filter((f: string) => {
+      if (!f) return false;
+      const lower = f.toLowerCase();
+      if (
+        lower.includes('/home/') ||
+        lower.includes('/users/') ||
+        lower.includes('/tmp/') ||
+        lower.includes('__solo__') ||
+        lower.includes('/agent-runs/')
+      ) {
+        return false;
+      }
+      return true;
+    });
+
     return [
       `${index + 1}. 命中原因：${entry.reasons.join('；') || '近期相关执行'}`,
       digest.userIntent ? `   - 上次目标：${digest.userIntent}` : '',
@@ -906,18 +1008,18 @@ export function buildExecutionExperiencePrompt(workspaceRoot: string, query: Exe
       experienceHints.length > 0 ? `   - 经验节点：${experienceHints.join(' / ')}` : '',
       handoff?.nextAgentBrief ? `   - 下一位 Agent 交接：${handoff.nextAgentBrief}` : '',
       fileSignals.length > 0 ? `   - 相关文件：${fileSignals.join(', ')}` : '',
-      handoff?.filesToInspectFirst?.length ? `   - 建议先看：${handoff.filesToInspectFirst.slice(0, 5).join(', ')}` : '',
+      filesToInspectFirst.length > 0 ? `   - 建议先看：${filesToInspectFirst.slice(0, 5).join(', ')}` : '',
       handoff?.recommendedFirstActions?.length ? `   - 建议动作：${handoff.recommendedFirstActions.slice(0, 3).join(' / ')}` : '',
-      handoff?.commandsToRunNext?.length ? `   - 建议验证：${handoff.commandsToRunNext.slice(0, 2).join(' / ')}` : '',
+      cleanCommandsToRunNext.length > 0 ? `   - 建议验证：${cleanCommandsToRunNext.slice(0, 2).join(' / ')}` : '',
       handoff?.doNotRepeat?.length ? `   - 避免重复：${handoff.doNotRepeat.slice(0, 2).join(' / ')}` : '',
       (digest.reusableSignals || []).length > 0 ? `   - 可复用信号：${(digest.reusableSignals || []).slice(0, 3).join(' / ')}` : '',
-      (digest.verification || []).length > 0 ? `   - 验证信号：${(digest.verification || []).slice(0, 2).join(' / ')}` : '',
-      (digest.failures || []).length > 0 ? `   - 风险信号：${(digest.failures || []).slice(0, 2).join(' / ')}` : ''
+      cleanVerification.length > 0 ? `   - 验证信号：${cleanVerification.slice(0, 2).join(' / ')}` : '',
+      cleanFailures.length > 0 ? `   - 风险信号：${cleanFailures.slice(0, 2).join(' / ')}` : ''
     ].filter(Boolean).join('\n');
   });
   return [
     'SoloMap 相关执行经验（自动召回，最多 3 条）：',
-    '这些是历史结构化摘要，不是本轮事实；只能帮助减少重复探索，不能覆盖用户本轮要求、当前代码、测试或日志。',
+    'These are historical structured digests, not facts of this run. Only help reduce repeat explorations, cannot override user request or tests.',
     ...blocks
   ].join('\n');
 }

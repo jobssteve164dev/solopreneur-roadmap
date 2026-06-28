@@ -143,6 +143,37 @@ function compactLine(value: string, maxLength = 260): string {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
+export function isTrashOrLocalPrivate(candidate: {
+  summary: string;
+  appliesWhen: string;
+  doThis: string;
+  avoidThis: string;
+  promotionTarget?: string;
+}): boolean {
+  const textToCheck = `${candidate.summary}\n${candidate.appliesWhen}\n${candidate.doThis}\n${candidate.avoidThis}`.toLowerCase();
+  if (textToCheck.includes('run completed without explicit verification signal in captured tail')) {
+    return true;
+  }
+  if (
+    candidate.promotionTarget === 'pattern' ||
+    candidate.promotionTarget === 'operating_rule' ||
+    candidate.promotionTarget === 'decision' ||
+    candidate.promotionTarget === 'domain' ||
+    !candidate.promotionTarget
+  ) {
+    if (
+      textToCheck.includes('/home/') ||
+      textToCheck.includes('/users/') ||
+      textToCheck.includes('/tmp/') ||
+      textToCheck.includes('__solo__') ||
+      textToCheck.includes('/agent-runs/')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function ensureDir(dirPath: string): void {
   fs.mkdirSync(dirPath, { recursive: true });
 }
@@ -557,6 +588,9 @@ function maybeWritePromotionSuggestions(workspaceRoot: string, globalDataPath: s
     if (candidate.status !== 'candidate') {
       continue;
     }
+    if (isTrashOrLocalPrivate(candidate)) {
+      continue;
+    }
     const reason = promotionReason(candidate, allCandidates);
     if (!reason) {
       continue;
@@ -617,12 +651,25 @@ export function buildLearningRetrievalContext(workspaceRoot: string, globalDataP
     return '';
   }
   reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
-  const candidates = readCandidates(paths)
+  const scored = readCandidates(paths)
     .map((candidate) => ({ candidate, score: scoreCandidate(candidate, query) }))
-    .filter((entry) => entry.score >= 6)
-    .sort((a, b) => b.score - a.score || String(b.candidate.updatedAt || '').localeCompare(String(a.candidate.updatedAt || '')))
-    .slice(0, query.limit || 5)
-    .map((entry) => entry.candidate);
+    .filter((entry) => entry.score >= 6 && !isTrashOrLocalPrivate(entry.candidate))
+    .sort((a, b) => b.score - a.score || String(b.candidate.updatedAt || '').localeCompare(String(a.candidate.updatedAt || '')));
+
+  const seenSummaries = new Set<string>();
+  const candidates: LessonCandidate[] = [];
+  for (const entry of scored) {
+    const key = entry.candidate.summary.trim().toLowerCase();
+    if (seenSummaries.has(key)) {
+      continue;
+    }
+    seenSummaries.add(key);
+    candidates.push(entry.candidate);
+    if (candidates.length >= (query.limit || 5)) {
+      break;
+    }
+  }
+
   if (candidates.length === 0) {
     return '';
   }
@@ -647,9 +694,45 @@ export function buildLearningPromotionContext(workspaceRoot: string, globalDataP
   }
   reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
   maybeWritePromotionSuggestions(workspaceRoot, globalDataPath, readCandidates(paths).filter((candidate) => candidate.status === 'candidate'));
-  const suggestions = readPromotionSuggestions(paths)
-    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
-    .slice(0, limit);
+  
+  const rawSuggestions = readPromotionSuggestions(paths)
+    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+
+  const seenTargets = new Set<string>();
+  const suggestions: LearningPromotionSuggestion[] = [];
+  for (const sug of rawSuggestions) {
+    const draftText = sug.draftMarkdown.toLowerCase();
+    if (draftText.includes('run completed without explicit verification signal in captured tail')) {
+      continue;
+    }
+    if (
+      sug.promotionTarget === 'pattern' ||
+      sug.promotionTarget === 'operating_rule' ||
+      sug.promotionTarget === 'decision' ||
+      sug.promotionTarget === 'domain'
+    ) {
+      if (
+        draftText.includes('/home/') ||
+        draftText.includes('/users/') ||
+        draftText.includes('/tmp/') ||
+        draftText.includes('__solo__') ||
+        draftText.includes('/agent-runs/')
+      ) {
+        continue;
+      }
+    }
+    const cleanDraft = sug.draftMarkdown.replace(/-\s+Source candidate:\s+[^\n]+/gi, '').trim().toLowerCase();
+    const key = `${sug.targetPath}|${cleanDraft}`;
+    if (seenTargets.has(key)) {
+      continue;
+    }
+    seenTargets.add(key);
+    suggestions.push(sug);
+    if (suggestions.length >= limit) {
+      break;
+    }
+  }
+
   if (suggestions.length === 0) {
     return '';
   }
