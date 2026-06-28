@@ -5655,6 +5655,75 @@ test('completed Solo conversation starts configured review Agent when review mod
   assert.match(reviewPrompt, /runKind: solo/);
 });
 
+test('completed conversation does not start Agent review when persisted review mode is off', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
+      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-off-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":true,"reason":"实现已完成"}', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M src/app.js\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M src/app.js\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'output.log'), 'Implemented and validated.\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.agent_status.json');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '2',
+    runKind: 'step',
+    status: 'In Progress',
+    agentCli: 'codex',
+    reviewerCliPath: 'agy',
+    collaborationReviewMode: 'off',
+    executionLogId: 12,
+    userMessage: '完成 MVP',
+    outputFilePath: path.join(runDir, 'output.log'),
+    changesFilePath: path.join(runDir, 'changes.txt'),
+    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
+    commandFilePath: path.join(runDir, 'command.txt'),
+    completionDecisionFilePath: path.join(runDir, 'completion.json'),
+    startedAt: '2026-05-24T00:00:00.000Z'
+  }), 'utf8');
+
+  let nodeUpdate = null;
+  const executionUpdates = [];
+  const executionLogs = [];
+  let reviewCommand = '';
+  extensionModule.__setCommandExistsForTest(() => true);
+  extensionModule.__setTerminalForTest(() => ({
+    show() {},
+    sendText(command) {
+      reviewCommand = command;
+    }
+  }));
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
+    updateNode: (_nodeId, update) => { nodeUpdate = update; },
+    updateAgentExecution: (_id, _cli, _command, output, status) => {
+      executionUpdates.push({ output, status });
+      return true;
+    },
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      executionLogs.push({ nodeId, agentCli, command, output, status });
+      return 88;
+    },
+    getAgentExecutions: () => executionLogs
+  }, tempRoot);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(nodeUpdate.status, 'Completed');
+  assert.equal(executionUpdates[0].status, 'Completed');
+  assert.equal(executionLogs.length, 0);
+  assert.equal(reviewCommand, '');
+});
+
 test('passing Agent review completes the deferred roadmap step', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
@@ -6383,7 +6452,7 @@ test('partial settings updates preserve existing user settings after extension u
     globalPrompt: 'Keep my durable instruction.',
     globalDataPath: globalRoot,
     reviewerCliPath: 'agy',
-    collaborationReviewMode: 'all',
+    collaborationReviewMode: 'off',
     automationTasks: {
       focusMinutes: 45,
       triggers: {
@@ -6411,6 +6480,11 @@ test('partial settings updates preserve existing user settings after extension u
   };
 
   await extensionModule.__updatePersistedSettings(context, {
+    cliPath: undefined,
+    language: undefined,
+    globalPrompt: undefined,
+    reviewerCliPath: undefined,
+    collaborationReviewMode: undefined,
     automationTasks: {
       focusMinutes: 15,
       triggers: {
@@ -6425,7 +6499,7 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(persisted.globalPrompt, 'Keep my durable instruction.');
   assert.equal(persisted.globalDataPath, globalRoot);
   assert.equal(persisted.reviewerCliPath, 'agy');
-  assert.equal(persisted.collaborationReviewMode, 'all');
+  assert.equal(persisted.collaborationReviewMode, 'off');
   assert.equal(persisted.agentModelPreferences.codex, 'gpt-5');
   assert.equal(persisted.automationTasks.focusMinutes, 15);
   assert.equal(persisted.automationTasks.triggers.completed.notify, true);

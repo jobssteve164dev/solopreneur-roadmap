@@ -1066,7 +1066,10 @@ function getSettingsWithRuntimeState(context: vscode.ExtensionContext): Solopren
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: Partial<SolopreneurSettings>): Promise<void> {
   const currentSettings = getPersistedSettings(context);
-  const hasSetting = (key: keyof SolopreneurSettings) => Object.prototype.hasOwnProperty.call(settings, key);
+  const hasSetting = (key: keyof SolopreneurSettings) => (
+    Object.prototype.hasOwnProperty.call(settings, key)
+    && settings[key] !== undefined
+  );
   const nextGlobalDataPath = hasSetting('globalDataPath')
     ? String(settings.globalDataPath ?? '').trim()
     : String(currentSettings.globalDataPath ?? '').trim();
