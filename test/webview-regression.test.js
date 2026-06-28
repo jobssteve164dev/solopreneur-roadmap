@@ -3985,7 +3985,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(fs.readFileSync(path.join(ensuredMemory.globalRoot, 'metrics', 'execution-speed.csv'), 'utf8'), /反馈与规模化.*1234/);
   assert.ok(fs.readdirSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates')).some((name) => name.endsWith('.md') && name !== '_example.md'));
   assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /待审核学习候选：1/);
-  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /最近执行速度记录/);
+  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /低频指标已记录/);
+  assert.doesNotMatch(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /最近执行速度记录|最近复用记录|反馈与规模化.*1234/);
   const defaultMemoryPrompt = extensionModule.__buildSoloMapSystemMemoryPrompt('/workspace/app', memoryRoot);
   assert.match(defaultMemoryPrompt, /SoloMap 默认系统提示词/);
   assert.match(defaultMemoryPrompt, /\.solomap-global\/memory/);

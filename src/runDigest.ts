@@ -345,15 +345,29 @@ function extractCommandSignals(resolvedCommand: string): string[] {
   return [command];
 }
 
+function isAgentDispatchCommand(command: string): boolean {
+  const text = String(command || '').toLowerCase();
+  if (!text) {
+    return false;
+  }
+  return (
+    text.includes('.solopreneur/agent-runs/')
+    || text.includes('/prompt.txt')
+    || text.includes(' codex exec ')
+    || text.includes(' agy ')
+    || text.includes(' claude ')
+    || text.includes(' opencode ')
+    || text.includes('--skip-git-repo-check')
+    || text.includes('dangerously-bypass-approvals')
+  );
+}
+
 export function extractVerificationSignals(outputTail: string, resolvedCommand: string, status: string): string[] {
   const signals = [
     ...extractLinesByPattern(outputTail, /\b(test|tests|passed|passing|validated|validation|verify|verified|tsc|vitest|jest|playwright|pytest|npm run|npm test|node --test)\b/i, 6)
   ];
-  if (/\b(test|check|lint|validate|verify|tsc|vitest|jest|playwright|pytest)\b/i.test(resolvedCommand || '')) {
+  if (!isAgentDispatchCommand(resolvedCommand) && /\b(test|check|lint|validate|verify|tsc|vitest|jest|playwright|pytest)\b/i.test(resolvedCommand || '')) {
     signals.unshift(`Command: ${compactLine(resolvedCommand, 220)}`);
-  }
-  if (status === 'Completed' && signals.length === 0) {
-    signals.push('Run completed without explicit verification signal in captured tail.');
   }
   return signals.filter((entry, index, all) => all.indexOf(entry) === index).slice(0, 6);
 }

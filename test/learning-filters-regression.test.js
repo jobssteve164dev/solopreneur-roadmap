@@ -128,6 +128,69 @@ test('buildLearningRetrievalContext filters out trash, local private data and ap
   assert.doesNotMatch(retrieval, /home\/ubuntu/);
 });
 
+test('agent dispatch commands and empty verification placeholders do not become learning candidates', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-dispatch-learning-'));
+  const projectPath = path.join(root, 'app');
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(projectPath, { recursive: true });
+
+  const dispatchCommand = "cat '/home/ubuntu/project/app/.solopreneur/agent-runs/__solo__/2/prompt.txt' | '/usr/local/bin/codex' exec --color always -C '/home/ubuntu/project/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -";
+  assert.deepEqual(
+    runDigest.extractVerificationSignals('', dispatchCommand, 'Completed'),
+    []
+  );
+  assert.deepEqual(
+    runDigest.extractVerificationSignals('', 'npm test', 'Completed'),
+    ['Command: npm test']
+  );
+
+  const placeholderEvent = ledger.appendLearningEvent(projectPath, globalRoot, {
+    sourceType: 'solo',
+    sourceRef: 'solo-placeholder',
+    eventType: 'verified',
+    summary: 'Solo conversation state: Completed',
+    evidenceRefs: [{ type: 'run_digest', ref: '.solopreneur/run-digests/__solo__-2.json' }],
+    tags: ['solo'],
+    metadata: {
+      verification: ['Run completed without explicit verification signal in captured tail.'],
+      failures: []
+    }
+  });
+  const dispatchEvent = ledger.appendLearningEvent(projectPath, globalRoot, {
+    sourceType: 'solo',
+    sourceRef: 'solo-dispatch-command',
+    eventType: 'verified',
+    summary: 'Solo conversation state: Completed',
+    evidenceRefs: [{ type: 'command', ref: dispatchCommand }],
+    tags: ['solo'],
+    metadata: {
+      verification: [`Command: ${dispatchCommand}`],
+      failures: []
+    }
+  });
+
+  const candidateDecisionFiles = fs.readdirSync(path.join(globalRoot, 'learning', 'candidate-decisions')).filter((name) => name.endsWith('.json'));
+  const decisions = candidateDecisionFiles
+    .map((name) => JSON.parse(fs.readFileSync(path.join(globalRoot, 'learning', 'candidate-decisions', name), 'utf8')));
+  assert.equal(decisions.find((decision) => decision.eventId === placeholderEvent.id).decision, 'skipped');
+  assert.equal(decisions.find((decision) => decision.eventId === dispatchEvent.id).decision, 'skipped');
+
+  const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
+    projectPath,
+    runKind: 'solo',
+    contextText: 'codex agent dispatch verification',
+    files: [],
+    limit: 5
+  });
+  const promotionContext = ledger.buildLearningPromotionContext(projectPath, globalRoot);
+  const summary = ledger.readLearningSummary(projectPath, globalRoot);
+
+  assert.doesNotMatch(retrieval, /Run completed without explicit verification signal|codex' exec|agent-runs|prompt\.txt/);
+  assert.doesNotMatch(promotionContext, /Run completed without explicit verification signal|codex' exec|agent-runs|prompt\.txt/);
+  assert.equal(summary.candidateCount, 0);
+  assert.equal(summary.projectSignals[0].verificationSignals, 0);
+});
+
 test('buildLearningPromotionContext filters suggestions and applies deduplication', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-promotion-test-'));
   const projectPath = path.join(root, 'app');

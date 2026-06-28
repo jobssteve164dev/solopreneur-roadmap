@@ -148,10 +148,14 @@ export function isTrashOrLocalPrivate(candidate: {
   appliesWhen: string;
   doThis: string;
   avoidThis: string;
+  evidenceRefs?: LearningEvidenceRef[];
   promotionTarget?: string;
 }): boolean {
-  const textToCheck = `${candidate.summary}\n${candidate.appliesWhen}\n${candidate.doThis}\n${candidate.avoidThis}`.toLowerCase();
+  const textToCheck = `${candidate.summary}\n${candidate.appliesWhen}\n${candidate.doThis}\n${candidate.avoidThis}\n${(candidate.evidenceRefs || []).map((ref) => `${ref.type}:${ref.ref} ${ref.summary || ''}`).join('\n')}`.toLowerCase();
   if (textToCheck.includes('run completed without explicit verification signal in captured tail')) {
+    return true;
+  }
+  if (isLowValueLearningText(textToCheck)) {
     return true;
   }
   if (
@@ -172,6 +176,37 @@ export function isTrashOrLocalPrivate(candidate: {
     }
   }
   return false;
+}
+
+function isLowValueLearningText(value: string): boolean {
+  const text = String(value || '').toLowerCase();
+  if (!text) {
+    return true;
+  }
+  return (
+    text.includes('run completed without explicit verification signal')
+    || text.includes('/prompt.txt')
+    || text.includes('.solopreneur/agent-runs/')
+    || text.includes('agent-runs/<rungroup>')
+    || text.includes('agent-runs/<runGroup>'.toLowerCase())
+    || text.includes('__solo__')
+    || text.includes('__solo__/<runid>')
+    || text.includes('dangerously-bypass-approvals')
+    || text.includes('--skip-git-repo-check')
+    || text.includes(' codex exec ')
+    || text.includes("cat '<home>")
+    || text.includes('cat <home>')
+    || text.includes("cat '<projectroot>")
+    || text.includes('cat <projectroot>')
+  );
+}
+
+function isUsefulVerificationSignal(value: unknown): boolean {
+  const text = compactLine(String(value || ''), 360);
+  if (!text || isLowValueLearningText(text)) {
+    return false;
+  }
+  return /\b(test|tests|passed|passing|validated|validation|verify|verified|tsc|vitest|jest|playwright|pytest|npm run|npm test|node --test)\b/i.test(text);
 }
 
 function escapeRegExp(string: string) {
@@ -327,7 +362,7 @@ export function appendLearningEvent(
   const metadata = { ...(input.metadata || {}) };
   if (Array.isArray(metadata.verification)) {
     metadata.verification = metadata.verification
-      .filter((v) => v && !v.includes('Run completed without explicit verification signal'))
+      .filter((v) => isUsefulVerificationSignal(v))
       .map((v) => sanitizeProjectPaths(String(v), eventProjectPath));
   }
   if (Array.isArray(metadata.failures)) {
@@ -437,7 +472,7 @@ export function extractLessonCandidatesFromEvent(workspaceRoot: string, globalDa
   const metadata = event.metadata || {};
   const status = String(metadata.recommendedStatus || event.eventType || '').toLowerCase();
   const role = String(metadata.role || '').toLowerCase();
-  const verification = Array.isArray(metadata.verification) ? metadata.verification : [];
+  const verification = Array.isArray(metadata.verification) ? metadata.verification.filter(isUsefulVerificationSignal) : [];
   const failures = Array.isArray(metadata.failures) ? metadata.failures : [];
 
   if (event.eventType === 'corrected' || event.sourceType === 'user_correction') {
@@ -545,7 +580,9 @@ function reconcileLearningCandidateDecisionsBestEffort(workspaceRoot: string, gl
 
 function readCandidates(paths: ReturnType<typeof getLearningLedgerPaths>): LessonCandidate[] {
   const roots = [paths.candidatesRoot, paths.approvedRoot];
-  return roots.flatMap((root) => listJsonFiles(root).map((file) => safeReadJson<LessonCandidate>(file)).filter((item): item is LessonCandidate => Boolean(item && item.schemaVersion === 1)));
+  return roots
+    .flatMap((root) => listJsonFiles(root).map((file) => safeReadJson<LessonCandidate>(file)).filter((item): item is LessonCandidate => Boolean(item && item.schemaVersion === 1)))
+    .filter((candidate) => !isTrashOrLocalPrivate(candidate));
 }
 
 function readCandidateDecisions(paths: ReturnType<typeof getLearningLedgerPaths>): LearningCandidateDecision[] {
@@ -758,7 +795,7 @@ export function buildLearningPromotionContext(workspaceRoot: string, globalDataP
   const suggestions: LearningPromotionSuggestion[] = [];
   for (const sug of rawSuggestions) {
     const draftText = sug.draftMarkdown.toLowerCase();
-    if (draftText.includes('run completed without explicit verification signal in captured tail')) {
+    if (isLowValueLearningText(draftText)) {
       continue;
     }
     if (
@@ -844,7 +881,11 @@ export function readLearningSummary(workspaceRoot: string, globalDataPath = ''):
     current.eventCount += 1;
     current.latestAt = String(event.createdAt || '') > String(current.latestAt || '') ? event.createdAt : current.latestAt;
     if (['failed', 'blocked', 'deviated', 'partial', 'needs_confirmation'].includes(event.eventType)) current.riskSignals += 1;
-    if (event.eventType === 'verified' || event.metadata?.recommendedStatus === 'closed') current.verificationSignals += 1;
+    const eventMetadata = event.metadata || {};
+    const eventVerification = Array.isArray(eventMetadata.verification)
+      ? eventMetadata.verification.filter(isUsefulVerificationSignal)
+      : [];
+    if ((event.eventType === 'verified' && eventVerification.length > 0) || eventMetadata.recommendedStatus === 'closed') current.verificationSignals += 1;
     if (event.sourceType === 'strategy') current.strategySignals += 1;
     byProject.set(event.projectId, current);
   }

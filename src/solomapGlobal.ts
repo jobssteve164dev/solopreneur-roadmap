@@ -916,24 +916,15 @@ export function buildSolomapLearningContext(workspaceRoot: string, globalDataPat
   const metricsDir = path.join(globalRoot, 'metrics');
   const candidateCount = countMarkdownFiles(learningCandidatesDir);
   const ledgerSummary = readLearningSummary(workspaceRoot, globalDataPath);
-  const readTail = (fileName: string) => {
-    const filePath = path.join(metricsDir, fileName);
-    try {
-      return fs.readFileSync(filePath, 'utf8').trim().split('\n').slice(-4).join('\n');
-    } catch {
-      return '';
-    }
-  };
-  const executionTail = readTail('execution-speed.csv');
-  const reuseTail = readTail('reuse-rate.csv');
+  const hasExecutionMetrics = fs.existsSync(path.join(metricsDir, 'execution-speed.csv'));
+  const hasReuseMetrics = fs.existsSync(path.join(metricsDir, 'reuse-rate.csv'));
   return [
     'SoloMap 跨项目学习信号：',
     `- 待审核学习候选：${Math.max(candidateCount, ledgerSummary.candidateCount)}`,
     `- 统一学习账本事件：${ledgerSummary.eventCount}`,
     `- 已确认/已晋升经验：${ledgerSummary.approvedCount + ledgerSummary.promotedCount}`,
     ledgerSummary.projectSignals.length ? `- 最近项目学习信号：${ledgerSummary.projectSignals.slice(0, 4).map((item) => `${item.projectName}: ${item.candidateCount}候选/${item.riskSignals}风险/${item.verificationSignals}验证`).join('；')}` : '',
-    executionTail ? `- 最近执行速度记录：\n${executionTail}` : '',
-    reuseTail ? `- 最近复用记录：\n${reuseTail}` : '',
+    hasExecutionMetrics || hasReuseMetrics ? '- 低频指标已记录：仅用于 Improve、复盘或路线图调整时判断趋势，不作为普通执行任务的行动指令。' : '',
     '- 如果当前环节属于 Improve / 复盘 / 调整路线图，应优先参考这些信号来提出下一轮路线图调整。'
   ].filter(Boolean).join('\n');
 }
