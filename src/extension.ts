@@ -1029,6 +1029,29 @@ function normalizeAutomationSettings(value: unknown): SolomapAutomationSettings 
   };
 }
 
+function mergeAutomationSettings(currentValue: unknown, nextValue: unknown): SolomapAutomationSettings {
+  const current = normalizeAutomationSettings(currentValue);
+  if (!nextValue || typeof nextValue !== 'object') {
+    return current;
+  }
+  const currentTriggers = current.triggers || {};
+  const source = nextValue as Record<string, unknown>;
+  const nextTriggers = source.triggers && typeof source.triggers === 'object'
+    ? source.triggers as Record<string, unknown>
+    : {};
+  return {
+    focusMinutes: Object.prototype.hasOwnProperty.call(source, 'focusMinutes')
+      ? normalizeAutomationSettings(source).focusMinutes
+      : current.focusMinutes,
+    triggers: {
+      completed: Object.prototype.hasOwnProperty.call(nextTriggers, 'completed') ? normalizeAutomationTriggerSettings(nextTriggers.completed) : normalizeAutomationTriggerSettings(currentTriggers.completed),
+      failed: Object.prototype.hasOwnProperty.call(nextTriggers, 'failed') ? normalizeAutomationTriggerSettings(nextTriggers.failed) : normalizeAutomationTriggerSettings(currentTriggers.failed),
+      stopped: Object.prototype.hasOwnProperty.call(nextTriggers, 'stopped') ? normalizeAutomationTriggerSettings(nextTriggers.stopped) : normalizeAutomationTriggerSettings(currentTriggers.stopped),
+      focus_time: Object.prototype.hasOwnProperty.call(nextTriggers, 'focus_time') ? normalizeAutomationTriggerSettings(nextTriggers.focus_time) : normalizeAutomationTriggerSettings(currentTriggers.focus_time)
+    }
+  };
+}
+
 function getSettingsWithRuntimeState(context: vscode.ExtensionContext): SolopreneurSettings {
   const settings = getPersistedSettings(context);
   const automationTasks = normalizeAutomationSettings(settings.automationTasks || {});
@@ -1041,21 +1064,27 @@ function getSettingsWithRuntimeState(context: vscode.ExtensionContext): Solopren
   };
 }
 
-async function updatePersistedSettings(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
+async function updatePersistedSettings(context: vscode.ExtensionContext, settings: Partial<SolopreneurSettings>): Promise<void> {
   const currentSettings = getPersistedSettings(context);
+  const hasSetting = (key: keyof SolopreneurSettings) => Object.prototype.hasOwnProperty.call(settings, key);
+  const nextGlobalDataPath = hasSetting('globalDataPath')
+    ? String(settings.globalDataPath ?? '').trim()
+    : String(currentSettings.globalDataPath ?? '').trim();
   const nextSettings: SolopreneurSettings = {
-    cliPath: settings.cliPath || 'agy',
-    agentModelPreferences: mergeAgentModelPreferences(currentSettings.agentModelPreferences, settings.agentModelPreferences),
-    language: settings.language === 'en' ? 'en' : 'zh',
-    globalPrompt: String(settings.globalPrompt || '').trim(),
-    globalDataPath: String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim(),
+    cliPath: hasSetting('cliPath') ? (String(settings.cliPath || '').trim() || 'agy') : (currentSettings.cliPath || 'agy'),
+    agentModelPreferences: mergeAgentModelPreferences(currentSettings.agentModelPreferences, hasSetting('agentModelPreferences') ? settings.agentModelPreferences : undefined),
+    language: hasSetting('language') ? (settings.language === 'en' ? 'en' : 'zh') : (currentSettings.language === 'en' ? 'en' : 'zh'),
+    globalPrompt: hasSetting('globalPrompt') ? String(settings.globalPrompt ?? '').trim() : String(currentSettings.globalPrompt ?? '').trim(),
+    globalDataPath: nextGlobalDataPath,
     taskPermissionMode: 'auto',
-    reviewerCliPath: String(settings.reviewerCliPath ?? currentSettings.reviewerCliPath ?? '').trim(),
-    collaborationReviewMode: normalizeCollaborationReviewMode(settings.collaborationReviewMode ?? currentSettings.collaborationReviewMode),
-    automationTasks: normalizeAutomationSettings(settings.automationTasks ?? currentSettings.automationTasks),
+    reviewerCliPath: hasSetting('reviewerCliPath') ? String(settings.reviewerCliPath ?? '').trim() : String(currentSettings.reviewerCliPath ?? '').trim(),
+    collaborationReviewMode: normalizeCollaborationReviewMode(hasSetting('collaborationReviewMode') ? settings.collaborationReviewMode : currentSettings.collaborationReviewMode),
+    automationTasks: hasSetting('automationTasks')
+      ? mergeAutomationSettings(currentSettings.automationTasks, settings.automationTasks)
+      : normalizeAutomationSettings(currentSettings.automationTasks),
     proEntitlements: currentSettings.proEntitlements || {},
     proAccount: currentSettings.proAccount,
-    enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), String(settings.globalDataPath ?? currentSettings.globalDataPath ?? '').trim())
+    enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), nextGlobalDataPath)
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -3633,6 +3662,16 @@ function formatAgentReviewResult(result: { status: string; summary: string; find
   ].filter(Boolean).join('\n');
 }
 
+function hasAgentReviewForExecution(nodeId: string, mainExecutionLogId: number): boolean {
+  if (!syncEngine || !mainExecutionLogId || typeof syncEngine.getAgentExecutions !== 'function') {
+    return false;
+  }
+  return syncEngine.getAgentExecutions(nodeId).some((conversation) => {
+    const output = String(conversation?.output || '');
+    return new RegExp(`Review of execution:\\s*${mainExecutionLogId}(\\D|$)`).test(output);
+  });
+}
+
 function startAgentReviewRun(input: {
   workspaceRoot: string;
   nodeId: string;
@@ -3735,7 +3774,7 @@ function startAgentReviewRun(input: {
     terminalExecutionScript,
     `git -C ${shellQuote(input.workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
-    `node -e "const fs=require('fs');try{const p=${JSON.stringify(reviewResultFilePath)};const v=JSON.parse(fs.readFileSync(p,'utf8'));if(!['pass','revise','needs_user_confirmation'].includes(String(v.status||''))) process.exit(2);}catch(e){process.exit(2)}" || status=125`,
+    `node -e 'const fs=require("fs");try{const p=process.argv[1];const v=JSON.parse(fs.readFileSync(p,"utf8"));if(!["pass","revise","needs_user_confirmation"].includes(String(v.status||""))) process.exit(2);}catch(e){process.exit(2)}' ${shellQuote(reviewResultFilePath)} || status=125`,
     `if [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
@@ -6618,7 +6657,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       );
     }
 
-    if (shouldStartReview && !isContinuationRun) {
+    if (shouldStartReview && !isContinuationRun && !hasAgentReviewForExecution(nodeId, Number(executionLogId || 0))) {
       const requestedReviewerCli = String(reviewerCliPath || agentCli || '').trim();
       const reviewerCli = resolveAgentCli(requestedReviewerCli || String(agentCli || 'agy'), requestedReviewerCli ? '' : String(agentCli || 'agy'));
       if (commandExists(reviewerCli)) {

@@ -125,6 +125,9 @@ function loadCompiledModule(relativePath, exportPatch) {
               return {
                 get() {
                   return '';
+                },
+                update() {
+                  return Promise.resolve();
                 }
               };
             }
@@ -136,6 +139,7 @@ function loadCompiledModule(relativePath, exportPatch) {
               return Promise.resolve(true);
             }
           },
+          ConfigurationTarget: { Global: 1 },
           ViewColumn: { One: 1 },
           ThemeIcon: class ThemeIcon {},
           ThemeColor: class ThemeColor {}
@@ -5554,7 +5558,7 @@ test('completed step starts read-only Agent review before marking the step compl
       executionLogs.push({ nodeId, agentCli, command, output, status });
       return 88;
     },
-    getAgentExecutions: () => []
+    getAgentExecutions: () => executionLogs
   }, tempRoot);
 
   await extensionModule.__processAgentStatusFile(statusFilePath);
@@ -5569,6 +5573,12 @@ test('completed step starts read-only Agent review before marking the step compl
   const reviewPrompt = fs.readFileSync(path.join(runDir, 'review-12', 'prompt.txt'), 'utf8');
   assert.match(reviewPrompt, /只读复核 Agent/);
   assert.match(reviewPrompt, /不要修改项目文件/);
+  const reviewScript = fs.readFileSync(path.join(runDir, 'review-12', 'run-agent-review.sh'), 'utf8');
+  assert.match(reviewScript, /process\.argv\[1\]/);
+  assert.match(reviewScript, /review-result\.json' \|\| status=125/);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+  assert.equal(executionLogs.length, 1);
 });
 
 test('completed Solo conversation starts configured review Agent when review mode is every task', async () => {
@@ -6353,6 +6363,74 @@ test('project registry persists projects and pin state in the global SoloMap fil
   const sharedProjects = extensionModule.__getProjects(secondContext);
   assert.equal(sharedProjects[0].path, '/workspace/beta');
   assert.equal(sharedProjects[1].path, '/workspace/alpha');
+});
+
+test('partial settings updates preserve existing user settings after extension upgrades', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__updatePersistedSettings = updatePersistedSettings;',
+      'module.exports.__getPersistedSettings = getPersistedSettings;'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-partial-settings-'));
+  const globalRoot = path.join(tempRoot, '.solomap-global');
+  const settingsWrites = [];
+  const savedSettings = {
+    cliPath: 'codex',
+    agentModelPreferences: { codex: 'gpt-5' },
+    language: 'en',
+    globalPrompt: 'Keep my durable instruction.',
+    globalDataPath: globalRoot,
+    reviewerCliPath: 'agy',
+    collaborationReviewMode: 'all',
+    automationTasks: {
+      focusMinutes: 45,
+      triggers: {
+        completed: { notify: true, sound: false, retry: false, prompt: '' },
+        failed: { notify: false, sound: false, retry: true, prompt: '' },
+        stopped: { notify: false, sound: false, retry: false, prompt: '' },
+        focus_time: { notify: false, sound: false, retry: false, prompt: '' }
+      }
+    }
+  };
+  const map = new Map([['solopreneur.settings', savedSettings]]);
+  const context = {
+    extensionPath: projectRoot,
+    extensionUri: createUri(projectRoot),
+    globalState: {
+      get(key) {
+        return map.get(key);
+      },
+      update(key, value) {
+        map.set(key, value);
+        if (key === 'solopreneur.settings') settingsWrites.push(value);
+        return Promise.resolve();
+      }
+    }
+  };
+
+  await extensionModule.__updatePersistedSettings(context, {
+    automationTasks: {
+      focusMinutes: 15,
+      triggers: {
+        focus_time: { notify: true, sound: false, retry: false, prompt: '' }
+      }
+    }
+  });
+
+  const persisted = settingsWrites.at(-1);
+  assert.equal(persisted.cliPath, 'codex');
+  assert.equal(persisted.language, 'en');
+  assert.equal(persisted.globalPrompt, 'Keep my durable instruction.');
+  assert.equal(persisted.globalDataPath, globalRoot);
+  assert.equal(persisted.reviewerCliPath, 'agy');
+  assert.equal(persisted.collaborationReviewMode, 'all');
+  assert.equal(persisted.agentModelPreferences.codex, 'gpt-5');
+  assert.equal(persisted.automationTasks.focusMinutes, 15);
+  assert.equal(persisted.automationTasks.triggers.completed.notify, true);
+  assert.equal(persisted.automationTasks.triggers.failed.retry, true);
+  assert.equal(persisted.automationTasks.triggers.focus_time.notify, true);
 });
 
 test('Flow pause and abandon commands work correctly', async () => {
