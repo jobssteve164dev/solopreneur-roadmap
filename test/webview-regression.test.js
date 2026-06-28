@@ -4836,6 +4836,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(experiencePrompt, /SoloMap 相关执行经验/);
   assert.match(experiencePrompt, /修复 src\/extension\.ts/);
   assert.match(experiencePrompt, /src\/extension\.ts/);
+  assert.match(experiencePrompt, /经验节点/);
+  assert.match(experiencePrompt, /%\/1次/);
   assert.match(experiencePrompt, /下一位 Agent 交接/);
   assert.match(experiencePrompt, /建议先看/);
   assert.match(experiencePrompt, /npm test passed/);

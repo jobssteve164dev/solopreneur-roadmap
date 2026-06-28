@@ -832,6 +832,26 @@ export function writeExecutionGraph(workspaceRoot: string): string {
   return graphPath;
 }
 
+function buildExecutionGraphExperienceHints(graph: ExecutionGraph, runId: string, limit = 2): string[] {
+  const experienceIds = graph.usageEdges
+    .filter((edge) => edge.runId === runId)
+    .map((edge) => edge.experienceId)
+    .filter((experienceId, index, all) => experienceId && all.indexOf(experienceId) === index);
+  return experienceIds
+    .map((experienceId) => graph.experienceNodes[experienceId])
+    .filter((node): node is ExecutionExperienceNode => Boolean(node && node.centralMeaning))
+    .sort((a, b) =>
+      Number(b.stats?.winRate || 0.5) - Number(a.stats?.winRate || 0.5) ||
+      Number(b.stats?.uses || 0) - Number(a.stats?.uses || 0)
+    )
+    .slice(0, limit)
+    .map((node) => {
+      const winRate = Number(node.stats?.winRate || 0.5);
+      const uses = Number(node.stats?.uses || 0);
+      return `${node.centralMeaning}（${Math.round(winRate * 100)}%/${uses}次）`;
+    });
+}
+
 function scoreRunDigest(digest: RunDigest, query: ExecutionExperienceQuery): { score: number; reasons: string[] } {
   const context = query.contextText || '';
   const contextTokens = tokenizeExperienceText([
@@ -863,6 +883,7 @@ function scoreRunDigest(digest: RunDigest, query: ExecutionExperienceQuery): { s
 }
 
 export function buildExecutionExperiencePrompt(workspaceRoot: string, query: ExecutionExperienceQuery): string {
+  const graph = buildExecutionGraph(workspaceRoot);
   const matches = readRunDigests(workspaceRoot)
     .map((digest) => ({ digest, ...scoreRunDigest(digest, query) }))
     .filter((entry) => entry.score >= 3)
@@ -877,10 +898,12 @@ export function buildExecutionExperiencePrompt(workspaceRoot: string, query: Exe
       .filter((file, fileIndex, all) => file && all.indexOf(file) === fileIndex)
       .slice(0, 6);
     const handoff = digest.handoff;
+    const experienceHints = buildExecutionGraphExperienceHints(graph, digest.runId, 2);
     return [
       `${index + 1}. 命中原因：${entry.reasons.join('；') || '近期相关执行'}`,
       digest.userIntent ? `   - 上次目标：${digest.userIntent}` : '',
       digest.outcome ? `   - 上次结果：${digest.outcome}` : `   - 上次状态：${digest.status}`,
+      experienceHints.length > 0 ? `   - 经验节点：${experienceHints.join(' / ')}` : '',
       handoff?.nextAgentBrief ? `   - 下一位 Agent 交接：${handoff.nextAgentBrief}` : '',
       fileSignals.length > 0 ? `   - 相关文件：${fileSignals.join(', ')}` : '',
       handoff?.filesToInspectFirst?.length ? `   - 建议先看：${handoff.filesToInspectFirst.slice(0, 5).join(', ')}` : '',
