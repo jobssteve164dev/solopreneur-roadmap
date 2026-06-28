@@ -5028,16 +5028,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = selectedProjectPath || '';
-          currentProjects.portfolio = message.projects.portfolio || [];
+          currentProjects.portfolio = normalizePortfolioDerivedSignals(message.projects.portfolio || []);
           currentProjects.globalStore = message.projects.globalStore || null;
           renderProjects(message.projects.projects, currentProjects.selectedProjectPath);
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolioFromAsyncUpdate(message.projects.portfolio || [], currentProjects.selectedProjectPath || '');
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath || '');
           break;
 
         case 'projectIssuesLoaded':
           currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
-            project.path === message.projectPath ? { ...project, issues: message.issues } : project
+            project.path === message.projectPath ? normalizeProjectDerivedSignals({ ...project, issues: message.issues }) : project
           ));
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
@@ -5045,7 +5045,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'projectDeliveryLoaded':
           currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
-            project.path === message.projectPath ? { ...project, delivery: message.delivery, deliverySignal: deliverySignalText(message.delivery) } : project
+            project.path === message.projectPath ? normalizeProjectDerivedSignals({ ...project, delivery: message.delivery }) : project
           ));
           if (message.projectPath === currentProjects.selectedProjectPath) {
             deliveryActionMessage = '';
@@ -5056,7 +5056,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'projectSecurityLoaded':
           currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
-            project.path === message.projectPath ? { ...project, security: message.security, securitySignal: securitySignalText(message.security) } : project
+            project.path === message.projectPath ? normalizeProjectDerivedSignals({ ...project, security: message.security }) : project
           ));
           if (message.projectPath === currentProjects.selectedProjectPath) {
             deliveryActionMessage = '';
@@ -6125,6 +6125,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return ({ P0: 0, P1: 1, P2: 2, P3: 3 })[priority] ?? 4;
     }
 
+    function portfolioTieBreak(a, b) {
+      const recent = String((b && b.recentActivityAt) || '').localeCompare(String((a && a.recentActivityAt) || ''));
+      if (recent !== 0) return recent;
+      const name = String((a && a.name) || '').localeCompare(String((b && b.name) || ''));
+      if (name !== 0) return name;
+      return String((a && a.path) || '').localeCompare(String((b && b.path) || ''));
+    }
+
     function sortPinnedProjects(projects) {
       return (projects || []).slice().sort((a, b) => {
         const pinnedA = a && a.pinnedAt ? 1 : 0;
@@ -6181,12 +6189,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || !!project.stageGap;
     }
 
-      function todayPlanScore(project, selectedProjectPath) {
+      function todayPlanScore(project) {
         let score = 0;
         const rhythm = getTodayWorkRhythm();
-        if (selectedProjectPath && project.path === selectedProjectPath) {
-          score += 70; // 优先当前激活项目，单点突破
-        }
         if (Number(project.security && project.security.openCriticalHigh || 0) > 0) score += 130;
         if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) score += 120;
         if (Number(project.failedNodes || 0) > 0) score += 100;
@@ -6228,7 +6233,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const projects = (portfolio || [])
           .filter(project => project && project.path)
           .slice()
-          .sort((a, b) => todayPlanScore(b, selectedProjectPath) - todayPlanScore(a, selectedProjectPath) || priorityRank(a.globalPriority) - priorityRank(b.globalPriority));
+          .sort((a, b) => todayPlanScore(b) - todayPlanScore(a) || priorityRank(a.globalPriority) - priorityRank(b.globalPriority) || portfolioTieBreak(a, b));
         const used = new Set();
         const take = (slot, predicate) => {
           const project = projects.find(candidate => !used.has(candidate.path) && predicate(candidate));
@@ -6641,6 +6646,40 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (Number(security.openCriticalHigh || 0) > 0) return t('securitySignalRisk') + ' ' + Number(security.openCriticalHigh || 0);
       if (security.status === 'healthy') return t('securitySignalHealthy');
       return '';
+    }
+
+    function issuePressureText(issues) {
+      if (!issues || !issues.available) return '';
+      const p0 = Number((issues.byPriority || {}).P0 || 0);
+      const bugs = Number((issues.byCategory || {}).bug || 0);
+      if (p0 > 0) return p0 + ' P0';
+      if (bugs > 0) return bugs + ' bug';
+      return Number(issues.open || 0) > 0 ? Number(issues.open || 0) + ' open' : '';
+    }
+
+    function normalizeProjectDerivedSignals(project) {
+      if (!project) return project;
+      const next = { ...project };
+      const securityRisk = Number(next.security && next.security.openCriticalHigh || 0);
+      const failedDelivery = Number(next.delivery && next.delivery.failedWorkflowRuns || 0);
+      const p0Issues = Number(((next.issues || {}).byPriority || {}).P0 || 0);
+      next.deliverySignal = deliverySignalText(next.delivery) || '';
+      next.securitySignal = securitySignalText(next.security) || '';
+      next.issuePressure = issuePressureText(next.issues) || '';
+      if (securityRisk > 0) {
+        next.globalNextAction = t('securitySignalRisk');
+      } else if (failedDelivery > 0) {
+        next.globalNextAction = t('todayReasonDelivery');
+      } else if (p0Issues > 0) {
+        next.globalNextAction = t('todayReasonIssue');
+      } else if (next.recommendedNodeTitle) {
+        next.globalNextAction = next.recommendedNodeTitle;
+      }
+      return next;
+    }
+
+    function normalizePortfolioDerivedSignals(portfolio) {
+      return (portfolio || []).map(project => normalizeProjectDerivedSignals(project));
     }
 
     function foundationSignalText(foundation) {

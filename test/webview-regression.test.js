@@ -632,6 +632,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /data-agent-fix-foundation-project-path/);
   assert.match(script, /projectSecurityLoaded/);
   assert.match(script, /securitySignalText/);
+  assert.match(script, /normalizeProjectDerivedSignals/);
+  assert.doesNotMatch(script, /project\.path === selectedProjectPath\)\s*\{\s*score \+= 70/);
   assert.match(script, /foundationSignalText/);
   assert.doesNotMatch(script, /buildSecurityActionPrompt/);
   assert.match(script, /buildFoundationActionPrompt/);
@@ -721,6 +723,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   ], `
     globalThis.__setDeliveryActionPanelExpanded = (value) => { deliveryActionPanelExpanded = Boolean(value); };
     globalThis.__renderProjectDeliveryPanel = renderProjectDeliveryPanel;
+    globalThis.__getCurrentPortfolio = () => currentProjects.portfolio;
+    globalThis.__resetActiveProjectPath = () => { activeProjectPath = ''; currentProjects.selectedProjectPath = ''; };
   `);
 
   context.__setDeliveryActionPanelExpanded(true);
@@ -842,6 +846,97 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     && message.automationTasks.triggers.completed.sound === false
     && message.automationTasks.triggers.stopped.retry === true
   ));
+
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'Alpha', path: '/workspace/alpha' }, { name: 'Beta', path: '/workspace/beta' }],
+      selectedProjectPath: '/workspace/beta',
+      portfolio: [{
+        name: 'Alpha',
+        path: '/workspace/alpha',
+        totalNodes: 2,
+        completedNodes: 0,
+        failedNodes: 0,
+        runningNodes: 0,
+        inProgressNodes: 1,
+        pendingNodes: 1,
+        recommendedNodeId: 'alpha-step',
+        recommendedNodeTitle: '推进 Alpha',
+        recommendedStatus: 'In Progress',
+        overallStatus: 'In Progress',
+        recentActivityAt: '2026-05-27T10:00:00.000Z',
+        globalPriority: 'P1',
+        issues: { available: true, byPriority: {}, byCategory: {}, open: 0 },
+        delivery: { available: true, failedWorkflowRuns: 0 },
+        security: { available: true, openCriticalHigh: 0 },
+        nodes: []
+      }, {
+        name: 'Beta',
+        path: '/workspace/beta',
+        totalNodes: 2,
+        completedNodes: 0,
+        failedNodes: 0,
+        runningNodes: 0,
+        inProgressNodes: 1,
+        pendingNodes: 1,
+        recommendedNodeId: 'beta-step',
+        recommendedNodeTitle: '推进 Beta',
+        recommendedStatus: 'In Progress',
+        overallStatus: 'In Progress',
+        recentActivityAt: '2026-05-26T10:00:00.000Z',
+        globalPriority: 'P1',
+        issues: { available: true, byPriority: {}, byCategory: {}, open: 0 },
+        delivery: { available: true, failedWorkflowRuns: 0 },
+        security: { available: true, openCriticalHigh: 0 },
+        nodes: []
+      }]
+    }
+  });
+  const initialTodayPlan = elements['global-focus-panel'].innerHTML;
+  const extractTodayProjectOrder = (html) => [...String(html).matchAll(/global-focus-name">([^<]+)</g)].map((match) => match[1]);
+  const initialTodayProjectOrder = extractTodayProjectOrder(initialTodayPlan);
+  assert.deepEqual(initialTodayProjectOrder, ['Alpha', 'Beta']);
+
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'Alpha', path: '/workspace/alpha' }, { name: 'Beta', path: '/workspace/beta' }],
+      selectedProjectPath: '/workspace/alpha',
+      portfolio: context.__getCurrentPortfolio()
+    }
+  });
+  const afterSelectionTodayPlan = elements['global-focus-panel'].innerHTML;
+  assert.deepEqual(extractTodayProjectOrder(afterSelectionTodayPlan), initialTodayProjectOrder);
+
+  dispatchMessage({
+    command: 'projectDeliveryLoaded',
+    projectPath: '/workspace/beta',
+    delivery: {
+      available: true,
+      failedWorkflowRuns: 1,
+      latestWorkflowStatus: 'failure',
+      syncedAt: '2026-05-27T11:00:00.000Z'
+    }
+  });
+  const afterDeliveryRefresh = elements['global-focus-panel'].innerHTML;
+  assert.equal(extractTodayProjectOrder(afterDeliveryRefresh)[0], 'Beta');
+  assert.match(afterDeliveryRefresh, /发布检查需要处理/);
+  assert.match(elements['portfolio-list'].innerHTML, /下一步: 发布检查需要处理/);
+  dispatchMessage({
+    command: 'projectDeliveryLoaded',
+    projectPath: '/workspace/beta',
+    delivery: {
+      available: true,
+      failedWorkflowRuns: 0,
+      latestWorkflowStatus: 'success',
+      syncedAt: '2026-05-27T11:05:00.000Z'
+    }
+  });
+  const afterDeliveryRecovery = elements['global-focus-panel'].innerHTML;
+  assert.deepEqual(extractTodayProjectOrder(afterDeliveryRecovery), initialTodayProjectOrder);
+  assert.match(elements['portfolio-list'].innerHTML, /下一步: 推进 Beta/);
+  context.__resetActiveProjectPath();
 
   dispatchMessage({
     command: 'projectsLoaded',
