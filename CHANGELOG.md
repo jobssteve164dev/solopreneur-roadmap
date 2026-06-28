@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.279 - 2026-06-28
+
+### Changed
+- Enhance execution graph and learning candidate tracking (dc79ca7)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.278 - 2026-06-28
 
 ### Fixed
