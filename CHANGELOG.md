@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.278 - 2026-06-28
+
+### Fixed
+- preserve disabled review mode (2268515)
+
+### Docs
+- require generated script and idempotency checks (376a2f7)
+- protect persisted user settings (bdcadd3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.277 - 2026-06-28
 
 ### Changed
