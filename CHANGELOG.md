@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.282 - 2026-06-28
+
+### Fixed
+- implement path sanitization and shift-left junk filtering in learning ledger and run digest (a4d2cb7)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.281 - 2026-06-28
 
 ### Fixed
