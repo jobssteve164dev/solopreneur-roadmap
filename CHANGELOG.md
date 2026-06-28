@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.283 - 2026-06-28
+
+### Added
+- optimize global focus panel with action buttons, nested todos and select bias (8e48cf6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.282 - 2026-06-28
 
 ### Fixed
