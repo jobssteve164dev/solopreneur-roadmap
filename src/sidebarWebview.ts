@@ -929,6 +929,103 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       gap: 5px;
     }
 
+    .global-focus-item.is-selected {
+      border-color: rgba(0, 229, 255, 0.45);
+      background: rgba(0, 229, 255, 0.05);
+    }
+
+    .global-focus-action-btn-wrap {
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .global-focus-action-btn {
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+      padding: 3px 6px;
+      font-size: 8.5px;
+      font-weight: 800;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      line-height: 1;
+    }
+
+    .global-focus-action-btn:hover {
+      opacity: 0.9;
+      transform: scale(1.02);
+    }
+
+    .global-focus-action-btn.urgent {
+      background: #ff5252;
+      border-color: #ff5252;
+      color: #fff;
+    }
+
+    .global-focus-action-btn.running {
+      background: #2979ff;
+      border-color: #2979ff;
+      color: #fff;
+    }
+
+    .global-focus-action-btn.primary {
+      background: #7c4dff;
+      border-color: #7c4dff;
+      color: #fff;
+    }
+
+    .global-focus-action-btn.review {
+      background: #00e5ff;
+      border-color: #00e5ff;
+      color: #000;
+    }
+
+    .global-focus-action-btn.focus {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: rgba(255, 255, 255, 0.18);
+      color: var(--text-main);
+    }
+
+    .global-focus-sub-todos {
+      margin-top: 6px;
+      border-top: 1px dashed rgba(255, 255, 255, 0.08);
+      padding-top: 5px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .global-focus-sub-todo {
+      padding: 4px 6px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 9px;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      cursor: pointer;
+    }
+
+    .global-focus-sub-todo:hover {
+      background: rgba(255, 255, 255, 0.07);
+    }
+
+    .global-focus-sub-todo .todo-title {
+      font-weight: 800;
+      color: #d8fbff;
+    }
+
+    .global-focus-sub-todo .todo-reason {
+      color: var(--text-muted);
+      font-size: 8.5px;
+    }
+
+    .global-focus-sub-todo.confirm {
+      border-left: 2px solid #ffab40;
+    }
+
     .daily-review-panel {
       margin-top: 8px;
       border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -3624,6 +3721,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         todayRhythmFriday: '周五收尾复盘',
         todayRhythmMonthEnd: '月末回顾',
         dailyReviewButton: 'Agent 审视',
+        actionFix: '去救火',
+        actionStatus: '看状态',
+        actionStart: '开始',
+        actionReview: '去复盘',
+        actionFocus: '聚焦',
+        otherSuggestions: '其他项目建议',
+        otherConfirmations: '其他确认事项',
         dailyReviewRunning: 'Agent 正在捋今天的安排...',
         dailyReviewFailed: '审视失败，请打开运行日志查看原因。',
         dailyReviewEmpty: '还没有 Agent 审视结果。',
@@ -3934,6 +4038,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         todayRhythmFriday: 'Friday closure',
         todayRhythmMonthEnd: 'Month-end review',
         dailyReviewButton: 'Agent Review',
+        actionFix: 'Fix',
+        actionStatus: 'Status',
+        actionStart: 'Start',
+        actionReview: 'Review',
+        actionFocus: 'Focus',
+        otherSuggestions: 'Other Suggestions',
+        otherConfirmations: 'Other Confirmations',
         dailyReviewRunning: 'Agent is reviewing today’s plan...',
         dailyReviewFailed: 'Review failed. Open the run log for details.',
         dailyReviewEmpty: 'No Agent review yet.',
@@ -6070,209 +6181,316 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || !!project.stageGap;
     }
 
-    function todayPlanScore(project) {
-      let score = 0;
-      const rhythm = getTodayWorkRhythm();
-      if (Number(project.security && project.security.openCriticalHigh || 0) > 0) score += 130;
-      if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) score += 120;
-      if (Number(project.failedNodes || 0) > 0) score += 100;
-      if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) score += 90;
-      if (project.globalPriority === 'P0') score += 80;
-      if (project.globalPriority === 'P1') score += 60;
-      if (Number(project.runningNodes || 0) > 0) score += 50;
-      if (Number(project.inProgressNodes || 0) > 0) score += 40;
-      if (Number(project.pendingNodes || 0) > 0) score += 20;
-      if (Number(project.reusableSignals || 0) > 0) score += 10;
-      if (isNewProjectStart(project)) score += rhythm === 'monday' ? 35 : 12;
-      if (rhythm === 'monday' && project.globalPriority === 'P1') score += 35;
-      if (rhythm === 'monday' && Number(project.pendingNodes || 0) > 0) score += 10;
-      if (rhythm === 'friday' && hasCloseoutValue(project)) score += 45;
-      if (rhythm === 'friday' && Number(project.inProgressNodes || 0) > 0) score += 15;
-      if (rhythm === 'monthEnd' && hasCloseoutValue(project)) score += 55;
-      if (rhythm === 'monthEnd' && (project.globalPriority === 'P0' || project.blocker)) score += 20;
-      return score;
-    }
-
-    function todayPlanReason(project) {
-      const rhythm = getTodayWorkRhythm();
-      if (Number(project.security && project.security.openCriticalHigh || 0) > 0) return t('securitySignalRisk');
-      if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) return t('todayReasonDelivery');
-      if (Number(project.failedNodes || 0) > 0) return t('todayReasonFailed');
-      if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) return t('todayReasonIssue');
-      if (rhythm === 'monthEnd' && hasCloseoutValue(project)) return t('todayReasonMonthReview');
-      if (rhythm === 'friday' && hasCloseoutValue(project)) return t('todayReasonFridayLearning');
-      if (rhythm === 'monday' && (project.globalPriority === 'P1' || isNewProjectStart(project))) return t('todayReasonWeeklyFocus');
-      if (isNewProjectStart(project)) return t('todayReasonNewProject');
-      if (Number(project.runningNodes || 0) > 0) return t('todayReasonRunning');
-      if (Number(project.inProgressNodes || 0) > 0) return t('todayReasonInProgress');
-      if (Number(project.reusableSignals || 0) > 0) return t('todayReasonReusable');
-      if (Number(project.pendingNodes || 0) > 0) return t('todayReasonPending');
-      return t('todayReasonReview');
-    }
-
-    function buildTodayPlanItems(portfolio) {
-      const projects = (portfolio || [])
-        .filter(project => project && project.path)
-        .slice()
-        .sort((a, b) => todayPlanScore(b) - todayPlanScore(a) || priorityRank(a.globalPriority) - priorityRank(b.globalPriority));
-      const used = new Set();
-      const take = (slot, predicate) => {
-        const project = projects.find(candidate => !used.has(candidate.path) && predicate(candidate));
-        if (!project) return null;
-        used.add(project.path);
-        return { slot, project };
-      };
-      return [
-        take(t('todaySlotUrgent'), project => Number(project.security && project.security.openCriticalHigh || 0) > 0 || Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 || Number(project.failedNodes || 0) > 0 || Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0 || project.globalPriority === 'P0'),
-        take(t('todaySlotMain'), project => project.globalPriority === 'P1' || Number(project.runningNodes || 0) > 0 || Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0),
-        take(t('todaySlotClose'), project => Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || project.stageGap)
-      ].filter(Boolean).concat(
-        projects
-          .filter(project => !used.has(project.path))
-          .slice(0, 3)
-          .map((project, index) => ({ slot: index === 0 ? t('todaySlotMain') : t('todaySlotClose'), project }))
-      ).slice(0, 3);
-    }
-
-    function startDailyReviewPolling() {
-      if (dailyReviewPollTimer) {
-        clearTimeout(dailyReviewPollTimer);
-        dailyReviewPollTimer = null;
+      function todayPlanScore(project, selectedProjectPath) {
+        let score = 0;
+        const rhythm = getTodayWorkRhythm();
+        if (selectedProjectPath && project.path === selectedProjectPath) {
+          score += 70; // 优先当前激活项目，单点突破
+        }
+        if (Number(project.security && project.security.openCriticalHigh || 0) > 0) score += 130;
+        if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) score += 120;
+        if (Number(project.failedNodes || 0) > 0) score += 100;
+        if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) score += 90;
+        if (project.globalPriority === 'P0') score += 80;
+        if (project.globalPriority === 'P1') score += 60;
+        if (Number(project.runningNodes || 0) > 0) score += 50;
+        if (Number(project.inProgressNodes || 0) > 0) score += 40;
+        if (Number(project.pendingNodes || 0) > 0) score += 20;
+        if (Number(project.reusableSignals || 0) > 0) score += 10;
+        if (isNewProjectStart(project)) score += rhythm === 'monday' ? 35 : 12;
+        if (rhythm === 'monday' && project.globalPriority === 'P1') score += 35;
+        if (rhythm === 'monday' && Number(project.pendingNodes || 0) > 0) score += 10;
+        if (rhythm === 'friday' && hasCloseoutValue(project)) score += 45;
+        if (rhythm === 'friday' && Number(project.inProgressNodes || 0) > 0) score += 15;
+        if (rhythm === 'monthEnd' && hasCloseoutValue(project)) score += 55;
+        if (rhythm === 'monthEnd' && (project.globalPriority === 'P0' || project.blocker)) score += 20;
+        return score;
       }
-      if (!currentDailyReview || currentDailyReview.status !== 'running') return;
-      dailyReviewPollTimer = setTimeout(() => {
-        vscode.postMessage({ command: 'getDailyReview' });
-      }, 2500);
-    }
 
-    function renderDailyReview(review) {
-      if (!review) return '';
-      if (review.status === 'running') {
-        return '<div class="daily-review-panel"><div class="daily-review-summary">' + escapeHtml(t('dailyReviewRunning')) + '</div></div>';
+      function todayPlanReason(project) {
+        const rhythm = getTodayWorkRhythm();
+        if (Number(project.security && project.security.openCriticalHigh || 0) > 0) return t('securitySignalRisk');
+        if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) return t('todayReasonDelivery');
+        if (Number(project.failedNodes || 0) > 0) return t('todayReasonFailed');
+        if (Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) return t('todayReasonIssue');
+        if (rhythm === 'monthEnd' && hasCloseoutValue(project)) return t('todayReasonMonthReview');
+        if (rhythm === 'friday' && hasCloseoutValue(project)) return t('todayReasonFridayLearning');
+        if (rhythm === 'monday' && (project.globalPriority === 'P1' || isNewProjectStart(project))) return t('todayReasonWeeklyFocus');
+        if (isNewProjectStart(project)) return t('todayReasonNewProject');
+        if (Number(project.runningNodes || 0) > 0) return t('todayReasonRunning');
+        if (Number(project.inProgressNodes || 0) > 0) return t('todayReasonInProgress');
+        if (Number(project.reusableSignals || 0) > 0) return t('todayReasonReusable');
+        if (Number(project.pendingNodes || 0) > 0) return t('todayReasonPending');
+        return t('todayReasonReview');
       }
-      if (review.status === 'failed') {
-        return '<div class="daily-review-panel"><div class="daily-review-summary">' + escapeHtml(review.error || t('dailyReviewFailed')) + '</div></div>';
+
+      function buildTodayPlanItems(portfolio, selectedProjectPath) {
+        const projects = (portfolio || [])
+          .filter(project => project && project.path)
+          .slice()
+          .sort((a, b) => todayPlanScore(b, selectedProjectPath) - todayPlanScore(a, selectedProjectPath) || priorityRank(a.globalPriority) - priorityRank(b.globalPriority));
+        const used = new Set();
+        const take = (slot, predicate) => {
+          const project = projects.find(candidate => !used.has(candidate.path) && predicate(candidate));
+          if (!project) return null;
+          used.add(project.path);
+          return { slot, project };
+        };
+        return [
+          take(t('todaySlotUrgent'), project => Number(project.security && project.security.openCriticalHigh || 0) > 0 || Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 || Number(project.failedNodes || 0) > 0 || Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0 || project.globalPriority === 'P0'),
+          take(t('todaySlotMain'), project => project.globalPriority === 'P1' || Number(project.runningNodes || 0) > 0 || Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0),
+          take(t('todaySlotClose'), project => Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || project.stageGap)
+        ].filter(Boolean).concat(
+          projects
+            .filter(project => !used.has(project.path))
+            .slice(0, 3)
+            .map((project, index) => ({ slot: index === 0 ? t('todaySlotMain') : t('todaySlotClose'), project }))
+        ).slice(0, 3);
       }
-      const todos = Array.isArray(review.todos) ? review.todos.slice(0, 5) : [];
-      const confirmations = Array.isArray(review.needsConfirmation) ? review.needsConfirmation.slice(0, 3) : [];
-      if (!todos.length && !confirmations.length && !review.summary) return '';
-      return \`
-        <div class="daily-review-panel">
-          \${review.summary ? \`<div class="daily-review-summary">\${escapeHtml(review.summary)}</div>\` : ''}
-          \${todos.length ? \`
-            <div class="daily-review-list">
-              \${todos.map((todo, index) => \`
-                <div class="daily-review-item" data-daily-review-index="\${index}">
-                  <div class="daily-review-title">\${escapeHtml(todo.title || '')}</div>
-                  <div class="daily-review-reason">\${escapeHtml(todo.reason || '')}</div>
-                </div>
-              \`).join('')}
+
+      function startDailyReviewPolling() {
+        if (dailyReviewPollTimer) {
+          clearTimeout(dailyReviewPollTimer);
+          dailyReviewPollTimer = null;
+        }
+        if (!currentDailyReview || currentDailyReview.status !== 'running') return;
+        dailyReviewPollTimer = setTimeout(() => {
+          vscode.postMessage({ command: 'getDailyReview' });
+        }, 2500);
+      }
+
+      function renderDailyReview(review) {
+        if (!review) return '';
+        if (review.status === 'running') {
+          return '<div class="daily-review-panel"><div class="daily-review-summary">' + escapeHtml(t('dailyReviewRunning')) + '</div></div>';
+        }
+        if (review.status === 'failed') {
+          return '<div class="daily-review-panel"><div class="daily-review-summary">' + escapeHtml(review.error || t('dailyReviewFailed')) + '</div></div>';
+        }
+        const portfolio = currentProjects.portfolio || [];
+        const selectedProjectPath = currentProjects.selectedProjectPath;
+        const items = buildTodayPlanItems(portfolio, selectedProjectPath);
+        const shownProjectPaths = new Set(items.map(it => it.project.path));
+
+        const todos = Array.isArray(review.todos) ? review.todos : [];
+        const confirmations = Array.isArray(review.needsConfirmation) ? review.needsConfirmation : [];
+
+        const otherTodos = todos.filter(t => !shownProjectPaths.has(t.projectPath));
+        const otherConfirms = confirmations.filter(c => !shownProjectPaths.has(c.projectPath));
+
+        if (!otherTodos.length && !otherConfirms.length && !review.summary) return '';
+
+        let otherTodosHtml = '';
+        if (otherTodos.length) {
+          otherTodosHtml += '<div class="daily-review-summary" style="margin-top: 10px; font-weight: bold; font-size: 0.9em; opacity: 0.8;">' + escapeHtml(t('otherSuggestions') || '其他项目建议') + '</div>' +
+            '<div class="daily-review-list">';
+          for (let i = 0; i < otherTodos.length; i++) {
+            const todo = otherTodos[i];
+            const globalIdx = todos.indexOf(todo);
+            otherTodosHtml += '<div class="daily-review-item" data-daily-review-index="' + globalIdx + '">' +
+              '<div class="daily-review-title">' + escapeHtml(todo.title || '') + '</div>' +
+              '<div class="daily-review-reason">' + escapeHtml(todo.reason || '') + '</div>' +
+              '</div>';
+          }
+          otherTodosHtml += '</div>';
+        }
+
+        let otherConfirmsHtml = '';
+        if (otherConfirms.length) {
+          otherConfirmsHtml += '<div class="daily-review-summary" style="margin-top: 10px; font-weight: bold; font-size: 0.9em; opacity: 0.8;">' + escapeHtml(t('otherConfirmations') || '其他确认事项') + '</div>' +
+            '<div class="daily-review-list">';
+          for (let j = 0; j < otherConfirms.length; j++) {
+            const confirm = otherConfirms[j];
+            const globalIdx = confirmations.indexOf(confirm);
+            otherConfirmsHtml += '<div class="daily-review-item" data-daily-confirm-index="' + globalIdx + '">' +
+              '<div class="daily-review-title">' + escapeHtml(confirm.title || '') + '</div>' +
+              '<div class="daily-review-reason">' + escapeHtml(confirm.reason || '') + '</div>' +
+              '</div>';
+          }
+          otherConfirmsHtml += '</div>';
+        }
+
+        return \`
+          <div class="daily-review-panel">
+            \\\${review.summary ? \\\`<div class="daily-review-summary">\\\${escapeHtml(review.summary)}</div>\\\` : ''}
+            \\\${otherTodosHtml}
+            \\\${otherConfirmsHtml}
+          </div>
+        \`;
+      }
+
+      function openDailyReviewTarget(item) {
+        const projectPath = item && item.projectPath ? String(item.projectPath) : '';
+        if (!projectPath) return;
+        activateProjectInSidebar(projectPath);
+        vscode.postMessage({ command: 'project.select', projectPath });
+        if (item.nodeId) {
+          vscode.postMessage({ command: 'showFullRoadmap' });
+        }
+      }
+
+      function renderGlobalFocus(portfolio, selectedProjectPath) {
+        if (!globalFocusPanel) return;
+        const items = buildTodayPlanItems(portfolio, selectedProjectPath);
+        const store = currentProjects.globalStore || {};
+        const rhythm = getTodayWorkRhythm();
+        if (!items.length) {
+          globalFocusPanel.innerHTML = \`
+            <div class="global-focus-head">
+              <span class="global-focus-title"><span class="codicon codicon-target"></span>\\\${escapeHtml(t('globalFocusTitle'))}</span>
             </div>
-          \` : ''}
-          \${confirmations.length ? \`
-            <div class="daily-review-summary">\${escapeHtml(t('dailyReviewConfirm'))}</div>
-            <div class="daily-review-list">
-              \${confirmations.map((todo, index) => \`
-                <div class="daily-review-item" data-daily-confirm-index="\${index}">
-                  <div class="daily-review-title">\${escapeHtml(todo.title || '')}</div>
-                  <div class="daily-review-reason">\${escapeHtml(todo.reason || '')}</div>
-                </div>
-              \`).join('')}
-            </div>
-          \` : ''}
-        </div>
-      \`;
-    }
+            <div class="empty-portfolio">\\\${escapeHtml(t('globalFocusEmpty'))}</div>
+          \`;
+          return;
+        }
 
-    function openDailyReviewTarget(item) {
-      const projectPath = item && item.projectPath ? String(item.projectPath) : '';
-      if (!projectPath) return;
-      activateProjectInSidebar(projectPath);
-      vscode.postMessage({ command: 'project.select', projectPath });
-      if (item.nodeId) {
-        vscode.postMessage({ command: 'showFullRoadmap' });
-      }
-    }
+        const review = currentDailyReview || {};
+        const todos = Array.isArray(review.todos) ? review.todos : [];
+        const confirmations = Array.isArray(review.needsConfirmation) ? review.needsConfirmation : [];
 
-    function renderGlobalFocus(portfolio, selectedProjectPath) {
-      if (!globalFocusPanel) return;
-      const items = buildTodayPlanItems(portfolio);
-      const store = currentProjects.globalStore || {};
-      const rhythm = getTodayWorkRhythm();
-      if (!items.length) {
+        let listHtml = '';
+        for (let k = 0; k < items.length; k++) {
+          const item = items[k];
+          const project = item.project;
+          const isSelected = project.path === selectedProjectPath;
+          
+          let actionBtnHtml = '';
+          let actionNodeId = '';
+          if (Number(project.security && project.security.openCriticalHigh || 0) > 0 ||
+              Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 ||
+              Number(project.failedNodes || 0) > 0 ||
+              Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) {
+            actionNodeId = project.failedNodeId || project.recommendedNodeId || '';
+            actionBtnHtml = '<button class="global-focus-action-btn urgent" type="button" data-action-project-path="' + escapeHtml(project.path) + '" data-action-node-id="' + escapeHtml(actionNodeId) + '"><span class="codicon codicon-warning"></span>' + escapeHtml(t('actionFix') || '去救火') + '</button>';
+          } else if (Number(project.runningNodes || 0) > 0) {
+            actionBtnHtml = '<button class="global-focus-action-btn running" type="button" data-action-project-path="' + escapeHtml(project.path) + '"><span class="codicon codicon-play"></span>' + escapeHtml(t('actionStatus') || '看状态') + '</button>';
+          } else if (Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0) {
+            actionNodeId = project.recommendedNodeId || '';
+            actionBtnHtml = '<button class="global-focus-action-btn primary" type="button" data-action-project-path="' + escapeHtml(project.path) + '" data-action-node-id="' + escapeHtml(actionNodeId) + '"><span class="codicon codicon-debug-continue"></span>' + escapeHtml(t('actionStart') || '开始') + '</button>';
+          } else if (hasCloseoutValue(project)) {
+            actionBtnHtml = '<button class="global-focus-action-btn review" type="button" data-action-project-path="' + escapeHtml(project.path) + '"><span class="codicon codicon-notebook"></span>' + escapeHtml(t('actionReview') || '去复盘') + '</button>';
+          } else {
+            actionBtnHtml = '<button class="global-focus-action-btn focus" type="button" data-action-project-path="' + escapeHtml(project.path) + '"><span class="codicon codicon-eye"></span>' + escapeHtml(t('actionFocus') || '聚焦') + '</button>';
+          }
+
+          const projectTodos = todos.filter(t => t.projectPath === project.path);
+          const projectConfirms = confirmations.filter(c => c.projectPath === project.path);
+
+          let subTodosHtml = '';
+          if (projectTodos.length || projectConfirms.length) {
+            subTodosHtml += '<div class="global-focus-sub-todos">';
+            for (let i = 0; i < projectTodos.length; i++) {
+              const todo = projectTodos[i];
+              const globalIdx = todos.indexOf(todo);
+              subTodosHtml += '<div class="global-focus-sub-todo" data-daily-review-index="' + globalIdx + '">' +
+                '<span class="todo-title">' + escapeHtml(todo.title || '') + '</span>' +
+                '<span class="todo-reason">' + escapeHtml(todo.reason || '') + '</span>' +
+                '</div>';
+            }
+            for (let j = 0; j < projectConfirms.length; j++) {
+              const confirm = projectConfirms[j];
+              const globalIdx = confirmations.indexOf(confirm);
+              subTodosHtml += '<div class="global-focus-sub-todo confirm" data-daily-confirm-index="' + globalIdx + '">' +
+                '<span class="todo-title">' + escapeHtml(confirm.title || '') + '</span>' +
+                '<span class="todo-reason">' + escapeHtml(confirm.reason || '') + '</span>' +
+                '</div>';
+            }
+            subTodosHtml += '</div>';
+          }
+
+          listHtml += '<div class="global-focus-item ' + (isSelected ? 'is-selected' : '') + '" data-global-focus-project="' + escapeHtml(project.path) + '">' +
+            '<div class="global-focus-row">' +
+            '<span class="global-focus-main">' +
+            '<span class="global-focus-name">' + escapeHtml(project.name || '') + '</span>' +
+            '<span class="global-focus-action">' + escapeHtml(todayPlanReason(project)) + ' · ' + escapeHtml(project.blocker || project.globalNextAction || project.recommendedNodeTitle || '-') + '</span>' +
+            '</span>' +
+            '<span class="global-focus-slot">' + escapeHtml(item.slot) + '</span>' +
+            '<span class="global-priority ' + escapeHtml(project.globalPriority || 'P2') + '">' + escapeHtml(project.globalPriority || 'P2') + '</span>' +
+            '<span class="global-focus-action-btn-wrap">' + actionBtnHtml + '</span>' +
+            '</div>' +
+            subTodosHtml +
+            '</div>';
+        }
+
         globalFocusPanel.innerHTML = \`
           <div class="global-focus-head">
-            <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
+            <span class="global-focus-title"><span class="codicon codicon-target"></span>\\\${escapeHtml(t('globalFocusTitle'))}</span>
+            <button class="global-review-btn" type="button" data-run-daily-review \\\${currentDailyReview && currentDailyReview.status === 'running' ? 'disabled' : ''}><span class="codicon codicon-sparkle"></span>\\\${escapeHtml(t('dailyReviewButton'))}</button>
           </div>
-          <div class="empty-portfolio">\${escapeHtml(t('globalFocusEmpty'))}</div>
+          <div class="global-focus-list">
+            \\\${listHtml}
+          </div>
+          <div class="global-focus-foot">
+            <span class="global-chip">\\\${escapeHtml(todayWorkRhythmLabel(rhythm))}</span>
+            <span class="global-chip">\\\${escapeHtml(t('globalLearning'))}: \\\${escapeHtml(store.learningCandidateCount || 0)}</span>
+            <span class="global-chip">\\\${escapeHtml(t('globalDependencies'))}: \\\${escapeHtml((store.dependencies || []).length || 0)}</span>
+          </div>
+          \\\${renderDailyReview(currentDailyReview)}
         \`;
-        return;
-      }
-      globalFocusPanel.innerHTML = \`
-        <div class="global-focus-head">
-          <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
-          <button class="global-review-btn" type="button" data-run-daily-review \${currentDailyReview && currentDailyReview.status === 'running' ? 'disabled' : ''}><span class="codicon codicon-sparkle"></span>\${escapeHtml(t('dailyReviewButton'))}</button>
-        </div>
-        <div class="global-focus-list">
-          \${items.map(item => \`
-            <div class="global-focus-item \${item.project.path === selectedProjectPath ? 'is-selected' : ''}" data-global-focus-project="\${escapeHtml(item.project.path)}">
-              <div class="global-focus-row">
-                <span class="global-focus-main">
-                  <span class="global-focus-name">\${escapeHtml(item.project.name || '')}</span>
-                  <span class="global-focus-action">\${escapeHtml(todayPlanReason(item.project))} · \${escapeHtml(item.project.blocker || item.project.globalNextAction || item.project.recommendedNodeTitle || '-')}</span>
-                </span>
-                <span class="global-focus-slot">\${escapeHtml(item.slot)}</span>
-                <span class="global-priority \${escapeHtml(item.project.globalPriority || 'P2')}">\${escapeHtml(item.project.globalPriority || 'P2')}</span>
-              </div>
-            </div>
-          \`).join('')}
-        </div>
-        <div class="global-focus-foot">
-          <span class="global-chip">\${escapeHtml(todayWorkRhythmLabel(rhythm))}</span>
-          <span class="global-chip">\${escapeHtml(t('globalLearning'))}: \${escapeHtml(store.learningCandidateCount || 0)}</span>
-          <span class="global-chip">\${escapeHtml(t('globalDependencies'))}: \${escapeHtml((store.dependencies || []).length || 0)}</span>
-        </div>
-        \${renderDailyReview(currentDailyReview)}
-      \`;
-      const reviewButton = globalFocusPanel.querySelector('[data-run-daily-review]');
-      if (reviewButton) {
-        reviewButton.addEventListener('click', () => {
-          currentDailyReview = {
-            status: 'running',
-            summary: '',
-            todos: [],
-            needsConfirmation: []
-          };
-          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          vscode.postMessage({ command: 'runDailyReview' });
-          startDailyReviewPolling();
-        });
-      }
-      globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {
-        item.addEventListener('click', () => {
-          const projectPath = item.getAttribute('data-global-focus-project') || '';
-          if (projectPath === currentProjects.selectedProjectPath) return;
-          activateProjectInSidebar(projectPath);
-          vscode.postMessage({
-            command: 'project.select',
-            projectPath
+        const reviewButton = globalFocusPanel.querySelector('[data-run-daily-review]');
+        if (reviewButton) {
+          reviewButton.addEventListener('click', () => {
+            currentDailyReview = {
+              status: 'running',
+              summary: '',
+              todos: [],
+              needsConfirmation: []
+            };
+            renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            vscode.postMessage({ command: 'runDailyReview' });
+            startDailyReviewPolling();
+          });
+        }
+        globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {
+          item.addEventListener('click', () => {
+            const projectPath = item.getAttribute('data-global-focus-project') || '';
+            if (projectPath === currentProjects.selectedProjectPath) return;
+            activateProjectInSidebar(projectPath);
+            vscode.postMessage({
+              command: 'project.select',
+              projectPath
+            });
+            const proj = (portfolio || []).find(p => p.path === projectPath);
+            if (proj && proj.recommendedNodeId) {
+              vscode.postMessage({ command: 'showFullRoadmap' });
+            }
           });
         });
-      });
-      globalFocusPanel.querySelectorAll('[data-daily-review-index]').forEach(item => {
-        item.addEventListener('click', () => {
-          const index = Number(item.getAttribute('data-daily-review-index') || 0);
-          openDailyReviewTarget((currentDailyReview && currentDailyReview.todos || [])[index]);
+        globalFocusPanel.querySelectorAll('[data-action-project-path]').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const projectPath = btn.getAttribute('data-action-project-path') || '';
+            const nodeId = btn.getAttribute('data-action-node-id') || '';
+            if (nodeId) {
+              vscode.postMessage({
+                command: 'project.continue',
+                projectPath,
+                nodeId
+              });
+            } else {
+              activateProjectInSidebar(projectPath);
+              vscode.postMessage({ command: 'project.select', projectPath });
+              vscode.postMessage({ command: 'showFullRoadmap' });
+            }
+          });
         });
-      });
-      globalFocusPanel.querySelectorAll('[data-daily-confirm-index]').forEach(item => {
-        item.addEventListener('click', () => {
-          const index = Number(item.getAttribute('data-daily-confirm-index') || 0);
-          openDailyReviewTarget((currentDailyReview && currentDailyReview.needsConfirmation || [])[index]);
+        globalFocusPanel.querySelectorAll('[data-daily-review-index]').forEach(item => {
+          item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const index = Number(item.getAttribute('data-daily-review-index') || 0);
+            openDailyReviewTarget((currentDailyReview && currentDailyReview.todos || [])[index]);
+          });
         });
-      });
-      startDailyReviewPolling();
-    }
+        globalFocusPanel.querySelectorAll('[data-daily-confirm-index]').forEach(item => {
+          item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const index = Number(item.getAttribute('data-daily-confirm-index') || 0);
+            openDailyReviewTarget((currentDailyReview && currentDailyReview.needsConfirmation || [])[index]);
+          });
+        });
+        startDailyReviewPolling();
+      }
+
 
     function renderOnboardingPanel() {
       return SoloMapWebview.renderOnboardingPanel(t);
