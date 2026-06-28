@@ -84,6 +84,9 @@ Agent 原始运行记录
 - Digest v2 保存到 `.solopreneur/run-digests/`，作为原始日志和长期记忆之间的中间层。
 - Digest v2 包含 handoff：下一位 Agent 简报、建议先看的文件、建议动作、建议验证、阻塞项、不要重复的失败路径和风险等级。
 - 每次写入 digest 后，SoloMap 自动刷新 `.solopreneur/execution-graph.json`，按环节、Agent、文件、状态、失败和命令建立轻量索引。
+- Execution Graph 不只记录 run 索引，还从 digest 中抽取经验节点：验证动作、失败模式、可复用信号、handoff 动作和运行决策。
+- 每个经验节点都有中心语义、适用条件、建议动作、避免项、检查项、来源 run，以及使用边统计。
+- 使用边记录某个 run 如何命中经验节点，并用 `alpha/beta` 累计 win/loss/neutral，形成轻量胜率估计；它服务下一次召回排序和经验晋升判断，不作为用户前台概念。
 - 下一轮 Agent prompt 会按同任务入口、同运行类型、文件路径和关键词命中召回最多 3 条相关执行经验，并注入跨 Agent handoff 工具入口。
 - `resources/tools/solomap-experience.cjs` 可从 digest、execution graph 和 SQLite `execution_logs` 生成 `handoff`、`summary`、`history`、`failures`、`latest-changes`、`search` 等查询结果。
 - `resources/skills/solomap-cross-agent-handoff/SKILL.md` 固定 Agent 接手另一位 Agent 工作时的查询顺序、验证边界和原始日志使用规则。
@@ -143,6 +146,15 @@ Execution Graph 不是聊天搜索，也不是日志浏览器。它是为了在�
 - `file -> CodeGraph symbol/module`（当 CodeGraph 可用时）
 
 当前实现把这些关系压缩进 `.solopreneur/execution-graph.json`，不要求用户理解或维护图结构。
+
+经验节点的最小字段包括：
+
+- 中心语义：这条经验到底在说什么，避免 Markdown 条目只有段落、没有可索引主题。
+- 适用条件：下一次什么场景可以召回。
+- 应做/避免：召回后能直接影响动作。
+- 检查项：可复用命令或验证信号。
+- 来源与使用边：这条经验从哪些 run 来，在哪些 run 中被观察、验证或失败。
+- 胜率估计：用 beta 先验聚合 win/loss，避免单次成功被误判成稳定规则。
 
 ## CodeGraph 的位置
 

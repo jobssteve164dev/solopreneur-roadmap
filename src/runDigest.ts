@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 
 function normalizeStringList(value: unknown): string[] {
@@ -166,6 +167,43 @@ export interface ExecutionGraphRun {
   handoffSummary: string;
 }
 
+export type ExecutionExperienceNodeType = 'verification' | 'failure' | 'reusable_signal' | 'handoff_action' | 'decision';
+export type ExecutionExperienceUsagePhase = 'observed' | 'prompt_injected' | 'verified' | 'failed';
+export type ExecutionExperienceOutcome = 'win' | 'loss' | 'neutral';
+
+export interface ExecutionExperienceStats {
+  uses: number;
+  wins: number;
+  losses: number;
+  neutral: number;
+  alpha: number;
+  beta: number;
+  winRate: number;
+  lastUsed: string;
+}
+
+export interface ExecutionExperienceNode {
+  id: string;
+  type: ExecutionExperienceNodeType;
+  centralMeaning: string;
+  sourceKinds: string[];
+  sourceRefs: string[];
+  appliesWhen: string[];
+  doThis: string;
+  avoidThis: string;
+  checks: string[];
+  stats: ExecutionExperienceStats;
+}
+
+export interface ExecutionExperienceUsageEdge {
+  runId: string;
+  experienceId: string;
+  phase: ExecutionExperienceUsagePhase;
+  outcome: ExecutionExperienceOutcome;
+  evidenceRefs: string[];
+  createdAt: string;
+}
+
 export interface ExecutionGraph {
   schemaVersion: number;
   updatedAt: string;
@@ -177,7 +215,10 @@ export interface ExecutionGraph {
     byStatus: Record<string, string[]>;
     byFailure: Record<string, string[]>;
     byCommand: Record<string, string[]>;
+    byExperience: Record<string, string[]>;
   };
+  experienceNodes: Record<string, ExecutionExperienceNode>;
+  usageEdges: ExecutionExperienceUsageEdge[];
   runs: ExecutionGraphRun[];
 }
 
@@ -507,10 +548,219 @@ function addExecutionGraphIndex(index: Record<string, string[]>, key: string, ru
   }
 }
 
+function stableExecutionExperienceId(type: ExecutionExperienceNodeType, centralMeaning: string): string {
+  const hash = crypto
+    .createHash('sha1')
+    .update(`${type}\n${compactLine(centralMeaning || '', 360).toLowerCase()}`)
+    .digest('hex')
+    .slice(0, 16);
+  return `exp-${type.replace(/_/g, '-')}-${hash}`;
+}
+
+function emptyExperienceStats(): ExecutionExperienceStats {
+  return {
+    uses: 0,
+    wins: 0,
+    losses: 0,
+    neutral: 0,
+    alpha: 1,
+    beta: 1,
+    winRate: 0.5,
+    lastUsed: ''
+  };
+}
+
+function mergeUnique(values: string[], additions: string[], limit: number, maxLength = 220): string[] {
+  return uniqueCompactList([...values, ...additions], limit, maxLength);
+}
+
+function updateExperienceStats(stats: ExecutionExperienceStats, edge: ExecutionExperienceUsageEdge): ExecutionExperienceStats {
+  const next = {
+    ...stats,
+    uses: Number(stats.uses || 0) + 1,
+    wins: Number(stats.wins || 0),
+    losses: Number(stats.losses || 0),
+    neutral: Number(stats.neutral || 0),
+    alpha: Number(stats.alpha || 1),
+    beta: Number(stats.beta || 1),
+    lastUsed: String(edge.createdAt || stats.lastUsed || '')
+  };
+  if (edge.outcome === 'win') {
+    next.wins += 1;
+    next.alpha += 1;
+  } else if (edge.outcome === 'loss') {
+    next.losses += 1;
+    next.beta += 1;
+  } else {
+    next.neutral += 1;
+  }
+  const denominator = next.alpha + next.beta;
+  next.winRate = denominator > 0 ? Number((next.alpha / denominator).toFixed(4)) : 0.5;
+  if (String(stats.lastUsed || '') > String(next.lastUsed || '')) {
+    next.lastUsed = stats.lastUsed;
+  }
+  return next;
+}
+
+function experienceOutcomeForDigest(digest: RunDigest, positiveWhenCompleted = true): ExecutionExperienceOutcome {
+  const status = String(digest.status || '').toLowerCase();
+  if (status === 'failed') {
+    return 'loss';
+  }
+  if (positiveWhenCompleted && (status === 'completed' || status === 'recorded')) {
+    return 'win';
+  }
+  return 'neutral';
+}
+
+function buildExperienceNodeSeed(
+  digest: RunDigest,
+  type: ExecutionExperienceNodeType,
+  signal: string
+): ExecutionExperienceNode {
+  const centralMeaning = compactLine(signal, 360);
+  const fileContext = [...(digest.changedFiles || []), ...(digest.touchedFiles || [])]
+    .filter((file, index, all) => file && all.indexOf(file) === index)
+    .slice(0, 5);
+  const commandContext = (digest.commandSignals || []).slice(0, 3);
+  const commonChecks = mergeUnique(commandContext, digest.verification || [], 5, 260);
+  if (type === 'verification') {
+    return {
+      id: stableExecutionExperienceId(type, centralMeaning),
+      type,
+      centralMeaning,
+      sourceKinds: [digest.runKind || 'run'],
+      sourceRefs: [digest.runId],
+      appliesWhen: mergeUnique(fileContext, [
+        digest.nodeId ? `同一路线图入口：${digest.nodeId}` : '',
+        '后续任务需要证明相同区域或相同命令链路已闭环'
+      ], 6),
+      doThis: '优先复用或改写这组验证动作，并验证最终产物。',
+      avoidThis: '不要只凭实现描述或完成摘要宣称闭环。',
+      checks: commonChecks,
+      stats: emptyExperienceStats()
+    };
+  }
+  if (type === 'failure') {
+    return {
+      id: stableExecutionExperienceId(type, centralMeaning),
+      type,
+      centralMeaning,
+      sourceKinds: [digest.runKind || 'run'],
+      sourceRefs: [digest.runId],
+      appliesWhen: mergeUnique(fileContext, [
+        digest.nodeId ? `同一路线图入口：${digest.nodeId}` : '',
+        '后续任务出现相同失败、相同命令或相同文件区域'
+      ], 6),
+      doThis: '先复核已知失败原因，再决定重试、回退、补验证或调整计划。',
+      avoidThis: '不要无视同类失败历史直接重复上一条路径。',
+      checks: commonChecks,
+      stats: emptyExperienceStats()
+    };
+  }
+  if (type === 'handoff_action') {
+    return {
+      id: stableExecutionExperienceId(type, centralMeaning),
+      type,
+      centralMeaning,
+      sourceKinds: [digest.runKind || 'run'],
+      sourceRefs: [digest.runId],
+      appliesWhen: mergeUnique(fileContext, [
+        digest.nodeId ? `接手同一路线图入口：${digest.nodeId}` : '',
+        '后续 Agent 需要接续上一轮未完全显式化的上下文'
+      ], 6),
+      doThis: '把这条交接动作转成当前任务的第一步检查或验证。',
+      avoidThis: '不要把 handoff 当成已验证结论；先和当前代码、日志、测试对齐。',
+      checks: commonChecks,
+      stats: emptyExperienceStats()
+    };
+  }
+  if (type === 'decision') {
+    return {
+      id: stableExecutionExperienceId(type, centralMeaning),
+      type,
+      centralMeaning,
+      sourceKinds: [digest.runKind || 'run'],
+      sourceRefs: [digest.runId],
+      appliesWhen: mergeUnique(fileContext, [
+        digest.nodeId ? `同一路线图入口：${digest.nodeId}` : '',
+        '后续任务可能重新触碰相同边界或方案取舍'
+      ], 6),
+      doThis: '先确认该决策仍被当前代码和用户要求支持，再沿用。',
+      avoidThis: '不要把单次运行决策升级成全局规则。',
+      checks: commonChecks,
+      stats: emptyExperienceStats()
+    };
+  }
+  return {
+    id: stableExecutionExperienceId(type, centralMeaning),
+    type,
+    centralMeaning,
+    sourceKinds: [digest.runKind || 'run'],
+    sourceRefs: [digest.runId],
+    appliesWhen: mergeUnique(fileContext, [
+      digest.nodeId ? `同一路线图入口：${digest.nodeId}` : '',
+      '后续任务出现相同目标、文件或验证需求'
+    ], 6),
+    doThis: '在下一次执行前召回这条经验，并转成具体动作或验证。',
+    avoidThis: '不要只复述历史摘要；必须用当前证据确认适用性。',
+    checks: commonChecks,
+    stats: emptyExperienceStats()
+  };
+}
+
+function buildExperienceEdgesForDigest(digest: RunDigest): Array<{ node: ExecutionExperienceNode; edge: ExecutionExperienceUsageEdge }> {
+  const items: Array<{ type: ExecutionExperienceNodeType; signal: string; phase: ExecutionExperienceUsagePhase; outcome: ExecutionExperienceOutcome }> = [];
+  for (const signal of digest.verification || []) {
+    items.push({ type: 'verification', signal, phase: 'verified', outcome: experienceOutcomeForDigest(digest, true) });
+  }
+  for (const signal of digest.failures || []) {
+    items.push({ type: 'failure', signal, phase: 'failed', outcome: String(digest.status || '').toLowerCase() === 'failed' ? 'loss' : 'neutral' });
+  }
+  for (const signal of digest.reusableSignals || []) {
+    items.push({ type: 'reusable_signal', signal, phase: 'observed', outcome: experienceOutcomeForDigest(digest, true) });
+  }
+  for (const signal of digest.handoff?.recommendedFirstActions || []) {
+    items.push({ type: 'handoff_action', signal, phase: 'observed', outcome: 'neutral' });
+  }
+  for (const signal of digest.handoff?.decisionsMade || []) {
+    items.push({ type: 'decision', signal, phase: 'observed', outcome: experienceOutcomeForDigest(digest, false) });
+  }
+  const seen = new Set<string>();
+  return items
+    .filter((item) => {
+      const key = `${item.type}\n${compactLine(item.signal, 360)}`;
+      if (!item.signal || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 18)
+    .map((item) => {
+      const node = buildExperienceNodeSeed(digest, item.type, item.signal);
+      return {
+        node,
+        edge: {
+          runId: digest.runId,
+          experienceId: node.id,
+          phase: item.phase,
+          outcome: item.outcome,
+          evidenceRefs: uniqueCompactList([
+            digest.rawRefs?.digestPath ? `digest:${digest.rawRefs.digestPath}` : '',
+            digest.rawRefs?.executionLogId ? `execution_logs:${digest.rawRefs.executionLogId}` : '',
+            ...node.checks.map((check) => `check:${check}`)
+          ], 6, 260),
+          createdAt: String(digest.finishedAt || new Date().toISOString())
+        }
+      };
+    });
+}
+
 function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
   const digests = readRunDigests(workspaceRoot);
   const graph: ExecutionGraph = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     updatedAt: new Date().toISOString(),
     runCount: digests.length,
     indexes: {
@@ -519,8 +769,11 @@ function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
       byFile: {},
       byStatus: {},
       byFailure: {},
-      byCommand: {}
+      byCommand: {},
+      byExperience: {}
     },
+    experienceNodes: {},
+    usageEdges: [],
     runs: []
   };
   for (const digest of digests) {
@@ -552,6 +805,21 @@ function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
     }
     for (const command of digest.commandSignals || []) {
       addExecutionGraphIndex(graph.indexes.byCommand, command, runId);
+    }
+    for (const { node, edge } of buildExperienceEdgesForDigest(digest)) {
+      const existing = graph.experienceNodes[node.id];
+      if (existing) {
+        existing.sourceKinds = mergeUnique(existing.sourceKinds, node.sourceKinds, 8);
+        existing.sourceRefs = mergeUnique(existing.sourceRefs, node.sourceRefs, 24);
+        existing.appliesWhen = mergeUnique(existing.appliesWhen, node.appliesWhen, 8);
+        existing.checks = mergeUnique(existing.checks, node.checks, 8, 260);
+        existing.stats = updateExperienceStats(existing.stats, edge);
+      } else {
+        node.stats = updateExperienceStats(node.stats, edge);
+        graph.experienceNodes[node.id] = node;
+      }
+      graph.usageEdges.push(edge);
+      addExecutionGraphIndex(graph.indexes.byExperience, node.id, runId);
     }
   }
   return graph;

@@ -67,10 +67,28 @@ export interface LearningPromotionSuggestion {
   updatedAt: string;
 }
 
+export interface LearningCandidateDecision {
+  schemaVersion: 1;
+  id: string;
+  eventId: string;
+  projectId: string;
+  projectPath: string;
+  projectName: string;
+  decision: 'created' | 'skipped';
+  candidateIds: string[];
+  reason: string;
+  checkedSignals: string[];
+  evidenceRefs: LearningEvidenceRef[];
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface LearningSummary {
   globalRoot: string;
   eventCount: number;
   candidateCount: number;
+  candidateDecisionCount: number;
+  skippedCandidateDecisionCount: number;
   approvedCount: number;
   promotedCount: number;
   recentEvents: LearningEvent[];
@@ -140,6 +158,7 @@ export function getLearningLedgerPaths(workspaceRoot: string, globalDataPath = '
   approvedRoot: string;
   rejectedRoot: string;
   promotionSuggestionsRoot: string;
+  candidateDecisionsRoot: string;
 } {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const learningRoot = path.join(globalRoot, 'learning');
@@ -154,13 +173,14 @@ export function getLearningLedgerPaths(workspaceRoot: string, globalDataPath = '
     candidatesRoot: path.join(learningRoot, 'candidates'),
     approvedRoot: path.join(learningRoot, 'approved'),
     rejectedRoot: path.join(learningRoot, 'rejected'),
-    promotionSuggestionsRoot: path.join(learningRoot, 'promotion-suggestions')
+    promotionSuggestionsRoot: path.join(learningRoot, 'promotion-suggestions'),
+    candidateDecisionsRoot: path.join(learningRoot, 'candidate-decisions')
   };
 }
 
 export function ensureLearningLedgerStore(workspaceRoot: string, globalDataPath = ''): ReturnType<typeof getLearningLedgerPaths> {
   const paths = getLearningLedgerPaths(workspaceRoot, globalDataPath);
-  [paths.learningRoot, paths.ledgerRoot, paths.sourcesRoot, paths.candidatesRoot, paths.approvedRoot, paths.rejectedRoot, paths.promotionSuggestionsRoot].forEach(ensureDir);
+  [paths.learningRoot, paths.ledgerRoot, paths.sourcesRoot, paths.candidatesRoot, paths.approvedRoot, paths.rejectedRoot, paths.promotionSuggestionsRoot, paths.candidateDecisionsRoot].forEach(ensureDir);
   if (!fs.existsSync(paths.eventsPath)) {
     fs.writeFileSync(paths.eventsPath, '', 'utf8');
   }
@@ -278,6 +298,53 @@ function candidateFromEvent(event: LearningEvent, lessonType: LessonType, summar
   };
 }
 
+function checkedSignalsForEvent(event: LearningEvent): string[] {
+  const metadata = event.metadata || {};
+  return [
+    `sourceType:${event.sourceType}`,
+    `eventType:${event.eventType}`,
+    metadata.recommendedStatus ? `recommendedStatus:${metadata.recommendedStatus}` : '',
+    metadata.role ? `role:${metadata.role}` : '',
+    Array.isArray(metadata.verification) && metadata.verification.length > 0 ? 'verification:present' : 'verification:empty',
+    Array.isArray(metadata.failures) && metadata.failures.length > 0 ? 'failures:present' : 'failures:empty'
+  ].filter(Boolean).map((item) => compactLine(item, 180));
+}
+
+function candidateDecisionPath(paths: ReturnType<typeof getLearningLedgerPaths>, eventId: string): string {
+  return path.join(paths.candidateDecisionsRoot, `${stableId('cand-decision', [eventId])}.json`);
+}
+
+function writeCandidateDecision(
+  paths: ReturnType<typeof getLearningLedgerPaths>,
+  event: LearningEvent,
+  candidates: LessonCandidate[],
+  reason: string
+): LearningCandidateDecision {
+  const decisionPath = candidateDecisionPath(paths, event.id);
+  const existing = safeReadJson<LearningCandidateDecision>(decisionPath);
+  if (existing && existing.schemaVersion === 1) {
+    return existing;
+  }
+  const now = new Date().toISOString();
+  const decision: LearningCandidateDecision = {
+    schemaVersion: 1,
+    id: stableId('cand-decision', [event.id]),
+    eventId: event.id,
+    projectId: event.projectId,
+    projectPath: event.projectPath,
+    projectName: event.projectName,
+    decision: candidates.length > 0 ? 'created' : 'skipped',
+    candidateIds: candidates.map((candidate) => candidate.id),
+    reason: compactLine(reason, 360),
+    checkedSignals: checkedSignalsForEvent(event),
+    evidenceRefs: event.evidenceRefs || [],
+    createdAt: now,
+    updatedAt: now
+  };
+  fs.writeFileSync(decisionPath, JSON.stringify(decision, null, 2) + '\n', 'utf8');
+  return decision;
+}
+
 export function extractLessonCandidatesFromEvent(workspaceRoot: string, globalDataPath: string, event: LearningEvent): LessonCandidate[] {
   const candidates: LessonCandidate[] = [];
   const metadata = event.metadata || {};
@@ -336,11 +403,11 @@ export function extractLessonCandidatesFromEvent(workspaceRoot: string, globalDa
     }));
   }
 
+  const paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
   if (candidates.length === 0) {
+    writeCandidateDecision(paths, event, [], 'no_reusable_candidate_signal_matched');
     return [];
   }
-
-  const paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
   const written: LessonCandidate[] = [];
   for (const candidate of candidates) {
     const candidatePath = path.join(paths.candidatesRoot, `${candidate.id}.json`);
@@ -349,13 +416,55 @@ export function extractLessonCandidatesFromEvent(workspaceRoot: string, globalDa
       written.push(candidate);
     }
   }
+  writeCandidateDecision(paths, event, candidates, written.length > 0 ? 'candidate_created' : 'candidate_already_exists');
   maybeWritePromotionSuggestions(workspaceRoot, globalDataPath, written);
   return written;
+}
+
+export function reconcileLearningCandidateDecisions(workspaceRoot: string, globalDataPath = ''): {
+  eventsChecked: number;
+  decisionsCreated: number;
+  candidatesCreated: number;
+} {
+  const paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
+  const events = readJsonl<LearningEvent>(paths.eventsPath, 2000).filter((event) => event && event.schemaVersion === 1);
+  let decisionsCreated = 0;
+  let candidatesCreated = 0;
+  for (const event of events) {
+    if (fs.existsSync(candidateDecisionPath(paths, event.id))) {
+      continue;
+    }
+    const beforeDecisionExists = fs.existsSync(candidateDecisionPath(paths, event.id));
+    const candidates = extractLessonCandidatesFromEvent(workspaceRoot, globalDataPath, event);
+    if (!beforeDecisionExists && fs.existsSync(candidateDecisionPath(paths, event.id))) {
+      decisionsCreated += 1;
+    }
+    candidatesCreated += candidates.length;
+  }
+  return {
+    eventsChecked: events.length,
+    decisionsCreated,
+    candidatesCreated
+  };
+}
+
+function reconcileLearningCandidateDecisionsBestEffort(workspaceRoot: string, globalDataPath = ''): void {
+  try {
+    reconcileLearningCandidateDecisions(workspaceRoot, globalDataPath);
+  } catch {
+    // Learning reconciliation must not block prompt retrieval or project summaries.
+  }
 }
 
 function readCandidates(paths: ReturnType<typeof getLearningLedgerPaths>): LessonCandidate[] {
   const roots = [paths.candidatesRoot, paths.approvedRoot];
   return roots.flatMap((root) => listJsonFiles(root).map((file) => safeReadJson<LessonCandidate>(file)).filter((item): item is LessonCandidate => Boolean(item && item.schemaVersion === 1)));
+}
+
+function readCandidateDecisions(paths: ReturnType<typeof getLearningLedgerPaths>): LearningCandidateDecision[] {
+  return listJsonFiles(paths.candidateDecisionsRoot)
+    .map((file) => safeReadJson<LearningCandidateDecision>(file))
+    .filter((item): item is LearningCandidateDecision => Boolean(item && item.schemaVersion === 1));
 }
 
 function readPromotionSuggestions(paths: ReturnType<typeof getLearningLedgerPaths>): LearningPromotionSuggestion[] {
@@ -507,6 +616,7 @@ export function buildLearningRetrievalContext(workspaceRoot: string, globalDataP
   } catch {
     return '';
   }
+  reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
   const candidates = readCandidates(paths)
     .map((candidate) => ({ candidate, score: scoreCandidate(candidate, query) }))
     .filter((entry) => entry.score >= 6)
@@ -535,6 +645,7 @@ export function buildLearningPromotionContext(workspaceRoot: string, globalDataP
   } catch {
     return '';
   }
+  reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
   maybeWritePromotionSuggestions(workspaceRoot, globalDataPath, readCandidates(paths).filter((candidate) => candidate.status === 'candidate'));
   const suggestions = readPromotionSuggestions(paths)
     .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
@@ -564,6 +675,8 @@ export function readLearningSummary(workspaceRoot: string, globalDataPath = ''):
       globalRoot,
       eventCount: 0,
       candidateCount: 0,
+      candidateDecisionCount: 0,
+      skippedCandidateDecisionCount: 0,
       approvedCount: 0,
       promotedCount: 0,
       recentEvents: [],
@@ -571,8 +684,10 @@ export function readLearningSummary(workspaceRoot: string, globalDataPath = ''):
       projectSignals: []
     };
   }
+  reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
   const events = readJsonl<LearningEvent>(paths.eventsPath, 1000).filter((event) => event && event.schemaVersion === 1);
   const candidates = readCandidates(paths);
+  const candidateDecisions = readCandidateDecisions(paths);
   const byProject = new Map<string, LearningSummary['projectSignals'][number]>();
   for (const event of events) {
     const current = byProject.get(event.projectId) || {
@@ -619,6 +734,8 @@ export function readLearningSummary(workspaceRoot: string, globalDataPath = ''):
     globalRoot: paths.globalRoot,
     eventCount: events.length,
     candidateCount: candidates.filter((candidate) => candidate.status === 'candidate').length,
+    candidateDecisionCount: candidateDecisions.length,
+    skippedCandidateDecisionCount: candidateDecisions.filter((decision) => decision.decision === 'skipped').length,
     approvedCount: candidates.filter((candidate) => candidate.status === 'approved').length,
     promotedCount: candidates.filter((candidate) => candidate.status === 'promoted').length,
     recentEvents: events.slice(-8).reverse(),

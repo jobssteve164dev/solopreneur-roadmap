@@ -1999,11 +1999,17 @@ test('learning ledger writes events, extracts candidates, and retrieves reusable
 
   const eventsPath = path.join(globalRoot, 'learning', 'ledger', 'events.jsonl');
   const candidatesDir = path.join(globalRoot, 'learning', 'candidates');
+  const candidateDecisionsDir = path.join(globalRoot, 'learning', 'candidate-decisions');
   const promotionSuggestionsDir = path.join(globalRoot, 'learning', 'promotion-suggestions');
   assert.ok(fs.existsSync(eventsPath));
   assert.match(fs.readFileSync(eventsPath, 'utf8'), new RegExp(event.id));
   const candidateFiles = fs.readdirSync(candidatesDir).filter((name) => name.endsWith('.json'));
   assert.ok(candidateFiles.length >= 1);
+  const candidateDecisionFiles = fs.readdirSync(candidateDecisionsDir).filter((name) => name.endsWith('.json'));
+  assert.ok(candidateDecisionFiles.length >= 1);
+  const createdDecision = JSON.parse(fs.readFileSync(path.join(candidateDecisionsDir, candidateDecisionFiles[0]), 'utf8'));
+  assert.equal(createdDecision.decision, 'created');
+  assert.ok(createdDecision.candidateIds.length >= 1);
   const promotionSuggestionFiles = fs.readdirSync(promotionSuggestionsDir).filter((name) => name.endsWith('.json'));
   assert.ok(promotionSuggestionFiles.length >= 1);
   const promotionSuggestion = JSON.parse(fs.readFileSync(path.join(promotionSuggestionsDir, promotionSuggestionFiles[0]), 'utf8'));
@@ -2014,6 +2020,7 @@ test('learning ledger writes events, extracts candidates, and retrieves reusable
   const summary = ledger.readLearningSummary(projectPath, globalRoot);
   assert.equal(summary.eventCount, 1);
   assert.equal(summary.candidateCount >= 1, true);
+  assert.equal(summary.candidateDecisionCount >= 1, true);
   assert.equal(summary.projectSignals[0].riskSignals >= 1, true);
 
   const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
@@ -2029,6 +2036,29 @@ test('learning ledger writes events, extracts candidates, and retrieves reusable
   const promotionContext = ledger.buildLearningPromotionContext(projectPath, globalRoot);
   assert.match(promotionContext, /SoloMap 自动晋升建议/);
   assert.match(promotionContext, /project_memory/);
+
+  const skippedEvent = ledger.appendLearningEvent(projectPath, globalRoot, {
+    sourceType: 'solo',
+    sourceRef: 'solo-no-learning-signal',
+    eventType: 'partial',
+    summary: 'User discussed a temporary idea without reusable execution signal.',
+    evidenceRefs: [{ type: 'user', ref: 'temporary discussion', summary: 'No durable lesson' }],
+    tags: ['solo'],
+    metadata: {
+      verification: [],
+      failures: []
+    }
+  });
+  const afterSkippedDecisionFiles = fs.readdirSync(candidateDecisionsDir).filter((name) => name.endsWith('.json'));
+  const skippedDecisions = afterSkippedDecisionFiles
+    .map((name) => JSON.parse(fs.readFileSync(path.join(candidateDecisionsDir, name), 'utf8')))
+    .filter((decision) => decision.eventId === skippedEvent.id);
+  assert.equal(skippedDecisions.length, 1);
+  assert.equal(skippedDecisions[0].decision, 'skipped');
+  assert.match(skippedDecisions[0].reason, /no_reusable_candidate_signal_matched/);
+
+  const reconciled = ledger.reconcileLearningCandidateDecisions(projectPath, globalRoot);
+  assert.equal(reconciled.eventsChecked >= 2, true);
 
   const existingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-existing-learning-ledger-'));
   const existingProjectPath = path.join(existingRoot, 'existing-app');
@@ -4788,6 +4818,15 @@ test('agent command builder uses non-interactive task runs and native continuati
   const graphFile = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
   assert.equal(graphFile.runCount, 1);
   assert.ok(graphFile.indexes.byFile['src/extension.ts'].includes(digest.runId));
+  assert.equal(graphFile.schemaVersion, 2);
+  assert.ok(Object.keys(graphFile.experienceNodes).length >= 1);
+  assert.ok(graphFile.usageEdges.length >= 1);
+  const verificationNode = Object.values(graphFile.experienceNodes).find((node) => node.type === 'verification');
+  assert.ok(verificationNode);
+  assert.match(verificationNode.centralMeaning, /npm test/);
+  assert.equal(verificationNode.stats.uses >= 1, true);
+  assert.equal(verificationNode.stats.winRate > 0.5, true);
+  assert.ok(graphFile.indexes.byExperience[verificationNode.id].includes(digest.runId));
   const experiencePrompt = extensionModule.__buildExecutionExperiencePrompt(digestRoot, {
     nodeId: '2',
     runKind: 'step',

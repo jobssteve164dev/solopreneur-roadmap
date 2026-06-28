@@ -83,7 +83,9 @@ Run Digest 是单次运行的结构化摘要。
 
 Execution Graph 是 digest 之间的关系索引。当前采用项目本地 `.solopreneur/execution-graph.json`，不引入独立图数据库。
 
-核心关系：
+核心关系分两层。
+
+第一层是 run 索引：
 
 - 同项目。
 - 同路线图环节。
@@ -94,6 +96,16 @@ Execution Graph 是 digest 之间的关系索引。当前采用项目本地 `.so
 - 同 Issue。
 - 同文档职责。
 - 同 CodeGraph symbol/module（可选）。
+
+第二层是经验节点：
+
+- 验证动作。
+- 失败模式。
+- 可复用信号。
+- handoff 动作。
+- 运行决策。
+
+经验节点必须有中心语义，不能只是 Markdown 段落。Graph 会记录 `run -> experience node` 的使用边，并按 win/loss/neutral 累计 beta 胜率估计。胜率不是替 Agent 做决定，而是帮助下一次召回时区分“多次有效的经验”和“一次性过程记录”。
 
 ### 4. Retrieval Pack
 
