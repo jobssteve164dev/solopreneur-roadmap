@@ -6312,9 +6312,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         return \`
           <div class="daily-review-panel">
-            \\\${review.summary ? \\\`<div class="daily-review-summary">\\\${escapeHtml(review.summary)}</div>\\\` : ''}
-            \\\${otherTodosHtml}
-            \\\${otherConfirmsHtml}
+            \${review.summary ? \`<div class="daily-review-summary">\${escapeHtml(review.summary)}</div>\` : ''}
+            \${otherTodosHtml}
+            \${otherConfirmsHtml}
           </div>
         \`;
       }
@@ -6414,18 +6414,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         globalFocusPanel.innerHTML = \`
           <div class="global-focus-head">
-            <span class="global-focus-title"><span class="codicon codicon-target"></span>\\\${escapeHtml(t('globalFocusTitle'))}</span>
-            <button class="global-review-btn" type="button" data-run-daily-review \\\${currentDailyReview && currentDailyReview.status === 'running' ? 'disabled' : ''}><span class="codicon codicon-sparkle"></span>\\\${escapeHtml(t('dailyReviewButton'))}</button>
+            <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
+            <button class="global-review-btn" type="button" data-run-daily-review \${currentDailyReview && currentDailyReview.status === 'running' ? 'disabled' : ''}><span class="codicon codicon-sparkle"></span>\${escapeHtml(t('dailyReviewButton'))}</button>
           </div>
           <div class="global-focus-list">
-            \\\${listHtml}
+            \${listHtml}
           </div>
           <div class="global-focus-foot">
-            <span class="global-chip">\\\${escapeHtml(todayWorkRhythmLabel(rhythm))}</span>
-            <span class="global-chip">\\\${escapeHtml(t('globalLearning'))}: \\\${escapeHtml(store.learningCandidateCount || 0)}</span>
-            <span class="global-chip">\\\${escapeHtml(t('globalDependencies'))}: \\\${escapeHtml((store.dependencies || []).length || 0)}</span>
+            <span class="global-chip">\${escapeHtml(todayWorkRhythmLabel(rhythm))}</span>
+            <span class="global-chip">\${escapeHtml(t('globalLearning'))}: \${escapeHtml(store.learningCandidateCount || 0)}</span>
+            <span class="global-chip">\${escapeHtml(t('globalDependencies'))}: \${escapeHtml((store.dependencies || []).length || 0)}</span>
           </div>
-          \\\${renderDailyReview(currentDailyReview)}
+          \${renderDailyReview(currentDailyReview)}
         \`;
         const reviewButton = globalFocusPanel.querySelector('[data-run-daily-review]');
         if (reviewButton) {
