@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.281 - 2026-06-28
+
+### Fixed
+- filter junk and local private data in learning ledger and run digest (e558154)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.280 - 2026-06-28
 
 ### Changed
