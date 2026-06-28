@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.277 - 2026-06-28
+
+### Changed
+- Tighten agent decision boundaries (5b85621)
+
+### Fixed
+- prevent duplicate reviews and preserve settings (d58ffec)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.276 - 2026-06-27
 
 ### Changed
