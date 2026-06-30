@@ -120,6 +120,7 @@
           "type": "object",
           "default": {
             "focusMinutes": 25,
+            "scheduledTasks": [],
             "triggers": {
               "completed": {
                 "notify": false,

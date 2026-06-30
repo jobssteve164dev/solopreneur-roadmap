@@ -351,6 +351,61 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       align-items: center;
     }
 
+    .scheduled-task-panel {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      margin-top: 10px;
+      padding-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .scheduled-task-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 10.5px;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
+    .scheduled-task-list {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .scheduled-task-card {
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: rgba(255, 255, 255, 0.035);
+      border-radius: 7px;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .scheduled-task-top {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 86px auto auto;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .scheduled-task-add {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 86px;
+      gap: 6px;
+    }
+
+    .scheduled-task-empty {
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.35;
+      padding: 4px 0;
+    }
+
     .enhancement-list {
       display: flex;
       flex-direction: column;
@@ -3083,6 +3138,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         <button class="settings-action-btn save-btn" id="btn-start-focus-timer"><span class="codicon codicon-play"></span><span id="text-start-focus-timer">Start</span></button>
         <button class="settings-action-btn test-btn" id="btn-stop-focus-timer"><span class="codicon codicon-debug-stop"></span><span id="text-stop-focus-timer">Stop</span></button>
       </div>
+      <div class="scheduled-task-panel">
+        <div class="scheduled-task-head">
+          <span id="scheduled-tasks-title">Scheduled tasks</span>
+          <span class="automation-summary-line" id="scheduled-tasks-next"></span>
+        </div>
+        <div class="scheduled-task-list" id="scheduled-tasks-list"></div>
+        <div class="scheduled-task-add">
+          <input type="text" class="settings-input" id="scheduled-task-title-input" placeholder="Name">
+          <input type="time" class="settings-input" id="scheduled-task-time-input" value="09:00">
+        </div>
+        <textarea class="settings-input settings-textarea" id="scheduled-task-prompt-input" rows="2" placeholder="Prompt to send at this time..."></textarea>
+        <button class="settings-action-btn save-btn" id="btn-add-scheduled-task"><span class="codicon codicon-add"></span><span id="text-add-scheduled-task">Add scheduled task</span></button>
+      </div>
     </div>
   </div>
 
@@ -3479,6 +3547,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const focusTimerMinutesInput = document.getElementById('focus-timer-minutes');
     const btnStartFocusTimer = document.getElementById('btn-start-focus-timer');
     const btnStopFocusTimer = document.getElementById('btn-stop-focus-timer');
+    const scheduledTasksTitle = document.getElementById('scheduled-tasks-title');
+    const scheduledTasksNext = document.getElementById('scheduled-tasks-next');
+    const scheduledTasksList = document.getElementById('scheduled-tasks-list');
+    const scheduledTaskTitleInput = document.getElementById('scheduled-task-title-input');
+    const scheduledTaskTimeInput = document.getElementById('scheduled-task-time-input');
+    const scheduledTaskPromptInput = document.getElementById('scheduled-task-prompt-input');
+    const btnAddScheduledTask = document.getElementById('btn-add-scheduled-task');
     const btnToggleFeedback = document.getElementById('btn-toggle-feedback');
     const btnCloseFeedback = document.getElementById('btn-close-feedback');
     const feedbackPanel = document.getElementById('feedback-panel');
@@ -3770,6 +3845,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerRunning: '下次提醒',
         focusTimerDue: '提醒已到',
         focusTimerSaved: '专注提醒已更新',
+        scheduledTasksTitle: '定时开始任务',
+        scheduledTasksEmpty: '还没有定时任务。',
+        scheduledTasksNext: '下次 {time}',
+        scheduledTaskNamePlaceholder: '名称',
+        scheduledTaskPromptPlaceholder: '到点发送的新任务提示词...',
+        addScheduledTask: '新增定时',
+        scheduledTaskEnabled: '开启',
+        scheduledTaskDisabled: '关闭',
+        scheduledTaskDelete: '删除',
         automationTask: '触发点和动作',
         automationFocusMinutes: '专注分钟',
         automationTime: '每天时间',
@@ -4089,6 +4173,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerRunning: 'Next reminder',
         focusTimerDue: 'Reminder due',
         focusTimerSaved: 'Focus timer updated',
+        scheduledTasksTitle: 'Scheduled tasks',
+        scheduledTasksEmpty: 'No scheduled tasks yet.',
+        scheduledTasksNext: 'Next {time}',
+        scheduledTaskNamePlaceholder: 'Name',
+        scheduledTaskPromptPlaceholder: 'Prompt to send at this time...',
+        addScheduledTask: 'Add scheduled task',
+        scheduledTaskEnabled: 'On',
+        scheduledTaskDisabled: 'Off',
+        scheduledTaskDelete: 'Delete',
         automationTask: 'Trigger and action',
         automationFocusMinutes: 'Focus minutes',
         automationTime: 'Daily time',
@@ -4418,6 +4511,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('label-focus-timer-minutes', t('focusTimerMinutes'));
       setText('text-start-focus-timer', t('focusTimerStart'));
       setText('text-stop-focus-timer', t('focusTimerStop'));
+      setText('scheduled-tasks-title', t('scheduledTasksTitle'));
+      setText('text-add-scheduled-task', t('addScheduledTask'));
+      if (scheduledTaskTitleInput) scheduledTaskTitleInput.placeholder = t('scheduledTaskNamePlaceholder');
+      if (scheduledTaskPromptInput) scheduledTaskPromptInput.placeholder = t('scheduledTaskPromptPlaceholder');
       setText('feedback-title', t('feedbackPanelTitle'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
       setText('text-rating-title', t('feedbackRatingTitle'));
@@ -4507,6 +4604,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           settingsPanel.style.display = 'none';
           if (feedbackPanel) feedbackPanel.style.display = 'none';
           focusTimerPanel.style.display = 'block';
+          renderScheduledTasksView();
           updateFocusTimerView();
         }
       });
@@ -4536,6 +4634,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         automationDraftSettings.focusMinutes = Math.max(1, Math.min(240, Number(focusTimerMinutesInput.value || 25) || 25));
         updateFocusTimerView();
       });
+    }
+
+    if (btnAddScheduledTask) {
+      btnAddScheduledTask.addEventListener('click', addScheduledTaskFromPanel);
     }
 
     if (btnToggleFeedback) {
@@ -4743,12 +4845,54 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     ];
     let automationDraftSettings = null;
 
+    function normalizeScheduledTask(task, index) {
+      const source = task && typeof task === 'object' ? task : {};
+      const prompt = String(source.prompt || '').trim();
+      return {
+        id: String(source.id || '').trim() || 'scheduled-' + (index + 1),
+        title: String(source.title || '').trim(),
+        enabled: Object.prototype.hasOwnProperty.call(source, 'enabled') ? Boolean(source.enabled) : Boolean(prompt),
+        timeOfDay: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(source.timeOfDay || '')) ? String(source.timeOfDay) : '09:00',
+        prompt
+      };
+    }
+
+    function normalizeScheduledTasks(automation, triggers) {
+      if (Array.isArray(automation.scheduledTasks)) {
+        return automation.scheduledTasks.map(normalizeScheduledTask);
+      }
+      const legacy = triggers && triggers.scheduled_time ? triggers.scheduled_time : {};
+      const prompt = String(legacy.prompt || '').trim();
+      if (!prompt) return [];
+      return [normalizeScheduledTask({
+        id: 'scheduled-default',
+        title: '',
+        enabled: true,
+        timeOfDay: legacy.timeOfDay || '09:00',
+        prompt
+      }, 0)];
+    }
+
+    function syncFirstScheduledTaskTrigger(settings) {
+      const first = settings.scheduledTasks && settings.scheduledTasks[0] ? settings.scheduledTasks[0] : null;
+      settings.triggers.scheduled_time = {
+        notify: false,
+        sound: false,
+        retry: false,
+        prompt: first ? String(first.prompt || '').trim() : '',
+        timeOfDay: first ? String(first.timeOfDay || '09:00') : '09:00'
+      };
+      return settings;
+    }
+
     function normalizeAutomationSettings(settings) {
       const automation = settings && settings.automationTasks ? settings.automationTasks : {};
       const triggers = automation.triggers || {};
       const normalized = {
         focusMinutes: Math.max(1, Math.min(240, Number(automation.focusMinutes || 25) || 25)),
         nextFocusReminderAt: String(automation.nextFocusReminderAt || ''),
+        nextScheduledTaskAt: String(automation.nextScheduledTaskAt || ''),
+        scheduledTasks: normalizeScheduledTasks(automation, triggers),
         triggers: {}
       };
       automationTriggers.forEach(trigger => {
@@ -4761,7 +4905,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           timeOfDay: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(value.timeOfDay || '')) ? String(value.timeOfDay) : '09:00'
         };
       });
-      return normalized;
+      return syncFirstScheduledTaskTrigger(normalized);
     }
 
     function getAutomationTriggerLabel(triggerKey) {
@@ -4910,12 +5054,182 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const timeOfDay = /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(automationTimeInput.value || ''))
           ? String(automationTimeInput.value)
           : '09:00';
+        const prompt = String(automationPromptInput ? automationPromptInput.value : '').trim();
+        const currentFirst = automationDraftSettings.scheduledTasks && automationDraftSettings.scheduledTasks[0]
+          ? automationDraftSettings.scheduledTasks[0]
+          : null;
+        if (prompt) {
+          automationDraftSettings.scheduledTasks = [
+            {
+              ...(currentFirst || { id: 'scheduled-default', title: '', enabled: true }),
+              enabled: currentFirst ? currentFirst.enabled !== false : true,
+              timeOfDay,
+              prompt
+            },
+            ...((automationDraftSettings.scheduledTasks || []).slice(currentFirst ? 1 : 0))
+          ];
+        } else if (currentFirst) {
+          automationDraftSettings.scheduledTasks = [
+            { ...currentFirst, timeOfDay, prompt: '' },
+            ...((automationDraftSettings.scheduledTasks || []).slice(1))
+          ];
+        }
         automationDraftSettings.triggers.scheduled_time = {
           ...(automationDraftSettings.triggers.scheduled_time || {}),
-          timeOfDay
+          timeOfDay,
+          prompt
         };
       }
-      return automationDraftSettings;
+      return syncFirstScheduledTaskTrigger(automationDraftSettings);
+    }
+
+    function createScheduledTaskId() {
+      return 'scheduled-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+    }
+
+    function getNextScheduledTask(tasks) {
+      const now = new Date();
+      return (tasks || [])
+        .filter(task => task && task.enabled !== false && String(task.prompt || '').trim())
+        .map(task => {
+          const match = /^([01]\\d|2[0-3]):([0-5]\\d)$/.exec(String(task.timeOfDay || '09:00'));
+          const next = new Date(now.getTime());
+          next.setHours(match ? Number(match[1]) : 9, match ? Number(match[2]) : 0, 0, 0);
+          if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
+          return { task, next };
+        })
+        .sort((a, b) => a.next.getTime() - b.next.getTime())[0] || null;
+    }
+
+    function formatScheduledDate(date) {
+      if (!date) return '';
+      try {
+        return date.toLocaleString(currentLanguage === 'zh' ? 'zh-CN' : 'en-US', {
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      } catch {
+        return String(date);
+      }
+    }
+
+    function updateScheduledTasksNext() {
+      const automation = automationDraftSettings || normalizeAutomationSettings(currentSettings || {});
+      const tasks = automation.scheduledTasks || [];
+      const next = getNextScheduledTask(tasks);
+      if (scheduledTasksNext) {
+        scheduledTasksNext.textContent = next ? t('scheduledTasksNext').replace('{time}', formatScheduledDate(next.next)) : '';
+      }
+    }
+
+    function renderScheduledTasksView() {
+      const automation = automationDraftSettings || normalizeAutomationSettings(currentSettings || {});
+      const tasks = automation.scheduledTasks || [];
+      updateScheduledTasksNext();
+      if (!scheduledTasksList) return;
+      if (tasks.length === 0) {
+        scheduledTasksList.innerHTML = '<div class="scheduled-task-empty">' + escapeHtml(t('scheduledTasksEmpty')) + '</div>';
+        return;
+      }
+      scheduledTasksList.innerHTML = tasks.map((task) => {
+        const enabled = task.enabled !== false;
+        return [
+          '<div class="scheduled-task-card" data-scheduled-task-id="' + escapeHtml(task.id) + '">',
+            '<div class="scheduled-task-top">',
+              '<input type="text" class="settings-input" data-scheduled-title value="' + escapeHtml(task.title || '') + '" placeholder="' + escapeHtml(t('scheduledTaskNamePlaceholder')) + '">',
+              '<input type="time" class="settings-input" data-scheduled-time value="' + escapeHtml(task.timeOfDay || '09:00') + '">',
+              '<button type="button" class="settings-action-btn test-btn" data-scheduled-toggle>' + escapeHtml(enabled ? t('scheduledTaskEnabled') : t('scheduledTaskDisabled')) + '</button>',
+              '<button type="button" class="settings-action-btn test-btn" data-scheduled-delete><span class="codicon codicon-trash"></span></button>',
+            '</div>',
+            '<textarea class="settings-input settings-textarea" rows="2" data-scheduled-prompt placeholder="' + escapeHtml(t('scheduledTaskPromptPlaceholder')) + '">' + escapeHtml(task.prompt || '') + '</textarea>',
+          '</div>'
+        ].join('');
+      }).join('');
+      bindScheduledTaskList();
+    }
+
+    function updateScheduledTask(taskId, updates, shouldRender, shouldPersist) {
+      if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+      automationDraftSettings.scheduledTasks = (automationDraftSettings.scheduledTasks || []).map(task => (
+        task.id === taskId ? { ...task, ...updates } : task
+      ));
+      syncFirstScheduledTaskTrigger(automationDraftSettings);
+      if (shouldRender) {
+        renderScheduledTasksView();
+      } else {
+        updateScheduledTasksNext();
+      }
+      if (shouldPersist) {
+        vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
+      }
+    }
+
+    function bindScheduledTaskList() {
+      if (!scheduledTasksList || typeof scheduledTasksList.querySelectorAll !== 'function') return;
+      scheduledTasksList.querySelectorAll('[data-scheduled-task-id]').forEach(card => {
+        const taskId = card.getAttribute('data-scheduled-task-id') || '';
+        const titleInput = card.querySelector('[data-scheduled-title]');
+        const timeInput = card.querySelector('[data-scheduled-time]');
+        const promptInput = card.querySelector('[data-scheduled-prompt]');
+        const toggleButton = card.querySelector('[data-scheduled-toggle]');
+        const deleteButton = card.querySelector('[data-scheduled-delete]');
+        if (titleInput) {
+          titleInput.addEventListener('input', () => updateScheduledTask(taskId, { title: String(titleInput.value || '').trim() }, false, false));
+          titleInput.addEventListener('change', () => updateScheduledTask(taskId, { title: String(titleInput.value || '').trim() }, false, true));
+        }
+        if (timeInput) {
+          const updateTime = (persist) => updateScheduledTask(taskId, {
+            timeOfDay: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(timeInput.value || '')) ? String(timeInput.value) : '09:00'
+          }, false, persist);
+          timeInput.addEventListener('input', () => updateTime(false));
+          timeInput.addEventListener('change', () => updateTime(true));
+        }
+        if (promptInput) {
+          promptInput.addEventListener('input', () => updateScheduledTask(taskId, { prompt: String(promptInput.value || '').trim() }, false, false));
+          promptInput.addEventListener('change', () => updateScheduledTask(taskId, { prompt: String(promptInput.value || '').trim() }, false, true));
+        }
+        if (toggleButton) {
+          toggleButton.addEventListener('click', () => {
+            const task = (automationDraftSettings.scheduledTasks || []).find(item => item.id === taskId);
+            updateScheduledTask(taskId, { enabled: !(task && task.enabled !== false) }, true, true);
+          });
+        }
+        if (deleteButton) {
+          deleteButton.addEventListener('click', () => {
+            if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+            automationDraftSettings.scheduledTasks = (automationDraftSettings.scheduledTasks || []).filter(task => task.id !== taskId);
+            syncFirstScheduledTaskTrigger(automationDraftSettings);
+            renderScheduledTasksView();
+            vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
+          });
+        }
+      });
+    }
+
+    function addScheduledTaskFromPanel() {
+      const prompt = String(scheduledTaskPromptInput ? scheduledTaskPromptInput.value : '').trim();
+      if (!prompt) return;
+      if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+      const timeOfDay = scheduledTaskTimeInput && /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(scheduledTaskTimeInput.value || ''))
+        ? String(scheduledTaskTimeInput.value)
+        : '09:00';
+      automationDraftSettings.scheduledTasks = [
+        ...(automationDraftSettings.scheduledTasks || []),
+        {
+          id: createScheduledTaskId(),
+          title: String(scheduledTaskTitleInput ? scheduledTaskTitleInput.value : '').trim(),
+          enabled: true,
+          timeOfDay,
+          prompt
+        }
+      ];
+      syncFirstScheduledTaskTrigger(automationDraftSettings);
+      if (scheduledTaskTitleInput) scheduledTaskTitleInput.value = '';
+      if (scheduledTaskPromptInput) scheduledTaskPromptInput.value = '';
+      renderScheduledTasksView();
+      vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
     }
 
     function isFocusTimerEnabled(settings) {
@@ -4961,6 +5275,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (btnStopFocusTimer) {
         btnStopFocusTimer.disabled = !enabled;
       }
+      updateScheduledTasksNext();
     }
 
     function restartFocusTimerTick() {

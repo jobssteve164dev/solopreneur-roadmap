@@ -98,7 +98,7 @@ import {
   shellQuote,
   supportsSdkContinuation
 } from './agentCli';
-import { SolomapAutomationSettings, SolomapAutomationTrigger, SolopreneurSettings } from './pluginContracts';
+import { SolomapAutomationSettings, SolomapAutomationTrigger, SolomapScheduledAutomationTask, SolopreneurSettings } from './pluginContracts';
 import { buildConversationPresentations } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import {
@@ -1019,20 +1019,71 @@ function normalizeAutomationTriggerSettings(value: unknown) {
   };
 }
 
+function normalizeScheduledAutomationTask(value: unknown, index: number): SolomapScheduledAutomationTask | null {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const id = String(source.id || '').trim() || `scheduled-${index + 1}`;
+  const rawTime = String(source.timeOfDay || '').trim();
+  const prompt = String(source.prompt || '').trim();
+  const title = String(source.title || '').trim();
+  const enabled = Object.prototype.hasOwnProperty.call(source, 'enabled') ? Boolean(source.enabled) : Boolean(prompt);
+  return {
+    id,
+    title,
+    enabled,
+    timeOfDay: /^([01]\d|2[0-3]):[0-5]\d$/.test(rawTime) ? rawTime : '09:00',
+    prompt
+  };
+}
+
+function normalizeScheduledAutomationTasks(source: Record<string, unknown>, rawTriggers: Record<string, unknown>): SolomapScheduledAutomationTask[] {
+  if (Array.isArray(source.scheduledTasks)) {
+    return source.scheduledTasks
+      .map((task, index) => normalizeScheduledAutomationTask(task, index))
+      .filter((task): task is SolomapScheduledAutomationTask => Boolean(task));
+  }
+  const legacy = normalizeAutomationTriggerSettings(rawTriggers.scheduled_time);
+  if (legacy.prompt) {
+    return [{
+      id: 'scheduled-default',
+      title: '',
+      enabled: true,
+      timeOfDay: legacy.timeOfDay,
+      prompt: legacy.prompt
+    }];
+  }
+  return [];
+}
+
+function firstScheduledTaskAsTrigger(tasks: SolomapScheduledAutomationTask[], fallback: unknown) {
+  const first = tasks[0];
+  if (!first) {
+    return normalizeAutomationTriggerSettings(fallback);
+  }
+  return normalizeAutomationTriggerSettings({
+    notify: false,
+    sound: false,
+    retry: false,
+    prompt: first.prompt || '',
+    timeOfDay: first.timeOfDay || '09:00'
+  });
+}
+
 function normalizeAutomationSettings(value: unknown): SolomapAutomationSettings {
   const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
   const rawTriggers = source.triggers && typeof source.triggers === 'object'
     ? source.triggers as Record<string, unknown>
     : {};
   const focusMinutes = Math.max(1, Math.min(240, Number(source.focusMinutes || 25) || 25));
+  const scheduledTasks = normalizeScheduledAutomationTasks(source, rawTriggers);
   return {
     focusMinutes,
+    scheduledTasks,
     triggers: {
       completed: normalizeAutomationTriggerSettings(rawTriggers.completed),
       failed: normalizeAutomationTriggerSettings(rawTriggers.failed),
       stopped: normalizeAutomationTriggerSettings(rawTriggers.stopped),
       focus_time: normalizeAutomationTriggerSettings(rawTriggers.focus_time),
-      scheduled_time: normalizeAutomationTriggerSettings(rawTriggers.scheduled_time)
+      scheduled_time: firstScheduledTaskAsTrigger(scheduledTasks, rawTriggers.scheduled_time)
     }
   };
 }
@@ -1047,16 +1098,23 @@ function mergeAutomationSettings(currentValue: unknown, nextValue: unknown): Sol
   const nextTriggers = source.triggers && typeof source.triggers === 'object'
     ? source.triggers as Record<string, unknown>
     : {};
+  const nextNormalized = normalizeAutomationSettings(source);
+  const scheduledTasks = Object.prototype.hasOwnProperty.call(source, 'scheduledTasks')
+    ? nextNormalized.scheduledTasks || []
+    : Object.prototype.hasOwnProperty.call(nextTriggers, 'scheduled_time')
+      ? nextNormalized.scheduledTasks || []
+      : current.scheduledTasks || [];
   return {
     focusMinutes: Object.prototype.hasOwnProperty.call(source, 'focusMinutes')
       ? normalizeAutomationSettings(source).focusMinutes
       : current.focusMinutes,
+    scheduledTasks,
     triggers: {
       completed: Object.prototype.hasOwnProperty.call(nextTriggers, 'completed') ? normalizeAutomationTriggerSettings(nextTriggers.completed) : normalizeAutomationTriggerSettings(currentTriggers.completed),
       failed: Object.prototype.hasOwnProperty.call(nextTriggers, 'failed') ? normalizeAutomationTriggerSettings(nextTriggers.failed) : normalizeAutomationTriggerSettings(currentTriggers.failed),
       stopped: Object.prototype.hasOwnProperty.call(nextTriggers, 'stopped') ? normalizeAutomationTriggerSettings(nextTriggers.stopped) : normalizeAutomationTriggerSettings(currentTriggers.stopped),
       focus_time: Object.prototype.hasOwnProperty.call(nextTriggers, 'focus_time') ? normalizeAutomationTriggerSettings(nextTriggers.focus_time) : normalizeAutomationTriggerSettings(currentTriggers.focus_time),
-      scheduled_time: Object.prototype.hasOwnProperty.call(nextTriggers, 'scheduled_time') ? normalizeAutomationTriggerSettings(nextTriggers.scheduled_time) : normalizeAutomationTriggerSettings(currentTriggers.scheduled_time)
+      scheduled_time: firstScheduledTaskAsTrigger(scheduledTasks, Object.prototype.hasOwnProperty.call(nextTriggers, 'scheduled_time') ? nextTriggers.scheduled_time : currentTriggers.scheduled_time)
     }
   };
 }
@@ -5683,23 +5741,32 @@ function getNextScheduledAutomationAt(timeOfDay: string, now = new Date()): Date
   return next;
 }
 
+function getNextScheduledAutomationTask(tasks: SolomapScheduledAutomationTask[], now = new Date()): { task: SolomapScheduledAutomationTask; nextAt: Date } | null {
+  const candidates = tasks
+    .filter((task) => task && task.enabled !== false && String(task.prompt || '').trim())
+    .map((task) => ({
+      task,
+      nextAt: getNextScheduledAutomationAt(task.timeOfDay || '09:00', now)
+    }))
+    .sort((a, b) => a.nextAt.getTime() - b.nextAt.getTime());
+  return candidates[0] || null;
+}
+
 function scheduleTimedAutomationTask(context: vscode.ExtensionContext): void {
   if (scheduledAutomationTimer) {
     clearTimeout(scheduledAutomationTimer);
     scheduledAutomationTimer = null;
   }
   const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
-  const rule = settings.triggers?.scheduled_time || {};
-  const prompt = String(rule.prompt || '').trim();
-  if (!prompt) {
+  const next = getNextScheduledAutomationTask(settings.scheduledTasks || []);
+  if (!next) {
     scheduledAutomationNextAt = '';
     return;
   }
-  const nextAt = getNextScheduledAutomationAt(rule.timeOfDay || '09:00');
-  scheduledAutomationNextAt = nextAt.toISOString();
-  const delayMs = Math.max(1000, nextAt.getTime() - Date.now());
+  scheduledAutomationNextAt = next.nextAt.toISOString();
+  const delayMs = Math.max(1000, next.nextAt.getTime() - Date.now());
   scheduledAutomationTimer = setTimeout(() => {
-    void runScheduledAutomationTask(context).finally(() => {
+    void runScheduledAutomationTask(context, next.task.id).finally(() => {
       scheduleTimedAutomationTask(context);
     });
   }, delayMs);
@@ -5709,24 +5776,26 @@ function scheduleTimedAutomationTask(context: vscode.ExtensionContext): void {
   void broadcastSettings(context);
 }
 
-async function runScheduledAutomationTask(context: vscode.ExtensionContext): Promise<void> {
+async function runScheduledAutomationTask(context: vscode.ExtensionContext, taskId = ''): Promise<void> {
   const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
-  const rule = settings.triggers?.scheduled_time || {};
-  const prompt = String(rule.prompt || '').trim();
-  if (!prompt) {
+  const tasks = settings.scheduledTasks || [];
+  const task = tasks.find((candidate) => candidate.id === taskId) || getNextScheduledAutomationTask(tasks)?.task;
+  const prompt = String(task?.prompt || '').trim();
+  if (!task || task.enabled === false || !prompt) {
     return;
   }
   const workspaceRoot = await ensureActionProject(context, activeProjectRoot || getSelectedProjectPath(context) || '');
   if (!workspaceRoot) {
     return;
   }
-  const timeOfDay = String(rule.timeOfDay || '09:00');
-  const runKey = `${new Date().toISOString().slice(0, 10)}:${timeOfDay}:${workspaceRoot}`;
+  const timeOfDay = String(task.timeOfDay || '09:00');
+  const runKey = `${new Date().toISOString().slice(0, 10)}:${task.id}:${timeOfDay}:${workspaceRoot}`;
   if (scheduledAutomationRunKeys.has(runKey)) {
     recordAutomationTaskEvent(workspaceRoot, {
       trigger: 'scheduled_time',
       action: 'prompt',
       status: 'skipped',
+      taskId: task.id,
       message: 'Already launched this scheduled automation task today.'
     });
     return;
@@ -5736,6 +5805,8 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext): Pro
     trigger: 'scheduled_time',
     action: 'prompt',
     status: 'started',
+    taskId: task.id,
+    title: task.title || '',
     timeOfDay
   });
   await handleRunSoloConversation(context, prompt, getPersistedSettings(context).cliPath || '');

@@ -610,7 +610,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /feedback\.open/);
   assert.match(html, /id="btn-toggle-focus-timer"/);
   assert.match(html, /id="focus-timer-panel"/);
+  assert.match(html, /id="scheduled-tasks-list"/);
+  assert.match(html, /id="btn-add-scheduled-task"/);
   assert.match(script, /nextFocusReminderAt/);
+  assert.match(script, /scheduledTasks/);
   assert.match(html, /id="btn-toggle-feedback"/);
   assert.match(html, /id="feedback-panel"/);
   assert.match(html, /id="btn-open-strategy-pyramid"/);
@@ -681,6 +684,14 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-stop-focus-timer',
     'text-start-focus-timer',
     'text-stop-focus-timer',
+    'scheduled-tasks-title',
+    'scheduled-tasks-next',
+    'scheduled-tasks-list',
+    'scheduled-task-title-input',
+    'scheduled-task-time-input',
+    'scheduled-task-prompt-input',
+    'btn-add-scheduled-task',
+    'text-add-scheduled-task',
     'btn-toggle-feedback',
     'btn-close-feedback',
     'feedback-panel',
@@ -800,6 +811,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       automationTasks: {
         focusMinutes: 25,
         nextFocusReminderAt: '',
+        nextScheduledTaskAt: '',
+        scheduledTasks: [],
         triggers: {
           completed: { notify: false, sound: false, retry: false, prompt: '' },
           failed: { notify: false, sound: false, retry: false, prompt: '' },
@@ -824,6 +837,23 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     && message.automationTasks.focusMinutes === 15
     && message.automationTasks.triggers.focus_time.notify === true
     && message.automationTasks.triggers.focus_time.sound === false
+  ));
+  postedMessages.length = 0;
+  elements['scheduled-task-title-input'].value = '早上规划';
+  elements['scheduled-task-time-input'].value = '08:45';
+  elements['scheduled-task-prompt-input'].value = '规划今天最重要的一项任务';
+  elements['btn-add-scheduled-task'].listeners.click();
+  assert.ok(postedMessages.some((message) =>
+    message.command === 'settings.update'
+    && message.automationTasks
+    && Array.isArray(message.automationTasks.scheduledTasks)
+    && message.automationTasks.scheduledTasks.some((task) =>
+      task.title === '早上规划'
+      && task.timeOfDay === '08:45'
+      && task.prompt === '规划今天最重要的一项任务'
+      && task.enabled === true
+    )
+    && message.automationTasks.triggers.scheduled_time.timeOfDay === '08:45'
   ));
   postedMessages.length = 0;
   elements['btn-stop-focus-timer'].listeners.click();
@@ -870,6 +900,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     && message.automationTasks
     && message.automationTasks.triggers.scheduled_time.timeOfDay === '08:30'
     && message.automationTasks.triggers.scheduled_time.prompt === '整理今天最重要的一项任务'
+    && Array.isArray(message.automationTasks.scheduledTasks)
+    && message.automationTasks.scheduledTasks[0].timeOfDay === '08:30'
     && message.automationTasks.triggers.scheduled_time.retry === false
   ));
 
@@ -6618,6 +6650,10 @@ test('partial settings updates preserve existing user settings after extension u
     collaborationReviewMode: 'off',
     automationTasks: {
       focusMinutes: 45,
+      scheduledTasks: [
+        { id: 'morning', title: 'Morning', enabled: true, prompt: 'Start the daily task', timeOfDay: '08:30' },
+        { id: 'evening', title: 'Evening', enabled: false, prompt: 'Review today', timeOfDay: '18:00' }
+      ],
       triggers: {
         completed: { notify: true, sound: false, retry: false, prompt: '' },
         failed: { notify: false, sound: false, retry: true, prompt: '' },
@@ -6669,14 +6705,20 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(persisted.automationTasks.triggers.completed.notify, true);
   assert.equal(persisted.automationTasks.triggers.failed.retry, true);
   assert.equal(persisted.automationTasks.triggers.focus_time.notify, true);
+  assert.equal(persisted.automationTasks.scheduledTasks.length, 2);
+  assert.equal(persisted.automationTasks.scheduledTasks[0].prompt, 'Start the daily task');
+  assert.equal(persisted.automationTasks.scheduledTasks[0].timeOfDay, '08:30');
+  assert.equal(persisted.automationTasks.scheduledTasks[1].enabled, false);
   assert.equal(persisted.automationTasks.triggers.scheduled_time.prompt, 'Start the daily task');
-  assert.equal(persisted.automationTasks.triggers.scheduled_time.timeOfDay, '08:30');
 });
 
 test('scheduled automation computes the next daily trigger time', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__getNextScheduledAutomationAt = getNextScheduledAutomationAt;'
+    [
+      'module.exports.__getNextScheduledAutomationAt = getNextScheduledAutomationAt;',
+      'module.exports.__getNextScheduledAutomationTask = getNextScheduledAutomationTask;'
+    ].join('\n')
   );
   const beforeTime = new Date('2026-06-30T08:00:00.000Z');
   const afterTime = new Date('2026-06-30T10:00:00.000Z');
@@ -6693,6 +6735,14 @@ test('scheduled automation computes the next daily trigger time', () => {
     extensionModule.__getNextScheduledAutomationAt('invalid', beforeTime).toISOString(),
     '2026-06-30T09:00:00.000Z'
   );
+  const next = extensionModule.__getNextScheduledAutomationTask([
+    { id: 'disabled', enabled: false, timeOfDay: '08:10', prompt: 'skip me' },
+    { id: 'empty', enabled: true, timeOfDay: '08:15', prompt: '' },
+    { id: 'later', enabled: true, timeOfDay: '18:00', prompt: 'Review today' },
+    { id: 'soon', enabled: true, timeOfDay: '08:30', prompt: 'Start now' }
+  ], beforeTime);
+  assert.equal(next.task.id, 'soon');
+  assert.equal(next.nextAt.toISOString(), '2026-06-30T08:30:00.000Z');
 });
 
 test('Flow pause and abandon commands work correctly', async () => {

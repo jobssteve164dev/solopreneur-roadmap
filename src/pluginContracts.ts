@@ -45,9 +45,18 @@ export interface SolomapAutomationTriggerSettings {
   timeOfDay?: string;
 }
 
+export interface SolomapScheduledAutomationTask {
+  id: string;
+  title?: string;
+  enabled?: boolean;
+  timeOfDay?: string;
+  prompt?: string;
+}
+
 export interface SolomapAutomationSettings {
   focusMinutes?: number;
   nextFocusReminderAt?: string;
   nextScheduledTaskAt?: string;
+  scheduledTasks?: SolomapScheduledAutomationTask[];
   triggers?: Partial<Record<SolomapAutomationTrigger, SolomapAutomationTriggerSettings>>;
 }
