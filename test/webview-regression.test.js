@@ -649,7 +649,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /id="btn-paste-pro-code"/);
   assert.match(html, /id="automation-trigger-select"/);
   assert.match(html, /id="automation-action-select"/);
+  assert.match(html, /id="automation-time-input"/);
   assert.match(script, /automationActionNone/);
+  assert.match(script, /automationTriggerScheduled/);
   assert.doesNotMatch(html, /automation-trigger-row|automation-check/);
   assert.match(script, /entitlement\.login/);
   assert.match(script, /entitlement\.paste/);
@@ -702,6 +704,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'automation-prompt-input',
     'automation-focus-row',
     'automation-focus-minutes',
+    'automation-time-row',
+    'automation-time-input',
     'automation-current-summary',
     'setting-feedback-title',
     'setting-feedback-body',
@@ -800,7 +804,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
           completed: { notify: false, sound: false, retry: false, prompt: '' },
           failed: { notify: false, sound: false, retry: false, prompt: '' },
           stopped: { notify: false, sound: false, retry: false, prompt: '' },
-          focus_time: { notify: false, sound: false, retry: false, prompt: '' }
+          focus_time: { notify: false, sound: false, retry: false, prompt: '' },
+          scheduled_time: { notify: false, sound: false, retry: false, prompt: '', timeOfDay: '09:00' }
         }
       }
     }
@@ -845,6 +850,27 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     && message.automationTasks.triggers.completed.notify === false
     && message.automationTasks.triggers.completed.sound === false
     && message.automationTasks.triggers.stopped.retry === true
+  ));
+  postedMessages.length = 0;
+  elements['automation-trigger-select'].listeners.click({
+    target: elements['automation-trigger-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'scheduled_time'),
+    stopPropagation() {}
+  });
+  elements['automation-action-select'].listeners.click({
+    target: elements['automation-action-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'prompt'),
+    stopPropagation() {}
+  });
+  elements['automation-time-input'].value = '08:30';
+  elements['automation-time-input'].listeners.input();
+  elements['automation-prompt-input'].value = '整理今天最重要的一项任务';
+  elements['automation-prompt-input'].listeners.input();
+  elements['btn-save-settings'].listeners.click();
+  assert.ok(postedMessages.some((message) =>
+    message.command === 'settings.update'
+    && message.automationTasks
+    && message.automationTasks.triggers.scheduled_time.timeOfDay === '08:30'
+    && message.automationTasks.triggers.scheduled_time.prompt === '整理今天最重要的一项任务'
+    && message.automationTasks.triggers.scheduled_time.retry === false
   ));
 
   dispatchMessage({
@@ -6596,7 +6622,8 @@ test('partial settings updates preserve existing user settings after extension u
         completed: { notify: true, sound: false, retry: false, prompt: '' },
         failed: { notify: false, sound: false, retry: true, prompt: '' },
         stopped: { notify: false, sound: false, retry: false, prompt: '' },
-        focus_time: { notify: false, sound: false, retry: false, prompt: '' }
+        focus_time: { notify: false, sound: false, retry: false, prompt: '' },
+        scheduled_time: { notify: false, sound: false, retry: false, prompt: 'Start the daily task', timeOfDay: '08:30' }
       }
     }
   };
@@ -6642,6 +6669,30 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(persisted.automationTasks.triggers.completed.notify, true);
   assert.equal(persisted.automationTasks.triggers.failed.retry, true);
   assert.equal(persisted.automationTasks.triggers.focus_time.notify, true);
+  assert.equal(persisted.automationTasks.triggers.scheduled_time.prompt, 'Start the daily task');
+  assert.equal(persisted.automationTasks.triggers.scheduled_time.timeOfDay, '08:30');
+});
+
+test('scheduled automation computes the next daily trigger time', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getNextScheduledAutomationAt = getNextScheduledAutomationAt;'
+  );
+  const beforeTime = new Date('2026-06-30T08:00:00.000Z');
+  const afterTime = new Date('2026-06-30T10:00:00.000Z');
+
+  assert.equal(
+    extensionModule.__getNextScheduledAutomationAt('09:30', beforeTime).toISOString(),
+    '2026-06-30T09:30:00.000Z'
+  );
+  assert.equal(
+    extensionModule.__getNextScheduledAutomationAt('09:30', afterTime).toISOString(),
+    '2026-07-01T09:30:00.000Z'
+  );
+  assert.equal(
+    extensionModule.__getNextScheduledAutomationAt('invalid', beforeTime).toISOString(),
+    '2026-06-30T09:00:00.000Z'
+  );
 });
 
 test('Flow pause and abandon commands work correctly', async () => {

@@ -144,6 +144,13 @@
                 "sound": false,
                 "retry": false,
                 "prompt": ""
+              },
+              "scheduled_time": {
+                "notify": false,
+                "sound": false,
+                "retry": false,
+                "timeOfDay": "09:00",
+                "prompt": ""
               }
             }
           },

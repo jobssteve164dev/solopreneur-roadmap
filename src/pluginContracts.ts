@@ -35,17 +35,19 @@ export interface SolopreneurSettings {
 
 export type AgentModelLoader = (agentCli: string) => Promise<AgentModelCatalog>;
 
-export type SolomapAutomationTrigger = 'completed' | 'failed' | 'stopped' | 'focus_time';
+export type SolomapAutomationTrigger = 'completed' | 'failed' | 'stopped' | 'focus_time' | 'scheduled_time';
 
 export interface SolomapAutomationTriggerSettings {
   notify?: boolean;
   sound?: boolean;
   retry?: boolean;
   prompt?: string;
+  timeOfDay?: string;
 }
 
 export interface SolomapAutomationSettings {
   focusMinutes?: number;
   nextFocusReminderAt?: string;
+  nextScheduledTaskAt?: string;
   triggers?: Partial<Record<SolomapAutomationTrigger, SolomapAutomationTriggerSettings>>;
 }

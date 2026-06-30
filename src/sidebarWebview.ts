@@ -3383,6 +3383,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           <label class="settings-lbl-title" id="label-automation-focus-minutes">Focus minutes</label>
           <input type="number" class="settings-input" id="automation-focus-minutes" min="1" max="240" value="25">
         </div>
+        <div class="automation-focus-row" id="automation-time-row" style="display:none;">
+          <label class="settings-lbl-title" id="label-automation-time">Time</label>
+          <input type="time" class="settings-input" id="automation-time-input" value="09:00">
+        </div>
         <textarea class="settings-input settings-textarea" id="automation-prompt-input" style="display:none;" rows="2" placeholder="Prompt to auto-send after this trigger..."></textarea>
         <div class="automation-summary-line" id="automation-current-summary"></div>
       </div>
@@ -3523,6 +3527,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const automationPromptInput = document.getElementById('automation-prompt-input');
     const automationFocusRow = document.getElementById('automation-focus-row');
     const automationFocusMinutesInput = document.getElementById('automation-focus-minutes');
+    const automationTimeRow = document.getElementById('automation-time-row');
+    const automationTimeInput = document.getElementById('automation-time-input');
     const automationCurrentSummary = document.getElementById('automation-current-summary');
     let focusTimerTick = null;
     let currentLanguage = 'zh';
@@ -3766,6 +3772,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerSaved: '专注提醒已更新',
         automationTask: '触发点和动作',
         automationFocusMinutes: '专注分钟',
+        automationTime: '每天时间',
         automationActionNone: '不动作',
         automationActionNotify: '系统通知',
         automationActionSound: '播放声音',
@@ -3778,6 +3785,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         automationTriggerFailed: '任务失败时',
         automationTriggerStopped: '手动停止时',
         automationTriggerFocus: '专注时间到',
+        automationTriggerScheduled: '每天指定时间',
         proFeatureName: '战略金字塔',
         proUnlocked: '已解锁',
         proLocked: '未解锁',
@@ -4083,6 +4091,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerSaved: 'Focus timer updated',
         automationTask: 'Trigger and action',
         automationFocusMinutes: 'Focus minutes',
+        automationTime: 'Daily time',
         automationActionNone: 'No action',
         automationActionNotify: 'System notification',
         automationActionSound: 'Play sound',
@@ -4095,6 +4104,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         automationTriggerFailed: 'When failed',
         automationTriggerStopped: 'When stopped',
         automationTriggerFocus: 'Focus time',
+        automationTriggerScheduled: 'Daily time',
         proFeatureName: 'Strategy Pyramid',
         proUnlocked: 'Unlocked',
         proLocked: 'Locked',
@@ -4446,6 +4456,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('settings-section-automation', t('settingsSectionAutomation'));
       setText('label-automation-task', t('automationTask'));
       setText('label-automation-focus-minutes', t('automationFocusMinutes'));
+      setText('label-automation-time', t('automationTime'));
       if (automationPromptInput) automationPromptInput.placeholder = t('automationPromptPlaceholder');
       setText('option-review-high-risk', t('reviewHighRisk'));
       setText('option-review-all', t('reviewAll'));
@@ -4610,6 +4621,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       automationFocusMinutesInput.addEventListener('input', updateAutomationDraftFromControls);
       automationFocusMinutesInput.addEventListener('change', updateAutomationDraftFromControls);
     }
+    if (automationTimeInput) {
+      automationTimeInput.addEventListener('input', updateAutomationTimeDraftFromInput);
+      automationTimeInput.addEventListener('change', updateAutomationTimeDraftFromInput);
+    }
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
@@ -4715,7 +4730,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       { key: 'completed', labelKey: 'automationTriggerCompleted' },
       { key: 'failed', labelKey: 'automationTriggerFailed' },
       { key: 'stopped', labelKey: 'automationTriggerStopped' },
-      { key: 'focus_time', labelKey: 'automationTriggerFocus' }
+      { key: 'focus_time', labelKey: 'automationTriggerFocus' },
+      { key: 'scheduled_time', labelKey: 'automationTriggerScheduled' }
     ];
     const automationActions = [
       { key: 'none', labelKey: 'automationActionNone' },
@@ -4741,7 +4757,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           notify: Boolean(value.notify),
           sound: Boolean(value.sound),
           retry: Boolean(value.retry),
-          prompt: String(value.prompt || '')
+          prompt: String(value.prompt || ''),
+          timeOfDay: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(value.timeOfDay || '')) ? String(value.timeOfDay) : '09:00'
         };
       });
       return normalized;
@@ -4757,6 +4774,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return t(action.labelKey);
     }
 
+    function getAutomationActionsForTrigger(triggerKey) {
+      return triggerKey === 'scheduled_time'
+        ? automationActions.filter(action => action.key === 'none' || action.key === 'prompt')
+        : automationActions;
+    }
+
     function getAutomationActionFromRule(triggerKey, rule) {
       if (!rule) return 'none';
       if (String(rule.prompt || '').trim()) return 'prompt';
@@ -4769,6 +4792,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function applyAutomationActionToRule(triggerKey, actionKey, promptValue) {
       const rule = { notify: false, sound: false, retry: false, prompt: '' };
+      const existingRule = automationDraftSettings && automationDraftSettings.triggers
+        ? automationDraftSettings.triggers[triggerKey] || {}
+        : {};
       if (actionKey === 'notify') {
         rule.notify = true;
       } else if (actionKey === 'sound') {
@@ -4780,8 +4806,31 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       } else if (actionKey === 'prompt') {
         rule.prompt = String(promptValue || '').trim();
       }
+      if (triggerKey === 'scheduled_time') {
+        const inputTime = automationTimeInput && /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(automationTimeInput.value || ''))
+          ? String(automationTimeInput.value)
+          : '';
+        const existingTime = /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(existingRule.timeOfDay || ''))
+          ? String(existingRule.timeOfDay)
+          : '';
+        rule.timeOfDay = inputTime || existingTime || '09:00';
+      }
       if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
       automationDraftSettings.triggers[triggerKey] = rule;
+    }
+
+    function updateAutomationTimeDraftFromInput() {
+      if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
+      const triggerKey = getSoloSelectValue(automationTriggerSelect) || 'completed';
+      if (triggerKey !== 'scheduled_time') return;
+      const rule = automationDraftSettings.triggers[triggerKey] || {};
+      automationDraftSettings.triggers[triggerKey] = {
+        ...rule,
+        timeOfDay: automationTimeInput && /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(automationTimeInput.value || ''))
+          ? String(automationTimeInput.value)
+          : '09:00'
+      };
+      syncAutomationSummary(triggerKey, getSoloSelectValue(automationActionSelect) || 'none');
     }
 
     function syncAutomationSummary(triggerKey, actionKey) {
@@ -4796,7 +4845,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
       const triggerKey = getSoloSelectValue(automationTriggerSelect) || 'completed';
       const rule = automationDraftSettings.triggers[triggerKey] || {};
-      const actionKey = getAutomationActionFromRule(triggerKey, rule);
+      const allowedActions = getAutomationActionsForTrigger(triggerKey);
+      const currentActionKey = getAutomationActionFromRule(triggerKey, rule);
+      const actionKey = allowedActions.some(action => action.key === currentActionKey) ? currentActionKey : 'none';
+      if (automationActionSelect) {
+        setSoloSelectOptions(automationActionSelect, allowedActions.map(action => ({
+          value: action.key,
+          label: t(action.labelKey)
+        })));
+      }
       setSoloSelectValue(automationActionSelect, actionKey);
       if (automationPromptInput) {
         automationPromptInput.style.display = actionKey === 'prompt' ? 'block' : 'none';
@@ -4805,7 +4862,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (automationFocusRow) {
         automationFocusRow.style.display = triggerKey === 'focus_time' || actionKey === 'pomodoro' ? 'grid' : 'none';
       }
+      if (automationTimeRow) {
+        automationTimeRow.style.display = triggerKey === 'scheduled_time' ? 'grid' : 'none';
+      }
       if (automationFocusMinutesInput) automationFocusMinutesInput.value = String(automationDraftSettings.focusMinutes || 25);
+      if (automationTimeInput) automationTimeInput.value = /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(rule.timeOfDay || '')) ? String(rule.timeOfDay) : '09:00';
       syncAutomationSummary(triggerKey, actionKey);
     }
 
@@ -4818,6 +4879,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       applyAutomationActionToRule(triggerKey, actionKey, automationPromptInput ? automationPromptInput.value : '');
       if (automationPromptInput) automationPromptInput.style.display = actionKey === 'prompt' ? 'block' : 'none';
       if (automationFocusRow) automationFocusRow.style.display = triggerKey === 'focus_time' || actionKey === 'pomodoro' ? 'grid' : 'none';
+      if (automationTimeRow) automationTimeRow.style.display = triggerKey === 'scheduled_time' ? 'grid' : 'none';
       syncAutomationSummary(triggerKey, actionKey);
     }
 
@@ -4831,7 +4893,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         setSoloSelectValue(automationTriggerSelect, getSoloSelectValue(automationTriggerSelect) || 'completed');
       }
       if (automationActionSelect) {
-        setSoloSelectOptions(automationActionSelect, automationActions.map(action => ({
+        const triggerKey = getSoloSelectValue(automationTriggerSelect) || 'completed';
+        setSoloSelectOptions(automationActionSelect, getAutomationActionsForTrigger(triggerKey).map(action => ({
           value: action.key,
           label: t(action.labelKey)
         })));
@@ -4842,6 +4905,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function collectAutomationSettings() {
       if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
       updateAutomationDraftFromControls();
+      const triggerKey = getSoloSelectValue(automationTriggerSelect) || 'completed';
+      if (triggerKey === 'scheduled_time' && automationTimeInput) {
+        const timeOfDay = /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(automationTimeInput.value || ''))
+          ? String(automationTimeInput.value)
+          : '09:00';
+        automationDraftSettings.triggers.scheduled_time = {
+          ...(automationDraftSettings.triggers.scheduled_time || {}),
+          timeOfDay
+        };
+      }
       return automationDraftSettings;
     }
 

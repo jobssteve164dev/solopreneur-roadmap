@@ -227,6 +227,9 @@ let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
 let focusReminderTimer: NodeJS.Timeout | null = null;
 let focusReminderNextAt = '';
+let scheduledAutomationTimer: NodeJS.Timeout | null = null;
+let scheduledAutomationNextAt = '';
+const scheduledAutomationRunKeys = new Set<string>();
 const agentTerminalNamesByConversationId = new Map<number, string>();
 const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 
@@ -332,6 +335,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize storage in the background after the UI provider is registered.
   void ensureSyncEngine(context);
   scheduleFocusReminder(context);
+  scheduleTimedAutomationTask(context);
 }
 
 async function ensureActionProject(context: vscode.ExtensionContext, projectPath: string): Promise<string> {
@@ -1004,11 +1008,14 @@ function normalizeEnabledEnhancements(value: unknown): Record<string, boolean> {
 
 function normalizeAutomationTriggerSettings(value: unknown) {
   const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const rawTime = String(source.timeOfDay || '').trim();
+  const timeOfDay = /^([01]\d|2[0-3]):[0-5]\d$/.test(rawTime) ? rawTime : '09:00';
   return {
     notify: Boolean(source.notify),
     sound: Boolean(source.sound),
     retry: Boolean(source.retry),
-    prompt: String(source.prompt || '').trim()
+    prompt: String(source.prompt || '').trim(),
+    timeOfDay
   };
 }
 
@@ -1024,7 +1031,8 @@ function normalizeAutomationSettings(value: unknown): SolomapAutomationSettings 
       completed: normalizeAutomationTriggerSettings(rawTriggers.completed),
       failed: normalizeAutomationTriggerSettings(rawTriggers.failed),
       stopped: normalizeAutomationTriggerSettings(rawTriggers.stopped),
-      focus_time: normalizeAutomationTriggerSettings(rawTriggers.focus_time)
+      focus_time: normalizeAutomationTriggerSettings(rawTriggers.focus_time),
+      scheduled_time: normalizeAutomationTriggerSettings(rawTriggers.scheduled_time)
     }
   };
 }
@@ -1047,7 +1055,8 @@ function mergeAutomationSettings(currentValue: unknown, nextValue: unknown): Sol
       completed: Object.prototype.hasOwnProperty.call(nextTriggers, 'completed') ? normalizeAutomationTriggerSettings(nextTriggers.completed) : normalizeAutomationTriggerSettings(currentTriggers.completed),
       failed: Object.prototype.hasOwnProperty.call(nextTriggers, 'failed') ? normalizeAutomationTriggerSettings(nextTriggers.failed) : normalizeAutomationTriggerSettings(currentTriggers.failed),
       stopped: Object.prototype.hasOwnProperty.call(nextTriggers, 'stopped') ? normalizeAutomationTriggerSettings(nextTriggers.stopped) : normalizeAutomationTriggerSettings(currentTriggers.stopped),
-      focus_time: Object.prototype.hasOwnProperty.call(nextTriggers, 'focus_time') ? normalizeAutomationTriggerSettings(nextTriggers.focus_time) : normalizeAutomationTriggerSettings(currentTriggers.focus_time)
+      focus_time: Object.prototype.hasOwnProperty.call(nextTriggers, 'focus_time') ? normalizeAutomationTriggerSettings(nextTriggers.focus_time) : normalizeAutomationTriggerSettings(currentTriggers.focus_time),
+      scheduled_time: Object.prototype.hasOwnProperty.call(nextTriggers, 'scheduled_time') ? normalizeAutomationTriggerSettings(nextTriggers.scheduled_time) : normalizeAutomationTriggerSettings(currentTriggers.scheduled_time)
     }
   };
 }
@@ -1059,7 +1068,8 @@ function getSettingsWithRuntimeState(context: vscode.ExtensionContext): Solopren
     ...settings,
     automationTasks: {
       ...automationTasks,
-      nextFocusReminderAt: focusReminderNextAt
+      nextFocusReminderAt: focusReminderNextAt,
+      nextScheduledTaskAt: scheduledAutomationNextAt
     }
   };
 }
@@ -1100,6 +1110,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('collaborationReviewMode', nextSettings.collaborationReviewMode, vscode.ConfigurationTarget.Global);
   await config.update('automationTasks', nextSettings.automationTasks, vscode.ConfigurationTarget.Global);
   scheduleFocusReminder(context);
+  scheduleTimedAutomationTask(context);
 }
 
 function projectName(projectPath: string): string {
@@ -5610,8 +5621,10 @@ function showAutomationNotification(trigger: SolomapAutomationTrigger, nodeId: s
       ? '任务已停止'
       : trigger === 'focus_time'
         ? '专注时间到了'
-        : '任务失败';
-  const message = nodeId && trigger !== 'focus_time'
+        : trigger === 'scheduled_time'
+          ? '定时任务已触发'
+          : '任务失败';
+  const message = nodeId && trigger !== 'focus_time' && trigger !== 'scheduled_time'
     ? `SoloMap 自动化任务：${label}（${nodeId}）。`
     : `SoloMap 自动化任务：${label}。`;
   if (status === 'Failed' || trigger === 'failed') {
@@ -5652,7 +5665,80 @@ function scheduleFocusReminder(context: vscode.ExtensionContext): void {
     }
     scheduleFocusReminder(context);
   }, minutes * 60 * 1000);
+  if (focusReminderTimer && typeof focusReminderTimer.unref === 'function') {
+    focusReminderTimer.unref();
+  }
   void broadcastSettings(context);
+}
+
+function getNextScheduledAutomationAt(timeOfDay: string, now = new Date()): Date {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(timeOfDay || '').trim());
+  const hours = match ? Number(match[1]) : 9;
+  const minutes = match ? Number(match[2]) : 0;
+  const next = new Date(now.getTime());
+  next.setHours(hours, minutes, 0, 0);
+  if (next.getTime() <= now.getTime()) {
+    next.setDate(next.getDate() + 1);
+  }
+  return next;
+}
+
+function scheduleTimedAutomationTask(context: vscode.ExtensionContext): void {
+  if (scheduledAutomationTimer) {
+    clearTimeout(scheduledAutomationTimer);
+    scheduledAutomationTimer = null;
+  }
+  const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
+  const rule = settings.triggers?.scheduled_time || {};
+  const prompt = String(rule.prompt || '').trim();
+  if (!prompt) {
+    scheduledAutomationNextAt = '';
+    return;
+  }
+  const nextAt = getNextScheduledAutomationAt(rule.timeOfDay || '09:00');
+  scheduledAutomationNextAt = nextAt.toISOString();
+  const delayMs = Math.max(1000, nextAt.getTime() - Date.now());
+  scheduledAutomationTimer = setTimeout(() => {
+    void runScheduledAutomationTask(context).finally(() => {
+      scheduleTimedAutomationTask(context);
+    });
+  }, delayMs);
+  if (scheduledAutomationTimer && typeof scheduledAutomationTimer.unref === 'function') {
+    scheduledAutomationTimer.unref();
+  }
+  void broadcastSettings(context);
+}
+
+async function runScheduledAutomationTask(context: vscode.ExtensionContext): Promise<void> {
+  const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
+  const rule = settings.triggers?.scheduled_time || {};
+  const prompt = String(rule.prompt || '').trim();
+  if (!prompt) {
+    return;
+  }
+  const workspaceRoot = await ensureActionProject(context, activeProjectRoot || getSelectedProjectPath(context) || '');
+  if (!workspaceRoot) {
+    return;
+  }
+  const timeOfDay = String(rule.timeOfDay || '09:00');
+  const runKey = `${new Date().toISOString().slice(0, 10)}:${timeOfDay}:${workspaceRoot}`;
+  if (scheduledAutomationRunKeys.has(runKey)) {
+    recordAutomationTaskEvent(workspaceRoot, {
+      trigger: 'scheduled_time',
+      action: 'prompt',
+      status: 'skipped',
+      message: 'Already launched this scheduled automation task today.'
+    });
+    return;
+  }
+  scheduledAutomationRunKeys.add(runKey);
+  recordAutomationTaskEvent(workspaceRoot, {
+    trigger: 'scheduled_time',
+    action: 'prompt',
+    status: 'started',
+    timeOfDay
+  });
+  await handleRunSoloConversation(context, prompt, getPersistedSettings(context).cliPath || '');
 }
 
 function scheduleAutomationTasksAfterRun(context: vscode.ExtensionContext, input: {
