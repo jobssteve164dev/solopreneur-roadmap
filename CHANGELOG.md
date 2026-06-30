@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.288 - 2026-06-30
+
+### Added
+- support multiple scheduled automation tasks (fe884aa)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.287 - 2026-06-30
 
 ### Added
