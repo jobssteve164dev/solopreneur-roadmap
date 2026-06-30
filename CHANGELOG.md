@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.290 - 2026-06-30
+
+### Fixed
+- run scheduled tasks in bound project (39502bb)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.289 - 2026-06-30
 
 ### Fixed
