@@ -876,6 +876,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       && task.timeOfDay === '08:45'
       && task.prompt === '规划今天最重要的一项任务'
       && task.enabled === true
+      && task.projectPath === '/workspace/app'
+      && task.projectName === 'app'
     )
     && message.automationTasks.triggers.scheduled_time.timeOfDay === '08:45'
   ));
@@ -6719,7 +6721,8 @@ test('scheduled automation computes the next daily trigger time', () => {
     'out/extension.js',
     [
       'module.exports.__getNextScheduledAutomationAt = getNextScheduledAutomationAt;',
-      'module.exports.__getNextScheduledAutomationTask = getNextScheduledAutomationTask;'
+      'module.exports.__getNextScheduledAutomationTask = getNextScheduledAutomationTask;',
+      'module.exports.__getScheduledAutomationProjectPath = getScheduledAutomationProjectPath;'
     ].join('\n')
   );
   const beforeTime = new Date('2026-06-30T08:00:00.000Z');
@@ -6745,6 +6748,14 @@ test('scheduled automation computes the next daily trigger time', () => {
   ], beforeTime);
   assert.equal(next.task.id, 'soon');
   assert.equal(next.nextAt.toISOString(), '2026-06-30T08:30:00.000Z');
+  assert.equal(
+    extensionModule.__getScheduledAutomationProjectPath({ id: 'bound', projectPath: '/workspace/a' }, '/workspace/b'),
+    '/workspace/a'
+  );
+  assert.equal(
+    extensionModule.__getScheduledAutomationProjectPath({ id: 'legacy' }, '/workspace/b'),
+    '/workspace/b'
+  );
 });
 
 test('Flow pause and abandon commands work correctly', async () => {

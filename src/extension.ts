@@ -1025,11 +1025,15 @@ function normalizeScheduledAutomationTask(value: unknown, index: number): Soloma
   const rawTime = String(source.timeOfDay || '').trim();
   const prompt = String(source.prompt || '').trim();
   const title = String(source.title || '').trim();
+  const projectPath = String(source.projectPath || '').trim();
+  const projectName = String(source.projectName || '').trim();
   const enabled = Object.prototype.hasOwnProperty.call(source, 'enabled') ? Boolean(source.enabled) : Boolean(prompt);
   return {
     id,
     title,
     enabled,
+    projectPath,
+    projectName,
     timeOfDay: /^([01]\d|2[0-3]):[0-5]\d$/.test(rawTime) ? rawTime : '09:00',
     prompt
   };
@@ -5752,6 +5756,10 @@ function getNextScheduledAutomationTask(tasks: SolomapScheduledAutomationTask[],
   return candidates[0] || null;
 }
 
+function getScheduledAutomationProjectPath(task: SolomapScheduledAutomationTask, fallbackProjectPath: string): string {
+  return String(task.projectPath || '').trim() || String(fallbackProjectPath || '').trim();
+}
+
 function scheduleTimedAutomationTask(context: vscode.ExtensionContext): void {
   if (scheduledAutomationTimer) {
     clearTimeout(scheduledAutomationTimer);
@@ -5784,7 +5792,8 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
   if (!task || task.enabled === false || !prompt) {
     return;
   }
-  const workspaceRoot = await ensureActionProject(context, activeProjectRoot || getSelectedProjectPath(context) || '');
+  const targetProjectPath = getScheduledAutomationProjectPath(task, activeProjectRoot || getSelectedProjectPath(context) || '');
+  const workspaceRoot = await ensureActionProject(context, targetProjectPath);
   if (!workspaceRoot) {
     return;
   }

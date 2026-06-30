@@ -413,6 +413,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       padding: 4px 0;
     }
 
+    .scheduled-task-card-target {
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.35;
+      margin-top: -2px;
+    }
+
     .automation-scheduled-entry {
       border: 1px solid rgba(255, 255, 255, 0.08);
       background: rgba(255, 255, 255, 0.035);
@@ -3880,8 +3887,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerDue: '提醒已到',
         focusTimerSaved: '专注提醒已更新',
         scheduledTasksTitle: '定时开始任务',
-        scheduledTasksTarget: '到点会在 {project} 中开始 Solo 对话',
+        scheduledTasksTarget: '新增定时会绑定 {project}',
         scheduledTasksNoProject: '先选择一个项目，定时任务会在当前项目中启动。',
+        scheduledTaskTarget: '项目：{project}',
         scheduledTasksEmpty: '还没有定时任务。',
         scheduledTasksNext: '下次 {time}',
         scheduledTaskNamePlaceholder: '名称',
@@ -4212,8 +4220,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerDue: 'Reminder due',
         focusTimerSaved: 'Focus timer updated',
         scheduledTasksTitle: 'Scheduled tasks',
-        scheduledTasksTarget: 'Starts a Solo conversation in {project} at the scheduled time',
+        scheduledTasksTarget: 'New scheduled tasks bind to {project}',
         scheduledTasksNoProject: 'Choose a project first. Scheduled tasks run in the current project.',
+        scheduledTaskTarget: 'Project: {project}',
         scheduledTasksEmpty: 'No scheduled tasks yet.',
         scheduledTasksNext: 'Next {time}',
         scheduledTaskNamePlaceholder: 'Name',
@@ -4908,6 +4917,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         id: String(source.id || '').trim() || 'scheduled-' + (index + 1),
         title: String(source.title || '').trim(),
         enabled: Object.prototype.hasOwnProperty.call(source, 'enabled') ? Boolean(source.enabled) : Boolean(prompt),
+        projectPath: String(source.projectPath || '').trim(),
+        projectName: String(source.projectName || '').trim(),
         timeOfDay: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(source.timeOfDay || '')) ? String(source.timeOfDay) : '09:00',
         prompt
       };
@@ -5201,6 +5212,26 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return parts[parts.length - 1] || projectPath;
     }
 
+    function getScheduledTaskProjectName(task) {
+      const projectPath = String(task && task.projectPath || '').trim();
+      const project = projectPath
+        ? (currentProjects.projects || []).find(item => item.path === projectPath)
+          || (currentProjects.portfolio || []).find(item => item.path === projectPath)
+        : null;
+      if (project && (project.name || project.path)) {
+        return project.name || project.path;
+      }
+      if (task && task.projectName) {
+        return String(task.projectName);
+      }
+      if (!projectPath) {
+        return getSelectedProjectDisplayName();
+      }
+      const normalized = projectPath.replace(/[\\/]+$/, '');
+      const parts = normalized.split(/[\\/]/).filter(Boolean);
+      return parts[parts.length - 1] || projectPath;
+    }
+
     function updateScheduledTasksTarget() {
       if (!scheduledTasksTarget) return;
       const projectName = getSelectedProjectDisplayName();
@@ -5221,6 +5252,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
       scheduledTasksList.innerHTML = tasks.map((task) => {
         const enabled = task.enabled !== false;
+        const taskProjectName = getScheduledTaskProjectName(task);
         return [
           '<div class="scheduled-task-card" data-scheduled-task-id="' + escapeHtml(task.id) + '">',
             '<div class="scheduled-task-top">',
@@ -5229,6 +5261,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               '<button type="button" class="settings-action-btn test-btn" data-scheduled-toggle>' + escapeHtml(enabled ? t('scheduledTaskEnabled') : t('scheduledTaskDisabled')) + '</button>',
               '<button type="button" class="settings-action-btn test-btn" data-scheduled-delete><span class="codicon codicon-trash"></span></button>',
             '</div>',
+            taskProjectName ? '<div class="scheduled-task-card-target">' + escapeHtml(t('scheduledTaskTarget').replace('{project}', taskProjectName)) + '</div>' : '',
             '<textarea class="settings-input settings-textarea" rows="2" data-scheduled-prompt placeholder="' + escapeHtml(t('scheduledTaskPromptPlaceholder')) + '">' + escapeHtml(task.prompt || '') + '</textarea>',
           '</div>'
         ].join('');
@@ -5303,12 +5336,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const timeOfDay = scheduledTaskTimeInput && /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(scheduledTaskTimeInput.value || ''))
         ? String(scheduledTaskTimeInput.value)
         : '09:00';
+      const projectPath = currentProjects.selectedProjectPath || activeProjectPath || '';
       automationDraftSettings.scheduledTasks = [
         ...(automationDraftSettings.scheduledTasks || []),
         {
           id: createScheduledTaskId(),
           title: String(scheduledTaskTitleInput ? scheduledTaskTitleInput.value : '').trim(),
           enabled: true,
+          projectPath,
+          projectName: getSelectedProjectDisplayName(),
           timeOfDay,
           prompt
         }

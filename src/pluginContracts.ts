@@ -49,6 +49,8 @@ export interface SolomapScheduledAutomationTask {
   id: string;
   title?: string;
   enabled?: boolean;
+  projectPath?: string;
+  projectName?: string;
   timeOfDay?: string;
   prompt?: string;
 }
