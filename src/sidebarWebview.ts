@@ -376,6 +376,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       gap: 7px;
     }
 
+    .scheduled-task-target {
+      color: var(--text-muted);
+      font-size: 10.5px;
+      line-height: 1.35;
+      margin-top: -2px;
+    }
+
     .scheduled-task-card {
       border: 1px solid rgba(255, 255, 255, 0.10);
       background: rgba(255, 255, 255, 0.035);
@@ -404,6 +411,25 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       font-size: 10px;
       line-height: 1.35;
       padding: 4px 0;
+    }
+
+    .automation-scheduled-entry {
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.035);
+      border-radius: 7px;
+      padding: 6px 7px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .automation-scheduled-copy {
+      color: var(--text-muted);
+      font-size: 10.5px;
+      line-height: 1.35;
+      min-width: 0;
     }
 
     .enhancement-list {
@@ -3143,6 +3169,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           <span id="scheduled-tasks-title">Scheduled tasks</span>
           <span class="automation-summary-line" id="scheduled-tasks-next"></span>
         </div>
+        <div class="scheduled-task-target" id="scheduled-tasks-target"></div>
         <div class="scheduled-task-list" id="scheduled-tasks-list"></div>
         <div class="scheduled-task-add">
           <input type="text" class="settings-input" id="scheduled-task-title-input" placeholder="Name">
@@ -3457,6 +3484,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         </div>
         <textarea class="settings-input settings-textarea" id="automation-prompt-input" style="display:none;" rows="2" placeholder="Prompt to auto-send after this trigger..."></textarea>
         <div class="automation-summary-line" id="automation-current-summary"></div>
+        <div class="automation-scheduled-entry" id="automation-scheduled-entry">
+          <span class="automation-scheduled-copy" id="automation-scheduled-entry-copy">Scheduled tasks · 0</span>
+          <button class="settings-action-btn test-btn" type="button" id="btn-open-scheduled-tasks"><span class="codicon codicon-clock"></span><span id="text-open-scheduled-tasks">Manage</span></button>
+        </div>
       </div>
     </div>
 
@@ -3549,6 +3580,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnStopFocusTimer = document.getElementById('btn-stop-focus-timer');
     const scheduledTasksTitle = document.getElementById('scheduled-tasks-title');
     const scheduledTasksNext = document.getElementById('scheduled-tasks-next');
+    const scheduledTasksTarget = document.getElementById('scheduled-tasks-target');
     const scheduledTasksList = document.getElementById('scheduled-tasks-list');
     const scheduledTaskTitleInput = document.getElementById('scheduled-task-title-input');
     const scheduledTaskTimeInput = document.getElementById('scheduled-task-time-input');
@@ -3605,6 +3637,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const automationTimeRow = document.getElementById('automation-time-row');
     const automationTimeInput = document.getElementById('automation-time-input');
     const automationCurrentSummary = document.getElementById('automation-current-summary');
+    const automationScheduledEntryCopy = document.getElementById('automation-scheduled-entry-copy');
+    const btnOpenScheduledTasks = document.getElementById('btn-open-scheduled-tasks');
     let focusTimerTick = null;
     let currentLanguage = 'zh';
     let currentNodes = [];
@@ -3846,6 +3880,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerDue: '提醒已到',
         focusTimerSaved: '专注提醒已更新',
         scheduledTasksTitle: '定时开始任务',
+        scheduledTasksTarget: '到点会在 {project} 中开始 Solo 对话',
+        scheduledTasksNoProject: '先选择一个项目，定时任务会在当前项目中启动。',
         scheduledTasksEmpty: '还没有定时任务。',
         scheduledTasksNext: '下次 {time}',
         scheduledTaskNamePlaceholder: '名称',
@@ -3863,6 +3899,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         automationActionPomodoro: '番茄钟提醒',
         automationActionRetry: '重试任务',
         automationActionPrompt: '唤起新任务对话',
+        automationScheduledEntry: '定时任务 · {count} 组',
+        openScheduledTasks: '管理',
         automationSummaryPattern: '当前：{trigger} -> {action}',
         automationPromptPlaceholder: '触发后自动发送的新任务提示词...',
         automationTriggerCompleted: '任务完成后',
@@ -4174,6 +4212,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         focusTimerDue: 'Reminder due',
         focusTimerSaved: 'Focus timer updated',
         scheduledTasksTitle: 'Scheduled tasks',
+        scheduledTasksTarget: 'Starts a Solo conversation in {project} at the scheduled time',
+        scheduledTasksNoProject: 'Choose a project first. Scheduled tasks run in the current project.',
         scheduledTasksEmpty: 'No scheduled tasks yet.',
         scheduledTasksNext: 'Next {time}',
         scheduledTaskNamePlaceholder: 'Name',
@@ -4191,6 +4231,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         automationActionPomodoro: 'Pomodoro reminder',
         automationActionRetry: 'Retry task',
         automationActionPrompt: 'Start new task conversation',
+        automationScheduledEntry: 'Scheduled tasks · {count}',
+        openScheduledTasks: 'Manage',
         automationSummaryPattern: 'Current: {trigger} -> {action}',
         automationPromptPlaceholder: 'Prompt to auto-send after this trigger...',
         automationTriggerCompleted: 'After completion',
@@ -4515,6 +4557,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('text-add-scheduled-task', t('addScheduledTask'));
       if (scheduledTaskTitleInput) scheduledTaskTitleInput.placeholder = t('scheduledTaskNamePlaceholder');
       if (scheduledTaskPromptInput) scheduledTaskPromptInput.placeholder = t('scheduledTaskPromptPlaceholder');
+      updateScheduledTasksTarget();
       setText('feedback-title', t('feedbackPanelTitle'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
       setText('text-rating-title', t('feedbackRatingTitle'));
@@ -4555,6 +4598,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('label-automation-focus-minutes', t('automationFocusMinutes'));
       setText('label-automation-time', t('automationTime'));
       if (automationPromptInput) automationPromptInput.placeholder = t('automationPromptPlaceholder');
+      setText('text-open-scheduled-tasks', t('openScheduledTasks'));
+      updateAutomationScheduledEntry();
       setText('option-review-high-risk', t('reviewHighRisk'));
       setText('option-review-all', t('reviewAll'));
       setText('option-review-off', t('reviewOff'));
@@ -4604,6 +4649,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           settingsPanel.style.display = 'none';
           if (feedbackPanel) feedbackPanel.style.display = 'none';
           focusTimerPanel.style.display = 'block';
+          updateScheduledTasksTarget();
           renderScheduledTasksView();
           updateFocusTimerView();
         }
@@ -4638,6 +4684,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     if (btnAddScheduledTask) {
       btnAddScheduledTask.addEventListener('click', addScheduledTaskFromPanel);
+    }
+
+    if (btnOpenScheduledTasks) {
+      btnOpenScheduledTasks.addEventListener('click', () => {
+        settingsPanel.style.display = 'none';
+        if (feedbackPanel) feedbackPanel.style.display = 'none';
+        focusTimerPanel.style.display = 'block';
+        updateScheduledTasksTarget();
+        renderScheduledTasksView();
+        updateFocusTimerView();
+      });
     }
 
     if (btnToggleFeedback) {
@@ -4832,8 +4889,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       { key: 'completed', labelKey: 'automationTriggerCompleted' },
       { key: 'failed', labelKey: 'automationTriggerFailed' },
       { key: 'stopped', labelKey: 'automationTriggerStopped' },
-      { key: 'focus_time', labelKey: 'automationTriggerFocus' },
-      { key: 'scheduled_time', labelKey: 'automationTriggerScheduled' }
+      { key: 'focus_time', labelKey: 'automationTriggerFocus' }
     ];
     const automationActions = [
       { key: 'none', labelKey: 'automationActionNone' },
@@ -4984,6 +5040,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         .replace('{action}', getAutomationActionLabel(actionKey));
     }
 
+    function updateAutomationScheduledEntry() {
+      if (!automationScheduledEntryCopy) return;
+      const automation = automationDraftSettings || normalizeAutomationSettings(currentSettings || {});
+      const count = (automation.scheduledTasks || []).length;
+      automationScheduledEntryCopy.textContent = t('automationScheduledEntry').replace('{count}', String(count));
+    }
+
     function syncAutomationControlsFromTrigger() {
       if (!automationTriggerSelect || !automationActionSelect) return;
       if (!automationDraftSettings) automationDraftSettings = normalizeAutomationSettings(currentSettings || {});
@@ -5012,6 +5075,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (automationFocusMinutesInput) automationFocusMinutesInput.value = String(automationDraftSettings.focusMinutes || 25);
       if (automationTimeInput) automationTimeInput.value = /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(rule.timeOfDay || '')) ? String(rule.timeOfDay) : '09:00';
       syncAutomationSummary(triggerKey, actionKey);
+      updateAutomationScheduledEntry();
     }
 
     function updateAutomationDraftFromControls() {
@@ -5124,9 +5188,31 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
     }
 
+    function getSelectedProjectDisplayName() {
+      const projectPath = currentProjects.selectedProjectPath || activeProjectPath || '';
+      if (!projectPath) return '';
+      const project = (currentProjects.projects || []).find(item => item.path === projectPath)
+        || (currentProjects.portfolio || []).find(item => item.path === projectPath);
+      if (project && (project.name || project.path)) {
+        return project.name || project.path;
+      }
+      const normalized = String(projectPath).replace(/[\\/]+$/, '');
+      const parts = normalized.split(/[\\/]/).filter(Boolean);
+      return parts[parts.length - 1] || projectPath;
+    }
+
+    function updateScheduledTasksTarget() {
+      if (!scheduledTasksTarget) return;
+      const projectName = getSelectedProjectDisplayName();
+      scheduledTasksTarget.textContent = projectName
+        ? t('scheduledTasksTarget').replace('{project}', projectName)
+        : t('scheduledTasksNoProject');
+    }
+
     function renderScheduledTasksView() {
       const automation = automationDraftSettings || normalizeAutomationSettings(currentSettings || {});
       const tasks = automation.scheduledTasks || [];
+      updateScheduledTasksTarget();
       updateScheduledTasksNext();
       if (!scheduledTasksList) return;
       if (tasks.length === 0) {
@@ -5161,6 +5247,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       } else {
         updateScheduledTasksNext();
       }
+      updateAutomationScheduledEntry();
       if (shouldPersist) {
         vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
       }
@@ -5202,6 +5289,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             automationDraftSettings.scheduledTasks = (automationDraftSettings.scheduledTasks || []).filter(task => task.id !== taskId);
             syncFirstScheduledTaskTrigger(automationDraftSettings);
             renderScheduledTasksView();
+            updateAutomationScheduledEntry();
             vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
           });
         }
@@ -5229,6 +5317,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (scheduledTaskTitleInput) scheduledTaskTitleInput.value = '';
       if (scheduledTaskPromptInput) scheduledTaskPromptInput.value = '';
       renderScheduledTasksView();
+      updateAutomationScheduledEntry();
       vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
     }
 
@@ -5419,6 +5508,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           currentProjects.portfolio = normalizePortfolioDerivedSignals(message.projects.portfolio || []);
           currentProjects.globalStore = message.projects.globalStore || null;
           renderProjects(message.projects.projects, currentProjects.selectedProjectPath);
+          updateScheduledTasksTarget();
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath || '');
           break;
@@ -6199,6 +6289,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         title: project.path || project.name || ''
       })).filter(option => option.value);
       setSoloSelectOptions(projectSelect, options, selectedProjectPath || (options[0] ? options[0].value : ''));
+      updateScheduledTasksTarget();
     }
 
     function renderPortfolioFilters() {
@@ -7709,6 +7800,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       activeProjectPath = projectPath;
       currentProjects.selectedProjectPath = projectPath;
       setSoloSelectValue(projectSelect, projectPath);
+      updateScheduledTasksTarget();
       activePortfolioFilter = 'all';
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, projectPath);

@@ -610,6 +610,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /feedback\.open/);
   assert.match(html, /id="btn-toggle-focus-timer"/);
   assert.match(html, /id="focus-timer-panel"/);
+  assert.match(html, /id="scheduled-tasks-target"/);
   assert.match(html, /id="scheduled-tasks-list"/);
   assert.match(html, /id="btn-add-scheduled-task"/);
   assert.match(script, /nextFocusReminderAt/);
@@ -653,8 +654,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(html, /id="automation-trigger-select"/);
   assert.match(html, /id="automation-action-select"/);
   assert.match(html, /id="automation-time-input"/);
+  assert.match(html, /id="btn-open-scheduled-tasks"/);
   assert.match(script, /automationActionNone/);
-  assert.match(script, /automationTriggerScheduled/);
+  assert.match(script, /openScheduledTasks/);
   assert.doesNotMatch(html, /automation-trigger-row|automation-check/);
   assert.match(script, /entitlement\.login/);
   assert.match(script, /entitlement\.paste/);
@@ -686,6 +688,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'text-stop-focus-timer',
     'scheduled-tasks-title',
     'scheduled-tasks-next',
+    'scheduled-tasks-target',
     'scheduled-tasks-list',
     'scheduled-task-title-input',
     'scheduled-task-time-input',
@@ -718,6 +721,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'automation-time-row',
     'automation-time-input',
     'automation-current-summary',
+    'automation-scheduled-entry-copy',
+    'btn-open-scheduled-tasks',
+    'text-open-scheduled-tasks',
     'setting-feedback-title',
     'setting-feedback-body',
     'btn-open-feedback',
@@ -825,9 +831,27 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   });
   assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'agy');
   assert.equal(elements['setting-clipath-custom'].style.display, 'none');
+  assert.ok(elements['automation-trigger-select'].__options.every((option) => option.getAttribute('data-solo-option-value') !== 'scheduled_time'));
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'app', path: '/workspace/app' }],
+      selectedProjectPath: '/workspace/app',
+      portfolio: [{ name: 'app', path: '/workspace/app' }]
+    }
+  });
   postedMessages.length = 0;
+  elements['btn-toggle-settings'].listeners.click();
+  assert.equal(elements['settings-panel'].style.display, 'block');
+  assert.match(elements['automation-scheduled-entry-copy'].textContent, /0/);
+  elements['btn-open-scheduled-tasks'].listeners.click();
+  assert.equal(elements['settings-panel'].style.display, 'none');
+  assert.equal(elements['focus-timer-panel'].style.display, 'block');
+  assert.match(elements['scheduled-tasks-target'].textContent, /app/);
+  elements['btn-close-focus-timer'].listeners.click();
   elements['btn-toggle-focus-timer'].listeners.click();
   assert.equal(elements['focus-timer-panel'].style.display, 'block');
+  assert.match(elements['scheduled-tasks-target'].textContent, /app/);
   elements['focus-timer-minutes'].value = '15';
   elements['focus-timer-minutes'].listeners.input();
   elements['btn-start-focus-timer'].listeners.click();
@@ -882,28 +906,6 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     && message.automationTasks.triggers.stopped.retry === true
   ));
   postedMessages.length = 0;
-  elements['automation-trigger-select'].listeners.click({
-    target: elements['automation-trigger-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'scheduled_time'),
-    stopPropagation() {}
-  });
-  elements['automation-action-select'].listeners.click({
-    target: elements['automation-action-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'prompt'),
-    stopPropagation() {}
-  });
-  elements['automation-time-input'].value = '08:30';
-  elements['automation-time-input'].listeners.input();
-  elements['automation-prompt-input'].value = '整理今天最重要的一项任务';
-  elements['automation-prompt-input'].listeners.input();
-  elements['btn-save-settings'].listeners.click();
-  assert.ok(postedMessages.some((message) =>
-    message.command === 'settings.update'
-    && message.automationTasks
-    && message.automationTasks.triggers.scheduled_time.timeOfDay === '08:30'
-    && message.automationTasks.triggers.scheduled_time.prompt === '整理今天最重要的一项任务'
-    && Array.isArray(message.automationTasks.scheduledTasks)
-    && message.automationTasks.scheduledTasks[0].timeOfDay === '08:30'
-    && message.automationTasks.triggers.scheduled_time.retry === false
-  ));
 
   dispatchMessage({
     command: 'projectsLoaded',
