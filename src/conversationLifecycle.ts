@@ -5,9 +5,11 @@ import { AgentConversation } from './db/types';
 export interface ConversationLifecycleOptions {
   nowMs?: number;
   staleRunningMs?: number;
+  staleRunningStatusMs?: number;
 }
 
 const defaultStaleRunningMs = 2 * 60 * 1000;
+const defaultStaleRunningStatusMs = 10 * 60 * 1000;
 const agentStatusDirName = 'agent-status';
 
 function readJson(filePath: string): any | null {
@@ -37,11 +39,16 @@ function getConversationStatusFilePaths(projectRoot: string, conversationId: num
   ];
 }
 
-function readStatusForConversation(projectRoot: string, conversationId: number): any | null {
+interface ConversationStatusMatch {
+  status: any;
+  filePath: string;
+}
+
+function readStatusForConversation(projectRoot: string, conversationId: number): ConversationStatusMatch | null {
   for (const filePath of getConversationStatusFilePaths(projectRoot, conversationId)) {
     const status = readJson(filePath);
     if (status && Number(status.executionLogId || 0) === Number(conversationId || 0)) {
-      return status;
+      return { status, filePath };
     }
   }
   return null;
@@ -65,9 +72,41 @@ function statusFromOutput(output: string): string {
   return '';
 }
 
-function hasRunningStatus(projectRoot: string, conversation: AgentConversation): boolean {
-  const status = readStatusForConversation(projectRoot, Number(conversation.id || 0));
-  return Boolean(status && String(status.status || '') === 'Running');
+function isContinuationConversation(conversation: AgentConversation, status: any | null): boolean {
+  const runKind = String(status?.runKind || '').trim();
+  const output = String(conversation.output || '');
+  return runKind === 'solo_continue'
+    || runKind === 'step_continue'
+    || /Agent continuation started\.|Continuation parent conversation:|Continuation mode:/i.test(output);
+}
+
+function getFileMtimeMs(filePath: string): number {
+  try {
+    return fs.existsSync(filePath) ? fs.statSync(filePath).mtimeMs : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function hasFreshRunningStatus(
+  projectRoot: string,
+  conversation: AgentConversation,
+  nowMs: number,
+  staleRunningStatusMs: number
+): boolean {
+  const match = readStatusForConversation(projectRoot, Number(conversation.id || 0));
+  if (!match || String(match.status?.status || '') !== 'Running') {
+    return false;
+  }
+  const outputFilePath = String(match.status?.outputFilePath || '').trim();
+  const latestActivityMs = Math.max(
+    getFileMtimeMs(match.filePath),
+    outputFilePath ? getFileMtimeMs(outputFilePath) : 0
+  );
+  if (!latestActivityMs) {
+    return true;
+  }
+  return nowMs - latestActivityMs <= staleRunningStatusMs;
 }
 
 export function isConversationRunningStatus(status: string): boolean {
@@ -87,14 +126,19 @@ export function normalizeAgentConversationLifecycle(
   if (status !== 'Running') {
     return conversation;
   }
-  if (hasRunningStatus(projectRoot, conversation)) {
+  const nowMs = options.nowMs ?? Date.now();
+  const staleRunningStatusMs = options.staleRunningStatusMs ?? defaultStaleRunningStatusMs;
+  const statusMatch = readStatusForConversation(projectRoot, Number(conversation.id || 0));
+  if (hasFreshRunningStatus(projectRoot, conversation, nowMs, staleRunningStatusMs)) {
     return conversation;
   }
   const startedAt = Date.parse(String(conversation.timestamp || ''));
-  const nowMs = options.nowMs ?? Date.now();
   const staleRunningMs = options.staleRunningMs ?? defaultStaleRunningMs;
   if (Number.isFinite(startedAt) && nowMs - startedAt < staleRunningMs) {
     return conversation;
+  }
+  if (isContinuationConversation(conversation, statusMatch?.status || null)) {
+    return { ...conversation, status: 'Recorded' };
   }
   return { ...conversation, status: 'Failed' };
 }

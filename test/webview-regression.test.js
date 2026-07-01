@@ -2481,6 +2481,52 @@ test('conversation lifecycle reconciles stale running execution logs before pres
   reopened.close();
 });
 
+test('conversation lifecycle records stale continuation runs instead of showing them as running', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-lifecycle-continuation-'));
+  const solopreneurA = path.join(projectRootA, '.solopreneur');
+  const runDir = path.join(solopreneurA, 'agent-runs', '__solo__', '1');
+  const statusRoot = path.join(solopreneurA, 'agent-status');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(statusRoot, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  fs.writeFileSync(outputFilePath, 'Continuation output stopped after the terminal closed.\n', 'utf8');
+  const store = new SqliteStore(path.join(solopreneurA, 'project_journal.db'), projectRoot);
+  await store.init();
+  const executionId = store.logExecution(
+    '__solo__',
+    'codex',
+    'codex resume',
+    'Agent continuation started.\n\nContinuation parent conversation: 9',
+    'Running'
+  );
+  const statusFilePath = path.join(statusRoot, `${executionId}.json`);
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '__solo__',
+    runKind: 'solo_continue',
+    status: 'Running',
+    executionLogId: executionId,
+    outputFilePath,
+    startedAt: '2026-01-01T00:00:00.000Z'
+  }), 'utf8');
+  const oldDate = new Date('2026-01-01T00:20:00.000Z');
+  fs.utimesSync(statusFilePath, oldDate, oldDate);
+  fs.utimesSync(outputFilePath, oldDate, oldDate);
+  store.db.run('UPDATE execution_logs SET timestamp = ? WHERE id = ?', ['2026-01-01T00:00:00.000Z', executionId]);
+  store.save();
+
+  const logs = store.getExecutionLogs('__solo__');
+  assert.equal(logs[0].status, 'Recorded');
+  assert.match(logs[0].output, /SoloMap lifecycle reconciliation: Running -> Recorded/);
+  store.close();
+
+  const reopened = new SqliteStore(path.join(solopreneurA, 'project_journal.db'), projectRoot);
+  await reopened.init();
+  const persisted = reopened.getExecutionLogs('__solo__');
+  assert.equal(persisted[0].status, 'Recorded');
+  reopened.close();
+});
+
 test('strategy pyramid webview renders the paid strategic cockpit without internal mechanics', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
