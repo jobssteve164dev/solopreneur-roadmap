@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.296 - 2026-07-01
+
+### Fixed
+- keep agent status reconciliation project-scoped (1f26461)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.295 - 2026-07-01
 
 ### Fixed
