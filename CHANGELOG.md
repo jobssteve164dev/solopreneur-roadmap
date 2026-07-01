@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.295 - 2026-07-01
+
+### Fixed
+- keep sidebar latest conversation rooted (f21d774)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.294 - 2026-07-01
 
 ### Fixed
