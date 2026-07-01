@@ -99,7 +99,7 @@ import {
   supportsSdkContinuation
 } from './agentCli';
 import { SolomapAutomationSettings, SolomapAutomationTrigger, SolomapScheduledAutomationTask, SolopreneurSettings } from './pluginContracts';
-import { buildConversationPresentations } from './conversationPresentation';
+import { buildConversationPresentations, selectLatestConversationRoots } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import {
   buildAgentModelsLoadedMessage,
@@ -1903,7 +1903,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return buildConversationPresentations(projectPath, soloConversationId, syncEngine.getAgentExecutions(soloConversationId)).slice(0, 1);
+    return selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, syncEngine.getAgentExecutions(soloConversationId)), 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -1912,7 +1912,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return buildConversationPresentations(projectPath, soloConversationId, store.getExecutionLogs(soloConversationId)).slice(0, 1);
+    return selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, store.getExecutionLogs(soloConversationId)), 1);
   } finally {
     store.close();
   }
@@ -1923,7 +1923,7 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return buildConversationPresentations(projectPath, nodeId, syncEngine.getAgentExecutions(nodeId)).slice(0, 1);
+    return selectLatestConversationRoots(buildConversationPresentations(projectPath, nodeId, syncEngine.getAgentExecutions(nodeId)), 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -1932,7 +1932,7 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return buildConversationPresentations(projectPath, nodeId, store.getExecutionLogs(nodeId)).slice(0, 1);
+    return selectLatestConversationRoots(buildConversationPresentations(projectPath, nodeId, store.getExecutionLogs(nodeId)), 1);
   } finally {
     store.close();
   }

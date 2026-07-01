@@ -143,3 +143,41 @@ export function buildConversationPresentations(
     };
   });
 }
+
+export function selectLatestConversationRoots(conversations: PresentedAgentConversation[], limit = 1): PresentedAgentConversation[] {
+  const byId = new Map<number, PresentedAgentConversation>();
+  conversations.forEach((conversation) => {
+    const id = Number(conversation.id || 0);
+    if (id) {
+      byId.set(id, conversation);
+    }
+  });
+
+  const latestActivityByRoot = new Map<number, number>();
+  const roots = new Map<number, PresentedAgentConversation>();
+  conversations.forEach((conversation) => {
+    const id = Number(conversation.id || 0);
+    if (!id) {
+      return;
+    }
+    const reviewParentId = Number(conversation.reviewParentConversationId || 0);
+    const rootId = reviewParentId && byId.has(reviewParentId)
+      ? reviewParentId
+      : Number(conversation.continuationRootConversationId || id);
+    const root = byId.get(rootId) || conversation;
+    const resolvedRootId = Number(root.id || id);
+    roots.set(resolvedRootId, root);
+    latestActivityByRoot.set(
+      resolvedRootId,
+      Math.max(latestActivityByRoot.get(resolvedRootId) || 0, id)
+    );
+  });
+
+  return [...roots.values()]
+    .sort((left, right) => {
+      const leftActivity = latestActivityByRoot.get(Number(left.id || 0)) || Number(left.id || 0);
+      const rightActivity = latestActivityByRoot.get(Number(right.id || 0)) || Number(right.id || 0);
+      return rightActivity - leftActivity || Number(right.id || 0) - Number(left.id || 0);
+    })
+    .slice(0, Math.max(0, limit));
+}

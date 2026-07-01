@@ -3468,7 +3468,7 @@ test('panel message helper posts stable command payloads', async () => {
 });
 
 test('conversation presentation is the shared source for roadmap and sidebar actions', () => {
-  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const { buildConversationPresentations, selectLatestConversationRoots } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
   const conversations = buildConversationPresentations('', '__solo__', [
     {
       id: 20,
@@ -3520,6 +3520,36 @@ test('conversation presentation is the shared source for roadmap and sidebar act
   assert.equal(conversations[0].capabilities.canRollback, true);
   assert.equal(conversations[1].continuationParentConversationId, 20);
   assert.equal(conversations[2].reviewParentConversationId, 20);
+  assert.deepEqual(selectLatestConversationRoots(conversations, 1).map(conversation => conversation.id), [20]);
+});
+
+test('sidebar latest solo conversation keeps the main conversation status when a continuation is newest', () => {
+  const { buildConversationPresentations, selectLatestConversationRoots } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const conversations = buildConversationPresentations('', '__solo__', [
+    {
+      id: 10,
+      nodeId: '__solo__',
+      timestamp: '2026-07-01T03:04:37.689Z',
+      agentCli: 'codex',
+      command: 'codex resume',
+      status: 'Running',
+      output: 'Agent continuation started.\n\nContinuation parent conversation: 9\nContinuation session id: 019f1b9f-ee3a-78f3-bfad-2a14a73faaaf'
+    },
+    {
+      id: 9,
+      nodeId: '__solo__',
+      timestamp: '2026-07-01T03:01:30.218Z',
+      agentCli: 'codex',
+      command: 'codex exec',
+      status: 'Completed',
+      output: 'User supplement:\n主对话\n\nSolo conversation state: Completed\n\nNative Agent session saved: session.json (019f1b9f-ee3a-78f3-bfad-2a14a73faaaf)'
+    }
+  ]);
+  const latest = selectLatestConversationRoots(conversations, 1);
+
+  assert.equal(latest.length, 1);
+  assert.equal(latest[0].id, 9);
+  assert.equal(latest[0].status, 'Completed');
 });
 
 test('legacy and canonical webview commands dispatch through one plugin action contract', async () => {
