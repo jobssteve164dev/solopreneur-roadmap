@@ -3433,7 +3433,7 @@ function buildAgentShellScript(
   const loggedCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
-  const statusBase = { nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
+  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
@@ -3861,6 +3861,7 @@ function startAgentReviewRun(input: {
   );
 
   const statusBase = {
+    workspaceRoot: input.workspaceRoot,
     nodeId: input.nodeId,
     runKind: 'agent_review',
     globalDataPath: input.globalDataPath,
@@ -4041,6 +4042,22 @@ function getAgentStatusRoot(workspaceRoot: string): string {
 
 function getAgentStatusFilePath(workspaceRoot: string, executionLogId: number): string {
   return path.join(getAgentStatusRoot(workspaceRoot), `${Number(executionLogId || 0)}.json`);
+}
+
+function inferWorkspaceRootFromStatusFilePath(statusFilePath: string): string {
+  const normalizedPath = String(statusFilePath || '').trim();
+  if (!normalizedPath) {
+    return '';
+  }
+  const fileName = path.basename(normalizedPath);
+  const statusDir = path.dirname(normalizedPath);
+  if (fileName === '.agent_status.json') {
+    return statusDir;
+  }
+  if (path.basename(statusDir) === agentStatusDirName && path.basename(path.dirname(statusDir)) === '.solopreneur') {
+    return path.dirname(path.dirname(statusDir));
+  }
+  return '';
 }
 
 function findAgentStatusForConversation(workspaceRoot: string, conversationId: number): any | null {
@@ -6518,6 +6535,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const statusData = JSON.parse(fileContent);
+    const statusWorkspaceRoot = String(inferWorkspaceRootFromStatusFilePath(statusFilePath) || statusData.workspaceRoot || '').trim();
+    if (statusWorkspaceRoot && activeProjectRoot && statusWorkspaceRoot !== activeProjectRoot) {
+      return;
+    }
     if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
       await processFlowStatusFile(statusFilePath, statusData);
       return;
@@ -6574,7 +6595,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const outputTail = getOutputTail(outputFilePath);
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
     const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
-    const workspaceRoot = activeProjectRoot || (statusFilePath ? path.dirname(statusFilePath) : '');
+    const workspaceRoot = statusWorkspaceRoot || activeProjectRoot || '';
+    if (workspaceRoot && activeProjectRoot && workspaceRoot !== activeProjectRoot) {
+      return;
+    }
     const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
     // User-confirmed completion remains authoritative over any in-flight Agent result.
     const preserveCompletedNode = currentNode?.status === 'Completed';
