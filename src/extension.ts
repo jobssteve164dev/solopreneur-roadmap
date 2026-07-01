@@ -2324,7 +2324,6 @@ async function saveProjectStrategy(
  * Sends current node and edge states back to the Webview frontend.
  */
 function sendNodesToWebview() {
-  reconcileActiveProjectConversationLifecycle();
   const nodes = syncEngine
     ? ensureCompletionCriteriaForNodes(activeProjectRoot || '', syncEngine.getNodes(), { writeMissing: false })
     : [];
@@ -3860,7 +3859,6 @@ function startAgentReviewRun(input: {
     ].filter(Boolean).join('\n\n'),
     'Running'
   );
-  postNodeConversations(input.nodeId);
 
   const statusBase = {
     nodeId: input.nodeId,
@@ -3904,9 +3902,13 @@ function startAgentReviewRun(input: {
   ].join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
 
-  const terminal = createAgentTerminal(input.workspaceRoot, `review-${input.nodeId}-${executionLogId}`);
-  terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  launchAgentConversationTerminal({
+    workspaceRoot: input.workspaceRoot,
+    label: `review-${input.nodeId}-${executionLogId}`,
+    conversationId: executionLogId,
+    command: `bash ${shellQuote(runScriptPath)}`,
+    refreshNodeId: input.nodeId
+  });
 }
 
 function getOutputTail(filePath: string): string {
@@ -4114,6 +4116,22 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
   });
+}
+
+function launchAgentConversationTerminal(input: {
+  workspaceRoot: string;
+  label: string;
+  conversationId?: number;
+  command: string;
+  refreshNodeId?: string;
+}): vscode.Terminal {
+  const terminal = createAgentTerminal(input.workspaceRoot, input.label, input.conversationId || 0);
+  terminal.show(true);
+  terminal.sendText(input.command);
+  if (input.refreshNodeId) {
+    postNodeConversations(input.refreshNodeId);
+  }
+  return terminal;
 }
 
 async function handleAgentTerminalClosed(terminalName: string): Promise<boolean> {
@@ -4687,7 +4705,6 @@ async function handleContinueConversationTurn(
   const directExecutionCommand = `${shellQuote(process.execPath)} ${shellQuote(runnerFilePath)}`;
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
   syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
-  postNodeConversations(nodeId);
 
   const { finalCommand } = buildAgentShellScript(
     agentCli,
@@ -4710,8 +4727,13 @@ async function handleContinueConversationTurn(
     runDir,
     statusFilePath
   );
-  const terminal = createAgentTerminal(activeProjectRoot, `continue-${nodeId}-${executionLogId}`, executionLogId);
-  terminal.sendText(finalCommand);
+  launchAgentConversationTerminal({
+    workspaceRoot: activeProjectRoot,
+    label: `continue-${nodeId}-${executionLogId}`,
+    conversationId: executionLogId,
+    command: finalCommand,
+    refreshNodeId: nodeId
+  });
 }
 
 async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
@@ -4776,7 +4798,6 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot);
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
   syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
-  postNodeConversations(nodeId);
   const { finalCommand } = buildAgentShellScript(
     agentCli,
     '',
@@ -4798,9 +4819,13 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     runDir,
     statusFilePath
   );
-  const terminal = createAgentTerminal(activeProjectRoot, `continue-${nodeId}-${executionLogId}`, executionLogId);
-  terminal.show(true);
-  terminal.sendText(finalCommand);
+  launchAgentConversationTerminal({
+    workspaceRoot: activeProjectRoot,
+    label: `continue-${nodeId}-${executionLogId}`,
+    conversationId: executionLogId,
+    command: finalCommand,
+    refreshNodeId: nodeId
+  });
 }
 
 function readAgentStatus(statusFilePath: string): any | null {
@@ -4984,7 +5009,6 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
-  postNodeConversations(roadmapRevisionId);
 
   const { finalCommand } = buildAgentShellScript(
     agentCli,
@@ -5007,9 +5031,13 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     runDir,
     getAgentStatusFilePath(activeProjectRoot, executionLogId)
   );
-  const terminal = createAgentTerminal(activeProjectRoot, `revision-${executionLogId}`, executionLogId);
-  terminal.show(true);
-  terminal.sendText(finalCommand);
+  launchAgentConversationTerminal({
+    workspaceRoot: activeProjectRoot,
+    label: `revision-${executionLogId}`,
+    conversationId: executionLogId,
+    command: finalCommand,
+    refreshNodeId: roadmapRevisionId
+  });
 }
 
 async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
@@ -5094,7 +5122,6 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     launchSummary,
     'Running'
   );
-  postNodeConversations(soloConversationId);
 
   const { finalCommand } = buildAgentShellScript(
     agentCli,
@@ -5117,9 +5144,13 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     runDir,
     getAgentStatusFilePath(activeProjectRoot, executionLogId)
   );
-  const terminal = createAgentTerminal(activeProjectRoot, `solo-${executionLogId}`, executionLogId);
-  terminal.show(true);
-  terminal.sendText(finalCommand);
+  launchAgentConversationTerminal({
+    workspaceRoot: activeProjectRoot,
+    label: `solo-${executionLogId}`,
+    conversationId: executionLogId,
+    command: finalCommand,
+    refreshNodeId: soloConversationId
+  });
 }
 
 function getCurrentFlowTrace(projectPath: string): FlowTrace | null {
@@ -5220,9 +5251,12 @@ async function startFlowRoleRun(
     runDir,
     statusFilePath
   );
-  const terminal = createAgentTerminal(input.projectPath, `flow-${input.flow.flowId}-${input.role}-${executionLogId}`, executionLogId);
-  terminal.show(true);
-  terminal.sendText(finalCommand);
+  launchAgentConversationTerminal({
+    workspaceRoot: input.projectPath,
+    label: `flow-${input.flow.flowId}-${input.role}-${executionLogId}`,
+    conversationId: executionLogId,
+    command: finalCommand
+  });
 }
 
 async function handleRunFlow(
@@ -5639,13 +5673,16 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
-  postNodeConversations(nodeId);
 
   const { finalCommand } = buildAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
 
-  const terminal = createAgentTerminal(workspaceRoot, `step-${nodeId}-${executionLogId}`, executionLogId);
-  terminal.show(true);
-  terminal.sendText(finalCommand);
+  launchAgentConversationTerminal({
+    workspaceRoot,
+    label: `step-${nodeId}-${executionLogId}`,
+    conversationId: executionLogId,
+    command: finalCommand,
+    refreshNodeId: nodeId
+  });
 }
 
 function extractUserSupplementFromExecutionOutput(output: string): string {

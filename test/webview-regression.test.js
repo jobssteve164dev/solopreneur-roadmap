@@ -3617,6 +3617,84 @@ test('sidebar provider delegates view, daily review, and global store responsibi
   assert.match(globalStoreSource, /export function ensureGlobalEngineeringStore/);
 });
 
+test('agent launch path uses one terminal-first startup component', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const sendNodesBody = source.slice(
+    source.indexOf('function sendNodesToWebview()'),
+    source.indexOf('function reconcileActiveProjectConversationLifecycle')
+  );
+  assert.doesNotMatch(sendNodesBody, /reconcileActiveProjectConversationLifecycle\(\)/);
+
+  const launcherBody = source.slice(
+    source.indexOf('function launchAgentConversationTerminal'),
+    source.indexOf('async function handleAgentTerminalClosed')
+  );
+  assert.match(launcherBody, /createAgentTerminal\(input\.workspaceRoot, input\.label, input\.conversationId \|\| 0\)/);
+  assert.ok(
+    launcherBody.indexOf('terminal.show(true)') < launcherBody.indexOf('terminal.sendText(input.command)'),
+    'startup component must show the terminal before sending the command'
+  );
+  assert.ok(
+    launcherBody.indexOf('terminal.sendText(input.command)') < launcherBody.indexOf('postNodeConversations(input.refreshNodeId)'),
+    'startup component must refresh conversation history after command dispatch'
+  );
+
+  const assertLaunchComponent = (name, startMarker, endMarker, refreshNodeExpression = '') => {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start + startMarker.length);
+    assert.notEqual(start, -1, `${name} start marker missing`);
+    assert.notEqual(end, -1, `${name} end marker missing`);
+    const body = source.slice(start, end);
+    assert.match(body, /launchAgentConversationTerminal\(\{/);
+    assert.doesNotMatch(body, /createAgentTerminal\(/);
+    if (refreshNodeExpression) {
+      assert.match(body, new RegExp(`refreshNodeId:\\s*${refreshNodeExpression}`));
+    }
+  };
+
+  assertLaunchComponent(
+    'solo launch',
+    'async function handleRunSoloConversation',
+    'function getCurrentFlowTrace',
+    'soloConversationId'
+  );
+  assertLaunchComponent(
+    'roadmap revision launch',
+    'async function handleRoadmapRevision',
+    'async function handleRunSoloConversation',
+    'roadmapRevisionId'
+  );
+  assertLaunchComponent(
+    'step launch',
+    'async function handleRunAgent',
+    'function extractUserSupplementFromExecutionOutput',
+    'nodeId'
+  );
+  assertLaunchComponent(
+    'sdk continuation launch',
+    'async function handleContinueConversationTurn',
+    'async function handleContinueNativeConversation',
+    'nodeId'
+  );
+  assertLaunchComponent(
+    'native continuation launch',
+    'async function handleContinueNativeConversation',
+    'function readAgentStatus',
+    'nodeId'
+  );
+  assertLaunchComponent(
+    'agent review launch',
+    'function startAgentReviewRun',
+    'function getOutputTail',
+    'input\\.nodeId'
+  );
+  assertLaunchComponent(
+    'flow role launch',
+    'async function startFlowRoleRun',
+    'async function handleRunFlow'
+  );
+});
+
 test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
