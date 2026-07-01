@@ -129,6 +129,7 @@ import {
   LocalUsageStats,
   recordLocalUsageEvent as recordLocalUsageEventInStats
 } from './localUsageStats';
+import { clearProjectInvestmentCache } from './projectAnalytics';
 import {
   buildPassportProUrl,
   buildProAccountStatus,
@@ -6691,6 +6692,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           failureReason
         });
         runDigestPath = writeRunDigest(workspaceRoot, runDigest);
+        clearProjectInvestmentCache(workspaceRoot);
         runDigestSummary = `Execution digest saved: ${toProjectRelativeRuntimePath(workspaceRoot, runDigestPath)}`;
       } catch (error) {
         runDigestSummary = `Execution digest not saved: ${error instanceof Error ? error.message : String(error)}`;

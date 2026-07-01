@@ -5,6 +5,7 @@ import * as Papa from 'papaparse';
 import { summarizeDocumentationForReview } from './documentationManifest';
 import { readLearningSummary } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
+import { ProjectInvestmentStats, readProjectInvestmentStats } from './projectAnalytics';
 import {
   ProjectDeliverySummary,
   ProjectIssueSummary,
@@ -54,6 +55,7 @@ export interface ProjectPortfolioSummary {
   documentationDocumentCount: number;
   documentationPendingReview: number;
   pinnedAt?: string;
+  investment: ProjectInvestmentStats;
   loopSummary: ProjectLoopSummary;
   nodes: RoadmapNodeLike[];
 }
@@ -412,6 +414,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
   const securitySignal = inferSecuritySignal(baseSummary.security);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
   const documentationSummary = summarizeDocumentationForReview(project.path);
+  const investment = readProjectInvestmentStats(project.path);
   const loopSummary = buildProjectLoopSummary(nodes, recommendedNode, stageSummary);
   return {
     ...baseSummary,
@@ -435,6 +438,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
     documentationDocumentCount: documentationSummary.documentCount,
     documentationPendingReview: documentationSummary.pendingReviewCount,
     pinnedAt: project.pinnedAt || '',
+    investment,
     loopSummary
   };
 }

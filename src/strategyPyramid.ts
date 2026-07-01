@@ -1,8 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as Papa from 'papaparse';
-import { buildAgentImpactSummary } from './agentImpact';
 import { readLearningSummary } from './learningLedger';
+import { readProjectInvestmentStats } from './projectAnalytics';
 
 export interface StrategyPyramidProject {
   name: string;
@@ -973,9 +973,8 @@ export function buildStrategyPyramidSnapshotData(
 
       const saved = savedStrategies.get(project.path);
 
-      // 完善单独项目的时间花费统计逻辑
-      const impactSummary = buildAgentImpactSummary([{ name: project.name, path: project.path }]);
-      const actualMinutes = impactSummary.totalMinutes || 0;
+      const investment = readProjectInvestmentStats(project.path);
+      const actualMinutes = Math.round(Number(investment.totalDurationMs || 0) / 60000);
 
       const role = saved ? csvRoleToDisplay(saved.role) : inferStrategyRole(project, nodes);
       const businessStage = saved ? saved.businessStage : inferBusinessStage(project, nodes);

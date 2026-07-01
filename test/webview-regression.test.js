@@ -179,6 +179,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './projectPortfolio') {
           return require(path.join(projectRoot, 'out/projectPortfolio.js'));
         }
+        if (id === './projectAnalytics') {
+          return require(path.join(projectRoot, 'out/projectAnalytics.js'));
+        }
         if (id === './projectRegistry') {
           return require(path.join(projectRoot, 'out/projectRegistry.js'));
         }
@@ -2397,6 +2400,52 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }
   }, 'strategyPyramid'), false);
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: {} }, 'strategyPyramid'), false);
+});
+
+test('project investment analytics aggregate local run effort for portfolio consumers', () => {
+  const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
+  const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-a-'));
+  const solopreneurA = path.join(projectRootA, '.solopreneur');
+  const digestRoot = path.join(solopreneurA, 'run-digests');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurA, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Build,,产品与 MVP,,agy,,Pending,2026-06-01T00:00:00.000Z,'
+  ].join('\n'), 'utf8');
+  fs.writeFileSync(path.join(digestRoot, 'step-1.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'step-1',
+    runKind: 'step',
+    status: 'Completed',
+    startedAt: '2026-06-14T09:00:00.000Z',
+    finishedAt: '2026-06-14T10:00:00.000Z',
+    durationMs: 60 * 60 * 1000
+  }), 'utf8');
+  fs.writeFileSync(path.join(digestRoot, 'solo-1.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'solo-1',
+    runKind: 'solo',
+    status: 'Failed',
+    startedAt: '2026-05-20T09:00:00.000Z',
+    finishedAt: '2026-05-20T09:30:00.000Z',
+    durationMs: 30 * 60 * 1000
+  }), 'utf8');
+
+  analytics.clearProjectInvestmentCache(projectRootA);
+  const stats = analytics.readProjectInvestmentStats(projectRootA, new Date('2026-06-15T00:00:00.000Z'));
+  assert.equal(stats.taskRunCount, 1);
+  assert.equal(stats.soloConversationCount, 1);
+  assert.equal(stats.completedRunCount, 1);
+  assert.equal(stats.failedRunCount, 1);
+  assert.equal(stats.totalDurationMs, 90 * 60 * 1000);
+  assert.equal(stats.recentDurationMs, 60 * 60 * 1000);
+  assert.ok(stats.focusScore > 0);
+
+  const summaries = projectPortfolio.buildProjectPortfolioSummaries([{ name: 'Invested', path: projectRootA }]);
+  assert.equal(summaries[0].investment.taskRunCount, 1);
+  assert.equal(summaries[0].investment.soloConversationCount, 1);
+  assert.equal(summaries[0].investment.totalDurationMs, 90 * 60 * 1000);
 });
 
 test('strategy pyramid webview renders the paid strategic cockpit without internal mechanics', () => {

@@ -3838,6 +3838,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         todayReasonMonthReview: '月末适合回顾优先级和复用效果',
         todayReasonNewProject: '新项目先确认起点',
         todayReasonReusable: '已有可复用经验，推进成本更低',
+        todayReasonInvestment: '最近投入最多，适合继续形成闭环',
         todayRhythmDaily: '每日自查',
         todayRhythmMonday: '周一确认主线',
         todayRhythmFriday: '周五收尾复盘',
@@ -3989,6 +3990,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         openFeedback: '提交到 GitHub Issue',
         globalType: '类型',
         globalReusable: '可复用线索',
+        globalInvestment: '投入',
         globalLearning: '学习候选',
         globalDependencies: '阻断',
         soloPlaceholder: '说说你现在想处理的问题...',
@@ -4171,6 +4173,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         todayReasonMonthReview: 'Month end is best for priority and reuse review',
         todayReasonNewProject: 'Confirm the starting point for this new project',
         todayReasonReusable: 'Reusable experience lowers today’s effort',
+        todayReasonInvestment: 'Recent effort is highest; keep closing the loop',
         todayRhythmDaily: 'Daily check',
         todayRhythmMonday: 'Monday focus',
         todayRhythmFriday: 'Friday closure',
@@ -4322,6 +4325,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         openFeedback: 'Open GitHub Issue',
         globalType: 'Type',
         globalReusable: 'Reusable signals',
+        globalInvestment: 'Effort',
         globalLearning: 'Learning candidates',
         globalDependencies: 'Blockers',
         soloPlaceholder: 'Describe what you want to handle...',
@@ -6704,9 +6708,27 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || !!project.stageGap;
     }
 
+    function getInvestment(project) {
+      return project && project.investment ? project.investment : {};
+    }
+
+    function hasInvestmentMomentum(project) {
+      const investment = getInvestment(project);
+      return Number(investment.focusScore || 0) >= 30 || Number(investment.recentDurationMs || 0) >= 30 * 60 * 1000;
+    }
+
+    function formatInvestmentDuration(durationMs) {
+      const minutes = Math.round(Number(durationMs || 0) / 60000);
+      if (minutes <= 0) return '';
+      if (minutes < 60) return minutes + (currentLanguage === 'zh' ? ' 分钟' : 'm');
+      const hours = Math.round(minutes / 6) / 10;
+      return hours + (currentLanguage === 'zh' ? ' 小时' : 'h');
+    }
+
       function todayPlanScore(project) {
         let score = 0;
         const rhythm = getTodayWorkRhythm();
+        const investment = getInvestment(project);
         if (Number(project.security && project.security.openCriticalHigh || 0) > 0) score += 130;
         if (Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0) score += 120;
         if (Number(project.failedNodes || 0) > 0) score += 100;
@@ -6724,6 +6746,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (rhythm === 'friday' && Number(project.inProgressNodes || 0) > 0) score += 15;
         if (rhythm === 'monthEnd' && hasCloseoutValue(project)) score += 55;
         if (rhythm === 'monthEnd' && (project.globalPriority === 'P0' || project.blocker)) score += 20;
+        score += Math.min(25, Math.round(Number(investment.focusScore || 0) / 4));
         return score;
       }
 
@@ -6739,6 +6762,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (isNewProjectStart(project)) return t('todayReasonNewProject');
         if (Number(project.runningNodes || 0) > 0) return t('todayReasonRunning');
         if (Number(project.inProgressNodes || 0) > 0) return t('todayReasonInProgress');
+        if (hasInvestmentMomentum(project)) return t('todayReasonInvestment');
         if (Number(project.reusableSignals || 0) > 0) return t('todayReasonReusable');
         if (Number(project.pendingNodes || 0) > 0) return t('todayReasonPending');
         return t('todayReasonReview');
@@ -6759,7 +6783,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         return [
           take(t('todaySlotUrgent'), project => Number(project.security && project.security.openCriticalHigh || 0) > 0 || Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 || Number(project.failedNodes || 0) > 0 || Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0 || project.globalPriority === 'P0'),
           take(t('todaySlotMain'), project => project.globalPriority === 'P1' || Number(project.runningNodes || 0) > 0 || Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0),
-          take(t('todaySlotClose'), project => Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || project.stageGap)
+          take(t('todaySlotClose'), project => hasInvestmentMomentum(project) || Number(project.reusableSignals || 0) > 0 || project.overallStatus === 'Completed' || project.stageGap)
         ].filter(Boolean).concat(
           projects
             .filter(project => !used.has(project.path))
@@ -7484,6 +7508,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const deliverySignal = deliverySignalText(project.delivery) || project.deliverySignal || '';
         const securitySignal = securitySignalText(project.security) || project.securitySignal || '';
         const foundationSignal = project.foundation && Number(project.foundation.missingCount || 0) > 0 ? foundationSignalText(project.foundation) : '';
+        const investment = getInvestment(project);
+        const investmentRunCount = Number(investment.taskRunCount || 0) + Number(investment.soloConversationCount || 0);
+        const investmentDuration = formatInvestmentDuration(investment.totalDurationMs);
+        const investmentSignal = investmentRunCount > 0
+          ? investmentRunCount + (currentLanguage === 'zh' ? ' 次' : ' runs') + (investmentDuration ? ' / ' + investmentDuration : '')
+          : '';
         return \`
           <div class="portfolio-card \${isSelected ? 'is-selected' : ''}" data-select-project-path="\${escapeHtml(project.path)}">
             <div class="portfolio-card-head">
@@ -7503,6 +7533,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="portfolio-global-row">
               <span class="global-chip">\${escapeHtml(t('globalType'))}: \${escapeHtml(projectTypeLabel(project.projectType))}</span>
               <span class="global-chip">\${escapeHtml(statusText(project.overallStatus))}</span>
+              \${investmentSignal ? \`<span class="global-chip">\${escapeHtml(t('globalInvestment'))}: \${escapeHtml(investmentSignal)}</span>\` : ''}
               \${project.reusableSignals ? \`<span class="global-chip">\${escapeHtml(t('globalReusable'))}: \${escapeHtml(project.reusableSignals)}</span>\` : ''}
               \${project.issuePressure ? \`<span class="global-chip">\${escapeHtml(t('issues'))}: \${escapeHtml(project.issuePressure)}</span>\` : ''}
               \${deliverySignal ? \`<span class="global-chip">\${escapeHtml(deliverySignal)}</span>\` : ''}
