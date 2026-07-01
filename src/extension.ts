@@ -2324,6 +2324,7 @@ async function saveProjectStrategy(
  * Sends current node and edge states back to the Webview frontend.
  */
 function sendNodesToWebview() {
+  reconcileActiveProjectConversationLifecycle();
   const nodes = syncEngine
     ? ensureCompletionCriteriaForNodes(activeProjectRoot || '', syncEngine.getNodes(), { writeMissing: false })
     : [];
@@ -2339,6 +2340,49 @@ function sendNodesToWebview() {
   }
   if (extensionContextRef) {
     void postFlowStateToWebview(extensionContextRef);
+  }
+}
+
+function reconcileActiveProjectConversationLifecycle(): void {
+  if (!syncEngine || !activeProjectRoot) {
+    return;
+  }
+  if (typeof syncEngine.getProjectAgentExecutions !== 'function') {
+    return;
+  }
+  const conversations = syncEngine.getProjectAgentExecutions();
+  const runningNodeIds = new Set(
+    conversations
+      .filter((conversation) => String(conversation.status || '') === 'Running')
+      .map((conversation) => String(conversation.nodeId || ''))
+      .filter(Boolean)
+  );
+  const latestByNode = new Map<string, AgentConversation>();
+  for (const conversation of conversations) {
+    const nodeId = String(conversation.nodeId || '');
+    if (!nodeId || nodeId === soloConversationId || nodeId === roadmapRevisionId) {
+      continue;
+    }
+    const current = latestByNode.get(nodeId);
+    if (!current || Number(conversation.id || 0) > Number(current.id || 0)) {
+      latestByNode.set(nodeId, conversation);
+    }
+  }
+  for (const node of syncEngine.getNodes()) {
+    if (node.status !== 'Running' || runningNodeIds.has(node.id)) {
+      continue;
+    }
+    const latest = latestByNode.get(node.id);
+    const latestStatus = String(latest?.status || '');
+    const nextStatus = latestStatus === 'Failed'
+      ? 'Failed'
+      : latestStatus === 'Completed'
+        ? 'Completed'
+        : 'In Progress';
+    syncEngine.updateNode(node.id, {
+      status: nextStatus as RoadmapNode['status'],
+      completedAt: nextStatus === 'Completed' ? (node.completedAt || new Date().toISOString()) : ''
+    });
   }
 }
 
@@ -4785,13 +4829,11 @@ function getAgentStatusFilePaths(workspaceRoot: string): string[] {
 }
 
 function hasRunningAgentConversation(workspaceRoot: string, nodes: RoadmapNode[]): boolean {
+  reconcileActiveProjectConversationLifecycle();
+  if (syncEngine?.getProjectAgentExecutions().some((conversation) => conversation.status === 'Running')) {
+    return true;
+  }
   if (nodes.some((candidate) => candidate.status === 'Running')) {
-    return true;
-  }
-  if (syncEngine?.getAgentExecutions(roadmapRevisionId).some((conversation) => conversation.status === 'Running')) {
-    return true;
-  }
-  if (syncEngine?.getAgentExecutions(soloConversationId).some((conversation) => conversation.status === 'Running')) {
     return true;
   }
   const status = readAgentStatus(path.join(workspaceRoot, '.agent_status.json'));

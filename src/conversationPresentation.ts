@@ -4,6 +4,7 @@ import {
   extractContinuationParentConversationId,
   hydrateConversationContinuations
 } from './continuation';
+import { normalizeAgentConversationLifecycles } from './conversationLifecycle';
 
 export interface ConversationChangedFile {
   label: string;
@@ -117,7 +118,8 @@ export function buildConversationPresentations(
   conversations: AgentConversation[],
   now = Date.now()
 ): PresentedAgentConversation[] {
-  return hydrateConversationContinuations(workspaceRoot, nodeId, conversations).map((conversation) => {
+  const normalizedConversations = normalizeAgentConversationLifecycles(workspaceRoot, conversations, { nowMs: now });
+  return hydrateConversationContinuations(workspaceRoot, nodeId, normalizedConversations).map((conversation) => {
     const output = String(conversation.output || '');
     const rollbackGitHash = extractRollbackGitHash(output);
     return {
@@ -141,4 +143,3 @@ export function buildConversationPresentations(
     };
   });
 }
-

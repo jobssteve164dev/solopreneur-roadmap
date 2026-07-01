@@ -227,6 +227,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './conversationPresentation') {
           return require(path.join(projectRoot, 'out/conversationPresentation.js'));
         }
+        if (id === './conversationLifecycle') {
+          return require(path.join(projectRoot, 'out/conversationLifecycle.js'));
+        }
         if (id === './pluginActions') {
           return require(path.join(projectRoot, 'out/pluginActions.js'));
         }
@@ -2446,6 +2449,36 @@ test('project investment analytics aggregate local run effort for portfolio cons
   assert.equal(summaries[0].investment.taskRunCount, 1);
   assert.equal(summaries[0].investment.soloConversationCount, 1);
   assert.equal(summaries[0].investment.totalDurationMs, 90 * 60 * 1000);
+});
+
+test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-lifecycle-a-'));
+  const solopreneurA = path.join(projectRootA, '.solopreneur');
+  fs.mkdirSync(solopreneurA, { recursive: true });
+  const store = new SqliteStore(path.join(solopreneurA, 'project_journal.db'), projectRoot);
+  await store.init();
+  const executionId = store.logExecution(
+    '1',
+    'codex',
+    'codex exec',
+    'Agent conversation started.\n\nLaunched command in integrated terminal.',
+    'Running'
+  );
+  store.db.run('UPDATE execution_logs SET timestamp = ? WHERE id = ?', ['2026-01-01T00:00:00.000Z', executionId]);
+  store.save();
+
+  const logs = store.getExecutionLogs('1');
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].status, 'Failed');
+  assert.match(logs[0].output, /SoloMap lifecycle reconciliation: Running -> Failed/);
+  store.close();
+
+  const reopened = new SqliteStore(path.join(solopreneurA, 'project_journal.db'), projectRoot);
+  await reopened.init();
+  const persisted = reopened.getExecutionLogs('1');
+  assert.equal(persisted[0].status, 'Failed');
+  reopened.close();
 });
 
 test('strategy pyramid webview renders the paid strategic cockpit without internal mechanics', () => {

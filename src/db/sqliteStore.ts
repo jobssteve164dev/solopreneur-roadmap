@@ -2,15 +2,22 @@ import * as fs from 'fs';
 import * as path from 'path';
 import initSqlJs from 'sql.js';
 import { AgentConversation, RoadmapNode } from './types';
+import {
+  inferProjectRootForConversationStore,
+  normalizeAgentConversationLifecycle
+} from '../conversationLifecycle';
 
 export class SqliteStore {
   private db: initSqlJs.Database | null = null;
   private SQL: initSqlJs.SqlJsStatic | null = null;
+  private readonly projectRoot: string;
 
   constructor(
     private dbFilePath: string,
     private extensionPath: string
-  ) {}
+  ) {
+    this.projectRoot = inferProjectRootForConversationStore(dbFilePath);
+  }
 
   public isInitialized(): boolean {
     return Boolean(this.db);
@@ -160,14 +167,33 @@ export class SqliteStore {
   }
 
   private normalizeConversationStatus(log: AgentConversation): AgentConversation {
-    const output = String(log.output || '');
-    if (
-      log.status === 'In Progress'
-      && /(?:Run finished at:|Sentinel captured state:|Agent output tail:)/.test(output)
-    ) {
-      return { ...log, status: 'Completed' };
+    const normalized = normalizeAgentConversationLifecycle(this.projectRoot, log);
+    if (normalized.status !== log.status) {
+      return {
+        ...normalized,
+        output: this.persistLifecycleStatus(normalized, log.status)
+      };
     }
-    return log;
+    return normalized;
+  }
+
+  private persistLifecycleStatus(log: AgentConversation, previousStatus: string): string {
+    if (!this.db || !log.id) {
+      return String(log.output || '');
+    }
+    const output = String(log.output || '');
+    const lifecycleNote = `SoloMap lifecycle reconciliation: ${previousStatus || 'Unknown'} -> ${log.status}`;
+    const nextOutput = output.includes('SoloMap lifecycle reconciliation:')
+      ? output
+      : [output, lifecycleNote].filter(Boolean).join('\n\n');
+    this.db.run(
+      `UPDATE execution_logs
+       SET output = ?, status = ?
+       WHERE id = ?`,
+      [nextOutput, log.status, log.id]
+    );
+    this.save();
+    return nextOutput;
   }
 
   private filterSupersededRunningLogs(logs: AgentConversation[]): AgentConversation[] {
@@ -293,7 +319,8 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    return this.filterSupersededRunningLogs(logs).map((log) => this.normalizeConversationStatus(log));
+    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)))
+      .map((log) => this.normalizeConversationStatus(log));
   }
 
   /**
@@ -317,7 +344,8 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    return this.filterSupersededRunningLogs(logs).map((log) => this.normalizeConversationStatus(log));
+    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)))
+      .map((log) => this.normalizeConversationStatus(log));
   }
 
   /**
