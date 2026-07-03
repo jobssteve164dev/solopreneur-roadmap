@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.297 - 2026-07-03
+
+### Fixed
+- settle conversations from final status files (a41515a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.296 - 2026-07-01
 
 ### Fixed
