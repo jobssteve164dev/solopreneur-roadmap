@@ -109,6 +109,22 @@ function hasFreshRunningStatus(
   return nowMs - latestActivityMs <= staleRunningStatusMs;
 }
 
+function statusFromStatusFile(conversation: AgentConversation, status: any | null): string {
+  const statusValue = String(status?.status || '').trim();
+  if (!statusValue || statusValue === 'Running' || statusValue === 'Processed') {
+    return '';
+  }
+  if (isContinuationConversation(conversation, status)) {
+    return 'Recorded';
+  }
+  const runKind = String(status?.runKind || '').trim();
+  const nodeId = String(status?.nodeId || conversation.nodeId || '').trim();
+  if (statusValue === 'In Progress' && (runKind === 'solo' || nodeId === '__solo__')) {
+    return 'Completed';
+  }
+  return statusValue;
+}
+
 export function isConversationRunningStatus(status: string): boolean {
   return String(status || '') === 'Running';
 }
@@ -129,6 +145,10 @@ export function normalizeAgentConversationLifecycle(
   const nowMs = options.nowMs ?? Date.now();
   const staleRunningStatusMs = options.staleRunningStatusMs ?? defaultStaleRunningStatusMs;
   const statusMatch = readStatusForConversation(projectRoot, Number(conversation.id || 0));
+  const settledStatus = statusFromStatusFile(conversation, statusMatch?.status || null);
+  if (settledStatus) {
+    return { ...conversation, status: settledStatus };
+  }
   if (hasFreshRunningStatus(projectRoot, conversation, nowMs, staleRunningStatusMs)) {
     return conversation;
   }

@@ -2527,6 +2527,72 @@ test('conversation lifecycle records stale continuation runs instead of showing 
   reopened.close();
 });
 
+test('conversation lifecycle settles fresh solo status files before stale fallback', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-lifecycle-fresh-solo-'));
+  const solopreneur = path.join(root, '.solopreneur');
+  const runDir = path.join(solopreneur, 'agent-runs', '__solo__', '1');
+  fs.mkdirSync(runDir, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  fs.writeFileSync(outputFilePath, 'Agent finished before the watcher updated SQLite.\n', 'utf8');
+  const store = new SqliteStore(path.join(solopreneur, 'project_journal.db'), projectRoot);
+  await store.init();
+  const executionId = store.logExecution(
+    '__solo__',
+    'codex',
+    'codex exec',
+    'Solo conversation started.',
+    'Running'
+  );
+  const statusFilePath = path.join(solopreneur, 'agent-status', `${executionId}.json`);
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    executionLogId: executionId,
+    outputFilePath,
+    startedAt: new Date().toISOString()
+  }), 'utf8');
+
+  const logs = store.getExecutionLogs('__solo__');
+  assert.equal(logs[0].status, 'Completed');
+  assert.match(logs[0].output, /SoloMap lifecycle reconciliation: Running -> Completed/);
+  store.close();
+});
+
+test('sidebar latest solo conversation does not show running after the final status file lands', () => {
+  const { buildConversationPresentations, selectLatestConversationRoots } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-sidebar-fresh-solo-'));
+  const statusRoot = path.join(root, '.solopreneur', 'agent-status');
+  fs.mkdirSync(statusRoot, { recursive: true });
+  fs.writeFileSync(path.join(statusRoot, '12.json'), JSON.stringify({
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    executionLogId: 12,
+    outputFilePath: path.join(root, '.solopreneur', 'agent-runs', '__solo__', '12', 'output.log'),
+    startedAt: new Date().toISOString()
+  }), 'utf8');
+
+  const latest = selectLatestConversationRoots(buildConversationPresentations(root, '__solo__', [
+    {
+      id: 12,
+      nodeId: '__solo__',
+      timestamp: new Date().toISOString(),
+      agentCli: 'codex',
+      command: 'codex exec',
+      status: 'Running',
+      output: 'Solo conversation started.'
+    }
+  ]), 1);
+
+  assert.equal(latest.length, 1);
+  assert.equal(latest[0].status, 'Completed');
+  assert.equal(latest[0].capabilities.canStop, false);
+  assert.equal(latest[0].capabilities.canContinue, false);
+});
+
 test('strategy pyramid webview renders the paid strategic cockpit without internal mechanics', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
