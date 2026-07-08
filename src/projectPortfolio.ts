@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as Papa from 'papaparse';
 
@@ -100,7 +101,9 @@ export function normalizeGlobalDataPath(rawPath: string, projects: SolopreneurPr
     return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
   }
   const firstProjectPath = projects[0]?.path || process.cwd();
-  return path.join(path.dirname(firstProjectPath), '.solomap-global');
+  const parent = path.dirname(firstProjectPath);
+  const safeParent = parent && parent !== path.sep && parent !== '.' ? parent : os.homedir();
+  return path.join(safeParent, '.solomap-global');
 }
 
 export function getLocalDateKey(date = new Date()): string {

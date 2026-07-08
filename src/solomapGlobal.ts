@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as childProcess from 'child_process';
 import { RoadmapNode } from './db/types';
@@ -552,8 +553,9 @@ export function normalizeSolomapGlobalPath(workspaceRoot: string, globalDataPath
   if (trimmed) {
     return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
   }
-  const baseRoot = workspaceRoot || process.cwd();
-  return path.join(path.dirname(baseRoot), '.solomap-global');
+  const parent = path.dirname(workspaceRoot || process.cwd());
+  const safeParent = parent && parent !== path.sep && parent !== '.' ? parent : os.homedir();
+  return path.join(safeParent, '.solomap-global');
 }
 
 export function getSolomapMemoryRoot(workspaceRoot: string, globalDataPath = ''): string {

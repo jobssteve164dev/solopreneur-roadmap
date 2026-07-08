@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
@@ -121,8 +122,9 @@ function normalizeSolomapGlobalPath(workspaceRoot: string, globalDataPath = ''):
   if (trimmed) {
     return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
   }
-  const baseRoot = workspaceRoot || process.cwd();
-  return path.join(path.dirname(baseRoot), '.solomap-global');
+  const parent = path.dirname(workspaceRoot || process.cwd());
+  const safeParent = parent && parent !== path.sep && parent !== '.' ? parent : os.homedir();
+  return path.join(safeParent, '.solomap-global');
 }
 
 function slugify(value: string): string {
@@ -787,7 +789,7 @@ export function buildLearningPromotionContext(workspaceRoot: string, globalDataP
   }
   reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
   maybeWritePromotionSuggestions(workspaceRoot, globalDataPath, readCandidates(paths).filter((candidate) => candidate.status === 'candidate'));
-  
+
   const rawSuggestions = readPromotionSuggestions(paths)
     .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
 

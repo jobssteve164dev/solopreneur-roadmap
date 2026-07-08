@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as Papa from 'papaparse';
 import { readLearningSummary } from './learningLedger';
@@ -173,7 +174,9 @@ function normalizeGlobalDataPath(rawPath: string): string {
   if (trimmed) {
     return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
   }
-  return path.join(path.dirname(process.cwd()), '.solomap-global');
+  const parent = path.dirname(process.cwd());
+  const safeParent = parent && parent !== path.sep && parent !== '.' ? parent : os.homedir();
+  return path.join(safeParent, '.solomap-global');
 }
 
 function readStrategyRoadmapNodes(projectPath: string): StrategyPyramidNodeSummary[] {
