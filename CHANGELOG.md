@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.310 - 2026-07-09
+
+### Added
+- add project growth data snapshots (4a2b02a)
+
+### Docs
+- define project growth data layer (d0d453c)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.309 - 2026-07-09
 
 ### Fixed
