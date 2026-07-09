@@ -1,6 +1,7 @@
 import {
   loadExternalDeliverySummary,
   loadExternalIssueSummary,
+  loadExternalPullRequestSummary,
   loadExternalSecuritySummary
 } from './projectExternalSignals';
 import { buildProjectPortfolioSummaries, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
@@ -16,6 +17,7 @@ interface SidebarProjectLoaderOptions {
 export class SidebarProjectLoader {
   private portfolioRequest = 0;
   private issueRequest = 0;
+  private pullRequestRequest = 0;
   private deliveryRequest = 0;
   private securityRequest = 0;
 
@@ -24,6 +26,7 @@ export class SidebarProjectLoader {
   public cancelExternalLoads(): void {
     this.portfolioRequest += 1;
     this.issueRequest += 1;
+    this.pullRequestRequest += 1;
     this.deliveryRequest += 1;
     this.securityRequest += 1;
   }
@@ -31,6 +34,7 @@ export class SidebarProjectLoader {
   public scheduleAll(projects: SolopreneurProject[], selectedProjectPath: string): void {
     this.schedulePortfolioEnrichment(projects, selectedProjectPath);
     this.scheduleIssueLoads(projects, selectedProjectPath);
+    this.schedulePullRequestLoads(projects, selectedProjectPath);
     this.scheduleDeliveryLoads(projects, selectedProjectPath);
     this.scheduleSecurityLoads(projects, selectedProjectPath);
   }
@@ -78,6 +82,19 @@ export class SidebarProjectLoader {
           this.options.postMessage({ command: 'projectIssuesLoaded', projectPath: project.path, issues });
         }).catch((error) => console.error('SoloMap sidebar failed to refresh issue summary:', error));
       }, 1200 + 80 * index);
+    });
+  }
+
+  private schedulePullRequestLoads(projects: SolopreneurProject[], selectedProjectPath: string): void {
+    const requestId = ++this.pullRequestRequest;
+    this.orderedProjects(projects, selectedProjectPath).forEach((project, index) => {
+      setTimeout(() => {
+        if (!this.options.isAvailable() || requestId !== this.pullRequestRequest) return;
+        void loadExternalPullRequestSummary(project.path).then((pullRequests) => {
+          if (!this.options.isAvailable() || requestId !== this.pullRequestRequest) return;
+          this.options.postMessage({ command: 'projectPullRequestsLoaded', projectPath: project.path, pullRequests });
+        }).catch((error) => console.error('SoloMap sidebar failed to refresh pull request summary:', error));
+      }, 1300 + 100 * index);
     });
   }
 

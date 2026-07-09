@@ -15,9 +15,11 @@ import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import {
   closeProjectIssue,
+  closeProjectPullRequest,
   createProjectIssue,
   loadExternalDeliverySummary,
   loadExternalIssueSummary,
+  loadExternalPullRequestSummary,
   loadExternalSecuritySummary,
   readCachedIssueDetails,
   readProjectIssueDetails
@@ -636,21 +638,31 @@ async function handleSharedWebviewAction(
       await respond({ command: 'issueActionCompleted', projectPath, success: result.ok, message: result.message });
       sendProjectsToWebviews(context);
     },
+    'pullRequest.close': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      const result = closeProjectPullRequest(projectPath, Number(request.pullRequestNumber || 0));
+      await respond({ command: 'pullRequestActionCompleted', projectPath, success: result.ok, message: result.message });
+      const pullRequests = await loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null);
+      if (pullRequests) await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
+      sendProjectsToWebviews(context);
+    },
     'project.refreshExternalData': async (request) => {
       const projectPath = String(request.projectPath || '');
-      const [issues, delivery, security] = await Promise.all([
+      const [issues, pullRequests, delivery, security] = await Promise.all([
         loadExternalIssueSummary(projectPath, { force: true }).catch(() => null),
+        loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null),
         loadExternalDeliverySummary(projectPath, { force: true }).catch(() => null),
         loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null)
       ]);
       if (issues) await respond({ command: 'projectIssuesLoaded', projectPath, issues });
+      if (pullRequests) await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
       if (delivery) await respond({ command: 'projectDeliveryLoaded', projectPath, delivery });
       if (security) await respond({ command: 'projectSecurityLoaded', projectPath, security });
       await respond({
         command: 'projectRefreshCompleted',
         projectPath,
-        success: Boolean(issues?.available || delivery?.available || security?.available),
-        message: issues?.message || delivery?.message || security?.message || ''
+        success: Boolean(issues?.available || pullRequests?.available || delivery?.available || security?.available),
+        message: issues?.message || pullRequests?.message || delivery?.message || security?.message || ''
       });
     },
     'project.openFile': async (request) => {

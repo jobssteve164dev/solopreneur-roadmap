@@ -9,9 +9,11 @@ import { ProjectInvestmentStats, readProjectInvestmentStats } from './projectAna
 import {
   ProjectDeliverySummary,
   ProjectIssueSummary,
+  ProjectPullRequestSummary,
   ProjectSecuritySummary,
   readCachedDeliverySummary,
   readCachedIssueSummary,
+  readCachedPullRequestSummary,
   readCachedSecuritySummary
 } from './projectExternalSignals';
 
@@ -40,6 +42,7 @@ export interface ProjectPortfolioSummary {
   overallStatus: string;
   recentActivityAt: string;
   issues: ProjectIssueSummary;
+  pullRequests: ProjectPullRequestSummary;
   globalPriority: string;
   projectType: string;
   blocker: string;
@@ -404,6 +407,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
     overallStatus,
     recentActivityAt: getProjectRecentActivityAt(project.path),
     issues: readCachedIssueSummary(project.path),
+    pullRequests: readCachedPullRequestSummary(project.path),
     delivery: readCachedDeliverySummary(project.path),
     security: readCachedSecuritySummary(project.path),
     foundation: assessProjectFoundation(project.path)

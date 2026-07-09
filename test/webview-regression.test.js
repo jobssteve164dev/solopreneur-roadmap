@@ -642,14 +642,19 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /data-toggle-delivery-panel/);
   assert.match(script, /data-agent-fix-delivery-project-path/);
   assert.match(script, /data-open-security-audit/);
-  assert.doesNotMatch(script, /data-agent-fix-security-project-path/);
+  assert.match(script, /data-agent-fix-security-project-path/);
   assert.match(script, /data-agent-fix-foundation-project-path/);
+  assert.match(script, /data-agent-review-pr/);
+  assert.match(script, /data-close-pr/);
+  assert.match(script, /pullRequest\.close/);
+  assert.match(script, /buildPullRequestReviewPrompt/);
   assert.match(script, /projectSecurityLoaded/);
+  assert.match(script, /projectPullRequestsLoaded/);
   assert.match(script, /securitySignalText/);
   assert.match(script, /normalizeProjectDerivedSignals/);
   assert.doesNotMatch(script, /project\.path === selectedProjectPath\)\s*\{\s*score \+= 70/);
   assert.match(script, /foundationSignalText/);
-  assert.doesNotMatch(script, /buildSecurityActionPrompt/);
+  assert.match(script, /buildSecurityActionPrompt/);
   assert.match(script, /buildFoundationActionPrompt/);
   assert.match(html, /\.portfolio-compose\s*\{[\s\S]*border:\s*1px solid rgba\(124,\s*77,\s*255,\s*0\.22\)[\s\S]*border-radius:\s*8px/);
   assert.match(script, /security\.alerts\.filter\(alert => \(!alert\.state \|\| alert\.state === 'open'\) && \['critical', 'high'\]\.includes/);
@@ -778,7 +783,36 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.doesNotMatch(securityPanelHtml, /medium package/);
   assert.equal((securityPanelHtml.match(/data-open-security-audit=/g) || []).length, 1);
   assert.match(securityPanelHtml, /data-open-security-audit="https:\/\/github\.com\/owner\/repo\/security"/);
-  assert.doesNotMatch(securityPanelHtml, /data-agent-fix-security-project-path|打开路线大图/);
+  assert.match(securityPanelHtml, /data-agent-fix-security-project-path="\/workspace\/app"/);
+  assert.doesNotMatch(securityPanelHtml, /打开路线大图/);
+
+  const prPanelHtml = context.__renderProjectDeliveryPanel({
+    name: 'app',
+    path: '/workspace/app',
+    pullRequests: {
+      available: true,
+      repo: 'owner/repo',
+      open: 1,
+      items: [{
+        number: 7,
+        title: 'Fix checkout flow',
+        state: 'OPEN',
+        isDraft: false,
+        author: 'octo',
+        headRefName: 'fix-checkout',
+        baseRefName: 'main',
+        reviewDecision: 'REVIEW_REQUIRED',
+        mergeStateStatus: 'DIRTY',
+        comments: 2,
+        url: 'https://github.com/owner/repo/pull/7',
+        updatedAt: '2026-07-09T00:00:00.000Z'
+      }]
+    }
+  });
+  assert.match(prPanelHtml, /Fix checkout flow/);
+  assert.match(prPanelHtml, /data-agent-review-pr="7"/);
+  assert.match(prPanelHtml, /data-close-pr="7"/);
+  assert.match(prPanelHtml, /data-open-pr-url="https:\/\/github\.com\/owner\/repo\/pull\/7"/);
   context.__setDeliveryActionPanelExpanded(false);
 
   elements['btn-open-strategy-pyramid'].listeners.click();
@@ -3065,12 +3099,16 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
     'out/projectExternalSignals.js',
     [
       'module.exports.__getIssueCachePath = getIssueCachePath;',
+      'module.exports.__getPullRequestCachePath = getPullRequestCachePath;',
       'module.exports.__getDeliveryCachePath = getDeliveryCachePath;',
       'module.exports.__readIssueCache = readIssueCache;',
       'module.exports.__writeIssueCache = writeIssueCache;',
+      'module.exports.__readPullRequestCache = readPullRequestCache;',
+      'module.exports.__writePullRequestCache = writePullRequestCache;',
       'module.exports.__readDeliveryCache = readDeliveryCache;',
       'module.exports.__writeDeliveryCache = writeDeliveryCache;',
       'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;',
+      'module.exports.__summarizePullRequestItems = summarizePullRequestItems;',
       'module.exports.__summarizeIssueItems = summarizeIssueItems;'
     ].join('\n')
   );
@@ -3122,6 +3160,39 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   assert.equal(summary.open, 1);
   assert.equal(summary.byCategory.bug, 1);
   assert.equal(summary.byPriority.P0, 1);
+
+  const pullRequest = {
+    number: 7,
+    title: 'Fix checkout flow',
+    body: 'Fixes checkout regression.',
+    state: 'OPEN',
+    isDraft: false,
+    author: 'octo',
+    headRefName: 'fix-checkout',
+    baseRefName: 'main',
+    reviewDecision: 'REVIEW_REQUIRED',
+    mergeStateStatus: 'DIRTY',
+    comments: 3,
+    url: 'https://github.com/owner/repo/pull/7',
+    updatedAt: '2026-05-29T00:02:00.000Z'
+  };
+  sidebarModule.__writePullRequestCache(root, {
+    schemaVersion: 1,
+    repo: 'owner/repo',
+    syncedAt: '2026-05-29T00:02:00.000Z',
+    pullRequests: [pullRequest]
+  });
+  const pullRequestPath = sidebarModule.__getPullRequestCachePath(root);
+  assert.equal(pullRequestPath, path.join(root, '.solopreneur', 'pull-requests-cache.json'));
+  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /pull-requests-cache\.json/);
+  assert.equal(sidebarModule.__readPullRequestCache(root, 'other/repo'), null);
+  const pullRequestCache = sidebarModule.__readPullRequestCache(root, 'owner/repo');
+  const pullRequestSummary = sidebarModule.__summarizePullRequestItems('owner/repo', pullRequestCache.pullRequests, pullRequestCache.syncedAt, false);
+  assert.equal(pullRequestSummary.available, true);
+  assert.equal(pullRequestSummary.open, 1);
+  assert.equal(pullRequestSummary.reviewRequested, 1);
+  assert.equal(pullRequestSummary.blocked, 1);
+  assert.equal(pullRequestSummary.items[0].number, 7);
 
   sidebarModule.__writeDeliveryCache(root, {
     schemaVersion: 1,

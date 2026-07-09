@@ -8,6 +8,7 @@ import { ExternalDataLoadOptions, invalidateExternalData, loadExternalData } fro
 const githubRepoSlugCache = new Map<string, string>();
 const DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT = 3;
 const DELIVERY_WORKFLOW_RUN_FETCH_LIMIT = 20;
+const PULL_REQUEST_DISPLAY_LIMIT = 5;
 
 export interface ProjectIssueItem {
   number: number;
@@ -43,6 +44,37 @@ export interface ProjectIssueSummary {
   message: string;
 }
 
+export interface ProjectPullRequestItem {
+  number: number;
+  title: string;
+  body: string;
+  state: string;
+  isDraft: boolean;
+  author: string;
+  headRefName: string;
+  baseRefName: string;
+  reviewDecision: string;
+  mergeStateStatus: string;
+  comments: number;
+  url: string;
+  updatedAt: string;
+}
+
+export interface ProjectPullRequestSummary {
+  available: boolean;
+  loading: boolean;
+  stale: boolean;
+  syncedAt: string;
+  repo: string;
+  total: number;
+  open: number;
+  draft: number;
+  reviewRequested: number;
+  blocked: number;
+  items: ProjectPullRequestItem[];
+  message: string;
+}
+
 
 export interface IssueCacheFile {
   schemaVersion: number;
@@ -54,6 +86,13 @@ export interface IssueCacheFile {
     issue: ProjectIssueItem;
     comments: ProjectIssueComment[];
   }>;
+}
+
+export interface PullRequestCacheFile {
+  schemaVersion: number;
+  repo: string;
+  syncedAt: string;
+  pullRequests: ProjectPullRequestItem[];
 }
 
 
@@ -68,6 +107,23 @@ export function createEmptyIssueSummary(message = ''): ProjectIssueSummary {
     open: 0,
     byCategory: {},
     byPriority: {},
+    items: [],
+    message
+  };
+}
+
+export function createEmptyPullRequestSummary(message = ''): ProjectPullRequestSummary {
+  return {
+    available: false,
+    loading: false,
+    stale: false,
+    syncedAt: '',
+    repo: '',
+    total: 0,
+    open: 0,
+    draft: 0,
+    reviewRequested: 0,
+    blocked: 0,
     items: [],
     message
   };
@@ -156,6 +212,13 @@ export function createLoadingIssueSummary(): ProjectIssueSummary {
   };
 }
 
+export function createLoadingPullRequestSummary(): ProjectPullRequestSummary {
+  return {
+    ...createEmptyPullRequestSummary('Loading GitHub pull requests'),
+    loading: true
+  };
+}
+
 export function createEmptyDeliverySummary(message = ''): ProjectDeliverySummary {
   return {
     available: false,
@@ -210,6 +273,10 @@ export function getIssueCachePath(projectPath: string): string {
   return path.join(projectPath, '.solopreneur', 'issues-cache.json');
 }
 
+export function getPullRequestCachePath(projectPath: string): string {
+  return path.join(projectPath, '.solopreneur', 'pull-requests-cache.json');
+}
+
 export function getDeliveryCachePath(projectPath: string): string {
   return path.join(projectPath, '.solopreneur', 'delivery-cache.json');
 }
@@ -224,7 +291,7 @@ function ensureIssueCacheGitignore(projectPath: string): void {
   try {
     fs.mkdirSync(solopreneurDir, { recursive: true });
     const existing = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf8') : '';
-    const missing = ['issues-cache.json', 'delivery-cache.json', 'security-cache.json']
+    const missing = ['issues-cache.json', 'pull-requests-cache.json', 'delivery-cache.json', 'security-cache.json']
       .filter((entry) => !(new RegExp(`(^|\\n)${entry.replace('.', '\\.')}($|\\n)`).test(existing)));
     if (missing.length) {
       const next = `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`;
@@ -286,6 +353,62 @@ export function readIssueCache(projectPath: string, repo = getGithubRepoSlug(pro
 
 export function writeIssueCache(projectPath: string, cache: IssueCacheFile): void {
   const cachePath = getIssueCachePath(projectPath);
+  const tempPath = `${cachePath}.tmp`;
+  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+  const payload = JSON.stringify(cache, null, 2);
+  fs.writeFileSync(tempPath, payload, 'utf8');
+  JSON.parse(fs.readFileSync(tempPath, 'utf8'));
+  fs.renameSync(tempPath, cachePath);
+  ensureIssueCacheGitignore(projectPath);
+}
+
+function parseGithubPullRequest(rawPr: any): ProjectPullRequestItem {
+  return {
+    number: Number(rawPr?.number || 0),
+    title: String(rawPr?.title || ''),
+    body: String(rawPr?.body || ''),
+    state: String(rawPr?.state || ''),
+    isDraft: Boolean(rawPr?.isDraft),
+    author: String(rawPr?.author?.login || rawPr?.author || ''),
+    headRefName: String(rawPr?.headRefName || ''),
+    baseRefName: String(rawPr?.baseRefName || ''),
+    reviewDecision: String(rawPr?.reviewDecision || ''),
+    mergeStateStatus: String(rawPr?.mergeStateStatus || ''),
+    comments: Number(rawPr?.comments || 0),
+    url: String(rawPr?.url || ''),
+    updatedAt: String(rawPr?.updatedAt || '')
+  };
+}
+
+function validatePullRequestCache(raw: any, repo: string): PullRequestCacheFile | null {
+  if (!raw || raw.schemaVersion !== 1 || raw.repo !== repo || !Array.isArray(raw.pullRequests)) {
+    return null;
+  }
+  return {
+    schemaVersion: 1,
+    repo,
+    syncedAt: String(raw.syncedAt || ''),
+    pullRequests: raw.pullRequests.map(parseGithubPullRequest).filter((pr: ProjectPullRequestItem) => pr.number && pr.title && pr.state)
+  };
+}
+
+export function readPullRequestCache(projectPath: string, repo = getGithubRepoSlug(projectPath)): PullRequestCacheFile | null {
+  if (!repo) {
+    return null;
+  }
+  try {
+    const cachePath = getPullRequestCachePath(projectPath);
+    if (!fs.existsSync(cachePath)) {
+      return null;
+    }
+    return validatePullRequestCache(JSON.parse(fs.readFileSync(cachePath, 'utf8')), repo);
+  } catch {
+    return null;
+  }
+}
+
+export function writePullRequestCache(projectPath: string, cache: PullRequestCacheFile): void {
+  const cachePath = getPullRequestCachePath(projectPath);
   const tempPath = `${cachePath}.tmp`;
   fs.mkdirSync(path.dirname(cachePath), { recursive: true });
   const payload = JSON.stringify(cache, null, 2);
@@ -441,6 +564,37 @@ export function summarizeIssueItems(repo: string, items: ProjectIssueItem[], syn
   };
 }
 
+export function summarizePullRequestItems(repo: string, items: ProjectPullRequestItem[], syncedAt = '', stale = false): ProjectPullRequestSummary {
+  const openItems = items.filter((pr) => pr.state === 'OPEN');
+  const draftCount = openItems.filter((pr) => pr.isDraft).length;
+  const reviewRequestedCount = openItems.filter((pr) => String(pr.reviewDecision || '').toUpperCase() === 'REVIEW_REQUIRED').length;
+  const blockedCount = openItems.filter((pr) => ['DIRTY', 'BLOCKED', 'UNKNOWN'].includes(String(pr.mergeStateStatus || '').toUpperCase())).length;
+  return {
+    available: true,
+    loading: false,
+    stale,
+    syncedAt,
+    repo,
+    total: items.length,
+    open: stale ? 0 : openItems.length,
+    draft: stale ? 0 : draftCount,
+    reviewRequested: stale ? 0 : reviewRequestedCount,
+    blocked: stale ? 0 : blockedCount,
+    items: openItems
+      .sort((a, b) => {
+        const rank = (pr: ProjectPullRequestItem) => {
+          if (['DIRTY', 'BLOCKED', 'UNKNOWN'].includes(String(pr.mergeStateStatus || '').toUpperCase())) return 0;
+          if (String(pr.reviewDecision || '').toUpperCase() === 'REVIEW_REQUIRED') return 1;
+          if (pr.isDraft) return 3;
+          return 2;
+        };
+        return rank(a) - rank(b) || Date.parse(String(b.updatedAt || '')) - Date.parse(String(a.updatedAt || ''));
+      })
+      .slice(0, PULL_REQUEST_DISPLAY_LIMIT),
+    message: stale ? 'Showing last synced GitHub pull requests' : ''
+  };
+}
+
 export function summarizeSecurityCache(repo: string, cache: SecurityCacheFile, stale = false): ProjectSecuritySummary {
   const openAlerts = (cache.alerts || []).filter((alert) => !alert.state || alert.state === 'open');
   const priorityAlerts = openAlerts.filter((alert) => ['critical', 'high'].includes(alert.severity));
@@ -468,6 +622,18 @@ export function readCachedIssueSummary(projectPath: string): ProjectIssueSummary
     return createLoadingIssueSummary();
   }
   return summarizeIssueItems(repo, cache.issues, cache.syncedAt, true);
+}
+
+export function readCachedPullRequestSummary(projectPath: string): ProjectPullRequestSummary {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyPullRequestSummary('No GitHub remote');
+  }
+  const cache = readPullRequestCache(projectPath, repo);
+  if (!cache) {
+    return createLoadingPullRequestSummary();
+  }
+  return summarizePullRequestItems(repo, cache.pullRequests, cache.syncedAt, true);
 }
 
 export function readCachedSecuritySummary(projectPath: string): ProjectSecuritySummary {
@@ -1092,11 +1258,70 @@ async function readProjectIssueSummaryAsync(projectPath: string): Promise<Projec
   return summarizeIssueItems(repo, items, cache.syncedAt, false);
 }
 
+async function readProjectPullRequestSummaryAsync(projectPath: string): Promise<ProjectPullRequestSummary> {
+  const repo = getGithubRepoSlug(projectPath);
+  if (!repo) {
+    return createEmptyPullRequestSummary('No GitHub remote');
+  }
+  const result = await runGhIssueCommandAsync(projectPath, [
+    'pr',
+    'list',
+    '--state',
+    'all',
+    '--limit',
+    '50',
+    '--json',
+    'number,title,body,state,isDraft,author,headRefName,baseRefName,reviewDecision,mergeStateStatus,comments,updatedAt,url'
+  ], 5000);
+  if (!result.ok) {
+    const cache = readPullRequestCache(projectPath, repo);
+    if (cache) {
+      return summarizePullRequestItems(repo, cache.pullRequests, cache.syncedAt, true);
+    }
+    return {
+      ...createEmptyPullRequestSummary(String(result.stderr || result.stdout || 'GitHub pull requests unavailable').trim()),
+      repo
+    };
+  }
+  let rawPrs: any[] = [];
+  try {
+    rawPrs = JSON.parse(String(result.stdout || '[]'));
+  } catch {
+    const cache = readPullRequestCache(projectPath, repo);
+    if (cache) {
+      return summarizePullRequestItems(repo, cache.pullRequests, cache.syncedAt, true);
+    }
+    return { ...createEmptyPullRequestSummary('GitHub pull request data could not be read'), repo };
+  }
+  const pullRequests = rawPrs.map(parseGithubPullRequest).filter((pr) => pr.number > 0);
+  const cache: PullRequestCacheFile = {
+    schemaVersion: 1,
+    repo,
+    syncedAt: new Date().toISOString(),
+    pullRequests
+  };
+  try {
+    writePullRequestCache(projectPath, cache);
+  } catch {
+    return summarizePullRequestItems(repo, pullRequests, cache.syncedAt, false);
+  }
+  return summarizePullRequestItems(repo, pullRequests, cache.syncedAt, false);
+}
+
 export function loadExternalIssueSummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectIssueSummary> {
   return loadExternalData(
     'github-issues',
     projectPath,
     () => readProjectIssueSummaryAsync(projectPath),
+    options
+  );
+}
+
+export function loadExternalPullRequestSummary(projectPath: string, options: ExternalDataLoadOptions = {}): Promise<ProjectPullRequestSummary> {
+  return loadExternalData(
+    'github-pull-requests',
+    projectPath,
+    () => readProjectPullRequestSummaryAsync(projectPath),
     options
   );
 }
@@ -1121,6 +1346,10 @@ export function loadExternalSecuritySummary(projectPath: string, options: Extern
 
 export function invalidateExternalIssueSummary(projectPath: string): void {
   invalidateExternalData('github-issues', projectPath);
+}
+
+export function invalidateExternalPullRequestSummary(projectPath: string): void {
+  invalidateExternalData('github-pull-requests', projectPath);
 }
 
 export function readProjectIssueDetails(projectPath: string, issueNumber: number): { ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale?: boolean } {
@@ -1194,6 +1423,23 @@ export function closeProjectIssue(projectPath: string, issueNumber: number): { o
   if (result.ok) {
     invalidateExternalIssueSummary(projectPath);
     readProjectIssueSummary(projectPath);
+  }
+  return {
+    ok: result.ok,
+    message: String(result.stdout || result.stderr || '').trim()
+  };
+}
+
+export function closeProjectPullRequest(projectPath: string, pullRequestNumber: number): { ok: boolean; message: string } {
+  const result = runGhIssueCommand(projectPath, [
+    'pr',
+    'close',
+    String(pullRequestNumber),
+    '--comment',
+    'Closed from SoloMap after user action.'
+  ], 10000);
+  if (result.ok) {
+    invalidateExternalPullRequestSummary(projectPath);
   }
   return {
     ok: result.ok,

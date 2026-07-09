@@ -4057,6 +4057,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         deliveryActionFixSecurity: '交给 Agent 修复安全风险',
         deliveryActionFixFoundation: '补齐项目基座',
         deliveryActionSecurityUnknown: '安全审计未配置或暂无权限。',
+        pullRequestActionTitle: 'Pull Requests',
+        pullRequestActionOpen: '待处理 PR',
+        pullRequestActionReview: '交给 Agent 审核',
+        pullRequestActionClose: '关闭 PR',
+        pullRequestActionStarted: '已交给 Agent 审核这个 PR。',
+        pullRequestActionClosed: 'PR 已关闭。',
         deliveryActionFailureTag: '失败',
         deliveryActionTimeoutTag: '超时',
         deliveryActionRequiredTag: '需处理',
@@ -4394,6 +4400,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         deliveryActionFixSecurity: 'Ask Agent to fix security risk',
         deliveryActionFixFoundation: 'Complete project foundation',
         deliveryActionSecurityUnknown: 'Security audit is not configured or authorized yet.',
+        pullRequestActionTitle: 'Pull Requests',
+        pullRequestActionOpen: 'Open PRs',
+        pullRequestActionReview: 'Ask Agent to review',
+        pullRequestActionClose: 'Close PR',
+        pullRequestActionStarted: 'Asked the Agent to review this PR.',
+        pullRequestActionClosed: 'PR closed.',
         deliveryActionFailureTag: 'Failed',
         deliveryActionTimeoutTag: 'Timed out',
         deliveryActionRequiredTag: 'Needs action',
@@ -5565,6 +5577,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
+        case 'projectPullRequestsLoaded':
+          currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
+            project.path === message.projectPath ? normalizeProjectDerivedSignals({ ...project, pullRequests: message.pullRequests }) : project
+          ));
+          if (message.projectPath === currentProjects.selectedProjectPath) {
+            deliveryActionMessage = '';
+          }
+          renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
         case 'projectDeliveryLoaded':
           currentProjects.portfolio = (currentProjects.portfolio || []).map(project => (
             project.path === message.projectPath ? normalizeProjectDerivedSignals({ ...project, delivery: message.delivery }) : project
@@ -5734,6 +5757,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             expandedIssueNumber = 0;
             issueDetails = null;
           }
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'pullRequestActionCompleted':
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          deliveryActionMessage = message.success ? (message.message || t('pullRequestActionClosed')) : (message.message || '');
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
       }
@@ -7294,6 +7323,60 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       ].join('\\n');
     }
 
+    function buildSecurityActionPrompt(project) {
+      const security = project && project.security ? project.security : {};
+      const alerts = Array.isArray(security.alerts) ? security.alerts : [];
+      const alertSummary = alerts.length
+        ? alerts.map((alert, index) => (index + 1) + '. ' + (alert.title || alert.source || 'Security alert') + ' · ' + (alert.source || 'Security') + ' · ' + (alert.severity || 'unknown') + (alert.url ? '\\n' + alert.url : '')).join('\\n')
+        : (currentLanguage === 'zh' ? '当前没有保留下来的风险明细，请重新读取 GitHub security alerts。' : 'No security alert details are preserved. Re-read GitHub security alerts.');
+      if (currentLanguage === 'zh') {
+        return [
+          '请处理这个项目当前的高危安全风险。',
+          '风险项：',
+          alertSummary,
+          '要求：先确认风险是否仍然存在，定位真实依赖、代码扫描或配置根因；做必要的最小修改并运行相关验证。不要只忽略告警，不要把修复留给下一轮。'
+        ].join('\\n');
+      }
+      return [
+        'Fix the current high-priority security risks in this project.',
+        'Alerts:',
+        alertSummary,
+        'Requirements: confirm the risks are still real, identify the dependency, code scanning, or configuration root cause, make the smallest necessary fix, and run the relevant verification. Do not only dismiss alerts, and do not leave the fix for another run.'
+      ].join('\\n');
+    }
+
+    function buildPullRequestReviewPrompt(project, pullRequest) {
+      const pr = pullRequest || {};
+      const projectName = project && (project.name || project.path) ? (project.name || project.path) : '';
+      const branchLine = (pr.headRefName || '') || (pr.baseRefName || '')
+        ? String(pr.headRefName || '-') + ' -> ' + String(pr.baseRefName || '-')
+        : '-';
+      if (currentLanguage === 'zh') {
+        return [
+          '请审核这个 GitHub Pull Request，并把它推进到可收口状态。',
+          '项目：' + projectName,
+          'PR：#' + (pr.number || '') + (pr.title ? ' ' + pr.title : ''),
+          pr.url ? '链接：' + pr.url : '',
+          '分支：' + branchLine,
+          '作者：' + (pr.author || '-'),
+          '状态：' + (pr.isDraft ? 'Draft' : pr.state || '-') + ' · Review ' + (pr.reviewDecision || '-') + ' · Merge ' + (pr.mergeStateStatus || '-'),
+          pr.body ? '描述：\\n' + String(pr.body).slice(0, 1800) : '描述：暂无。',
+          '要求：先检查 PR 的代码变更、关联 Issue、CI/检查状态和潜在回归；如果需要修复，直接做最小修改并验证；如果应关闭，请给出清楚理由并关闭该 PR。不要只做口头审核。'
+        ].filter(Boolean).join('\\n');
+      }
+      return [
+        'Review this GitHub Pull Request and move it to a closable state.',
+        'Project: ' + projectName,
+        'PR: #' + (pr.number || '') + (pr.title ? ' ' + pr.title : ''),
+        pr.url ? 'URL: ' + pr.url : '',
+        'Branches: ' + branchLine,
+        'Author: ' + (pr.author || '-'),
+        'State: ' + (pr.isDraft ? 'Draft' : pr.state || '-') + ' · Review ' + (pr.reviewDecision || '-') + ' · Merge ' + (pr.mergeStateStatus || '-'),
+        pr.body ? 'Description:\\n' + String(pr.body).slice(0, 1800) : 'Description: none.',
+        'Requirements: inspect the PR code changes, linked Issues, CI/check status, and regression risk first. If a fix is needed, make the smallest necessary change and verify it. If the PR should be closed, provide a clear reason and close it. Do not only leave a verbal review.'
+      ].filter(Boolean).join('\\n');
+    }
+
     function buildIssueActionPrompt(project, issueDetailsPayload) {
       const details = issueDetailsPayload || {};
       const issue = details.issue || {};
@@ -7336,11 +7419,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderProjectDeliveryPanel(project) {
       const delivery = project && project.delivery ? project.delivery : null;
+      const pullRequests = project && project.pullRequests ? project.pullRequests : null;
       const security = project && project.security ? project.security : null;
       const foundation = project && project.foundation ? project.foundation : null;
       const hasFoundationGap = Number(foundation && foundation.missingCount || 0) > 0;
-      const hasSecurityRisk = Number(security && security.openCriticalHigh || 0) > 0;
-      if ((!delivery || (!delivery.available && !delivery.loading && !delivery.message)) && !security && !hasFoundationGap) {
+      const securityAlerts = security && Array.isArray(security.alerts)
+        ? security.alerts.filter(alert => (!alert.state || alert.state === 'open') && ['critical', 'high'].includes(String(alert.severity || '').toLowerCase()))
+        : [];
+      const pullRequestItems = pullRequests && Array.isArray(pullRequests.items) ? pullRequests.items : [];
+      const pullRequestOpenCount = Math.max(Number(pullRequests && pullRequests.open || 0), pullRequestItems.length);
+      const securityRiskCount = Math.max(Number(security && security.openCriticalHigh || 0), securityAlerts.length);
+      const hasSecurityRisk = securityRiskCount > 0;
+      const hasOpenPullRequests = pullRequestOpenCount > 0;
+      if ((!delivery || (!delivery.available && !delivery.loading && !delivery.message)) && (!pullRequests || (!pullRequests.available && !pullRequests.loading && !pullRequests.message)) && !security && !hasFoundationGap) {
         return '';
       }
       const recentRuns = Array.isArray(delivery && delivery.recentWorkflowRuns) ? delivery.recentWorkflowRuns : [];
@@ -7348,7 +7439,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const hasFailure = failedRuns.length > 0;
       const expanded = deliveryActionPanelExpanded;
       const refreshBusy = projectRefreshPaths.has(project.path);
-      const hasActionRisk = hasSecurityRisk || hasFailure;
+      const hasActionRisk = hasSecurityRisk || hasFailure || hasOpenPullRequests;
 
       const runRows = failedRuns.map(run => {
         const title = run.displayTitle || run.name || '-';
@@ -7372,11 +7463,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (security && security.loading) {
         miniStatusText = t('issueLoading');
       } else if (hasSecurityRisk) {
-        miniStatusText = t('securitySignalRisk') + ' ' + security.openCriticalHigh;
+        miniStatusText = t('securitySignalRisk') + ' ' + securityRiskCount;
       } else if (delivery && delivery.loading) {
         miniStatusText = t('issueLoading');
       } else if (hasFailure) {
         miniStatusText = checksFailedLabel + ' ' + failedRuns.length;
+      } else if (hasOpenPullRequests) {
+        miniStatusText = t('pullRequestActionOpen') + ' ' + pullRequestOpenCount;
       } else if (hasFoundationGap) {
         miniStatusText = t('foundationMissing') + ' ' + foundation.missingCount;
       } else if (!delivery || !delivery.available) {
@@ -7403,9 +7496,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           + '</div>';
       }
 
-      const securityAlerts = security && Array.isArray(security.alerts)
-        ? security.alerts.filter(alert => (!alert.state || alert.state === 'open') && ['critical', 'high'].includes(String(alert.severity || '').toLowerCase()))
-        : [];
+      const pullRequestRows = pullRequestItems.length
+        ? pullRequestItems.map(pr => '<div class="portfolio-delivery-row">'
+          + '<span class="portfolio-issue-main">'
+          + '<span class="portfolio-issue-name">#' + escapeHtml(pr.number || '') + ' ' + escapeHtml(pr.title || '-') + '</span>'
+          + '<span class="portfolio-issue-sub">'
+          + escapeHtml((pr.isDraft ? 'Draft' : pr.state || 'PR') + ' · ' + (pr.reviewDecision || 'review') + ' · ' + (pr.mergeStateStatus || 'merge') + ' · ' + (pr.headRefName || '-') + ' -> ' + (pr.baseRefName || '-'))
+          + '</span>'
+          + '</span>'
+          + '<button class="portfolio-issue-action primary" data-agent-review-pr="' + escapeHtml(pr.number) + '" data-project-path="' + escapeHtml(project.path) + '">' + escapeHtml(t('pullRequestActionReview')) + '</button>'
+          + (pr.url ? '<button class="portfolio-issue-action" data-open-pr-url="' + escapeHtml(pr.url) + '">' + escapeHtml(t('projectOpen')) + '</button>' : '')
+          + '<button class="portfolio-issue-action danger" data-close-pr="' + escapeHtml(pr.number) + '" data-project-path="' + escapeHtml(project.path) + '">' + escapeHtml(t('pullRequestActionClose')) + '</button>'
+          + '</div>').join('')
+        : '';
       const securityRows = securityAlerts.length
         ? securityAlerts.map(alert => '<div class="portfolio-delivery-row">'
           + '<span class="portfolio-issue-main">'
@@ -7440,8 +7543,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         + '<div class="delivery-card-title"><span class="codicon codicon-shield"></span>' + escapeHtml(t('deliveryActionSecurity')) + '</div>'
         + '<div class="delivery-card-value">'
         + (hasSecurityRisk
-          ? '<span class="failed-count-highlight">' + security.openCriticalHigh + ' ' + (currentLanguage === 'zh' ? '个高危' : 'high risk') + '</span>'
+          ? '<span class="failed-count-highlight">' + securityRiskCount + ' ' + (currentLanguage === 'zh' ? '个高危' : 'high risk') + '</span>'
           : '<span class="healthy-highlight">' + escapeHtml(security && security.available ? t('securitySignalHealthy') : t('deliveryActionSecurityUnknown')) + '</span>')
+        + '</div>'
+        + '</div>'
+        + '<div class="delivery-card checks-card ' + (hasOpenPullRequests ? 'card-failed' : 'card-healthy') + '">'
+        + '<div class="delivery-card-title"><span class="codicon codicon-git-pull-request"></span>' + escapeHtml(t('pullRequestActionTitle')) + '</div>'
+        + '<div class="delivery-card-value">'
+        + (hasOpenPullRequests
+          ? '<span class="failed-count-highlight">' + pullRequestOpenCount + ' ' + escapeHtml(t('pullRequestActionOpen')) + '</span>'
+          : '<span class="healthy-highlight">' + (currentLanguage === 'zh' ? '无待处理' : 'None open') + '</span>')
         + '</div>'
         + '</div>'
         + '<div class="delivery-card checks-card ' + (hasFailure ? 'card-failed' : 'card-healthy') + '">'
@@ -7473,6 +7584,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           ? '<div class="delivery-runs-section">'
             + '<div class="delivery-section-title">' + (currentLanguage === 'zh' ? '未通过的检查：' : 'Failed checks:') + '</div>'
             + '<div class="portfolio-delivery-list">' + runRows + '</div>'
+            + '</div>'
+          : '')
+        + (pullRequestRows
+          ? '<div class="delivery-runs-section">'
+            + '<div class="delivery-section-title">' + escapeHtml(t('pullRequestActionTitle')) + '</div>'
+            + '<div class="portfolio-delivery-list">' + pullRequestRows + '</div>'
             + '</div>'
           : '')
         + (securityRows
@@ -7513,6 +7630,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           ? '<button class="delivery-action-btn primary-btn pulse-glow" data-agent-fix-delivery-project-path="' + escapeHtml(project.path) + '">'
             + '<span class="codicon codicon-tools"></span>'
             + escapeHtml(t('deliveryActionAgent'))
+            + '</button>'
+          : '')
+        + (hasSecurityRisk
+          ? '<button class="delivery-action-btn primary-btn pulse-glow" data-agent-fix-security-project-path="' + escapeHtml(project.path) + '">'
+            + '<span class="codicon codicon-shield"></span>'
+            + escapeHtml(t('deliveryActionFixSecurity'))
             + '</button>'
           : '')
         + (hasFoundationGap
@@ -7660,6 +7783,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({ command: 'external.open', url });
         });
       });
+      portfolioList.querySelectorAll('[data-open-pr-url]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const url = button.getAttribute('data-open-pr-url') || '';
+          if (!url) return;
+          vscode.postMessage({ command: 'external.open', url });
+        });
+      });
       portfolioList.querySelectorAll('[data-refresh-delivery-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -7691,6 +7822,65 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             agentCli,
             model,
             supplementFiles: []
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-agent-fix-security-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-agent-fix-security-project-path') || '';
+          const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
+          if (!projectPath || !project) return;
+          const targetId = projectSoloTargetId(projectPath);
+          const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
+          const model = getTargetModelValue(targetId, agentCli);
+          projectConversationModes[projectPath] = 'solo';
+          deliveryActionMessage = t('deliveryActionStarted');
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'conversation.runSolo',
+            projectPath,
+            userMessage: buildSecurityActionPrompt(project),
+            agentCli,
+            model,
+            supplementFiles: []
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-agent-review-pr]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
+          const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
+          const prNumber = Number(button.getAttribute('data-agent-review-pr') || 0);
+          const pullRequest = (project && project.pullRequests && Array.isArray(project.pullRequests.items))
+            ? project.pullRequests.items.find(item => Number(item.number || 0) === prNumber)
+            : null;
+          if (!projectPath || !project || !pullRequest) return;
+          const targetId = projectSoloTargetId(projectPath);
+          const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
+          const model = getTargetModelValue(targetId, agentCli);
+          projectConversationModes[projectPath] = 'solo';
+          deliveryActionMessage = t('pullRequestActionStarted');
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'conversation.runSolo',
+            projectPath,
+            userMessage: buildPullRequestReviewPrompt(project, pullRequest),
+            agentCli,
+            model,
+            supplementFiles: []
+          });
+          requestSidebarSoloConversationHistory(projectPath, true);
+        });
+      });
+      portfolioList.querySelectorAll('[data-close-pr]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'pullRequest.close',
+            projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
+            pullRequestNumber: Number(button.getAttribute('data-close-pr') || 0)
           });
         });
       });
