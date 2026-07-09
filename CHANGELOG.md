@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.302 - 2026-07-09
+
+### Changed
+- add minimal project foundation (9f3174f)
+
+### Fixed
+- label GitHub issue and PR links (d5274d7)
+- keep foundation ci stable (08a2fe4)
+- update website security dependencies (cdbb3db)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.301 - 2026-07-09
 
 ### Fixed
