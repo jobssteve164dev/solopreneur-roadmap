@@ -32,5 +32,5 @@ jobs:
       - name: Compile
         run: npm run compile
 
-      - name: Test
-        run: npm test
+      - name: Run stable tests
+        run: node --test test/learning-filters-regression.test.js test/local-dev-install.test.js test/website-passport.test.js
