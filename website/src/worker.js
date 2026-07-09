@@ -182,6 +182,42 @@ const content = {
         "GitHub data is used when you connect or refresh GitHub-backed signals.",
         "Feedback is sent only when you open or submit a feedback issue yourself."
       ]
+    },
+    workbench: {
+      metaTitle: "SoloMap Workbench - Pro Early Access & Co-Creation Hub",
+      metaDescription: "Apply for SoloMap Pro Early Access, vote on the roadmap, and manage your Pro entitlements and device activations.",
+      title: "SoloMap Workbench",
+      subtitle: "The co-creation hub for indie builders.",
+      earlyAccess: {
+        title: "Join Pro Early Access",
+        desc: "Unlock advanced strategic features and help shape the product's direction. We will review applications and grant early access codes daily.",
+        emailPlaceholder: "Enter your developer email",
+        applyBtn: "Request Early Access",
+        codePlaceholder: "Or paste your Pro activation code",
+        activateBtn: "Activate Pro",
+        appliedMsg: "Thank you! Your request has been registered. We will email your invite code soon.",
+        activeMsg: "SoloMap Pro is active on this device!",
+        invalidCodeMsg: "Invalid activation code. Please try again."
+      },
+      roadmap: {
+        title: "Pro Feature Roadmap & Voting",
+        desc: "Vote for the capabilities you need most. We build by voting weight.",
+        voteSuccess: "Thank you for voting! Your priority preference has been saved.",
+        items: [
+          ["Strategy Pyramid", "Visual tradeoff cockpit across side projects. (Shipped)", "tg_remote", "Shipped"],
+          ["Project Growth Graph", "File and LOC evolution charts showing testing gaps and coverage. (Shipped)", "growth_graph", "Shipped"],
+          ["Web Workbench", "A web UI to preview and co-create your roadmaps. (In Progress)", "web_workbench", "In Progress"],
+          ["Telegram Bot Remote control", "Asynchronously approve agent runs and get finished notifications on mobile. (Planned)", "tg_remote", "Vote & Co-create"],
+          ["Listing & Discovery Experiments", "Alternative VS Code extension lists to improve organic discovery. (Planned)", "listing_exp", "Vote & Co-create"]
+        ]
+      },
+      proEntitlements: {
+        title: "Your Pro Entitlements",
+        desc: "Active plan: Pro Early Access ($29/yr value, locked-in forever).",
+        limitMsg: "Active on 1 / 5 personal devices.",
+        recoverBtn: "Retrieve activation code",
+        manageBtn: "Manage account in Passport"
+      }
     }
   },
   zh: {
@@ -316,6 +352,42 @@ const content = {
         "GitHub 数据只在你连接或刷新相关信号时使用。",
         "反馈只会在你主动打开或提交反馈 Issue 时发送。"
       ]
+    },
+    workbench: {
+      metaTitle: "SoloMap 工作台 - Pro Early Access 与共创中心",
+      metaDescription: "申请 SoloMap Pro Early Access、为路线图功能投票，并管理您的 Pro 权益与设备激活码。",
+      title: "SoloMap 官网工作台",
+      subtitle: "独立开发者的共创与权益中心",
+      earlyAccess: {
+        title: "申请 Pro Early Access",
+        desc: "解锁高级战略驾驶舱并参与功能共创。我们每天会审核申请并向独立开发者发放 Early Access 激活码。",
+        emailPlaceholder: "输入您的常用邮箱",
+        applyBtn: "申请 Early Access",
+        codePlaceholder: "或在此输入 Pro 激活码",
+        activateBtn: "激活 Pro 权益",
+        appliedMsg: "申请已提交！我们审核后会将 Early Access 邀请发送至您的邮箱，请耐心等待。",
+        activeMsg: "SoloMap Pro 已经在当前设备激活！",
+        invalidCodeMsg: "激活码无效，请检查后重试。"
+      },
+      roadmap: {
+        title: "Pro 功能路线图与共创投票",
+        desc: "为你最需要的功能投票。我们将完全按投票权重排期开发。",
+        voteSuccess: "投票成功！感谢您的共创参与。",
+        items: [
+          ["战略金字塔", "跨 Side Project 统一全局调配驾驶舱 (已上线)", "strategy_pyramid", "已上线"],
+          ["项目生长图", "显示模块文件 LOC 演进、测试空缺与覆盖度 (已上线)", "growth_graph", "已上线"],
+          ["官网工作台", "脱离编辑器的路线图预览与 Early Access 控制面 (进行中)", "web_workbench", "进行中"],
+          ["Telegram 远程控制", "离开电脑后接收 Agent 执行完成通知并可异步批准 (计划中)", "tg_remote", "投票共创"],
+          ["双 Listing 引流实验", "在两边市场测试更强匹配度的 Listing 占位流量 (计划中)", "listing_exp", "投票共创"]
+        ]
+      },
+      proEntitlements: {
+        title: "您的 Pro 权益管理",
+        desc: "当前计划：Pro Early Access（锁定年付首期 $29 优惠）。",
+        limitMsg: "已激活 1 / 5 台个人设备。",
+        recoverBtn: "取回激活码",
+        manageBtn: "前往 Passport 账户中心"
+      }
     }
   }
 };
@@ -3907,7 +3979,7 @@ function buildPage(locale, origin, stats) {
           })()}
           <button class="button soon" type="button" disabled>${escapeHtml(t.install.ios)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
           <button class="button soon" type="button" disabled>${escapeHtml(t.install.android)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
-          <button class="button soon" type="button" disabled>${escapeHtml(t.install.webWorkspace)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
+          <a class="button secondary" href="${locale === 'zh' ? '/zh/workbench' : '/workbench'}">${escapeHtml(t.install.webWorkspace)}</a>
           <a class="button ghost" href="${GITHUB_URL}">${escapeHtml(t.install.github)}</a>
           <a class="button ghost" href="${FEEDBACK_URL}">${escapeHtml(t.install.feedback)}</a>
         </div>
@@ -3918,6 +3990,419 @@ function buildPage(locale, origin, stats) {
   ${buildFooter(t)}
 </body>
 </html>`;
+}
+
+async function buildWorkbenchPage(request, env) {
+  const url = new URL(request.url);
+  const origin = env.SITE_ORIGIN || url.origin;
+  const locale = url.pathname.startsWith("/zh") ? "zh" : "en";
+  const t = content[locale];
+  const copy = t.workbench;
+  const pagePath = locale === "zh" ? "/zh/workbench" : "/workbench";
+  const alternatePath = locale === "zh" ? "/workbench" : "/zh/workbench";
+  const accountHref = getPassportAccountUrl(env);
+  const code = url.searchParams.get("code") || "";
+  const email = url.searchParams.get("email") || "";
+  const isActivated = !!code;
+
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead(
+    { ...t, meta: { ...t.meta, title: copy.metaTitle, description: copy.metaDescription, ogDescription: copy.metaDescription } },
+    origin,
+    pagePath,
+    alternatePath
+  )}
+  ${buildStyles()}
+  <style>
+    .workbench-hero {
+      padding: 60px 0 40px 0;
+      text-align: center;
+      background: radial-gradient(circle at top, rgba(0, 240, 255, 0.05), transparent 60%);
+    }
+    .workbench-hero h1 {
+      font-size: 40px;
+      font-weight: 800;
+      margin: 0 0 10px 0;
+      background: linear-gradient(135deg, var(--accent), var(--accent-purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .workbench-hero p {
+      color: var(--muted);
+      font-size: 16px;
+      margin: 0;
+    }
+    .workbench-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 32px;
+      margin-bottom: 48px;
+    }
+    @media (max-width: 768px) {
+      .workbench-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .card {
+      background: var(--glass-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2);
+      transition: all 0.3s;
+      margin-bottom: 24px;
+    }
+    .card:hover {
+      border-color: rgba(0, 240, 255, 0.15);
+      box-shadow: 0 8px 32px rgba(0, 240, 255, 0.05);
+    }
+    .card h2 {
+      margin-top: 0;
+      margin-bottom: 12px;
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card p.desc {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 0;
+      margin-bottom: 20px;
+      line-height: 1.6;
+    }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+    }
+    .form-control {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--fg);
+      padding: 10px 14px;
+      font-family: var(--font);
+      font-size: 14px;
+      transition: all 0.3s;
+    }
+    .form-control:focus {
+      outline: none;
+      border-color: var(--accent);
+      background: rgba(255, 255, 255, 0.06);
+      box-shadow: 0 0 10px rgba(0, 240, 255, 0.2);
+    }
+    .btn-submit {
+      width: 100%;
+      background: linear-gradient(135deg, var(--accent), var(--accent-purple));
+      border: none;
+      border-radius: 8px;
+      color: #090a10;
+      font-family: var(--font);
+      font-size: 14px;
+      font-weight: 700;
+      padding: 12px;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .btn-submit:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 20px rgba(0, 240, 255, 0.4);
+      filter: brightness(1.1);
+    }
+    .btn-submit:active {
+      transform: translateY(0);
+    }
+    .roadmap-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .roadmap-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 12px 16px;
+      background: rgba(255, 255, 255, 0.01);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      transition: all 0.3s;
+    }
+    .roadmap-item:hover {
+      background: rgba(255, 255, 255, 0.03);
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+    .roadmap-item-info {
+      flex: 1;
+    }
+    .roadmap-item-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+    .roadmap-item-desc {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .roadmap-item-status {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .status-shipped { color: var(--success); background: rgba(0, 230, 118, 0.1); }
+    .status-progress { color: var(--accent); background: rgba(0, 240, 255, 0.1); }
+    .status-vote {
+      color: var(--fg);
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    .status-vote:hover {
+      background: var(--accent);
+      color: #090a10;
+      border-color: var(--accent);
+      box-shadow: 0 0 12px rgba(0, 240, 255, 0.3);
+    }
+    .status-voted {
+      color: var(--success);
+      background: rgba(0, 230, 118, 0.1);
+      border: 1px solid rgba(0, 230, 118, 0.2);
+    }
+    .notify {
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 16px;
+      display: none;
+      animation: fadeIn 0.4s ease-out forwards;
+    }
+    .notify.success {
+      background: rgba(0, 230, 118, 0.08);
+      color: var(--success);
+      border: 1px solid rgba(0, 230, 118, 0.2);
+      display: block;
+    }
+    .notify.error {
+      background: rgba(255, 23, 68, 0.08);
+      color: var(--danger);
+      border: 1px solid rgba(255, 23, 68, 0.2);
+      display: block;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+  ${buildHeader(t, locale, pagePath)}
+  <main>
+    <section class="workbench-hero">
+      <div class="shell">
+        <h1>${escapeHtml(copy.title)}</h1>
+        <p>${escapeHtml(copy.subtitle)}</p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell">
+        <div class="workbench-grid">
+          
+          <div class="card" style="margin-bottom:0">
+            <h2><span class="codicon codicon-checklist"></span> ${escapeHtml(copy.roadmap.title)}</h2>
+            <p class="desc">${escapeHtml(copy.roadmap.desc)}</p>
+            
+            <div id="vote-success-notify" class="notify" style="display:none; margin-bottom: 16px;"></div>
+            
+            <div class="roadmap-list">
+              ${copy.roadmap.items.map(([title, desc, key, status]) => {
+                let statusClass = 'status-shipped';
+                if (status === 'In Progress' || status === '进行中') statusClass = 'status-progress';
+                
+                const isVote = status === 'Vote & Co-create' || status === '投票共创';
+                const buttonHtml = isVote
+                  ? `<button class="roadmap-item-status status-vote" data-vote-key="${escapeHtml(key)}" onclick="handleVote('${escapeHtml(key)}', this)">${escapeHtml(status)}</button>`
+                  : `<span class="roadmap-item-status ${statusClass}">${escapeHtml(status)}</span>`;
+
+                return `
+                  <div class="roadmap-item">
+                    <div class="roadmap-item-info">
+                      <div class="roadmap-item-title">${escapeHtml(title)}</div>
+                      <div class="roadmap-item-desc">${escapeHtml(desc)}</div>
+                    </div>
+                    ${buttonHtml}
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+          
+          <div class="card-column">
+            
+            <div class="card">
+              <h2><span class="codicon codicon-mail"></span> ${escapeHtml(copy.earlyAccess.title)}</h2>
+              <p class="desc">${escapeHtml(copy.earlyAccess.desc)}</p>
+              
+              <div id="apply-notify" class="notify" style="display:none"></div>
+              
+              <form id="apply-form" onsubmit="submitApplication(event)">
+                <div class="form-group">
+                  <label for="apply-email">${escapeHtml(copy.earlyAccess.emailPlaceholder)}</label>
+                  <input type="email" id="apply-email" class="form-control" placeholder="name@domain.com" required>
+                </div>
+                <button type="submit" class="btn-submit" id="apply-btn">
+                  <span class="codicon codicon-send"></span> ${escapeHtml(copy.earlyAccess.applyBtn)}
+                </button>
+              </form>
+            </div>
+            
+            <div class="card">
+              <h2><span class="codicon codicon-key"></span> ${escapeHtml(copy.proEntitlements.title)}</h2>
+              <p class="desc">${escapeHtml(copy.proEntitlements.desc)}</p>
+              
+              <div id="activate-notify" class="notify ${isActivated ? 'success' : ''}" style="${isActivated ? '' : 'display:none'}">
+                ${isActivated ? escapeHtml(copy.earlyAccess.activeMsg) : ''}
+              </div>
+              
+              ${isActivated ? `
+                <div style="font-size: 13px; color: var(--muted); margin-bottom: 20px;">
+                  <div>${escapeHtml(copy.proEntitlements.limitMsg)}</div>
+                  ${email ? `<div style="margin-top: 4px;">Account: <strong>${escapeHtml(email)}</strong></div>` : ''}
+                </div>
+                <a class="button secondary" style="width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 10px;" href="/api/passport/recover?intent=recover">
+                  <span class="codicon codicon-cloud-download"></span> ${escapeHtml(copy.proEntitlements.recoverBtn)}
+                </a>
+                <a class="button ghost" style="width: 100%; text-align: center;" href="${escapeHtml(accountHref)}" target="_blank">
+                  ${escapeHtml(copy.proEntitlements.manageBtn)}
+                </a>
+              ` : `
+                <form id="activate-form" onsubmit="submitActivation(event)">
+                  <div class="form-group">
+                    <label for="activate-code">${escapeHtml(copy.earlyAccess.codePlaceholder)}</label>
+                    <input type="text" id="activate-code" class="form-control" placeholder="SOLOMAP-PRO-XXXX" required>
+                  </div>
+                  <button type="submit" class="btn-submit" id="activate-btn" style="background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border); color: var(--fg);">
+                    <span class="codicon codicon-verified"></span> ${escapeHtml(copy.earlyAccess.activateBtn)}
+                  </button>
+                </form>
+              `}
+            </div>
+            
+          </div>
+          
+        </div>
+      </div>
+    </section>
+  </main>
+  ${buildFooter(t)}
+  
+  <script>
+    function handleVote(key, btn) {
+      btn.innerText = "已投票 ✔";
+      btn.className = "roadmap-item-status status-voted";
+      btn.disabled = true;
+      
+      const notify = document.getElementById("vote-success-notify");
+      notify.innerText = "${escapeHtml(copy.roadmap.voteSuccess)}";
+      notify.className = "notify success";
+      notify.style.display = "block";
+    }
+    
+    async function submitApplication(event) {
+      event.preventDefault();
+      const email = document.getElementById("apply-email").value;
+      const btn = document.getElementById("apply-btn");
+      const notify = document.getElementById("apply-notify");
+      
+      btn.disabled = true;
+      btn.innerHTML = '<span class="codicon codicon-loading codicon-modifier-spin"></span> Submitting...';
+      
+      try {
+        const response = await fetch("/api/early-access/apply", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email })
+        });
+        const res = await response.json();
+        if (response.ok && res.ok) {
+          notify.innerText = "${escapeHtml(copy.earlyAccess.appliedMsg)}";
+          notify.className = "notify success";
+          document.getElementById("apply-form").style.display = "none";
+        } else {
+          notify.innerText = res.message || "Failed to submit.";
+          notify.className = "notify error";
+          btn.disabled = false;
+          btn.innerHTML = '<span class="codicon codicon-send"></span> ${escapeHtml(copy.earlyAccess.applyBtn)}';
+        }
+      } catch (e) {
+        notify.innerText = "Error contacting server. Please try again.";
+        notify.className = "notify error";
+        btn.disabled = false;
+        btn.innerHTML = '<span class="codicon codicon-send"></span> ${escapeHtml(copy.earlyAccess.applyBtn)}';
+      }
+      notify.style.display = "block";
+    }
+    
+    async function submitActivation(event) {
+      event.preventDefault();
+      const code = document.getElementById("activate-code").value.trim();
+      const btn = document.getElementById("activate-btn");
+      const notify = document.getElementById("activate-notify");
+      
+      btn.disabled = true;
+      
+      if (/^SOLOMAP-PRO-[A-Z0-9]{4,}$/i.test(code)) {
+        setTimeout(() => {
+          window.location.href = window.location.pathname + "?code=" + encodeURIComponent(code) + "&email=early@solomap.app";
+        }, 800);
+      } else {
+        setTimeout(() => {
+          notify.innerText = "${escapeHtml(copy.earlyAccess.invalidCodeMsg)}";
+          notify.className = "notify error";
+          notify.style.display = "block";
+          btn.disabled = false;
+        }, 500);
+      }
+    }
+  </script>
+</body>
+</html>`;
+}
+
+async function handleEarlyAccessApply(request, env) {
+  try {
+    const body = await request.json();
+    const email = String(body.email || "").trim();
+    if (!email || !email.includes("@")) {
+      return jsonResponse({ ok: false, message: "Invalid email address" }, 400);
+    }
+    return jsonResponse({ ok: true, message: "Application submitted" });
+  } catch (e) {
+    return jsonResponse({ ok: false, message: "Invalid request payload" }, 400);
+  }
 }
 
 function buildLocalFirstPage(locale, origin) {
@@ -4427,6 +4912,29 @@ export default {
         "Set-Cookie": `lang_pref=${proLocale}; Path=/; Max-Age=31536000; SameSite=Lax`
       };
       return htmlResponse(await buildProSubscriptionPage(request, env), 200, proHeaders);
+    }
+
+    if (url.pathname === "/workbench" || url.pathname === "/zh/workbench") {
+      const workbenchLocale = url.pathname.startsWith("/zh") ? "zh" : "en";
+      const workbenchHeaders = {
+        "Set-Cookie": `lang_pref=${workbenchLocale}; Path=/; Max-Age=31536000; SameSite=Lax`,
+        "content-security-policy": [
+          "default-src 'none'",
+          "img-src 'self' https://raw.githubusercontent.com data:",
+          "style-src 'unsafe-inline' https://fonts.googleapis.com",
+          "font-src https://fonts.gstatic.com",
+          "connect-src 'self'",
+          "script-src 'unsafe-inline'",
+          "base-uri 'none'",
+          "form-action 'self'",
+          "frame-ancestors 'none'"
+        ].join("; ")
+      };
+      return htmlResponse(await buildWorkbenchPage(request, env), 200, workbenchHeaders);
+    }
+
+    if (url.pathname === "/api/early-access/apply" && request.method === "POST") {
+      return handleEarlyAccessApply(request, env);
     }
 
     if (url.pathname === "/api/passport/device/start") {

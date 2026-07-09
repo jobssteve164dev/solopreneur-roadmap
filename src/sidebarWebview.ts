@@ -4098,6 +4098,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterFailed: '有失败',
         filterCompleted: '已完成',
         projectOpen: '打开路线大图',
+        projectGrowth: '项目生长图',
         issueOpenGithub: '打开 Issue',
         pullRequestOpenGithub: '打开 PR',
         projectContinue: '继续推进',
@@ -4453,6 +4454,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterFailed: 'Failed',
         filterCompleted: 'Done',
         projectOpen: 'Open Roadmap',
+        projectGrowth: 'Project Growth',
         issueOpenGithub: 'Open Issue',
         pullRequestOpenGithub: 'Open PR',
         projectContinue: 'Continue',
@@ -7986,6 +7988,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             </div>
             <div class="portfolio-card-actions">
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
+              <button class="portfolio-action-btn" data-open-project-growth-path="\${escapeHtml(project.path)}">\${t('projectGrowth')}</button>
               \${isSelected ? '' : \`<button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>\`}
             </div>
             \${isSelected ? renderProjectDeliveryPanel(project) + renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
@@ -8010,6 +8013,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({
             command: 'project.openRoadmap',
             projectPath: button.getAttribute('data-open-project-path')
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-open-project-growth-path]').forEach(button => {
+        button.addEventListener('click', () => {
+          vscode.postMessage({
+            command: 'project.openGrowth',
+            projectPath: button.getAttribute('data-open-project-growth-path')
           });
         });
       });

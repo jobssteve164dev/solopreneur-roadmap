@@ -31,6 +31,7 @@ import { getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGro
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
+import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
 import {
   buildCrossAgentHandoffInstructions,
   buildExecutionExperiencePrompt,
@@ -183,6 +184,7 @@ import {
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
+let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
@@ -272,6 +274,14 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(showStrategyPyramidDisposable);
+
+  const showProjectGrowthDisposable = vscode.commands.registerCommand(
+    'solopreneur.showProjectGrowth',
+    async (projectPath?: string) => {
+      await handleOpenProjectGrowth(context, projectPath);
+    }
+  );
+  context.subscriptions.push(showProjectGrowthDisposable);
 
   const refreshProjectGrowthDisposable = vscode.commands.registerCommand(
     'solopreneur.refreshProjectGrowthData',
@@ -657,6 +667,10 @@ async function handleSharedWebviewAction(
     'project.openRoadmap': async (request) => {
       await selectProject(context, String(request.projectPath || ''));
       await vscode.commands.executeCommand('solopreneur.showRoadmap');
+    },
+    'project.openGrowth': async (request) => {
+      await selectProject(context, String(request.projectPath || ''));
+      await vscode.commands.executeCommand('solopreneur.showProjectGrowth', String(request.projectPath || ''));
     },
     'project.continue': async (request) => {
       const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
@@ -2251,6 +2265,118 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
     },
     null,
     context.subscriptions
+  );
+}
+
+async function handleOpenProjectGrowth(context: vscode.ExtensionContext, projectPath?: string): Promise<void> {
+  const pathStr = projectPath || getSelectedProjectPath(context) || getWorkspaceRoot() || '';
+  if (!pathStr) {
+    vscode.window.showErrorMessage('请先选择一个项目文件夹再打开项目生长图。');
+    return;
+  }
+  await openProjectGrowthPanel(context, pathStr);
+}
+
+async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
+  if (activeProjectGrowthPanel) {
+    activeProjectGrowthPanel.reveal(vscode.ViewColumn.One);
+    activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(
+      activeProjectGrowthPanel.webview,
+      context,
+      {
+        title: '正在打开项目生长图',
+        message: '先打开视图，再读取本地项目代码生长数据。'
+      }
+    );
+    void refreshProjectGrowthPanel(context, projectPath);
+    return;
+  }
+
+  activeProjectGrowthPanel = vscode.window.createWebviewPanel(
+    'solopreneurProjectGrowth',
+    'SoloMap: Project Growth Graph',
+    vscode.ViewColumn.One,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.file(context.extensionPath)]
+    }
+  );
+
+  activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(
+    activeProjectGrowthPanel.webview,
+    context,
+    {
+      title: '正在打开项目生长图',
+      message: '先打开视图，再读取本地项目代码生长数据。'
+    }
+  );
+  void refreshProjectGrowthPanel(context, projectPath);
+
+  activeProjectGrowthPanel.webview.onDidReceiveMessage(
+    async (message) => {
+      switch (message.command) {
+        case 'refreshGrowth':
+          activeProjectGrowthPanel!.webview.html = buildLocalDataStatusHtml(
+            activeProjectGrowthPanel!.webview,
+            context,
+            {
+              title: '正在刷新项目生长图',
+              message: '正在重新分析项目代码生长数据。'
+            }
+          );
+          try {
+            await refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+              scanReason: 'webview_refresh',
+              maxFiles: 5000
+            });
+          } catch (e) {}
+          void refreshProjectGrowthPanel(context, projectPath);
+          break;
+      }
+    }
+  );
+
+  activeProjectGrowthPanel.onDidDispose(
+    () => {
+      activeProjectGrowthPanel = null;
+    },
+    null,
+    context.subscriptions
+  );
+}
+
+async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
+  const panel = activeProjectGrowthPanel;
+  if (!panel) {
+    return;
+  }
+  
+  const project = getProjects(context).find((p: any) => p.path === projectPath);
+  const projectName = project ? project.name : path.basename(projectPath) || 'Project';
+
+  await postLocalDataLoad(
+    () => getProjectGrowthView(projectPath, context.extensionPath, { refreshIfMissing: true }),
+    (growthView) => {
+      if (!activeProjectGrowthPanel) return;
+      activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
+        activeProjectGrowthPanel.webview,
+        context,
+        growthView,
+        projectName
+      );
+    },
+    (message) => {
+      if (!activeProjectGrowthPanel) return;
+      activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
+        title: '项目生长图加载失败',
+        message: '本地项目分析数据没有成功读取。',
+        detail: message,
+        actionLabel: '重试',
+        actionCommand: 'refreshGrowth'
+      });
+    },
+    '项目生长图本地数据加载失败。'
   );
 }
 

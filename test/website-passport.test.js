@@ -829,3 +829,46 @@ test('Privacy Policy and Terms of Service endpoints render correct bilingual cop
   assert.match(termsZh, /<h1>用户协议<\/h1>/);
   assert.match(termsZh, /许可授予与使用范围/);
 });
+
+test('Workbench page renders early access application form, roadmap preview, and handles apply request', async () => {
+  const worker = await loadWebsiteWorker();
+  const env = { SITE_ORIGIN: 'https://solomap.app' };
+
+  // 1. English workbench page
+  const resEn = await worker.default.fetch(new Request('https://solomap.app/workbench'), env);
+  const htmlEn = await resEn.text();
+  assert.equal(resEn.status, 200);
+  assert.match(htmlEn, /SoloMap Workbench/);
+  assert.match(htmlEn, /Join Pro Early Access/);
+  assert.match(htmlEn, /Pro Feature Roadmap &amp; Voting/);
+  assert.match(htmlEn, /Your Pro Entitlements/);
+
+  // 2. Chinese workbench page
+  const resZh = await worker.default.fetch(new Request('https://solomap.app/zh/workbench'), env);
+  const htmlZh = await resZh.text();
+  assert.equal(resZh.status, 200);
+  assert.match(htmlZh, /SoloMap 官网工作台/);
+  assert.match(htmlZh, /申请 Pro Early Access/);
+  assert.match(htmlZh, /Pro 功能路线图与共创投票/);
+
+  // 3. Early access apply API success path
+  const resApplyOk = await worker.default.fetch(new Request('https://solomap.app/api/early-access/apply', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'developer@solomap.app' })
+  }), env);
+  const applyOkBody = await resApplyOk.json();
+  assert.equal(resApplyOk.status, 200);
+  assert.equal(applyOkBody.ok, true);
+  assert.equal(applyOkBody.message, 'Application submitted');
+
+  // 4. Early access apply API error path (invalid email)
+  const resApplyErr = await worker.default.fetch(new Request('https://solomap.app/api/early-access/apply', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'invalid-email' })
+  }), env);
+  const applyErrBody = await resApplyErr.json();
+  assert.equal(resApplyErr.status, 400);
+  assert.equal(applyErrBody.ok, false);
+});
