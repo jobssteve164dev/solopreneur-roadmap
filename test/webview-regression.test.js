@@ -819,6 +819,26 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(prPanelHtml, />打开 PR</);
   assert.doesNotMatch(prPanelHtml, /打开路线大图/);
 
+  const failedChecksPanelHtml = context.__renderProjectDeliveryPanel({
+    name: 'app',
+    path: '/workspace/app',
+    delivery: {
+      available: true,
+      repo: 'owner/repo',
+      failedWorkflowRuns: 1,
+      recentWorkflowRuns: [{
+        displayTitle: 'Publish extension',
+        conclusion: 'failure',
+        url: 'https://github.com/owner/repo/actions/runs/42',
+        updatedAt: '2026-07-09T00:00:00.000Z'
+      }]
+    }
+  });
+  assert.match(failedChecksPanelHtml, /Publish extension/);
+  assert.match(failedChecksPanelHtml, /data-open-delivery-run="https:\/\/github\.com\/owner\/repo\/actions\/runs\/42"/);
+  assert.match(failedChecksPanelHtml, />查看失败 Run</);
+  assert.doesNotMatch(failedChecksPanelHtml, /打开路线大图/);
+
   const issueDetailHtml = context.__renderIssueDetailWithPayload({
     issue: {
       number: 12,

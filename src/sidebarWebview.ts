@@ -7705,7 +7705,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           + '<span class="portfolio-issue-name">' + escapeHtml(title) + '</span>'
           + '<span class="portfolio-issue-sub">' + escapeHtml(deliveryConclusionLabel(run.conclusion)) + (time ? ' · ' + escapeHtml(time) : '') + '</span>'
           + '</span>'
-          + (run.url ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(run.url) + '">' + escapeHtml(t('projectOpen')) + '</button>' : '')
+          + (run.url ? '<button class="portfolio-issue-action" data-open-delivery-run="' + escapeHtml(run.url) + '">' + escapeHtml(t('deliveryActionOpenRun')) + '</button>' : '')
           + '</div>';
       }).join('');
 
