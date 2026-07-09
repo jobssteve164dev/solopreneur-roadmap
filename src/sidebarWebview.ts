@@ -1641,7 +1641,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     .expand-arrow-icon {
       flex-shrink: 0;
       font-size: 11px;
-      color: var(--text-muted);
+      color: inherit;
       transition: transform 0.2s ease;
     }
 
@@ -6298,7 +6298,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="sidebar-conversation-right-col">
               \${miniActions}
               <span class="status-badge-new \${statusClassName}">\${escapeHtml(conversationStatusText(statusKey))}</span>
-              <span class="expand-arrow-icon codicon \${detailExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
+              <button type="button" class="delivery-toggle-btn" data-conversation-expand-id="\${escapeHtml(convId)}" aria-expanded="\${detailExpanded ? 'true' : 'false'}" title="\${escapeHtml(detailExpanded ? t('issueCollapse') : t('issueExpand'))}">
+                <span class="expand-arrow-icon codicon \${detailExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
+              </button>
             </div>
 
           </div>
@@ -6437,6 +6439,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             return;
           }
           const convId = card.getAttribute('data-card-trigger-id');
+          sidebarExpandedConversations[convId] = !sidebarExpandedConversations[convId];
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+
+      container.querySelectorAll('[data-conversation-expand-id]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const convId = button.getAttribute('data-conversation-expand-id');
           sidebarExpandedConversations[convId] = !sidebarExpandedConversations[convId];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });

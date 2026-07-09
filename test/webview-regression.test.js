@@ -1971,8 +1971,12 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?sameConversations\(sidebarProjectConversations\[message\.projectPath\], message\.conversations \|\| \[\]\)/);
   assert.match(html, /function pruneSidebarConversationExpansionState\(conversations\)/);
+  assert.match(html, /class="delivery-toggle-btn" data-conversation-expand-id/);
+  assert.match(html, /class="delivery-toggle-btn" data-toggle-issue-panel/);
+  assert.match(html, /data-conversation-expand-id/);
   assert.match(html, /class="expand-arrow-icon codicon/);
   assert.match(html, /querySelectorAll\('\[data-card-trigger-id\]'\)[\s\S]*?sidebarExpandedConversations\[convId\] = !sidebarExpandedConversations\[convId\]/);
+  assert.match(html, /querySelectorAll\('\[data-conversation-expand-id\]'\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?sidebarExpandedConversations\[convId\] = !sidebarExpandedConversations\[convId\]/);
   assert.doesNotMatch(html, /event\.target\.closest\('span\.codicon'\)/);
   assert.doesNotMatch(html, /case 'sidebarSoloConversationLoaded':[\s\S]*?for \(const k in sidebarExpandedConversations\) delete sidebarExpandedConversations\[k\]/);
   assert.doesNotMatch(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?for \(const k in sidebarExpandedConversations\) delete sidebarExpandedConversations\[k\]/);
