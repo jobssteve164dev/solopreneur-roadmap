@@ -4019,6 +4019,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterFailed: '有失败',
         filterCompleted: '已完成',
         projectOpen: '打开路线大图',
+        issueOpenGithub: '打开 Issue',
+        pullRequestOpenGithub: '打开 PR',
         projectContinue: '继续推进',
         projectReviewFailure: '处理失败',
         refreshProjectData: '刷新项目数据',
@@ -4362,6 +4364,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterFailed: 'Failed',
         filterCompleted: 'Done',
         projectOpen: 'Open Roadmap',
+        issueOpenGithub: 'Open Issue',
+        pullRequestOpenGithub: 'Open PR',
         projectContinue: 'Continue',
         projectReviewFailure: 'Review Failure',
         refreshProjectData: 'Refresh project data',
@@ -7183,7 +7187,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           \${issue.body ? \`<div class="portfolio-issue-comment">\${escapeHtml(issue.body).slice(0, 900)}</div>\` : ''}
           <div class="portfolio-issue-detail-actions">
             \${issue.state === 'OPEN' ? \`<button class="portfolio-issue-action primary" data-agent-fix-issue="\${escapeHtml(issue.number)}" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('issueAskAgent'))}</button>\` : ''}
-            \${issue.url ? \`<button class="portfolio-issue-action" data-open-issue-url="\${escapeHtml(issue.url)}">\${escapeHtml(t('projectOpen'))}</button>\` : ''}
+            \${issue.url ? \`<button class="portfolio-issue-action" data-open-issue-url="\${escapeHtml(issue.url)}">\${escapeHtml(t('issueOpenGithub'))}</button>\` : ''}
             \${issue.state === 'OPEN' ? \`<button class="portfolio-issue-action danger" data-close-issue="\${escapeHtml(issue.number)}" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('issueClose'))}</button>\` : ''}
           </div>
           \${comments.length ? comments.map(comment => \`
@@ -7505,7 +7509,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           + '</span>'
           + '</span>'
           + '<button class="portfolio-issue-action primary" data-agent-review-pr="' + escapeHtml(pr.number) + '" data-project-path="' + escapeHtml(project.path) + '">' + escapeHtml(t('pullRequestActionReview')) + '</button>'
-          + (pr.url ? '<button class="portfolio-issue-action" data-open-pr-url="' + escapeHtml(pr.url) + '">' + escapeHtml(t('projectOpen')) + '</button>' : '')
+          + (pr.url ? '<button class="portfolio-issue-action" data-open-pr-url="' + escapeHtml(pr.url) + '">' + escapeHtml(t('pullRequestOpenGithub')) + '</button>' : '')
           + '<button class="portfolio-issue-action danger" data-close-pr="' + escapeHtml(pr.number) + '" data-project-path="' + escapeHtml(project.path) + '">' + escapeHtml(t('pullRequestActionClose')) + '</button>'
           + '</div>').join('')
         : '';

@@ -759,6 +759,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   ], `
     globalThis.__setDeliveryActionPanelExpanded = (value) => { deliveryActionPanelExpanded = Boolean(value); };
     globalThis.__renderProjectDeliveryPanel = renderProjectDeliveryPanel;
+    globalThis.__renderIssueDetailWithPayload = (payload) => { issueDetails = payload; return renderIssueDetail('/workspace/app'); };
     globalThis.__getCurrentPortfolio = () => currentProjects.portfolio;
     globalThis.__resetActiveProjectPath = () => { activeProjectPath = ''; currentProjects.selectedProjectPath = ''; };
   `);
@@ -813,6 +814,22 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(prPanelHtml, /data-agent-review-pr="7"/);
   assert.match(prPanelHtml, /data-close-pr="7"/);
   assert.match(prPanelHtml, /data-open-pr-url="https:\/\/github\.com\/owner\/repo\/pull\/7"/);
+  assert.match(prPanelHtml, />打开 PR</);
+  assert.doesNotMatch(prPanelHtml, /打开路线大图/);
+
+  const issueDetailHtml = context.__renderIssueDetailWithPayload({
+    issue: {
+      number: 12,
+      title: 'Crash on startup',
+      state: 'OPEN',
+      body: 'App crashes when launched.',
+      url: 'https://github.com/owner/repo/issues/12'
+    },
+    comments: []
+  });
+  assert.match(issueDetailHtml, /data-open-issue-url="https:\/\/github\.com\/owner\/repo\/issues\/12"/);
+  assert.match(issueDetailHtml, />打开 Issue</);
+  assert.doesNotMatch(issueDetailHtml, /打开路线大图/);
   context.__setDeliveryActionPanelExpanded(false);
 
   elements['btn-open-strategy-pyramid'].listeners.click();
