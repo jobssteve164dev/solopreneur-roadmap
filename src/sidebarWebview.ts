@@ -6433,10 +6433,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
       container.querySelectorAll('[data-card-trigger-id]').forEach(card => {
         card.addEventListener('click', (event) => {
-          if (event.target.closest('button') || event.target.closest('.sidebar-conversation-mini-actions') || event.target.closest('span.codicon')) {
-            if (event.target.closest('.sidebar-conversation-mini-actions') || event.target.closest('button')) {
-              return;
-            }
+          if (event.target.closest('button') || event.target.closest('.sidebar-conversation-mini-actions')) {
+            return;
           }
           const convId = card.getAttribute('data-card-trigger-id');
           sidebarExpandedConversations[convId] = !sidebarExpandedConversations[convId];
