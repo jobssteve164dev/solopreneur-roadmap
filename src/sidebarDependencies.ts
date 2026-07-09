@@ -7,6 +7,7 @@ import {
   getAgentCliFamily,
   getAgentTaskAutomationStatus,
   getKnownAgentCliCandidates,
+  resolveExecutablePath,
   resolveAgentCli,
   shellQuote
 } from './agentCli';
@@ -22,6 +23,60 @@ export interface DependencyStatus {
   githubCliReady: boolean;
   githubAuthReady: boolean;
   githubMessage: string;
+  supportedAgents: SupportedAgentStatus[];
+}
+
+export interface SupportedAgentStatus {
+  family: string;
+  title: string;
+  candidates: string[];
+  command: string;
+  installed: boolean;
+  selected: boolean;
+  automationReady: boolean;
+  automationPreconfigured: boolean;
+  automationCanPrepare: boolean;
+  loginState: 'trial_required' | 'not_installed';
+  message: string;
+}
+
+const supportedAgentFamilies = [
+  { family: 'antigravity', title: 'Agy / Antigravity' },
+  { family: 'codex', title: 'Codex' },
+  { family: 'cursor', title: 'Cursor' },
+  { family: 'claude', title: 'Claude' },
+  { family: 'copilot', title: 'Copilot' },
+  { family: 'opencode', title: 'OpenCode' }
+];
+
+export function getSupportedAgentStatuses(configuredCliPath: string): SupportedAgentStatus[] {
+  const selectedCli = resolveAgentCli(configuredCliPath || 'agy', configuredCliPath || 'agy');
+  const selectedFamily = getAgentCliFamily(selectedCli || configuredCliPath || 'agy');
+
+  return supportedAgentFamilies.map((agent) => {
+    const candidates = getKnownAgentCliCandidates(agent.family);
+    const detected = candidates.find(commandExists) || '';
+    const command = detected ? resolveExecutablePath(detected) : '';
+    const automation = command
+      ? getAgentTaskAutomationStatus(command)
+      : { supported: false, preconfigured: false, permissionArgs: '', message: 'Agent CLI is not installed.' };
+    const installed = Boolean(command);
+    return {
+      family: agent.family,
+      title: agent.title,
+      candidates,
+      command,
+      installed,
+      selected: selectedFamily === agent.family,
+      automationReady: installed && automation.supported,
+      automationPreconfigured: Boolean(automation.preconfigured),
+      automationCanPrepare: installed && automation.supported && !automation.preconfigured,
+      loginState: installed ? 'trial_required' : 'not_installed',
+      message: installed
+        ? 'Installed. Run a task or use the Agent login action if this CLI asks you to sign in.'
+        : `Not found. Tried: ${candidates.join(', ')}`
+    };
+  });
 }
 
 export function getDependencyStatus(cliPath: string): DependencyStatus {
@@ -51,7 +106,8 @@ export function getDependencyStatus(cliPath: string): DependencyStatus {
     agentAutomationCanPrepare: agentReady && automation.supported && !automation.preconfigured,
     githubCliReady,
     githubAuthReady,
-    githubMessage
+    githubMessage,
+    supportedAgents: getSupportedAgentStatuses(cliPath || 'agy')
   };
 }
 

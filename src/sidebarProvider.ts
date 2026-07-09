@@ -9,7 +9,8 @@ import { readTodayReview, startDailyReviewAgent } from './dailyReview';
 import {
   buildAgentAutomationWrapper,
   buildAgentInstallCommand,
-  getDependencyStatus
+  getDependencyStatus,
+  getSupportedAgentStatuses
 } from './sidebarDependencies';
 import {
   buildProjectPortfolioSummaries,
@@ -125,6 +126,26 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               status: getDependencyStatus(data.cliPath || this._getSettings().cliPath || 'agy')
             });
             break;
+          case 'agent.setDefault': {
+            const settings = this._getSettings();
+            const cliPath = String(data.cliPath || '').trim();
+            if (!cliPath) {
+              vscode.window.showErrorMessage('Agent CLI path is missing.');
+              break;
+            }
+            await this._updateSettings({
+              ...settings,
+              cliPath
+            });
+            this.sendSettings();
+            this._view?.webview.postMessage({
+              command: 'dependenciesChecked',
+              status: getDependencyStatus(cliPath)
+            });
+            vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+            vscode.window.showInformationMessage(`Default Agent set to ${cliPath}.`);
+            break;
+          }
           case 'prepareAgentAutomation': {
             const settings = this._getSettings();
             const projectState = this._getProjects();
@@ -203,7 +224,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       this._view.webview.postMessage({
         command: 'settingsLoaded',
-        settings: this._getSettings()
+        settings: this._getSettings(),
+        supportedAgents: getSupportedAgentStatuses(this._getSettings().cliPath || 'agy')
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send settings:', error);

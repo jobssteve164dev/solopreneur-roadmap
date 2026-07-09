@@ -663,6 +663,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /conversation\.getProjectHistory/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
+  assert.match(html, /id="agent-readiness-panel"/);
   assert.match(html, /id="pro-account-panel"/);
   assert.match(html, /id="btn-open-pro-authorization"/);
   assert.match(html, /id="btn-paste-pro-code"/);
@@ -755,6 +756,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'dependency-automation-message',
     'dependency-github-status',
     'dependency-github-message',
+    'agent-readiness-panel',
     'cli-test-badge'
   ], `
     globalThis.__setDeliveryActionPanelExpanded = (value) => { deliveryActionPanelExpanded = Boolean(value); };
@@ -893,6 +895,28 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'agy');
   assert.equal(elements['setting-clipath-custom'].style.display, 'none');
   assert.ok(elements['automation-trigger-select'].__options.every((option) => option.getAttribute('data-solo-option-value') !== 'scheduled_time'));
+  dispatchMessage({
+    command: 'dependenciesChecked',
+    status: {
+      agentReady: true,
+      agentMessage: 'codex is ready.',
+      agentAutomationReady: true,
+      agentAutomationMessage: 'codex can run tasks.',
+      githubAuthReady: false,
+      githubMessage: 'GitHub authorization is needed.',
+      supportedAgents: [
+        { family: 'codex', title: 'Codex', command: '/usr/local/bin/codex', installed: true, selected: true, automationReady: true, automationPreconfigured: true },
+        { family: 'claude', title: 'Claude', command: '/usr/local/bin/claude', installed: true, selected: false, automationReady: true, automationCanPrepare: true },
+        { family: 'cursor', title: 'Cursor', command: '', installed: false, selected: false, automationReady: false }
+      ]
+    }
+  });
+  assert.match(elements['agent-readiness-panel'].innerHTML, /Codex/);
+  assert.match(elements['agent-readiness-panel'].innerHTML, /Claude/);
+  assert.match(elements['agent-readiness-panel'].innerHTML, /data-agent-set-default="\/usr\/local\/bin\/claude"/);
+  assert.match(script, /data-agent-set-default/);
+  assert.match(script, /command: 'agent\.setDefault'/);
+  assert.match(script, /data-agent-prepare/);
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {

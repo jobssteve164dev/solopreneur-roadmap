@@ -603,6 +603,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     .dependency-actions {
       display: flex;
       gap: 6px;
+      flex-wrap: wrap;
     }
 
     .dependency-action-btn {
@@ -614,6 +615,81 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       font-size: 10px;
       font-weight: 700;
       cursor: pointer;
+    }
+
+    .agent-readiness-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    .agent-readiness-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .agent-readiness-row.selected {
+      border-color: rgba(0, 229, 255, 0.32);
+      background: rgba(0, 229, 255, 0.07);
+    }
+
+    .agent-readiness-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .agent-readiness-title {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10.5px;
+      font-weight: 800;
+      color: var(--text-main);
+    }
+
+    .agent-readiness-meta {
+      font-size: 9px;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+
+    .agent-readiness-actions {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .agent-readiness-action {
+      border: 1px solid rgba(0, 229, 255, 0.22);
+      border-radius: 5px;
+      background: rgba(0, 229, 255, 0.07);
+      color: #d8fbff;
+      padding: 4px 6px;
+      font-size: 9px;
+      font-weight: 800;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .agent-readiness-action.secondary {
+      border-color: rgba(255, 255, 255, 0.14);
+      background: rgba(255, 255, 255, 0.045);
+      color: var(--text-muted);
+    }
+
+    .onboarding-agent-summary {
+      margin-top: 10px;
     }
 
     .impact-panel {
@@ -3531,6 +3607,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           <button class="dependency-action-btn" id="btn-open-agent-check"><span class="codicon codicon-terminal"></span><span id="text-open-agent-check">Agent</span></button>
           <button class="dependency-action-btn" id="btn-open-github-auth"><span class="codicon codicon-github"></span><span id="text-open-github-auth">GitHub</span></button>
         </div>
+        <div class="agent-readiness-panel" id="agent-readiness-panel"></div>
       </div>
     </div>
     </div>
@@ -3636,6 +3713,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnPrepareAgentAutomation = document.getElementById('btn-prepare-agent-automation');
     const btnOpenAgentCheck = document.getElementById('btn-open-agent-check');
     const btnOpenGithubAuth = document.getElementById('btn-open-github-auth');
+    const agentReadinessPanel = document.getElementById('agent-readiness-panel');
     const automationTriggerSelect = document.getElementById('automation-trigger-select');
     const automationActionSelect = document.getElementById('automation-action-select');
     const automationPromptInput = document.getElementById('automation-prompt-input');
@@ -3678,6 +3756,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let currentFeedbackType = 'not_working';
     let currentCliPath = 'agy';
     let currentSettings = {};
+    let lastDependencyStatus = null;
     let selectedEnhancementId = '';
     const projectConversationModes = {};
     const agentModelCatalogs = {};
@@ -4108,6 +4187,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         dependencyAutomation: '自动任务',
         dependencyGithub: 'GitHub 授权',
         prepareAgentAutomation: '准备 Agent',
+        firstRunReadiness: '先准备一个可用 Agent',
+        agentDefault: '默认',
+        agentUseDefault: '设为默认',
+        agentInstalled: '已安装',
+        agentNotInstalled: '未安装',
+        agentAutomationReady: '可连续执行',
+        agentAutomationAvailable: '可准备连续执行',
+        agentAutomationUnavailable: '需要手动确认',
+        agentLoginTrialRequired: '登录状态将在试跑时确认',
+        agentLoginAction: '登录 / 试跑',
         agentImpact: 'Agent 贡献',
         impactMinutes: '工作分钟',
         impactFiles: '改动文件',
@@ -4453,6 +4542,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         dependencyAutomation: 'Task automation',
         dependencyGithub: 'GitHub authorization',
         prepareAgentAutomation: 'Prepare Agent',
+        firstRunReadiness: 'Prepare one usable Agent first',
+        agentDefault: 'Default',
+        agentUseDefault: 'Use default',
+        agentInstalled: 'Installed',
+        agentNotInstalled: 'Not installed',
+        agentAutomationReady: 'Can run tasks',
+        agentAutomationAvailable: 'Can be prepared',
+        agentAutomationUnavailable: 'Needs manual confirmation',
+        agentLoginTrialRequired: 'Sign-in is confirmed on trial run',
+        agentLoginAction: 'Sign in / test',
         agentImpact: 'Agent Impact',
         impactMinutes: 'Minutes',
         impactFiles: 'Files changed',
@@ -4893,6 +4992,114 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderProAccount(settings) {
       SoloMapWebview.renderProAccount(proAccountPanel, settings, t, currentLanguage);
+    }
+
+    function dependencyBadge(ok) {
+      return '<span class="dependency-status ' + (ok ? 'ready' : 'needs-action') + '">' + escapeHtml(ok ? t('dependencyReady') : t('dependencyAction')) + '</span>';
+    }
+
+    function agentReadinessMeta(agent) {
+      if (!agent || !agent.installed) return t('agentNotInstalled');
+      const parts = [t('agentInstalled')];
+      parts.push(agent.automationPreconfigured ? t('agentAutomationReady') : (agent.automationReady ? t('agentAutomationAvailable') : t('agentAutomationUnavailable')));
+      parts.push(t('agentLoginTrialRequired'));
+      return parts.join(' · ');
+    }
+
+    function renderAgentReadinessRows(status, compact) {
+      const agents = Array.isArray(status && status.supportedAgents) ? status.supportedAgents : [];
+      if (!agents.length) {
+        return '<div class="dependency-message">' + escapeHtml(t('dependencyNotChecked')) + '</div>';
+      }
+      return agents.map(agent => {
+        const installed = Boolean(agent.installed);
+        const selected = Boolean(agent.selected);
+        const ready = installed && Boolean(agent.automationPreconfigured);
+        const command = String(agent.command || '');
+        const actions = [];
+        if (installed && !selected) {
+          actions.push('<button class="agent-readiness-action" data-agent-set-default="' + escapeHtml(command) + '">' + escapeHtml(t('agentUseDefault')) + '</button>');
+        }
+        if (installed && agent.automationCanPrepare) {
+          actions.push('<button class="agent-readiness-action" data-agent-prepare="' + escapeHtml(command) + '">' + escapeHtml(t('prepareAgentAutomation')) + '</button>');
+        }
+        if (installed) {
+          actions.push('<button class="agent-readiness-action secondary" data-agent-login-check="' + escapeHtml(command) + '">' + escapeHtml(t('agentLoginAction')) + '</button>');
+        } else if (!compact) {
+          actions.push('<button class="agent-readiness-action secondary" data-agent-install="' + escapeHtml(agent.family || '') + '">' + escapeHtml(t('openAgentInstall')) + '</button>');
+        }
+        return '<div class="agent-readiness-row ' + (selected ? 'selected' : '') + '">' +
+          '<div class="agent-readiness-main">' +
+          '<div class="agent-readiness-title">' +
+          '<span class="codicon codicon-' + (installed ? 'check' : 'circle-slash') + '"></span>' +
+          escapeHtml(agent.title || agent.family || '') +
+          (selected ? ' · ' + escapeHtml(t('agentDefault')) : '') +
+          '</div>' +
+          '<div class="agent-readiness-meta">' + escapeHtml(agentReadinessMeta(agent)) + '</div>' +
+          (command && !compact ? '<div class="agent-readiness-meta">' + escapeHtml(command) + '</div>' : '') +
+          '</div>' +
+          '<div class="agent-readiness-actions">' +
+          dependencyBadge(ready) +
+          actions.join('') +
+          '</div>' +
+          '</div>';
+      }).join('');
+    }
+
+    function bindAgentReadinessActions(container) {
+      if (!container) return;
+      container.querySelectorAll('[data-agent-set-default]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'agent.setDefault', cliPath: button.getAttribute('data-agent-set-default') || '' });
+        });
+      });
+      container.querySelectorAll('[data-agent-prepare]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'prepareAgentAutomation', cliPath: button.getAttribute('data-agent-prepare') || '' });
+        });
+      });
+      container.querySelectorAll('[data-agent-login-check]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'openDependencyAction', action: 'agent-check', cliPath: button.getAttribute('data-agent-login-check') || '' });
+        });
+      });
+      container.querySelectorAll('[data-agent-install]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'openDependencyAction', action: 'agent-install', cliPath: button.getAttribute('data-agent-install') || '' });
+        });
+      });
+    }
+
+    function renderDependencyStatus(status) {
+      status = status || {};
+      lastDependencyStatus = status;
+      setText('dependency-agent-message', status.agentMessage || t('dependencyNotChecked'));
+      setText('dependency-automation-message', status.agentAutomationMessage || t('dependencyNotChecked'));
+      setText('dependency-github-message', status.githubMessage || t('dependencyNotChecked'));
+      const agentStatus = document.getElementById('dependency-agent-status');
+      const automationStatus = document.getElementById('dependency-automation-status');
+      const githubStatus = document.getElementById('dependency-github-status');
+      if (agentStatus) {
+        agentStatus.className = 'dependency-status ' + (status.agentReady ? 'ready' : 'needs-action');
+        agentStatus.textContent = status.agentReady ? t('dependencyReady') : t('dependencyAction');
+      }
+      if (automationStatus) {
+        automationStatus.className = 'dependency-status ' + (status.agentAutomationReady ? 'ready' : 'needs-action');
+        automationStatus.textContent = status.agentAutomationReady ? t('dependencyReady') : t('dependencyAction');
+      }
+      if (githubStatus) {
+        githubStatus.className = 'dependency-status ' + (status.githubAuthReady ? 'ready' : 'needs-action');
+        githubStatus.textContent = status.githubAuthReady ? t('dependencyReady') : t('dependencyAction');
+      }
+      if (agentReadinessPanel) {
+        agentReadinessPanel.innerHTML = renderAgentReadinessRows(status, false);
+        bindAgentReadinessActions(agentReadinessPanel);
+      }
+      renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
     }
 
     const abilityController = SoloMapWebview.createAbilityController({
@@ -5533,6 +5740,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
+          if (!lastDependencyStatus) {
+            requestDependencyCheck();
+          }
           restartFocusTimerTick();
           break;
 
@@ -5834,11 +6044,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     });
 
     btnCheckDependencies.addEventListener('click', () => {
-      setDependencyPending();
-      vscode.postMessage({
-        command: 'checkDependencies',
-        cliPath: getEffectiveSettingCliPath()
-      });
+      requestDependencyCheck();
     });
 
     btnOpenAgentCheck.addEventListener('click', () => {
@@ -5902,6 +6108,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (!item) return;
         item.className = 'dependency-status';
         item.textContent = t('checkDependencies');
+      });
+    }
+
+    function requestDependencyCheck() {
+      setDependencyPending();
+      vscode.postMessage({
+        command: 'checkDependencies',
+        cliPath: getEffectiveSettingCliPath()
       });
     }
 
@@ -7089,7 +7303,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
 
     function renderOnboardingPanel() {
-      return SoloMapWebview.renderOnboardingPanel(t);
+      const setup = lastDependencyStatus
+        ? '<div class="onboarding-agent-summary">' +
+          '<div class="onboarding-kicker"><span class="codicon codicon-checklist"></span>' + escapeHtml(t('firstRunReadiness')) + '</div>' +
+          '<div class="agent-readiness-panel">' + renderAgentReadinessRows(lastDependencyStatus, true) + '</div>' +
+          '<div class="dependency-actions" style="margin-top: 8px;">' +
+          '<button class="dependency-action-btn" data-first-run-check><span class="codicon codicon-search"></span>' + escapeHtml(t('checkDependencies')) + '</button>' +
+          '<button class="dependency-action-btn" data-first-run-github><span class="codicon codicon-github"></span>' + escapeHtml(t('openGithubAuth')) + '</button>' +
+          '</div>' +
+          '</div>'
+        : '<div class="onboarding-agent-summary"><button class="dependency-action-btn" data-first-run-check><span class="codicon codicon-search"></span>' + escapeHtml(t('checkDependencies')) + '</button></div>';
+      const panel = SoloMapWebview.renderOnboardingPanel(t);
+      return panel.endsWith('</div>') ? panel.slice(0, -6) + setup + '</div>' : panel + setup;
     }
 
     function renderProjectIssuePanel(project) {
@@ -7674,6 +7899,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (!portfolio || portfolio.length === 0) {
         portfolioList.innerHTML = renderOnboardingPanel();
         bindOnboardingActions(portfolioList);
+        bindAgentReadinessActions(portfolioList);
+        portfolioList.querySelectorAll('[data-first-run-check]').forEach(button => {
+          button.addEventListener('click', () => requestDependencyCheck());
+        });
+        portfolioList.querySelectorAll('[data-first-run-github]').forEach(button => {
+          button.addEventListener('click', () => {
+            vscode.postMessage({
+              command: 'openDependencyAction',
+              action: 'github-auth',
+              cliPath: getEffectiveSettingCliPath()
+            });
+          });
+        });
         restoreProjectConversationInputState(preservedComposerState);
         return;
       }
