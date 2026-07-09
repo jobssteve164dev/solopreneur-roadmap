@@ -97,6 +97,32 @@ function readText(filePath: string): string {
   }
 }
 
+function readTextTail(filePath: string, maxBytes = 64 * 1024): string {
+  let fd: number | null = null;
+  try {
+    if (!fs.existsSync(filePath)) {
+      return '';
+    }
+    const stat = fs.statSync(filePath);
+    const length = Math.min(Math.max(0, stat.size), maxBytes);
+    if (length <= 0) {
+      return '';
+    }
+    const buffer = Buffer.alloc(length);
+    fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buffer, 0, length, Math.max(0, stat.size - length));
+    return buffer.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
 function readJson(filePath: string): any {
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -194,7 +220,7 @@ function readRunTimestamp(runDir: string): string {
 }
 
 function inferRunDurationMs(runDir: string, startedAt: string): number {
-  const output = readText(path.join(runDir, 'output.log'));
+  const output = readTextTail(path.join(runDir, 'output.log'));
   const storedDuration = output.match(/Run duration ms:\s*(\d+)/);
   if (storedDuration) {
     return Math.max(0, Number(storedDuration[1] || 0));
@@ -230,7 +256,7 @@ function inferRunStatus(runDir: string): string {
       return 'Failed';
     }
   }
-  const output = readText(path.join(runDir, 'output.log'));
+  const output = readTextTail(path.join(runDir, 'output.log'));
   if (/Failure category:|Failure reason:|Agent CLI exited before completing/i.test(output)) {
     return 'Failed';
   }

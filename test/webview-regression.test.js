@@ -5732,6 +5732,49 @@ test('agent impact summary counts local SoloMap contribution by agent', () => {
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 2, 2], ['claude', 1, 1, 2]]);
 });
 
+test('agent impact summary prefers run digests over raw agent run logs', () => {
+  const { buildAgentImpactSummary } = require(path.join(projectRoot, 'out/agentImpact.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-digest-'));
+  const solopreneurDir = path.join(tempRoot, '.solopreneur');
+  const digestRoot = path.join(solopreneurDir, 'run-digests');
+  const legacyRunDir = path.join(solopreneurDir, 'agent-runs', '__solo__', '1');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.mkdirSync(legacyRunDir, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,目标与路径确认,,codex,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z'
+  ].join('\n'));
+  fs.writeFileSync(path.join(digestRoot, 'digest-1.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'digest-1',
+    runKind: 'solo',
+    agentCli: 'codex',
+    status: 'Completed',
+    startedAt: '2026-06-01T10:00:00.000Z',
+    finishedAt: '2026-06-01T10:04:00.000Z',
+    durationMs: 4 * 60 * 1000,
+    changedFiles: ['src/from-digest.ts'],
+    touchedFiles: ['docs/from-digest.md']
+  }), 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'started_at'), '2026-06-01T09:00:00.000Z', 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'command.txt'), "claude -p 'legacy'", 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'output.log'), 'Run duration ms: 600000\nFailure reason: legacy should not count\n', 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'touched-files.txt'), 'M src/from-legacy.ts\n', 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'completion.json'), JSON.stringify({ markCompleted: false, failureReason: 'legacy' }), 'utf8');
+
+  const summary = buildAgentImpactSummary(
+    [{ name: 'Digest Project', path: tempRoot }],
+    new Date('2026-06-01T12:00:00.000Z')
+  );
+
+  assert.equal(summary.totalRuns, 1);
+  assert.equal(summary.completedRuns, 1);
+  assert.equal(summary.failedRuns, 0);
+  assert.equal(summary.totalMinutes, 4);
+  assert.equal(summary.changedFiles, 2);
+  assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 4, 2]]);
+});
+
 test('step conversations can start independently while dependencies or other runs are active', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',

@@ -36,11 +36,45 @@ interface RoadmapNodeLike {
   status: string;
 }
 
+interface AgentImpactRun {
+  agent: string;
+  status: 'completed' | 'failed' | 'unknown';
+  timestamp: number;
+  minutes: number;
+  changedFiles: string[];
+}
+
 function readFileIfExists(filePath: string): string {
   try {
     return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
   } catch {
     return '';
+  }
+}
+
+function readFileTailIfExists(filePath: string, maxBytes = 64 * 1024): string {
+  let fd: number | null = null;
+  try {
+    if (!fs.existsSync(filePath)) {
+      return '';
+    }
+    const stat = fs.statSync(filePath);
+    const length = Math.min(Math.max(0, stat.size), maxBytes);
+    if (length <= 0) {
+      return '';
+    }
+    const buffer = Buffer.alloc(length);
+    fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buffer, 0, length, Math.max(0, stat.size - length));
+    return buffer.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
   }
 }
 
@@ -59,7 +93,7 @@ function getRunTimestamp(runDir: string): number {
 }
 
 function getRunDurationMinutes(runDir: string, startedAtMs: number): number {
-  const output = readFileIfExists(path.join(runDir, 'output.log'));
+  const output = readFileTailIfExists(path.join(runDir, 'output.log'));
   const storedDuration = output.match(/Run duration ms:\s*(\d+)/);
   if (storedDuration) {
     return Math.max(1, Math.round(Number(storedDuration[1] || 0) / 60000));
@@ -108,7 +142,7 @@ function inferRunStatus(runDir: string): 'completed' | 'failed' | 'unknown' {
       return 'unknown';
     }
   }
-  const output = readFileIfExists(path.join(runDir, 'output.log'));
+  const output = readFileTailIfExists(path.join(runDir, 'output.log'));
   if (/Failure category:|Failure reason:|Agent CLI exited before completing/i.test(output)) {
     return 'failed';
   }
@@ -171,6 +205,91 @@ function listAgentRunDirs(runsRoot: string): string[] {
   return result;
 }
 
+function normalizeRunKind(value: unknown): string {
+  const kind = String(value || '').trim();
+  return kind || 'step';
+}
+
+function isImpactRunKind(kind: string): boolean {
+  return /^(step|step_continue|solo|solo_continue|roadmap_revision)$/.test(kind);
+}
+
+function statusFromDigest(value: unknown): 'completed' | 'failed' | 'unknown' {
+  const status = String(value || '').trim();
+  if (status === 'Completed' || status === 'Recorded' || status === 'In Progress') {
+    return 'completed';
+  }
+  if (status === 'Failed') {
+    return 'failed';
+  }
+  return 'unknown';
+}
+
+function inferAgentFromDigest(digest: any): string {
+  const agentCli = String(digest?.agentCli || '').trim();
+  if (agentCli) {
+    return inferAgentFromCommand(agentCli);
+  }
+  const commandSignal = Array.isArray(digest?.commandSignals) ? String(digest.commandSignals[0] || '') : '';
+  return inferAgentFromCommand(commandSignal);
+}
+
+function readRunsFromDigests(projectPath: string): AgentImpactRun[] {
+  const digestRoot = path.join(projectPath, '.solopreneur', 'run-digests');
+  if (!fs.existsSync(digestRoot)) {
+    return [];
+  }
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(digestRoot).filter((file) => file.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  return files.map((file) => {
+    let digest: any = null;
+    try {
+      digest = JSON.parse(fs.readFileSync(path.join(digestRoot, file), 'utf8'));
+    } catch {
+      return null;
+    }
+    if (!digest || typeof digest !== 'object') {
+      return null;
+    }
+    const runKind = normalizeRunKind(digest.runKind);
+    if (!isImpactRunKind(runKind)) {
+      return null;
+    }
+    const timestamp = Date.parse(String(digest.finishedAt || digest.startedAt || ''));
+    const durationMs = Math.max(0, Number(digest.durationMs || 0));
+    const changedFiles = [
+      ...(Array.isArray(digest.changedFiles) ? digest.changedFiles : []),
+      ...(Array.isArray(digest.touchedFiles) ? digest.touchedFiles : [])
+    ].map((item) => String(item || '').trim()).filter(Boolean);
+    return {
+      agent: inferAgentFromDigest(digest),
+      status: statusFromDigest(digest.status),
+      timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+      minutes: durationMs > 0 ? Math.max(1, Math.round(durationMs / 60000)) : 0,
+      changedFiles
+    };
+  }).filter((run): run is AgentImpactRun => Boolean(run));
+}
+
+function readRunsFromAgentDirs(projectPath: string): AgentImpactRun[] {
+  const runsRoot = path.join(projectPath, '.solopreneur', 'agent-runs');
+  return listAgentRunDirs(runsRoot).map((runDir) => {
+    const timestamp = getRunTimestamp(runDir);
+    const command = readFileIfExists(path.join(runDir, 'command.txt'));
+    return {
+      agent: inferAgentFromCommand(command),
+      status: inferRunStatus(runDir),
+      timestamp,
+      minutes: getRunDurationMinutes(runDir, timestamp),
+      changedFiles: readRunChangedFiles(runDir)
+    };
+  });
+}
+
 function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
   const roadmapPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
   if (!fs.existsSync(roadmapPath)) {
@@ -211,13 +330,13 @@ export function buildAgentImpactSummary(projects: AgentImpactProject[], now = ne
     totalNodes += nodes.length;
     completedNodes += nodes.filter((node) => node.status === 'Completed').length;
 
-    const runsRoot = path.join(project.path, '.solopreneur', 'agent-runs');
-    for (const runDir of listAgentRunDirs(runsRoot)) {
-      const timestamp = getRunTimestamp(runDir);
-      const command = readFileIfExists(path.join(runDir, 'command.txt'));
-      const agent = inferAgentFromCommand(command);
-      const minutes = getRunDurationMinutes(runDir, timestamp);
-      const changedFiles = readRunChangedFiles(runDir).map((file) => `${project.path}:${file}`);
+    const digestRuns = readRunsFromDigests(project.path);
+    const runs = digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(project.path);
+    for (const run of runs) {
+      const agent = run.agent;
+      const timestamp = run.timestamp;
+      const minutes = run.minutes;
+      const changedFiles = run.changedFiles.map((file) => `${project.path}:${file}`);
       const agentStats = byAgent.get(agent) || { agent, runs: 0, minutes: 0, files: new Set<string>(), latestRunAtMs: 0 };
 
       totalRuns += 1;
@@ -234,7 +353,7 @@ export function buildAgentImpactSummary(projects: AgentImpactProject[], now = ne
         agentStats.files.add(file);
       });
 
-      const status = inferRunStatus(runDir);
+      const status = run.status;
       if (status === 'completed') {
         completedRuns += 1;
       } else if (status === 'failed') {
