@@ -5797,6 +5797,46 @@ test('sync engine does not rewrite the journal when roadmap csv is unchanged', a
   assert.equal(secondEngine.getNodes()[0].title, 'Plan');
 });
 
+test('sqlite store records structured run index entries', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-run-index-'));
+  const dbPath = path.join(tempRoot, 'project_journal.db');
+  const store = new SqliteStore(dbPath, projectRoot);
+  await store.init();
+
+  store.upsertRunIndex({
+    executionLogId: 7,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    agentCli: 'codex',
+    status: 'Completed',
+    startedAt: '2026-06-01T10:00:00.000Z',
+    finishedAt: '2026-06-01T10:05:00.000Z',
+    durationMs: 5 * 60 * 1000,
+    outputPath: '.solopreneur/agent-runs/__solo__/7/output.log',
+    outputBytes: 1234,
+    outputTail: 'npm test passed',
+    commandPath: '.solopreneur/agent-runs/__solo__/7/command.txt',
+    promptPath: '.solopreneur/agent-runs/__solo__/7/prompt.txt',
+    changesPath: '.solopreneur/agent-runs/__solo__/7/changes.txt',
+    touchedFilesPath: '.solopreneur/agent-runs/__solo__/7/touched-files.txt',
+    updatedAt: '2026-06-01T10:05:00.000Z'
+  }, [
+    { filePath: 'src/view.ts', role: 'changed' },
+    { filePath: 'docs/result.md', role: 'touched' }
+  ], [
+    { type: 'verification', value: 'npm test passed' }
+  ]);
+
+  const entries = store.getRunIndexEntries();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].executionLogId, 7);
+  assert.equal(entries[0].durationMs, 5 * 60 * 1000);
+  assert.deepEqual(entries[0].files.map((file) => [file.role, file.filePath]), [['touched', 'docs/result.md'], ['changed', 'src/view.ts']]);
+  assert.deepEqual(entries[0].signals.map((signal) => [signal.type, signal.value]), [['verification', 'npm test passed']]);
+  store.close();
+});
+
 test('agent impact summary counts local SoloMap contribution by agent', () => {
   const { buildAgentImpactSummary } = require(path.join(projectRoot, 'out/agentImpact.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-'));
@@ -5878,6 +5918,76 @@ test('agent impact summary prefers run digests over raw agent run logs', () => {
   assert.equal(summary.totalMinutes, 4);
   assert.equal(summary.changedFiles, 2);
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 4, 2]]);
+});
+
+test('agent impact summary prefers database run index over digests and raw logs', async () => {
+  const { buildAgentImpactSummaryFromDatabase } = require(path.join(projectRoot, 'out/agentImpact.js'));
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-db-'));
+  const solopreneurDir = path.join(tempRoot, '.solopreneur');
+  const digestRoot = path.join(solopreneurDir, 'run-digests');
+  const legacyRunDir = path.join(solopreneurDir, 'agent-runs', '__solo__', '1');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.mkdirSync(legacyRunDir, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,目标与路径确认,,codex,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z'
+  ].join('\n'));
+  fs.writeFileSync(path.join(digestRoot, 'digest-1.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'digest-1',
+    runKind: 'solo',
+    agentCli: 'claude',
+    status: 'Failed',
+    startedAt: '2026-06-01T09:00:00.000Z',
+    finishedAt: '2026-06-01T09:10:00.000Z',
+    durationMs: 10 * 60 * 1000,
+    changedFiles: ['src/from-digest.ts']
+  }), 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'started_at'), '2026-06-01T08:00:00.000Z', 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'command.txt'), "claude -p 'legacy'", 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'output.log'), 'Run duration ms: 600000\nFailure reason: legacy should not count\n', 'utf8');
+  fs.writeFileSync(path.join(legacyRunDir, 'touched-files.txt'), 'M src/from-legacy.ts\n', 'utf8');
+
+  const store = new SqliteStore(path.join(solopreneurDir, 'project_journal.db'), projectRoot);
+  await store.init();
+  store.upsertRunIndex({
+    executionLogId: 11,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    agentCli: 'codex',
+    status: 'Completed',
+    startedAt: '2026-06-01T10:00:00.000Z',
+    finishedAt: '2026-06-01T10:03:00.000Z',
+    durationMs: 3 * 60 * 1000,
+    outputPath: '.solopreneur/agent-runs/__solo__/11/output.log',
+    outputBytes: 120,
+    outputTail: 'node --test passed',
+    commandPath: '',
+    promptPath: '',
+    changesPath: '',
+    touchedFilesPath: '',
+    updatedAt: '2026-06-01T10:03:00.000Z'
+  }, [
+    { filePath: 'src/from-db.ts', role: 'changed' },
+    { filePath: 'docs/from-db.md', role: 'touched' }
+  ], [
+    { type: 'verification', value: 'node --test passed' }
+  ]);
+  store.close();
+
+  const summary = await buildAgentImpactSummaryFromDatabase(
+    [{ name: 'DB Project', path: tempRoot }],
+    projectRoot,
+    new Date('2026-06-01T12:00:00.000Z')
+  );
+
+  assert.equal(summary.totalRuns, 1);
+  assert.equal(summary.completedRuns, 1);
+  assert.equal(summary.failedRuns, 0);
+  assert.equal(summary.totalMinutes, 3);
+  assert.equal(summary.changedFiles, 2);
+  assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 3, 2]]);
 });
 
 test('step conversations can start independently while dependencies or other runs are active', async () => {

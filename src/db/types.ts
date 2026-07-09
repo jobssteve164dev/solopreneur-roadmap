@@ -28,6 +28,42 @@ export interface AgentConversation {
   status: string;
 }
 
+export interface RunIndexRecord {
+  executionLogId: number;
+  nodeId: string;
+  runKind: string;
+  agentCli: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  outputPath: string;
+  outputBytes: number;
+  outputTail: string;
+  commandPath: string;
+  promptPath: string;
+  changesPath: string;
+  touchedFilesPath: string;
+  updatedAt: string;
+}
+
+export interface RunIndexFile {
+  executionLogId?: number;
+  filePath: string;
+  role: 'changed' | 'touched' | 'attachment' | 'evidence' | string;
+}
+
+export interface RunIndexSignal {
+  executionLogId?: number;
+  type: 'verification' | 'failure' | 'reusable' | 'decision' | string;
+  value: string;
+}
+
+export interface RunIndexEntry extends RunIndexRecord {
+  files: RunIndexFile[];
+  signals: RunIndexSignal[];
+}
+
 export interface ProjectState {
   nodes: RoadmapNode[];
   edges: RoadmapEdge[];

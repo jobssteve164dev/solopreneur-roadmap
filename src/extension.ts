@@ -9,7 +9,7 @@ import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
-import { getAgentImpactStatus, buildAgentImpactSummary } from './agentImpact';
+import { getAgentImpactStatusFromDatabase, buildAgentImpactSummary } from './agentImpact';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
@@ -544,7 +544,7 @@ async function handleSharedWebviewAction(
       });
     },
     'agentImpact.get': async () => {
-      await respond({ command: 'agentImpactLoaded', status: getAgentImpactStatus(getProjects(context)) });
+      await respond({ command: 'agentImpactLoaded', status: await getAgentImpactStatusFromDatabase(getProjects(context), context.extensionPath) });
     },
     'settings.get': async () => {
       await refreshProAccountStatus(context);
@@ -3445,7 +3445,7 @@ function buildAgentShellScript(
   const loggedCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
-  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
+  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode };
   const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
@@ -6555,7 +6555,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       await processFlowStatusFile(statusFilePath, statusData);
       return;
     }
-    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
 
     if (!nodeId || !status || status === 'Running' || status === 'Processed' || !syncEngine) {
       return;
@@ -6817,6 +6817,51 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         runDigestSummary = `Execution digest not saved: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
+    let runIndexSummary = '';
+    if (workspaceRoot && executionLogId) {
+      try {
+        const toRuntimePath = (candidate: string | undefined) => candidate && fs.existsSync(candidate)
+          ? toProjectRelativeRuntimePath(workspaceRoot, candidate)
+          : '';
+        const outputBytes = outputFilePath && fs.existsSync(outputFilePath)
+          ? fs.statSync(outputFilePath).size
+          : 0;
+        const changedFiles = parseFileSummaryLines(changedFilesSummary).map((filePath) => ({
+          filePath,
+          role: 'changed'
+        }));
+        const touchedFiles = parseFileSummaryLines(touchedFilesSummary).map((filePath) => ({
+          filePath,
+          role: 'touched'
+        }));
+        const verificationSignals = extractVerificationSignals(outputTail, resolvedCommand, nextStatus)
+          .map((value) => ({ type: 'verification', value }));
+        const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus)
+          .map((value) => ({ type: 'failure', value }));
+        syncEngine.upsertRunIndex({
+          executionLogId: Number(executionLogId),
+          nodeId,
+          runKind: String(runKind || (isSoloConversation ? 'solo' : 'step')),
+          agentCli: String(agentCli || commandPreview || command || 'Unknown CLI'),
+          status: nextStatus,
+          startedAt: String(startedAt || ''),
+          finishedAt,
+          durationMs: runDurationMs,
+          outputPath: toRuntimePath(outputFilePath),
+          outputBytes,
+          outputTail: compactLine(outputTail, 4000),
+          commandPath: toRuntimePath(commandFilePath),
+          promptPath: toRuntimePath(String(promptFilePath || '')),
+          changesPath: toRuntimePath(changesFilePath),
+          touchedFilesPath: toRuntimePath(touchedFilesPath),
+          updatedAt: finishedAt
+        }, [...changedFiles, ...touchedFiles], [...verificationSignals, ...failureSignals]);
+        clearProjectInvestmentCache(workspaceRoot);
+        runIndexSummary = 'Run index saved to project_journal.db.';
+      } catch (error) {
+        runIndexSummary = `Run index not saved: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     if (workspaceRoot && !isContinuationRun) {
       const verificationSignals = extractVerificationSignals(outputTail, resolvedCommand, nextStatus);
       const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus);
@@ -6919,6 +6964,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       stepHandoffSummary ? `Step handoff summary updated: ${getStepMemoryFilePath(workspaceRoot, nodeId)}` : '',
       documentationAudit ? `Documentation harness: ${documentationAudit.summary}` : '',
       runDigestSummary,
+      runIndexSummary,
       documentationAudit && documentationAudit.pendingReview.length > 0
         ? `Documentation review needed:\n${documentationAudit.pendingReview.map((item) => `- ${item.path}: ${item.reason}`).join('\n')}`
         : '',

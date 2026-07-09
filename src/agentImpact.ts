@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as Papa from 'papaparse';
+import { SqliteStore } from './db/sqliteStore';
+import { RunIndexEntry } from './db/types';
 
 export interface AgentImpactProject {
   name: string;
@@ -234,6 +236,42 @@ function inferAgentFromDigest(digest: any): string {
   return inferAgentFromCommand(commandSignal);
 }
 
+function readRunsFromRunIndexEntries(entries: RunIndexEntry[]): AgentImpactRun[] {
+  return entries.map((entry) => {
+    const runKind = normalizeRunKind(entry.runKind);
+    if (!isImpactRunKind(runKind)) {
+      return null;
+    }
+    const timestamp = Date.parse(String(entry.finishedAt || entry.startedAt || ''));
+    return {
+      agent: inferAgentFromCommand(entry.agentCli),
+      status: statusFromDigest(entry.status),
+      timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+      minutes: Number(entry.durationMs || 0) > 0 ? Math.max(1, Math.round(Number(entry.durationMs || 0) / 60000)) : 0,
+      changedFiles: entry.files
+        .filter((file) => file.role === 'changed' || file.role === 'touched')
+        .map((file) => String(file.filePath || '').trim())
+        .filter(Boolean)
+    };
+  }).filter((run): run is AgentImpactRun => Boolean(run));
+}
+
+async function readRunsFromRunIndex(projectPath: string, extensionPath: string): Promise<AgentImpactRun[]> {
+  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  if (!fs.existsSync(dbPath)) {
+    return [];
+  }
+  const store = new SqliteStore(dbPath, extensionPath);
+  try {
+    await store.init();
+    return readRunsFromRunIndexEntries(store.getRunIndexEntries());
+  } catch {
+    return [];
+  } finally {
+    store.close();
+  }
+}
+
 function readRunsFromDigests(projectPath: string): AgentImpactRun[] {
   const digestRoot = path.join(projectPath, '.solopreneur', 'run-digests');
   if (!fs.existsSync(digestRoot)) {
@@ -312,7 +350,11 @@ function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
   }
 }
 
-export function buildAgentImpactSummary(projects: AgentImpactProject[], now = new Date()): AgentImpactSummary {
+function buildAgentImpactSummaryFromProjectRuns(
+  projects: AgentImpactProject[],
+  getRuns: (project: AgentImpactProject) => AgentImpactRun[],
+  now = new Date()
+): AgentImpactSummary {
   const weekStartMs = now.getTime() - 7 * 24 * 60 * 60 * 1000;
   const byAgent = new Map<string, { agent: string; runs: number; minutes: number; files: Set<string>; latestRunAtMs: number }>();
   const allChangedFiles = new Set<string>();
@@ -330,8 +372,7 @@ export function buildAgentImpactSummary(projects: AgentImpactProject[], now = ne
     totalNodes += nodes.length;
     completedNodes += nodes.filter((node) => node.status === 'Completed').length;
 
-    const digestRuns = readRunsFromDigests(project.path);
-    const runs = digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(project.path);
+    const runs = getRuns(project);
     for (const run of runs) {
       const agent = run.agent;
       const timestamp = run.timestamp;
@@ -386,6 +427,31 @@ export function buildAgentImpactSummary(projects: AgentImpactProject[], now = ne
   };
 }
 
+export function buildAgentImpactSummary(projects: AgentImpactProject[], now = new Date()): AgentImpactSummary {
+  return buildAgentImpactSummaryFromProjectRuns(projects, (project) => {
+    const digestRuns = readRunsFromDigests(project.path);
+    return digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(project.path);
+  }, now);
+}
+
+export async function buildAgentImpactSummaryFromDatabase(projects: AgentImpactProject[], extensionPath: string, now = new Date()): Promise<AgentImpactSummary> {
+  const runsByProject = new Map<string, AgentImpactRun[]>();
+  for (const project of projects) {
+    const indexedRuns = await readRunsFromRunIndex(project.path, extensionPath);
+    if (indexedRuns.length > 0) {
+      runsByProject.set(project.path, indexedRuns);
+      continue;
+    }
+    const digestRuns = readRunsFromDigests(project.path);
+    runsByProject.set(project.path, digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(project.path));
+  }
+  return buildAgentImpactSummaryFromProjectRuns(projects, (project) => runsByProject.get(project.path) || [], now);
+}
+
 export function getAgentImpactStatus(projects: AgentImpactProject[]): AgentImpactStatus {
   return { impact: buildAgentImpactSummary(projects) };
+}
+
+export async function getAgentImpactStatusFromDatabase(projects: AgentImpactProject[], extensionPath: string): Promise<AgentImpactStatus> {
+  return { impact: await buildAgentImpactSummaryFromDatabase(projects, extensionPath) };
 }

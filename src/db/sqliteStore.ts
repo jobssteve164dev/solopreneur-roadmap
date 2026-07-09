@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import initSqlJs from 'sql.js';
-import { AgentConversation, RoadmapNode } from './types';
+import { AgentConversation, RoadmapNode, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal } from './types';
 import {
   inferProjectRootForConversationStore,
   normalizeAgentConversationLifecycle
@@ -36,12 +36,15 @@ export class SqliteStore {
       // 它会自动加载其同包目录下的 sql-wasm.wasm，避免绝对路径跨平台或解包导致定位失败的问题
       this.SQL = await initSqlJs();
 
-      if (fs.existsSync(this.dbFilePath)) {
+      const existed = fs.existsSync(this.dbFilePath);
+      if (existed) {
         const fileBuffer = fs.readFileSync(this.dbFilePath);
         this.db = new this.SQL.Database(fileBuffer);
       } else {
         this.db = new this.SQL.Database();
-        this.createTables();
+      }
+      const schemaChanged = this.createTables();
+      if (!existed || schemaChanged) {
         this.save();
       }
     } catch (error) {
@@ -53,10 +56,28 @@ export class SqliteStore {
   /**
    * Creates the schema tables for storing node history, logs, and state.
    */
-  private createTables(): void {
+  private createTables(): boolean {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
+    const requiredTables = [
+      'nodes',
+      'execution_logs',
+      'run_records',
+      'run_files',
+      'run_signals'
+    ];
+    const requiredIndexes = [
+      'idx_execution_logs_node_id',
+      'idx_run_records_node_id',
+      'idx_run_records_status',
+      'idx_run_records_run_kind',
+      'idx_run_records_agent_cli',
+      'idx_run_files_file_path',
+      'idx_run_signals_type'
+    ];
+    const schemaChanged = requiredTables.some((name) => !this.sqliteObjectExists('table', name))
+      || requiredIndexes.some((name) => !this.sqliteObjectExists('index', name));
 
     // Nodes Table
     this.db.run(`
@@ -87,6 +108,89 @@ export class SqliteStore {
         FOREIGN KEY (nodeId) REFERENCES nodes(id)
       )
     `);
+
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_execution_logs_node_id
+      ON execution_logs (nodeId, id)
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS run_records (
+        executionLogId INTEGER PRIMARY KEY,
+        nodeId TEXT,
+        runKind TEXT,
+        agentCli TEXT,
+        status TEXT,
+        startedAt TEXT,
+        finishedAt TEXT,
+        durationMs INTEGER,
+        outputPath TEXT,
+        outputBytes INTEGER,
+        outputTail TEXT,
+        commandPath TEXT,
+        promptPath TEXT,
+        changesPath TEXT,
+        touchedFilesPath TEXT,
+        updatedAt TEXT
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS run_files (
+        executionLogId INTEGER,
+        filePath TEXT,
+        role TEXT,
+        PRIMARY KEY (executionLogId, filePath, role)
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS run_signals (
+        executionLogId INTEGER,
+        type TEXT,
+        value TEXT,
+        PRIMARY KEY (executionLogId, type, value)
+      )
+    `);
+
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_run_records_node_id
+      ON run_records (nodeId, executionLogId)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_run_records_status
+      ON run_records (status)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_run_records_run_kind
+      ON run_records (runKind)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_run_records_agent_cli
+      ON run_records (agentCli)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_run_files_file_path
+      ON run_files (filePath)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_run_signals_type
+      ON run_signals (type)
+    `);
+    return schemaChanged;
+  }
+
+  private sqliteObjectExists(type: string, name: string): boolean {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const stmt = this.db.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name = ?');
+    try {
+      stmt.bind([type, name]);
+      return stmt.step();
+    } finally {
+      stmt.free();
+    }
   }
 
   /**
@@ -294,6 +398,176 @@ export class SqliteStore {
     const changed = this.db.getRowsModified() > 0;
     this.save();
     return changed;
+  }
+
+  public upsertRunIndex(record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const executionLogId = Number(record.executionLogId || 0);
+    if (!executionLogId) {
+      throw new Error('Cannot index a run without an executionLogId');
+    }
+    this.db.run(
+      `INSERT OR REPLACE INTO run_records (
+        executionLogId,
+        nodeId,
+        runKind,
+        agentCli,
+        status,
+        startedAt,
+        finishedAt,
+        durationMs,
+        outputPath,
+        outputBytes,
+        outputTail,
+        commandPath,
+        promptPath,
+        changesPath,
+        touchedFilesPath,
+        updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        executionLogId,
+        record.nodeId || '',
+        record.runKind || 'step',
+        record.agentCli || '',
+        record.status || '',
+        record.startedAt || '',
+        record.finishedAt || '',
+        Math.max(0, Number(record.durationMs || 0)),
+        record.outputPath || '',
+        Math.max(0, Number(record.outputBytes || 0)),
+        record.outputTail || '',
+        record.commandPath || '',
+        record.promptPath || '',
+        record.changesPath || '',
+        record.touchedFilesPath || '',
+        record.updatedAt || new Date().toISOString()
+      ]
+    );
+
+    this.db.run('DELETE FROM run_files WHERE executionLogId = ?', [executionLogId]);
+    const fileStmt = this.db.prepare('INSERT OR IGNORE INTO run_files (executionLogId, filePath, role) VALUES (?, ?, ?)');
+    try {
+      for (const file of files) {
+        const filePath = String(file.filePath || '').trim();
+        const role = String(file.role || '').trim();
+        if (filePath && role) {
+          fileStmt.run([executionLogId, filePath, role]);
+        }
+      }
+    } finally {
+      fileStmt.free();
+    }
+
+    this.db.run('DELETE FROM run_signals WHERE executionLogId = ?', [executionLogId]);
+    const signalStmt = this.db.prepare('INSERT OR IGNORE INTO run_signals (executionLogId, type, value) VALUES (?, ?, ?)');
+    try {
+      for (const signal of signals) {
+        const type = String(signal.type || '').trim();
+        const value = String(signal.value || '').trim();
+        if (type && value) {
+          signalStmt.run([executionLogId, type, value]);
+        }
+      }
+    } finally {
+      signalStmt.free();
+    }
+    this.save();
+  }
+
+  public getRunIndexEntries(): RunIndexEntry[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const entries = new Map<number, RunIndexEntry>();
+    const runStmt = this.db.prepare(`
+      SELECT
+        executionLogId,
+        nodeId,
+        runKind,
+        agentCli,
+        status,
+        startedAt,
+        finishedAt,
+        durationMs,
+        outputPath,
+        outputBytes,
+        outputTail,
+        commandPath,
+        promptPath,
+        changesPath,
+        touchedFilesPath,
+        updatedAt
+      FROM run_records
+      ORDER BY finishedAt DESC, executionLogId DESC
+    `);
+    try {
+      while (runStmt.step()) {
+        const row = runStmt.getAsObject() as any;
+        const executionLogId = Number(row.executionLogId || 0);
+        entries.set(executionLogId, {
+          executionLogId,
+          nodeId: String(row.nodeId || ''),
+          runKind: String(row.runKind || ''),
+          agentCli: String(row.agentCli || ''),
+          status: String(row.status || ''),
+          startedAt: String(row.startedAt || ''),
+          finishedAt: String(row.finishedAt || ''),
+          durationMs: Math.max(0, Number(row.durationMs || 0)),
+          outputPath: String(row.outputPath || ''),
+          outputBytes: Math.max(0, Number(row.outputBytes || 0)),
+          outputTail: String(row.outputTail || ''),
+          commandPath: String(row.commandPath || ''),
+          promptPath: String(row.promptPath || ''),
+          changesPath: String(row.changesPath || ''),
+          touchedFilesPath: String(row.touchedFilesPath || ''),
+          updatedAt: String(row.updatedAt || ''),
+          files: [],
+          signals: []
+        });
+      }
+    } finally {
+      runStmt.free();
+    }
+
+    const fileStmt = this.db.prepare('SELECT executionLogId, filePath, role FROM run_files ORDER BY executionLogId DESC, filePath ASC');
+    try {
+      while (fileStmt.step()) {
+        const row = fileStmt.getAsObject() as any;
+        const executionLogId = Number(row.executionLogId || 0);
+        const entry = entries.get(executionLogId);
+        if (entry) {
+          entry.files.push({
+            executionLogId,
+            filePath: String(row.filePath || ''),
+            role: String(row.role || '')
+          });
+        }
+      }
+    } finally {
+      fileStmt.free();
+    }
+
+    const signalStmt = this.db.prepare('SELECT executionLogId, type, value FROM run_signals ORDER BY executionLogId DESC, type ASC');
+    try {
+      while (signalStmt.step()) {
+        const row = signalStmt.getAsObject() as any;
+        const executionLogId = Number(row.executionLogId || 0);
+        const entry = entries.get(executionLogId);
+        if (entry) {
+          entry.signals.push({
+            executionLogId,
+            type: String(row.type || ''),
+            value: String(row.value || '')
+          });
+        }
+      }
+    } finally {
+      signalStmt.free();
+    }
+    return [...entries.values()];
   }
 
   /**
