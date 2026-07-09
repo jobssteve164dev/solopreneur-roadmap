@@ -5709,8 +5709,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           if (sameConversations(sidebarSoloConversations, message.conversations || [])) return;
           sidebarSoloConversations = message.conversations || [];
-          for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
-          for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
+          pruneSidebarConversationExpansionState([
+            ...sidebarSoloConversations,
+            ...(sidebarProjectConversations[message.projectPath] || [])
+          ]);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -5723,8 +5725,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           sidebarStepConversations[key] = message.conversations || [];
           sidebarStepConversationRequested[key] = true;
-          for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
-          for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
+          pruneSidebarConversationExpansionState(message.conversations || []);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
         }
@@ -5737,8 +5738,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           sidebarProjectConversations[message.projectPath] = message.conversations || [];
           sidebarProjectConversationRequested[message.projectPath] = true;
-          for (const k in sidebarExpandedConversations) delete sidebarExpandedConversations[k];
-          for (const k in sidebarLogsExpandedConversations) delete sidebarLogsExpandedConversations[k];
+          pruneSidebarConversationExpansionState([
+            ...sidebarSoloConversations,
+            ...(sidebarProjectConversations[message.projectPath] || [])
+          ]);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -6191,6 +6194,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (idDiff) return idDiff;
           return Date.parse(String(b.timestamp || '')) - Date.parse(String(a.timestamp || ''));
         })[0] || null;
+    }
+
+    function pruneSidebarConversationExpansionState(conversations) {
+      const activeIds = new Set((conversations || [])
+        .map(conversation => String(conversation && conversation.id || ''))
+        .filter(Boolean));
+      Object.keys(sidebarExpandedConversations).forEach(id => {
+        if (!activeIds.has(id)) delete sidebarExpandedConversations[id];
+      });
+      Object.keys(sidebarLogsExpandedConversations).forEach(id => {
+        if (!activeIds.has(id)) delete sidebarLogsExpandedConversations[id];
+      });
     }
 
     function bindConversationsTree(container, projectPath, nodeId, isSolo) {

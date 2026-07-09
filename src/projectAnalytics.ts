@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexEntry } from './db/types';
+import { backfillRunIndexFromDigests } from './runIndexMaintenance';
 
 export interface ProjectInvestmentStats {
   schemaVersion: number;
@@ -191,6 +192,7 @@ function readRunsFromRunIndexEntries(entries: RunIndexEntry[]): InvestmentRun[] 
 
 async function readRunsFromRunIndex(projectPath: string, extensionPath: string): Promise<InvestmentRun[]> {
   const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  await backfillRunIndexFromDigests(projectPath, extensionPath);
   if (!fs.existsSync(dbPath)) {
     return [];
   }

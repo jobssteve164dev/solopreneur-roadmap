@@ -69,10 +69,16 @@ SoloMap 的运行数据分为两层：
 
 这意味着用户打开侧边栏时会先看到同步兜底数据，随后 enrichment 刷新为 DB 优先的投资统计；旧项目和无索引项目仍可正常显示。
 
-## 后续阶段
+## 第三阶段闭环
 
-第三阶段补齐治理和修复：
+第三阶段完成索引修复和健康数据：
 
-- 增加从 `run-digests` 回填 `run_records` 的显式修复动作。
-- 在本地数据状态中展示运行索引健康度。
-- 对异常索引写入提供可定位错误，而不是让用户理解 SQLite 表结构。
+- `runIndexMaintenance` 提供从 `run-digests` 回填 `run_records` 的维护入口。
+- DB 优先读路径会先尝试轻量回填，再读取索引；旧项目打开后可自动获得运行索引。
+- 维护入口返回 `digestCount`、`indexedCount`、`missingDigestCount`、`backfilledCount`、`ok` 和 `error`，作为本地数据健康状态的数据源。
+- 异常以明确错误字符串返回给调用层，不要求用户理解 SQLite 表结构。
+
+## 剩余边界
+
+- 没有 `executionLogId` 的旧 digest 无法可靠回填到 `run_records` 主键，只作为 digest 兜底数据读取。
+- 原始 `output.log` 仍不进入数据库；历史审计继续走文件层。

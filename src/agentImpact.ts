@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as Papa from 'papaparse';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexEntry } from './db/types';
+import { backfillRunIndexFromDigests } from './runIndexMaintenance';
 
 export interface AgentImpactProject {
   name: string;
@@ -258,6 +259,7 @@ function readRunsFromRunIndexEntries(entries: RunIndexEntry[]): AgentImpactRun[]
 
 async function readRunsFromRunIndex(projectPath: string, extensionPath: string): Promise<AgentImpactRun[]> {
   const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  await backfillRunIndexFromDigests(projectPath, extensionPath);
   if (!fs.existsSync(dbPath)) {
     return [];
   }

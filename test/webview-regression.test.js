@@ -1946,6 +1946,9 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?sameConversations\(sidebarProjectConversations\[message\.projectPath\], message\.conversations \|\| \[\]\)/);
+  assert.match(html, /function pruneSidebarConversationExpansionState\(conversations\)/);
+  assert.doesNotMatch(html, /case 'sidebarSoloConversationLoaded':[\s\S]*?for \(const k in sidebarExpandedConversations\) delete sidebarExpandedConversations\[k\]/);
+  assert.doesNotMatch(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?for \(const k in sidebarExpandedConversations\) delete sidebarExpandedConversations\[k\]/);
   assert.match(html, /case 'nodesUpdated':[\s\S]*?message\.projectPath !== activeProjectPath\) \{[\s\S]*?return;/);
   assert.doesNotMatch(html, /Object\.keys\(projectSoloDrafts\)\.forEach\(key => delete projectSoloDrafts\[key\]\)/);
   assert.doesNotMatch(html, /Object\.keys\(projectConversationAgentSelections\)\.forEach\(key => delete projectConversationAgentSelections\[key\]\)/);
@@ -2591,9 +2594,59 @@ test('project investment analytics prefer database run index for enriched portfo
   assert.equal(summaries[0].investment.failedRunCount, 0);
 });
 
-test('database-backed portfolio stats fall back to run digests for legacy projects', async () => {
+test('run index maintenance backfills legacy digests and reports health', async () => {
+  const maintenance = require(path.join(projectRoot, 'out/runIndexMaintenance.js'));
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-run-index-backfill-'));
+  const solopreneurDir = path.join(projectRootA, '.solopreneur');
+  const digestRoot = path.join(solopreneurDir, 'run-digests');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.writeFileSync(path.join(digestRoot, 'digest-backfill.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: '__solo__-31',
+    executionLogId: 31,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    agentCli: 'codex',
+    status: 'Completed',
+    startedAt: '2026-06-10T10:00:00.000Z',
+    finishedAt: '2026-06-10T10:05:00.000Z',
+    durationMs: 5 * 60 * 1000,
+    changedFiles: ['src/from-digest.ts'],
+    touchedFiles: ['docs/from-digest.md'],
+    verification: ['npm test passed'],
+    failures: [],
+    reusableSignals: ['Completion: done'],
+    rawRefs: { sqliteTable: 'execution_logs', executionLogId: 31 }
+  }), 'utf8');
+
+  const before = await maintenance.getRunIndexHealth(projectRootA, projectRoot);
+  assert.equal(before.digestCount, 1);
+  assert.equal(before.indexedCount, 0);
+  assert.equal(before.missingDigestCount, 1);
+  assert.equal(before.ok, false);
+
+  const after = await maintenance.backfillRunIndexFromDigests(projectRootA, projectRoot);
+  assert.equal(after.digestCount, 1);
+  assert.equal(after.backfilledCount, 1);
+  assert.equal(after.missingDigestCount, 0);
+  assert.equal(after.ok, true);
+
+  const store = new SqliteStore(path.join(solopreneurDir, 'project_journal.db'), projectRoot);
+  await store.init();
+  const entries = store.getRunIndexEntries();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].executionLogId, 31);
+  assert.equal(entries[0].runKind, 'solo');
+  assert.deepEqual(entries[0].files.map((file) => [file.role, file.filePath]), [['touched', 'docs/from-digest.md'], ['changed', 'src/from-digest.ts']]);
+  assert.deepEqual(entries[0].signals.map((signal) => [signal.type, signal.value]), [['reusable', 'Completion: done'], ['verification', 'npm test passed']]);
+  store.close();
+});
+
+test('database-backed portfolio stats backfill run digests for legacy projects', async () => {
   const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
   const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-db-fallback-'));
   const solopreneurDir = path.join(projectRootA, '.solopreneur');
   const digestRoot = path.join(solopreneurDir, 'run-digests');
@@ -2605,11 +2658,15 @@ test('database-backed portfolio stats fall back to run digests for legacy projec
   fs.writeFileSync(path.join(digestRoot, 'digest-legacy.json'), JSON.stringify({
     schemaVersion: 2,
     runId: 'digest-legacy',
+    executionLogId: 44,
+    nodeId: '__solo__',
     runKind: 'solo',
+    agentCli: 'codex',
     status: 'Failed',
     startedAt: '2026-06-10T10:00:00.000Z',
     finishedAt: '2026-06-10T10:45:00.000Z',
-    durationMs: 45 * 60 * 1000
+    durationMs: 45 * 60 * 1000,
+    rawRefs: { sqliteTable: 'execution_logs', executionLogId: 44 }
   }), 'utf8');
 
   analytics.clearProjectInvestmentCache(projectRootA);
@@ -2622,6 +2679,7 @@ test('database-backed portfolio stats fall back to run digests for legacy projec
   assert.equal(stats.soloConversationCount, 1);
   assert.equal(stats.failedRunCount, 1);
   assert.equal(stats.totalDurationMs, 45 * 60 * 1000);
+  assert.equal(fs.existsSync(path.join(solopreneurDir, 'project_journal.db')), true);
 
   const summaries = await projectPortfolio.buildProjectPortfolioSummariesFromDatabase(
     [{ name: 'Legacy Invested', path: projectRootA }],
@@ -2630,6 +2688,11 @@ test('database-backed portfolio stats fall back to run digests for legacy projec
   assert.equal(summaries[0].investment.soloConversationCount, 1);
   assert.equal(summaries[0].investment.failedRunCount, 1);
   assert.equal(summaries[0].investment.totalDurationMs, 45 * 60 * 1000);
+
+  const store = new SqliteStore(path.join(solopreneurDir, 'project_journal.db'), projectRoot);
+  await store.init();
+  assert.equal(store.getRunIndexEntries().length, 1);
+  store.close();
 });
 
 test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {
