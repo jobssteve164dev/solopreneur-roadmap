@@ -37,13 +37,17 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
     '}'
   ].join('\n'));
   writeFile(path.join(tempRoot, 'src', 'extension.ts'), [
+    "import * as Papa from 'papaparse';",
     "import { loadProject } from './db/store';",
     'export function activate() {',
+    '  Papa.parse("a,b");',
     '  return loadProject();',
     '}'
   ].join('\n'));
   writeFile(path.join(tempRoot, 'test', 'store.test.js'), [
     "const assert = require('node:assert/strict');",
+    "const { loadProject } = require('../src/db/store');",
+    "assert.equal(loadProject().ok, true);",
     "assert.equal(1, 1);"
   ].join('\n'));
   writeFile(path.join(tempRoot, 'docs', 'methodology.md'), '# Methodology\n');
@@ -51,6 +55,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   const { SqliteStore } = require(path.join(projectRoot, 'out', 'db', 'sqliteStore.js'));
   const {
     buildProjectGrowthViewModel,
+    getProjectGrowthView,
     refreshProjectGrowthSnapshot
   } = require(path.join(projectRoot, 'out', 'projectGrowth.js'));
 
@@ -93,8 +98,13 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(view.totals.files, 4);
   assert.ok(view.totals.modules >= 3);
   assert.equal(view.totals.capabilities, 1);
+  assert.equal(view.totals.packages, 1);
   assert.ok(view.treemap);
   assert.equal(view.treemap.label, 'Project');
+  assert.ok(view.modules.some((module) => module.nodeId === 'module:data-layer'));
+  assert.ok(view.capabilities.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
+  assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));
+  assert.ok(view.keyEdges.some((edge) => edge.kind === 'tested_by'));
   assert.ok(view.gaps.some((gap) => gap.source === 'run_index' || gap.source === 'growth_rules'));
 
   const reopened = new SqliteStore(dbPath, projectRoot);
@@ -111,10 +121,43 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
     && edge.sourceId === 'file:src/extension.ts'
     && edge.targetId === 'file:src/db/store.ts'
   )));
+  assert.ok(latest.edges.some((edge) => (
+    edge.kind === 'tested_by'
+    && edge.sourceId === 'file:src/db/store.ts'
+    && edge.targetId === 'file:test/store.test.js'
+  )));
+  assert.ok(latest.edges.some((edge) => (
+    edge.kind === 'depends_on'
+    && edge.sourceId === 'file:src/extension.ts'
+    && edge.targetId === 'package:papaparse'
+  )));
   assert.ok(latest.edges.some((edge) => edge.kind === 'implements' && edge.targetId === 'capability:roadmap:roadmap-data'));
   assert.ok(latest.signals.some((signal) => signal.type === 'failure' && signal.level === 'attention'));
 
   const persistedView = buildProjectGrowthViewModel(latest);
   assert.equal(persistedView.totals.capabilities, 1);
   assert.ok(persistedView.gaps.length > 0);
+
+  writeFile(path.join(tempRoot, 'src', 'db', 'cache.ts'), [
+    'export const cacheReady = true;'
+  ].join('\n'));
+  const secondView = await refreshProjectGrowthSnapshot(tempRoot, projectRoot, {
+    scanReason: 'test-second',
+    now: new Date('2026-01-04T00:00:00.000Z')
+  });
+  assert.equal(secondView.totals.files, 5);
+  assert.ok(secondView.diff);
+  assert.equal(secondView.diff.filesAdded, 1);
+  assert.equal(secondView.diff.filesRemoved, 0);
+  assert.equal(secondView.history.length, 2);
+  assert.equal(secondView.history[0].snapshotId, secondView.snapshotId);
+
+  const queriedView = await getProjectGrowthView(tempRoot, projectRoot, {
+    refreshIfMissing: false,
+    historyLimit: 5
+  });
+  assert.equal(queriedView.snapshotId, secondView.snapshotId);
+  assert.ok(queriedView.diff);
+  assert.equal(queriedView.diff.filesAdded, 1);
+  assert.equal(queriedView.history.length, 2);
 });

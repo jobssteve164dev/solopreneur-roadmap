@@ -3958,7 +3958,9 @@ test('legacy and canonical webview commands dispatch through one plugin action c
   const { dispatchPluginAction } = require(path.join(projectRoot, 'out/pluginActions.js'));
   const received = [];
   const handlers = {
-    'conversation.continue': async (message) => received.push(message)
+    'conversation.continue': async (message) => received.push(message),
+    'projectGrowth.get': async (message) => received.push(message),
+    'projectGrowth.refresh': async (message) => received.push(message)
   };
 
   assert.equal(await dispatchPluginAction({
@@ -3975,6 +3977,16 @@ test('legacy and canonical webview commands dispatch through one plugin action c
   assert.equal(received[0].command, 'conversation.continue');
   assert.equal(received[0].nodeId, '__solo__');
   assert.equal(received[1].command, 'conversation.continue');
+  assert.equal(await dispatchPluginAction({
+    command: 'getProjectGrowth',
+    projectPath: '/workspace/app'
+  }, 'roadmap', handlers), true);
+  assert.equal(await dispatchPluginAction({
+    command: 'refreshProjectGrowth',
+    projectPath: '/workspace/app'
+  }, 'sidebar', handlers), true);
+  assert.equal(received[2].command, 'projectGrowth.get');
+  assert.equal(received[3].command, 'projectGrowth.refresh');
 });
 
 test('sidebar conversation controls are scoped to one history tree', () => {

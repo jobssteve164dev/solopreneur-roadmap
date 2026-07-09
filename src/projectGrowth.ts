@@ -17,6 +17,9 @@ export interface ProjectGrowthScanOptions {
   scanReason?: string;
   maxFiles?: number;
   now?: Date;
+  refreshIfMissing?: boolean;
+  forceRefresh?: boolean;
+  historyLimit?: number;
 }
 
 export interface ProjectGrowthSummaryNode {
@@ -38,18 +41,76 @@ export interface ProjectGrowthGap {
   source: string;
 }
 
+export interface ProjectGrowthTimelineItem {
+  snapshotId: string;
+  createdAt: string;
+  scanReason: string;
+  gitHead: string;
+  totals: ProjectGrowthTotals;
+}
+
+export interface ProjectGrowthDiff {
+  fromSnapshotId: string;
+  toSnapshotId: string;
+  filesAdded: number;
+  filesRemoved: number;
+  filesChanged: number;
+  locDelta: number;
+  modulesAdded: number;
+  modulesRemoved: number;
+  capabilitiesAdded: number;
+  capabilitiesRemoved: number;
+  signalsAdded: number;
+  signalsResolved: number;
+}
+
+export interface ProjectGrowthModuleSummary {
+  nodeId: string;
+  label: string;
+  role: string;
+  loc: number;
+  files: number;
+  tests: number;
+  signal: ProjectGrowthSummaryNode['colorSignal'];
+  confidence: number;
+}
+
+export interface ProjectGrowthCapabilitySummary {
+  nodeId: string;
+  label: string;
+  stage: string;
+  modules: string[];
+  signal: ProjectGrowthSummaryNode['colorSignal'];
+}
+
+export interface ProjectGrowthEdgeSummary {
+  sourceId: string;
+  targetId: string;
+  kind: string;
+  weight: number;
+  evidence: string;
+}
+
+export interface ProjectGrowthTotals {
+  files: number;
+  modules: number;
+  capabilities: number;
+  packages: number;
+  loc: number;
+  signals: number;
+}
+
 export interface ProjectGrowthViewModel {
   snapshotId: string;
   generatedAt: string;
   treemap: ProjectGrowthSummaryNode | null;
   gaps: ProjectGrowthGap[];
-  totals: {
-    files: number;
-    modules: number;
-    capabilities: number;
-    loc: number;
-    signals: number;
-  };
+  modules: ProjectGrowthModuleSummary[];
+  capabilities: ProjectGrowthCapabilitySummary[];
+  keyEdges: ProjectGrowthEdgeSummary[];
+  history: ProjectGrowthTimelineItem[];
+  diff: ProjectGrowthDiff | null;
+  totals: ProjectGrowthTotals;
 }
 
 interface FileFact {
@@ -154,6 +215,15 @@ function countLines(filePath: string, maxBytes = 512 * 1024): number {
 
 function isGeneratedOrExcluded(relativePath: string): boolean {
   return generatedPathPatterns.some((pattern) => pattern.test(relativePath));
+}
+
+function packageNameFromSpecifier(specifier: string): string {
+  const value = String(specifier || '').trim();
+  if (!value || value.startsWith('.') || value.startsWith('/') || value.startsWith('node:')) {
+    return '';
+  }
+  const parts = value.split('/');
+  return value.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
 }
 
 function roleForPath(relativePath: string): string {
@@ -452,9 +522,11 @@ function addImportEdges(
   projectPath: string,
   snapshotId: string,
   files: FileFact[],
+  nodes: Map<string, GrowthNodeRecord>,
   edges: GrowthEdgeRecord[]
 ): void {
   const fileSet = new Set(files.map((file) => file.relativePath));
+  const fileByPath = new Map(files.map((file) => [file.relativePath, file]));
   for (const file of files) {
     if (file.excluded || !/\.[cm]?[jt]sx?$/.test(file.relativePath)) {
       continue;
@@ -472,10 +544,43 @@ function addImportEdges(
     let match: RegExpExecArray | null;
     while ((match = importRegex.exec(content))) {
       const specifier = match[1] || match[2] || '';
+      const packageName = packageNameFromSpecifier(specifier);
+      if (packageName) {
+        const packageNodeId = `package:${packageName}`;
+        if (!nodes.has(packageNodeId)) {
+          nodes.set(packageNodeId, {
+            snapshotId,
+            nodeId: packageNodeId,
+            parentId: 'directory:.',
+            kind: 'package',
+            path: packageName,
+            label: packageName,
+            language: '',
+            bytes: 0,
+            loc: 0,
+            fileCount: 0,
+            testFileCount: 0,
+            generated: false,
+            excluded: false,
+            primaryRole: 'dependency',
+            confidence: 0.82
+          });
+        }
+        edges.push({
+          snapshotId,
+          sourceId: nodeIdForPath('file', file.relativePath),
+          targetId: packageNodeId,
+          kind: 'depends_on',
+          weight: 1,
+          evidence: specifier
+        });
+        continue;
+      }
       const target = resolveImportTarget(projectPath, file.relativePath, specifier, fileSet);
       if (!target) {
         continue;
       }
+      const targetFile = fileByPath.get(target);
       edges.push({
         snapshotId,
         sourceId: nodeIdForPath('file', file.relativePath),
@@ -484,6 +589,16 @@ function addImportEdges(
         weight: 1,
         evidence: specifier
       });
+      if (file.isTest && targetFile && !targetFile.isTest) {
+        edges.push({
+          snapshotId,
+          sourceId: nodeIdForPath('file', target),
+          targetId: nodeIdForPath('file', file.relativePath),
+          kind: 'tested_by',
+          weight: 1,
+          evidence: specifier
+        });
+      }
     }
   }
 }
@@ -802,15 +917,80 @@ function summarizeDirectoryStatus(node: GrowthNodeRecord, signals: GrowthSignalR
   return 'stable';
 }
 
-export function buildProjectGrowthViewModel(data: GrowthSnapshotData | null): ProjectGrowthViewModel {
+function emptyProjectGrowthViewModel(): ProjectGrowthViewModel {
+  return {
+    snapshotId: '',
+    generatedAt: '',
+    treemap: null,
+    gaps: [],
+    modules: [],
+    capabilities: [],
+    keyEdges: [],
+    history: [],
+    diff: null,
+    totals: { files: 0, modules: 0, capabilities: 0, packages: 0, loc: 0, signals: 0 }
+  };
+}
+
+function calculateGrowthTotals(data: GrowthSnapshotData): ProjectGrowthTotals {
+  return {
+    files: data.nodes.filter((node) => node.kind === 'file' && !node.excluded).length,
+    modules: data.nodes.filter((node) => node.kind === 'module').length,
+    capabilities: data.nodes.filter((node) => node.kind === 'capability').length,
+    packages: data.nodes.filter((node) => node.kind === 'package').length,
+    loc: data.nodes.filter((node) => node.kind === 'file' && !node.excluded).reduce((sum, node) => sum + node.loc, 0),
+    signals: data.signals.length
+  };
+}
+
+function signalKey(signal: GrowthSignalRecord): string {
+  return [signal.nodeId, signal.type, signal.level, signal.value, signal.source].join('\u001f');
+}
+
+export function buildProjectGrowthDiff(previous: GrowthSnapshotData | null, current: GrowthSnapshotData | null): ProjectGrowthDiff | null {
+  if (!previous || !current) {
+    return null;
+  }
+  const previousFiles = new Map(previous.nodes.filter((node) => node.kind === 'file' && !node.excluded).map((node) => [node.path, node]));
+  const currentFiles = new Map(current.nodes.filter((node) => node.kind === 'file' && !node.excluded).map((node) => [node.path, node]));
+  const previousModules = new Set(previous.nodes.filter((node) => node.kind === 'module').map((node) => node.nodeId));
+  const currentModules = new Set(current.nodes.filter((node) => node.kind === 'module').map((node) => node.nodeId));
+  const previousCapabilities = new Set(previous.nodes.filter((node) => node.kind === 'capability').map((node) => node.nodeId));
+  const currentCapabilities = new Set(current.nodes.filter((node) => node.kind === 'capability').map((node) => node.nodeId));
+  const previousSignals = new Set(previous.signals.map(signalKey));
+  const currentSignals = new Set(current.signals.map(signalKey));
+  let filesChanged = 0;
+  for (const [filePath, currentNode] of currentFiles.entries()) {
+    const previousNode = previousFiles.get(filePath);
+    if (previousNode && (previousNode.loc !== currentNode.loc || previousNode.bytes !== currentNode.bytes)) {
+      filesChanged += 1;
+    }
+  }
+  return {
+    fromSnapshotId: previous.snapshot.id,
+    toSnapshotId: current.snapshot.id,
+    filesAdded: [...currentFiles.keys()].filter((filePath) => !previousFiles.has(filePath)).length,
+    filesRemoved: [...previousFiles.keys()].filter((filePath) => !currentFiles.has(filePath)).length,
+    filesChanged,
+    locDelta: calculateGrowthTotals(current).loc - calculateGrowthTotals(previous).loc,
+    modulesAdded: [...currentModules].filter((nodeId) => !previousModules.has(nodeId)).length,
+    modulesRemoved: [...previousModules].filter((nodeId) => !currentModules.has(nodeId)).length,
+    capabilitiesAdded: [...currentCapabilities].filter((nodeId) => !previousCapabilities.has(nodeId)).length,
+    capabilitiesRemoved: [...previousCapabilities].filter((nodeId) => !currentCapabilities.has(nodeId)).length,
+    signalsAdded: [...currentSignals].filter((key) => !previousSignals.has(key)).length,
+    signalsResolved: [...previousSignals].filter((key) => !currentSignals.has(key)).length
+  };
+}
+
+export function buildProjectGrowthViewModel(
+  data: GrowthSnapshotData | null,
+  options: {
+    previous?: GrowthSnapshotData | null;
+    history?: GrowthSnapshotData[];
+  } = {}
+): ProjectGrowthViewModel {
   if (!data) {
-    return {
-      snapshotId: '',
-      generatedAt: '',
-      treemap: null,
-      gaps: [],
-      totals: { files: 0, modules: 0, capabilities: 0, loc: 0, signals: 0 }
-    };
+    return emptyProjectGrowthViewModel();
   }
   const byParent = new Map<string, GrowthNodeRecord[]>();
   for (const node of data.nodes.filter((node) => node.kind === 'directory' || node.kind === 'file')) {
@@ -839,6 +1019,12 @@ export function buildProjectGrowthViewModel(data: GrowthSnapshotData | null): Pr
   const root = data.nodes.find((node) => node.nodeId === 'directory:.') || data.nodes.find((node) => node.kind === 'directory') || null;
   const actionableLevels = new Set(['watch', 'attention', 'blocked']);
   const labelById = new Map(data.nodes.map((node) => [node.nodeId, node.label || node.path || node.nodeId]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of data.edges.filter((edge) => edge.kind === 'implements' || edge.kind === 'belongs_to_step')) {
+    const list = incomingByTarget.get(edge.targetId) || [];
+    list.push(edge.sourceId);
+    incomingByTarget.set(edge.targetId, list);
+  }
   const gaps = data.signals
     .filter((signal) => actionableLevels.has(signal.level))
     .map((signal) => ({
@@ -849,18 +1035,58 @@ export function buildProjectGrowthViewModel(data: GrowthSnapshotData | null): Pr
       source: signal.source
     }))
     .slice(0, 24);
+  const modules = data.nodes
+    .filter((node) => node.kind === 'module')
+    .sort((a, b) => b.loc - a.loc)
+    .map((node) => ({
+      nodeId: node.nodeId,
+      label: node.label,
+      role: node.primaryRole,
+      loc: node.loc,
+      files: node.fileCount,
+      tests: node.testFileCount,
+      signal: summarizeDirectoryStatus(node, data.signals),
+      confidence: node.confidence
+    }));
+  const capabilities = data.nodes
+    .filter((node) => node.kind === 'capability')
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map((node) => ({
+      nodeId: node.nodeId,
+      label: node.label,
+      stage: node.primaryRole,
+      modules: [...new Set(incomingByTarget.get(node.nodeId) || [])],
+      signal: summarizeDirectoryStatus(node, data.signals)
+    }));
+  const keyEdges = data.edges
+    .filter((edge) => ['imports', 'depends_on', 'tested_by', 'implements', 'shaped_by_run'].includes(edge.kind))
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 120)
+    .map((edge) => ({
+      sourceId: edge.sourceId,
+      targetId: edge.targetId,
+      kind: edge.kind,
+      weight: edge.weight,
+      evidence: edge.evidence
+    }));
+  const history = (options.history || [data]).map((snapshotData) => ({
+    snapshotId: snapshotData.snapshot.id,
+    createdAt: snapshotData.snapshot.createdAt,
+    scanReason: snapshotData.snapshot.scanReason,
+    gitHead: snapshotData.snapshot.gitHead,
+    totals: calculateGrowthTotals(snapshotData)
+  }));
   return {
     snapshotId: data.snapshot.id,
     generatedAt: data.snapshot.createdAt,
     treemap: root ? buildNode(root) : null,
     gaps,
-    totals: {
-      files: data.nodes.filter((node) => node.kind === 'file' && !node.excluded).length,
-      modules: data.nodes.filter((node) => node.kind === 'module').length,
-      capabilities: data.nodes.filter((node) => node.kind === 'capability').length,
-      loc: data.nodes.filter((node) => node.kind === 'file' && !node.excluded).reduce((sum, node) => sum + node.loc, 0),
-      signals: data.signals.length
-    }
+    modules,
+    capabilities,
+    keyEdges,
+    history,
+    diff: buildProjectGrowthDiff(options.previous || null, data),
+    totals: calculateGrowthTotals(data)
   };
 }
 
@@ -883,7 +1109,7 @@ export function buildProjectGrowthSnapshot(
   ensureDirectoryNodes(snapshotId, files, nodes, edges);
   addFileNodes(snapshotId, files, nodes, edges);
   aggregateDirectoryMetrics(nodes);
-  addImportEdges(projectPath, snapshotId, files, edges);
+  addImportEdges(projectPath, snapshotId, files, nodes, edges);
   addModuleAndCapabilityNodes(snapshotId, files, roadmapNodes, runEntries, nodes, edges, signals, labels, nowIso);
   addGitSignals(snapshotId, readGitChurn(projectPath), nodes, signals, nowIso);
 
@@ -933,12 +1159,57 @@ export async function refreshProjectGrowthSnapshot(
   options: ProjectGrowthScanOptions = {}
 ): Promise<ProjectGrowthViewModel> {
   const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const store = new SqliteStore(dbPath, extensionPath);
   try {
     await store.init();
+    const previousHistory = store.getGrowthSnapshotHistory(1);
+    const previous = previousHistory[0] ? store.getGrowthSnapshotById(previousHistory[0].id) : null;
     const snapshot = buildProjectGrowthSnapshot(projectPath, store.getAllNodes(), store.getRunIndexEntries(), options);
     store.writeGrowthSnapshot(snapshot);
-    return buildProjectGrowthViewModel(snapshot);
+    const history = store.getGrowthSnapshotHistory(options.historyLimit || 12)
+      .map((item) => store.getGrowthSnapshotById(item.id))
+      .filter(Boolean) as GrowthSnapshotData[];
+    return buildProjectGrowthViewModel(snapshot, { previous, history });
+  } finally {
+    store.close();
+  }
+}
+
+export async function getProjectGrowthView(
+  projectPath: string,
+  extensionPath: string,
+  options: ProjectGrowthScanOptions = {}
+): Promise<ProjectGrowthViewModel> {
+  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const store = new SqliteStore(dbPath, extensionPath);
+  try {
+    await store.init();
+    if (options.forceRefresh || (options.refreshIfMissing !== false && !store.getLatestGrowthSnapshot())) {
+      const previousHistory = store.getGrowthSnapshotHistory(1);
+      const previous = previousHistory[0] ? store.getGrowthSnapshotById(previousHistory[0].id) : null;
+      const snapshot = buildProjectGrowthSnapshot(projectPath, store.getAllNodes(), store.getRunIndexEntries(), {
+        ...options,
+        scanReason: options.scanReason || 'query_refresh'
+      });
+      store.writeGrowthSnapshot(snapshot);
+      const history = store.getGrowthSnapshotHistory(options.historyLimit || 12)
+        .map((item) => store.getGrowthSnapshotById(item.id))
+        .filter(Boolean) as GrowthSnapshotData[];
+      return buildProjectGrowthViewModel(snapshot, { previous, history });
+    }
+    const latest = store.getLatestGrowthSnapshot();
+    if (!latest) {
+      return emptyProjectGrowthViewModel();
+    }
+    const historyRows = store.getGrowthSnapshotHistory(options.historyLimit || 12);
+    const previousRow = historyRows.find((item) => item.id !== latest.snapshot.id);
+    const previous = previousRow ? store.getGrowthSnapshotById(previousRow.id) : null;
+    const history = historyRows
+      .map((item) => store.getGrowthSnapshotById(item.id))
+      .filter(Boolean) as GrowthSnapshotData[];
+    return buildProjectGrowthViewModel(latest, { previous, history });
   } finally {
     store.close();
   }

@@ -30,6 +30,8 @@ const commandAliases: Record<string, string> = {
   getAgentModels: 'agentModels.get',
   testCli: 'agent.testCli',
   getAgentImpact: 'agentImpact.get',
+  getProjectGrowth: 'projectGrowth.get',
+  refreshProjectGrowth: 'projectGrowth.refresh',
   getSettings: 'settings.get',
   updateSettings: 'settings.update',
   openProAuthorization: 'entitlement.login',

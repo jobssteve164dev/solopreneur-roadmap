@@ -931,6 +931,83 @@ export class SqliteStore {
     };
   }
 
+  public getGrowthSnapshotById(snapshotId: string): GrowthSnapshotData | null {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const id = String(snapshotId || '').trim();
+    if (!id) {
+      return null;
+    }
+    const snapshotStmt = this.db.prepare(`
+      SELECT id, createdAt, projectPath, gitHead, scanReason, status, durationMs, error
+      FROM growth_snapshots
+      WHERE id = ?
+      LIMIT 1
+    `);
+    let snapshot: GrowthSnapshotRecord | null = null;
+    try {
+      snapshotStmt.bind([id]);
+      if (snapshotStmt.step()) {
+        const row = snapshotStmt.getAsObject() as any;
+        snapshot = {
+          id: String(row.id || ''),
+          createdAt: String(row.createdAt || ''),
+          projectPath: String(row.projectPath || ''),
+          gitHead: String(row.gitHead || ''),
+          scanReason: String(row.scanReason || ''),
+          status: String(row.status || ''),
+          durationMs: Math.max(0, Number(row.durationMs || 0)),
+          error: String(row.error || '')
+        };
+      }
+    } finally {
+      snapshotStmt.free();
+    }
+    if (!snapshot) {
+      return null;
+    }
+    return {
+      snapshot,
+      nodes: this.getGrowthNodes(snapshot.id),
+      edges: this.getGrowthEdges(snapshot.id),
+      signals: this.getGrowthSignals(snapshot.id),
+      labels: this.getGrowthModuleLabels(snapshot.id)
+    };
+  }
+
+  public getGrowthSnapshotHistory(limit = 12): GrowthSnapshotRecord[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const stmt = this.db.prepare(`
+      SELECT id, createdAt, projectPath, gitHead, scanReason, status, durationMs, error
+      FROM growth_snapshots
+      ORDER BY createdAt DESC
+      LIMIT ?
+    `);
+    const rows: GrowthSnapshotRecord[] = [];
+    try {
+      stmt.bind([Math.max(1, Math.min(50, Number(limit || 12)))]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as any;
+        rows.push({
+          id: String(row.id || ''),
+          createdAt: String(row.createdAt || ''),
+          projectPath: String(row.projectPath || ''),
+          gitHead: String(row.gitHead || ''),
+          scanReason: String(row.scanReason || ''),
+          status: String(row.status || ''),
+          durationMs: Math.max(0, Number(row.durationMs || 0)),
+          error: String(row.error || '')
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+    return rows;
+  }
+
   private getGrowthNodes(snapshotId: string): GrowthNodeRecord[] {
     if (!this.db) {
       throw new Error('Database not initialized');

@@ -40,6 +40,7 @@
     "onView:solopreneur.sidebar",
     "onCommand:solopreneur.showRoadmap",
     "onCommand:solopreneur.showStrategyPyramid",
+    "onCommand:solopreneur.refreshProjectGrowthData",
     "onUri"
   ],
   "main": "./out/extension.js",
@@ -53,6 +54,11 @@
       {
         "command": "solopreneur.showStrategyPyramid",
         "title": "SoloMap: Show Strategy Pyramid",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.refreshProjectGrowthData",
+        "title": "SoloMap: Refresh Project Growth Data",
         "category": "SoloMap"
       }
     ],

@@ -79,7 +79,7 @@ export interface GrowthNodeRecord {
   snapshotId: string;
   nodeId: string;
   parentId: string;
-  kind: 'file' | 'directory' | 'module' | 'capability' | string;
+  kind: 'file' | 'directory' | 'module' | 'capability' | 'package' | string;
   path: string;
   label: string;
   language: string;

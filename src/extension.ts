@@ -27,7 +27,7 @@ import {
 import { getWebviewHtml } from './roadmapWebview';
 import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
 import { backfillRunIndexFromDigests } from './runIndexMaintenance';
-import { refreshProjectGrowthSnapshot } from './projectGrowth';
+import { getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -272,6 +272,29 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(showStrategyPyramidDisposable);
+
+  const refreshProjectGrowthDisposable = vscode.commands.registerCommand(
+    'solopreneur.refreshProjectGrowthData',
+    async () => {
+      const projectPath = getSelectedProjectPath(context);
+      if (!projectPath) {
+        vscode.window.showErrorMessage('Choose a project folder before refreshing project growth data.');
+        return;
+      }
+      try {
+        const growthView = await refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+          scanReason: 'manual_command',
+          maxFiles: 5000
+        });
+        activePanel?.webview.postMessage({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
+        sidebarProvider?.postMessage({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
+        vscode.window.showInformationMessage(`Project growth data refreshed: ${growthView.totals.files} files, ${growthView.totals.modules} modules.`);
+      } catch (error) {
+        vscode.window.showErrorMessage(`Project growth data refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  );
+  context.subscriptions.push(refreshProjectGrowthDisposable);
 
   const manageProAuthorizationDisposable = vscode.commands.registerCommand(
     'solopreneur.manageProAuthorization',
@@ -548,6 +571,37 @@ async function handleSharedWebviewAction(
     'agentImpact.get': async () => {
       await respond({ command: 'agentImpactLoaded', status: await getAgentImpactStatusFromDatabase(getProjects(context), context.extensionPath) });
     },
+    'projectGrowth.get': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      if (!projectPath) {
+        await respond({ command: 'projectGrowthLoaded', projectPath, growth: null, error: 'No project selected.' });
+        return;
+      }
+      const growth = await getProjectGrowthView(projectPath, context.extensionPath, {
+        refreshIfMissing: true,
+        historyLimit: Number(request.historyLimit || 12),
+        maxFiles: 5000
+      });
+      await respond({ command: 'projectGrowthLoaded', projectPath, growth });
+    },
+    'projectGrowth.refresh': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      if (!projectPath) {
+        await respond({ command: 'projectGrowthLoaded', projectPath, growth: null, error: 'No project selected.' });
+        return;
+      }
+      const growth = await refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+        scanReason: String(request.scanReason || 'manual_refresh'),
+        historyLimit: Number(request.historyLimit || 12),
+        maxFiles: 5000
+      });
+      await respond({ command: 'projectGrowthLoaded', projectPath, growth });
+      if (surface === 'roadmap') {
+        sidebarProvider?.postMessage({ command: 'projectGrowthLoaded', projectPath, growth });
+      } else {
+        activePanel?.webview.postMessage({ command: 'projectGrowthLoaded', projectPath, growth });
+      }
+    },
     'settings.get': async () => {
       await refreshProAccountStatus(context);
       await postSettingsLoaded(target, getSettingsWithRuntimeState(context));
@@ -650,13 +704,20 @@ async function handleSharedWebviewAction(
     },
     'project.refreshExternalData': async (request) => {
       const projectPath = String(request.projectPath || '');
-      const [issues, pullRequests, delivery, security, runIndexHealth] = await Promise.all([
+      const [issues, pullRequests, delivery, security, runIndexHealth, growthView] = await Promise.all([
         loadExternalIssueSummary(projectPath, { force: true }).catch(() => null),
         loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null),
         loadExternalDeliverySummary(projectPath, { force: true }).catch(() => null),
         loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null),
         backfillRunIndexFromDigests(projectPath, context.extensionPath).catch((error) => {
           console.error('SoloMap run index backfill failed during project refresh:', error);
+          return null;
+        }),
+        refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+          scanReason: 'project_refresh',
+          maxFiles: 5000
+        }).catch((error) => {
+          console.error('SoloMap project growth refresh failed during project refresh:', error);
           return null;
         })
       ]);
@@ -667,10 +728,13 @@ async function handleSharedWebviewAction(
       if (runIndexHealth?.backfilledCount) {
         sendLocalProjectsToWebviews(context);
       }
+      if (growthView) {
+        await respond({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
+      }
       await respond({
         command: 'projectRefreshCompleted',
         projectPath,
-        success: Boolean(issues?.available || pullRequests?.available || delivery?.available || security?.available || runIndexHealth?.ok),
+        success: Boolean(issues?.available || pullRequests?.available || delivery?.available || security?.available || runIndexHealth?.ok || growthView),
         message: issues?.message || pullRequests?.message || delivery?.message || security?.message || ''
       });
     },

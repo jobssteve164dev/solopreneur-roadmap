@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import { CsvStore } from './csvStore';
 import { SqliteStore } from './sqliteStore';
-import { AgentConversation, GrowthSnapshotData, RoadmapNode, RoadmapEdge, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal } from './types';
+import { AgentConversation, GrowthSnapshotData, GrowthSnapshotRecord, RoadmapNode, RoadmapEdge, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal } from './types';
 
 export class SyncEngine {
   private csvStore: CsvStore;
@@ -147,6 +147,14 @@ export class SyncEngine {
 
   public getLatestGrowthSnapshot(): GrowthSnapshotData | null {
     return this.sqliteStore.getLatestGrowthSnapshot();
+  }
+
+  public getGrowthSnapshotById(snapshotId: string): GrowthSnapshotData | null {
+    return this.sqliteStore.getGrowthSnapshotById(snapshotId);
+  }
+
+  public getGrowthSnapshotHistory(limit = 12): GrowthSnapshotRecord[] {
+    return this.sqliteStore.getGrowthSnapshotHistory(limit);
   }
 
   /**
