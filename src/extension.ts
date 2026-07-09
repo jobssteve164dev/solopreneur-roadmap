@@ -27,6 +27,7 @@ import {
 import { getWebviewHtml } from './roadmapWebview';
 import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
 import { backfillRunIndexFromDigests } from './runIndexMaintenance';
+import { refreshProjectGrowthSnapshot } from './projectGrowth';
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -6889,6 +6890,18 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         runIndexSummary = `Run index not saved: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
+    let projectGrowthSummary = '';
+    if (workspaceRoot && !isReviewRun && extensionContextRef) {
+      try {
+        const growthView = await refreshProjectGrowthSnapshot(workspaceRoot, extensionContextRef.extensionPath, {
+          scanReason: isContinuationRun ? 'agent_continuation' : isSoloConversation ? 'solo' : String(runKind || 'agent_run'),
+          maxFiles: 5000
+        });
+        projectGrowthSummary = `Project growth snapshot saved: ${growthView.totals.files} files, ${growthView.totals.modules} modules, ${growthView.gaps.length} gaps.`;
+      } catch (error) {
+        projectGrowthSummary = `Project growth snapshot not saved: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     if (workspaceRoot && !isContinuationRun) {
       const verificationSignals = extractVerificationSignals(outputTail, resolvedCommand, nextStatus);
       const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus);
@@ -6992,6 +7005,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       documentationAudit ? `Documentation harness: ${documentationAudit.summary}` : '',
       runDigestSummary,
       runIndexSummary,
+      projectGrowthSummary,
       documentationAudit && documentationAudit.pendingReview.length > 0
         ? `Documentation review needed:\n${documentationAudit.pendingReview.map((item) => `- ${item.path}: ${item.reason}`).join('\n')}`
         : '',

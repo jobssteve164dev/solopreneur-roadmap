@@ -1,7 +1,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import initSqlJs from 'sql.js';
-import { AgentConversation, RoadmapNode, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal } from './types';
+import {
+  AgentConversation,
+  GrowthEdgeRecord,
+  GrowthModuleLabelRecord,
+  GrowthNodeRecord,
+  GrowthSignalRecord,
+  GrowthSnapshotData,
+  GrowthSnapshotRecord,
+  RoadmapNode,
+  RunIndexEntry,
+  RunIndexFile,
+  RunIndexRecord,
+  RunIndexSignal
+} from './types';
 import {
   inferProjectRootForConversationStore,
   normalizeAgentConversationLifecycle
@@ -65,7 +78,12 @@ export class SqliteStore {
       'execution_logs',
       'run_records',
       'run_files',
-      'run_signals'
+      'run_signals',
+      'growth_snapshots',
+      'growth_nodes',
+      'growth_edges',
+      'growth_signals',
+      'growth_module_labels'
     ];
     const requiredIndexes = [
       'idx_execution_logs_node_id',
@@ -74,7 +92,14 @@ export class SqliteStore {
       'idx_run_records_run_kind',
       'idx_run_records_agent_cli',
       'idx_run_files_file_path',
-      'idx_run_signals_type'
+      'idx_run_signals_type',
+      'idx_growth_snapshots_created_at',
+      'idx_growth_nodes_snapshot',
+      'idx_growth_nodes_path',
+      'idx_growth_edges_snapshot',
+      'idx_growth_signals_snapshot',
+      'idx_growth_signals_node',
+      'idx_growth_module_labels_snapshot'
     ];
     const schemaChanged = requiredTables.some((name) => !this.sqliteObjectExists('table', name))
       || requiredIndexes.some((name) => !this.sqliteObjectExists('index', name));
@@ -176,6 +201,108 @@ export class SqliteStore {
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_run_signals_type
       ON run_signals (type)
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS growth_snapshots (
+        id TEXT PRIMARY KEY,
+        createdAt TEXT,
+        projectPath TEXT,
+        gitHead TEXT,
+        scanReason TEXT,
+        status TEXT,
+        durationMs INTEGER,
+        error TEXT
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS growth_nodes (
+        snapshotId TEXT,
+        nodeId TEXT,
+        parentId TEXT,
+        kind TEXT,
+        path TEXT,
+        label TEXT,
+        language TEXT,
+        bytes INTEGER,
+        loc INTEGER,
+        fileCount INTEGER,
+        testFileCount INTEGER,
+        generated INTEGER,
+        excluded INTEGER,
+        primaryRole TEXT,
+        confidence REAL,
+        PRIMARY KEY (snapshotId, nodeId)
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS growth_edges (
+        snapshotId TEXT,
+        sourceId TEXT,
+        targetId TEXT,
+        kind TEXT,
+        weight REAL,
+        evidence TEXT,
+        PRIMARY KEY (snapshotId, sourceId, targetId, kind)
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS growth_signals (
+        snapshotId TEXT,
+        nodeId TEXT,
+        type TEXT,
+        level TEXT,
+        value TEXT,
+        source TEXT,
+        sourceRef TEXT,
+        createdAt TEXT,
+        PRIMARY KEY (snapshotId, nodeId, type, value, sourceRef)
+      )
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS growth_module_labels (
+        snapshotId TEXT,
+        nodeId TEXT,
+        label TEXT,
+        role TEXT,
+        source TEXT,
+        confidence REAL,
+        updatedAt TEXT,
+        PRIMARY KEY (snapshotId, nodeId, label, role, source)
+      )
+    `);
+
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_growth_snapshots_created_at
+      ON growth_snapshots (createdAt)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_growth_nodes_snapshot
+      ON growth_nodes (snapshotId, kind)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_growth_nodes_path
+      ON growth_nodes (path)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_growth_edges_snapshot
+      ON growth_edges (snapshotId, kind)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_growth_signals_snapshot
+      ON growth_signals (snapshotId, type, level)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_growth_signals_node
+      ON growth_signals (nodeId, type)
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_growth_module_labels_snapshot
+      ON growth_module_labels (snapshotId, nodeId)
     `);
     return schemaChanged;
   }
@@ -568,6 +695,372 @@ export class SqliteStore {
       signalStmt.free();
     }
     return [...entries.values()];
+  }
+
+  public writeGrowthSnapshot(data: GrowthSnapshotData): void {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const snapshot = data.snapshot;
+    const snapshotId = String(snapshot.id || '').trim();
+    if (!snapshotId) {
+      throw new Error('Cannot write a growth snapshot without an id');
+    }
+    this.db.run('BEGIN TRANSACTION');
+    try {
+      this.db.run(
+        `INSERT OR REPLACE INTO growth_snapshots (
+          id,
+          createdAt,
+          projectPath,
+          gitHead,
+          scanReason,
+          status,
+          durationMs,
+          error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          snapshotId,
+          snapshot.createdAt || new Date().toISOString(),
+          snapshot.projectPath || '',
+          snapshot.gitHead || '',
+          snapshot.scanReason || '',
+          snapshot.status || '',
+          Math.max(0, Number(snapshot.durationMs || 0)),
+          snapshot.error || ''
+        ]
+      );
+
+      this.db.run('DELETE FROM growth_nodes WHERE snapshotId = ?', [snapshotId]);
+      this.db.run('DELETE FROM growth_edges WHERE snapshotId = ?', [snapshotId]);
+      this.db.run('DELETE FROM growth_signals WHERE snapshotId = ?', [snapshotId]);
+      this.db.run('DELETE FROM growth_module_labels WHERE snapshotId = ?', [snapshotId]);
+
+      const nodeStmt = this.db.prepare(`
+        INSERT OR REPLACE INTO growth_nodes (
+          snapshotId,
+          nodeId,
+          parentId,
+          kind,
+          path,
+          label,
+          language,
+          bytes,
+          loc,
+          fileCount,
+          testFileCount,
+          generated,
+          excluded,
+          primaryRole,
+          confidence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      try {
+        for (const node of data.nodes) {
+          const nodeId = String(node.nodeId || '').trim();
+          if (!nodeId) {
+            continue;
+          }
+          nodeStmt.run([
+            snapshotId,
+            nodeId,
+            node.parentId || '',
+            node.kind || '',
+            node.path || '',
+            node.label || '',
+            node.language || '',
+            Math.max(0, Number(node.bytes || 0)),
+            Math.max(0, Number(node.loc || 0)),
+            Math.max(0, Number(node.fileCount || 0)),
+            Math.max(0, Number(node.testFileCount || 0)),
+            node.generated ? 1 : 0,
+            node.excluded ? 1 : 0,
+            node.primaryRole || '',
+            Math.max(0, Math.min(1, Number(node.confidence || 0)))
+          ]);
+        }
+      } finally {
+        nodeStmt.free();
+      }
+
+      const edgeStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO growth_edges (
+          snapshotId,
+          sourceId,
+          targetId,
+          kind,
+          weight,
+          evidence
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      try {
+        for (const edge of data.edges) {
+          const sourceId = String(edge.sourceId || '').trim();
+          const targetId = String(edge.targetId || '').trim();
+          const kind = String(edge.kind || '').trim();
+          if (!sourceId || !targetId || !kind) {
+            continue;
+          }
+          edgeStmt.run([
+            snapshotId,
+            sourceId,
+            targetId,
+            kind,
+            Math.max(0, Number(edge.weight || 0)),
+            edge.evidence || ''
+          ]);
+        }
+      } finally {
+        edgeStmt.free();
+      }
+
+      const signalStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO growth_signals (
+          snapshotId,
+          nodeId,
+          type,
+          level,
+          value,
+          source,
+          sourceRef,
+          createdAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      try {
+        for (const signal of data.signals) {
+          const nodeId = String(signal.nodeId || '').trim();
+          const type = String(signal.type || '').trim();
+          const value = String(signal.value || '').trim();
+          if (!nodeId || !type || !value) {
+            continue;
+          }
+          signalStmt.run([
+            snapshotId,
+            nodeId,
+            type,
+            signal.level || 'info',
+            value,
+            signal.source || '',
+            signal.sourceRef || '',
+            signal.createdAt || snapshot.createdAt || new Date().toISOString()
+          ]);
+        }
+      } finally {
+        signalStmt.free();
+      }
+
+      const labelStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO growth_module_labels (
+          snapshotId,
+          nodeId,
+          label,
+          role,
+          source,
+          confidence,
+          updatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      try {
+        for (const label of data.labels) {
+          const nodeId = String(label.nodeId || '').trim();
+          const value = String(label.label || '').trim();
+          if (!nodeId || !value) {
+            continue;
+          }
+          labelStmt.run([
+            snapshotId,
+            nodeId,
+            value,
+            label.role || '',
+            label.source || '',
+            Math.max(0, Math.min(1, Number(label.confidence || 0))),
+            label.updatedAt || snapshot.createdAt || new Date().toISOString()
+          ]);
+        }
+      } finally {
+        labelStmt.free();
+      }
+
+      this.db.run('COMMIT');
+      this.save();
+    } catch (error) {
+      try {
+        this.db.run('ROLLBACK');
+      } catch {}
+      throw error;
+    }
+  }
+
+  public getLatestGrowthSnapshot(): GrowthSnapshotData | null {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const snapshotStmt = this.db.prepare(`
+      SELECT id, createdAt, projectPath, gitHead, scanReason, status, durationMs, error
+      FROM growth_snapshots
+      ORDER BY createdAt DESC
+      LIMIT 1
+    `);
+    let snapshot: GrowthSnapshotRecord | null = null;
+    try {
+      if (snapshotStmt.step()) {
+        const row = snapshotStmt.getAsObject() as any;
+        snapshot = {
+          id: String(row.id || ''),
+          createdAt: String(row.createdAt || ''),
+          projectPath: String(row.projectPath || ''),
+          gitHead: String(row.gitHead || ''),
+          scanReason: String(row.scanReason || ''),
+          status: String(row.status || ''),
+          durationMs: Math.max(0, Number(row.durationMs || 0)),
+          error: String(row.error || '')
+        };
+      }
+    } finally {
+      snapshotStmt.free();
+    }
+    if (!snapshot) {
+      return null;
+    }
+    return {
+      snapshot,
+      nodes: this.getGrowthNodes(snapshot.id),
+      edges: this.getGrowthEdges(snapshot.id),
+      signals: this.getGrowthSignals(snapshot.id),
+      labels: this.getGrowthModuleLabels(snapshot.id)
+    };
+  }
+
+  private getGrowthNodes(snapshotId: string): GrowthNodeRecord[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const stmt = this.db.prepare(`
+      SELECT snapshotId, nodeId, parentId, kind, path, label, language, bytes, loc, fileCount, testFileCount, generated, excluded, primaryRole, confidence
+      FROM growth_nodes
+      WHERE snapshotId = ?
+      ORDER BY kind ASC, path ASC, nodeId ASC
+    `);
+    const rows: GrowthNodeRecord[] = [];
+    try {
+      stmt.bind([snapshotId]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as any;
+        rows.push({
+          snapshotId: String(row.snapshotId || ''),
+          nodeId: String(row.nodeId || ''),
+          parentId: String(row.parentId || ''),
+          kind: String(row.kind || ''),
+          path: String(row.path || ''),
+          label: String(row.label || ''),
+          language: String(row.language || ''),
+          bytes: Math.max(0, Number(row.bytes || 0)),
+          loc: Math.max(0, Number(row.loc || 0)),
+          fileCount: Math.max(0, Number(row.fileCount || 0)),
+          testFileCount: Math.max(0, Number(row.testFileCount || 0)),
+          generated: Boolean(Number(row.generated || 0)),
+          excluded: Boolean(Number(row.excluded || 0)),
+          primaryRole: String(row.primaryRole || ''),
+          confidence: Math.max(0, Math.min(1, Number(row.confidence || 0)))
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+    return rows;
+  }
+
+  private getGrowthEdges(snapshotId: string): GrowthEdgeRecord[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const stmt = this.db.prepare(`
+      SELECT snapshotId, sourceId, targetId, kind, weight, evidence
+      FROM growth_edges
+      WHERE snapshotId = ?
+      ORDER BY kind ASC, sourceId ASC, targetId ASC
+    `);
+    const rows: GrowthEdgeRecord[] = [];
+    try {
+      stmt.bind([snapshotId]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as any;
+        rows.push({
+          snapshotId: String(row.snapshotId || ''),
+          sourceId: String(row.sourceId || ''),
+          targetId: String(row.targetId || ''),
+          kind: String(row.kind || ''),
+          weight: Math.max(0, Number(row.weight || 0)),
+          evidence: String(row.evidence || '')
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+    return rows;
+  }
+
+  private getGrowthSignals(snapshotId: string): GrowthSignalRecord[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const stmt = this.db.prepare(`
+      SELECT snapshotId, nodeId, type, level, value, source, sourceRef, createdAt
+      FROM growth_signals
+      WHERE snapshotId = ?
+      ORDER BY level DESC, type ASC, nodeId ASC
+    `);
+    const rows: GrowthSignalRecord[] = [];
+    try {
+      stmt.bind([snapshotId]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as any;
+        rows.push({
+          snapshotId: String(row.snapshotId || ''),
+          nodeId: String(row.nodeId || ''),
+          type: String(row.type || ''),
+          level: String(row.level || ''),
+          value: String(row.value || ''),
+          source: String(row.source || ''),
+          sourceRef: String(row.sourceRef || ''),
+          createdAt: String(row.createdAt || '')
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+    return rows;
+  }
+
+  private getGrowthModuleLabels(snapshotId: string): GrowthModuleLabelRecord[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const stmt = this.db.prepare(`
+      SELECT snapshotId, nodeId, label, role, source, confidence, updatedAt
+      FROM growth_module_labels
+      WHERE snapshotId = ?
+      ORDER BY nodeId ASC, confidence DESC
+    `);
+    const rows: GrowthModuleLabelRecord[] = [];
+    try {
+      stmt.bind([snapshotId]);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as any;
+        rows.push({
+          snapshotId: String(row.snapshotId || ''),
+          nodeId: String(row.nodeId || ''),
+          label: String(row.label || ''),
+          role: String(row.role || ''),
+          source: String(row.source || ''),
+          confidence: Math.max(0, Math.min(1, Number(row.confidence || 0))),
+          updatedAt: String(row.updatedAt || '')
+        });
+      }
+    } finally {
+      stmt.free();
+    }
+    return rows;
   }
 
   /**

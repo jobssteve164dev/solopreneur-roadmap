@@ -64,6 +64,73 @@ export interface RunIndexEntry extends RunIndexRecord {
   signals: RunIndexSignal[];
 }
 
+export interface GrowthSnapshotRecord {
+  id: string;
+  createdAt: string;
+  projectPath: string;
+  gitHead: string;
+  scanReason: string;
+  status: 'completed' | 'failed' | string;
+  durationMs: number;
+  error: string;
+}
+
+export interface GrowthNodeRecord {
+  snapshotId: string;
+  nodeId: string;
+  parentId: string;
+  kind: 'file' | 'directory' | 'module' | 'capability' | string;
+  path: string;
+  label: string;
+  language: string;
+  bytes: number;
+  loc: number;
+  fileCount: number;
+  testFileCount: number;
+  generated: boolean;
+  excluded: boolean;
+  primaryRole: string;
+  confidence: number;
+}
+
+export interface GrowthEdgeRecord {
+  snapshotId: string;
+  sourceId: string;
+  targetId: string;
+  kind: 'contains' | 'imports' | 'depends_on' | 'implements' | 'tested_by' | 'shaped_by_run' | 'belongs_to_step' | string;
+  weight: number;
+  evidence: string;
+}
+
+export interface GrowthSignalRecord {
+  snapshotId: string;
+  nodeId: string;
+  type: 'activity' | 'risk' | 'verification' | 'failure' | 'delivery' | 'ownership' | 'recommendation' | string;
+  level: 'info' | 'watch' | 'attention' | 'blocked' | string;
+  value: string;
+  source: string;
+  sourceRef: string;
+  createdAt: string;
+}
+
+export interface GrowthModuleLabelRecord {
+  snapshotId: string;
+  nodeId: string;
+  label: string;
+  role: string;
+  source: 'rule' | 'agent' | 'user' | 'import_graph' | 'roadmap' | string;
+  confidence: number;
+  updatedAt: string;
+}
+
+export interface GrowthSnapshotData {
+  snapshot: GrowthSnapshotRecord;
+  nodes: GrowthNodeRecord[];
+  edges: GrowthEdgeRecord[];
+  signals: GrowthSignalRecord[];
+  labels: GrowthModuleLabelRecord[];
+}
+
 export interface ProjectState {
   nodes: RoadmapNode[];
   edges: RoadmapEdge[];
