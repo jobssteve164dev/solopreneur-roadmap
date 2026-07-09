@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.298 - 2026-07-09
+
+### Fixed
+- prefer digests for agent impact stats (e3a914c)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.297 - 2026-07-03
 
 ### Fixed
