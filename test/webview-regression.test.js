@@ -2506,6 +2506,132 @@ test('project investment analytics aggregate local run effort for portfolio cons
   assert.equal(summaries[0].investment.totalDurationMs, 90 * 60 * 1000);
 });
 
+test('project investment analytics prefer database run index for enriched portfolio stats', async () => {
+  const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
+  const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-db-'));
+  const solopreneurDir = path.join(projectRootA, '.solopreneur');
+  const digestRoot = path.join(solopreneurDir, 'run-digests');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,目标与路径确认,,codex,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z'
+  ].join('\n'));
+  fs.writeFileSync(path.join(digestRoot, 'digest-conflict.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'digest-conflict',
+    runKind: 'solo',
+    status: 'Failed',
+    startedAt: '2026-05-01T10:00:00.000Z',
+    finishedAt: '2026-05-01T11:00:00.000Z',
+    durationMs: 60 * 60 * 1000
+  }), 'utf8');
+
+  const store = new SqliteStore(path.join(solopreneurDir, 'project_journal.db'), projectRoot);
+  await store.init();
+  store.upsertRunIndex({
+    executionLogId: 12,
+    nodeId: '1',
+    runKind: 'step',
+    agentCli: 'codex',
+    status: 'Completed',
+    startedAt: '2026-06-14T10:00:00.000Z',
+    finishedAt: '2026-06-14T10:20:00.000Z',
+    durationMs: 20 * 60 * 1000,
+    outputPath: '.solopreneur/agent-runs/1/12/output.log',
+    outputBytes: 100,
+    outputTail: 'npm test passed',
+    commandPath: '',
+    promptPath: '',
+    changesPath: '',
+    touchedFilesPath: '',
+    updatedAt: '2026-06-14T10:20:00.000Z'
+  }, [], [{ type: 'verification', value: 'npm test passed' }]);
+  store.upsertRunIndex({
+    executionLogId: 13,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    agentCli: 'codex',
+    status: 'Completed',
+    startedAt: '2026-06-14T11:00:00.000Z',
+    finishedAt: '2026-06-14T11:10:00.000Z',
+    durationMs: 10 * 60 * 1000,
+    outputPath: '.solopreneur/agent-runs/__solo__/13/output.log',
+    outputBytes: 80,
+    outputTail: 'done',
+    commandPath: '',
+    promptPath: '',
+    changesPath: '',
+    touchedFilesPath: '',
+    updatedAt: '2026-06-14T11:10:00.000Z'
+  }, [], []);
+  store.close();
+
+  analytics.clearProjectInvestmentCache(projectRootA);
+  const stats = await analytics.readProjectInvestmentStatsFromDatabase(
+    projectRootA,
+    projectRoot,
+    new Date('2026-06-15T00:00:00.000Z')
+  );
+  assert.equal(stats.taskRunCount, 1);
+  assert.equal(stats.soloConversationCount, 1);
+  assert.equal(stats.completedRunCount, 2);
+  assert.equal(stats.failedRunCount, 0);
+  assert.equal(stats.totalDurationMs, 30 * 60 * 1000);
+  assert.equal(stats.recentDurationMs, 30 * 60 * 1000);
+
+  const summaries = await projectPortfolio.buildProjectPortfolioSummariesFromDatabase(
+    [{ name: 'Invested DB', path: projectRootA }],
+    projectRoot
+  );
+  assert.equal(summaries[0].investment.taskRunCount, 1);
+  assert.equal(summaries[0].investment.soloConversationCount, 1);
+  assert.equal(summaries[0].investment.totalDurationMs, 30 * 60 * 1000);
+  assert.equal(summaries[0].investment.failedRunCount, 0);
+});
+
+test('database-backed portfolio stats fall back to run digests for legacy projects', async () => {
+  const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
+  const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-db-fallback-'));
+  const solopreneurDir = path.join(projectRootA, '.solopreneur');
+  const digestRoot = path.join(solopreneurDir, 'run-digests');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,目标与路径确认,,codex,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z'
+  ].join('\n'));
+  fs.writeFileSync(path.join(digestRoot, 'digest-legacy.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'digest-legacy',
+    runKind: 'solo',
+    status: 'Failed',
+    startedAt: '2026-06-10T10:00:00.000Z',
+    finishedAt: '2026-06-10T10:45:00.000Z',
+    durationMs: 45 * 60 * 1000
+  }), 'utf8');
+
+  analytics.clearProjectInvestmentCache(projectRootA);
+  const stats = await analytics.readProjectInvestmentStatsFromDatabase(
+    projectRootA,
+    projectRoot,
+    new Date('2026-06-15T00:00:00.000Z')
+  );
+  assert.equal(stats.taskRunCount, 0);
+  assert.equal(stats.soloConversationCount, 1);
+  assert.equal(stats.failedRunCount, 1);
+  assert.equal(stats.totalDurationMs, 45 * 60 * 1000);
+
+  const summaries = await projectPortfolio.buildProjectPortfolioSummariesFromDatabase(
+    [{ name: 'Legacy Invested', path: projectRootA }],
+    projectRoot
+  );
+  assert.equal(summaries[0].investment.soloConversationCount, 1);
+  assert.equal(summaries[0].investment.failedRunCount, 1);
+  assert.equal(summaries[0].investment.totalDurationMs, 45 * 60 * 1000);
+});
+
 test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-lifecycle-a-'));

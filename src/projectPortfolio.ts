@@ -5,7 +5,7 @@ import * as Papa from 'papaparse';
 import { summarizeDocumentationForReview } from './documentationManifest';
 import { readLearningSummary } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
-import { ProjectInvestmentStats, readProjectInvestmentStats } from './projectAnalytics';
+import { ProjectInvestmentStats, readProjectInvestmentStats, readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import {
   ProjectDeliverySummary,
@@ -88,6 +88,12 @@ export interface RoadmapNodeLike {
   status: string;
   agentCli?: string;
   dependencies?: string;
+}
+
+export interface ProjectPortfolioBuildOptions {
+  includeReusableSignals?: boolean;
+  globalDataPath?: string;
+  investmentStatsByProjectPath?: Map<string, ProjectInvestmentStats> | Record<string, ProjectInvestmentStats>;
 }
 
 type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
@@ -366,7 +372,18 @@ function countReusableSignals(projectPath: string, globalDataPath = ''): number 
   return legacyCount + ledgerSignalCount;
 }
 
-export function buildProjectPortfolioSummary(project: SolopreneurProject, options: { includeReusableSignals?: boolean; globalDataPath?: string } = {}): ProjectPortfolioSummary {
+function getInvestmentOverride(projectPath: string, options: ProjectPortfolioBuildOptions): ProjectInvestmentStats | null {
+  const overrides = options.investmentStatsByProjectPath;
+  if (!overrides) {
+    return null;
+  }
+  if (overrides instanceof Map) {
+    return overrides.get(projectPath) || null;
+  }
+  return overrides[projectPath] || null;
+}
+
+export function buildProjectPortfolioSummary(project: SolopreneurProject, options: ProjectPortfolioBuildOptions = {}): ProjectPortfolioSummary {
   const nodes = readProjectRoadmapNodes(project.path);
   const stageSummary = summarizeMethodologyStages(nodes);
   const totalNodes = nodes.length;
@@ -414,7 +431,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
   const securitySignal = inferSecuritySignal(baseSummary.security);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
   const documentationSummary = summarizeDocumentationForReview(project.path);
-  const investment = readProjectInvestmentStats(project.path);
+  const investment = getInvestmentOverride(project.path, options) || readProjectInvestmentStats(project.path);
   const loopSummary = buildProjectLoopSummary(nodes, recommendedNode, stageSummary);
   return {
     ...baseSummary,
@@ -443,7 +460,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
   };
 }
 
-export function buildProjectPortfolioSummaries(projects: SolopreneurProject[], options: { includeReusableSignals?: boolean; globalDataPath?: string } = {}): ProjectPortfolioSummary[] {
+export function buildProjectPortfolioSummaries(projects: SolopreneurProject[], options: ProjectPortfolioBuildOptions = {}): ProjectPortfolioSummary[] {
   return projects
     .map((project) => buildProjectPortfolioSummary(project, options))
     .sort((a, b) => {
@@ -457,4 +474,22 @@ export function buildProjectPortfolioSummaries(projects: SolopreneurProject[], o
       }
       return 0;
     });
+}
+
+export async function buildProjectPortfolioSummariesFromDatabase(
+  projects: SolopreneurProject[],
+  extensionPath: string,
+  options: ProjectPortfolioBuildOptions = {}
+): Promise<ProjectPortfolioSummary[]> {
+  const investmentStatsByProjectPath = new Map<string, ProjectInvestmentStats>();
+  await Promise.all(projects.map(async (project) => {
+    investmentStatsByProjectPath.set(
+      project.path,
+      await readProjectInvestmentStatsFromDatabase(project.path, extensionPath)
+    );
+  }));
+  return buildProjectPortfolioSummaries(projects, {
+    ...options,
+    investmentStatsByProjectPath
+  });
 }

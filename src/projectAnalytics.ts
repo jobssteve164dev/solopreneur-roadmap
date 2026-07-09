@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { SqliteStore } from './db/sqliteStore';
+import { RunIndexEntry } from './db/types';
 
 export interface ProjectInvestmentStats {
   schemaVersion: number;
@@ -84,6 +86,7 @@ function getProjectInvestmentSignature(projectPath: string): string {
   const solopreneurRoot = path.join(projectPath, '.solopreneur');
   return [
     statSignature(path.join(solopreneurRoot, 'roadmap.csv')),
+    statSignature(path.join(solopreneurRoot, 'project_journal.db')),
     directoryChildrenSignature(path.join(solopreneurRoot, 'run-digests')),
     directoryChildrenSignature(path.join(solopreneurRoot, 'agent-runs'))
   ].join('::');
@@ -168,6 +171,38 @@ function readRunsFromDigests(projectPath: string): InvestmentRun[] {
       durationMs: Math.max(0, Number(digest.durationMs || 0))
     };
   }).filter((run): run is InvestmentRun => Boolean(run));
+}
+
+function readRunsFromRunIndexEntries(entries: RunIndexEntry[]): InvestmentRun[] {
+  return entries.map((entry) => {
+    const runKind = normalizeRunKind(entry.runKind);
+    if (!isInvestmentRun(runKind)) {
+      return null;
+    }
+    return {
+      runKind,
+      status: String(entry.status || ''),
+      startedAt: String(entry.startedAt || ''),
+      finishedAt: String(entry.finishedAt || entry.startedAt || ''),
+      durationMs: Math.max(0, Number(entry.durationMs || 0))
+    };
+  }).filter((run): run is InvestmentRun => Boolean(run));
+}
+
+async function readRunsFromRunIndex(projectPath: string, extensionPath: string): Promise<InvestmentRun[]> {
+  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  if (!fs.existsSync(dbPath)) {
+    return [];
+  }
+  const store = new SqliteStore(dbPath, extensionPath);
+  try {
+    await store.init();
+    return readRunsFromRunIndexEntries(store.getRunIndexEntries());
+  } catch {
+    return [];
+  } finally {
+    store.close();
+  }
 }
 
 function isAgentRunDir(runDir: string): boolean {
@@ -328,6 +363,7 @@ function buildProjectInvestmentStatsFromRuns(runs: InvestmentRun[], now: Date): 
 export function clearProjectInvestmentCache(projectPath?: string): void {
   if (projectPath) {
     projectInvestmentCache.delete(projectPath);
+    projectInvestmentCache.delete(`db:${projectPath}`);
     return;
   }
   projectInvestmentCache.clear();
@@ -347,6 +383,33 @@ export function readProjectInvestmentStats(projectPath: string, now = new Date()
   const runs = digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(projectPath);
   const stats = buildProjectInvestmentStatsFromRuns(runs, now);
   projectInvestmentCache.set(projectPath, {
+    signature,
+    generatedAtMs: nowMs,
+    stats
+  });
+  return stats;
+}
+
+export async function readProjectInvestmentStatsFromDatabase(projectPath: string, extensionPath: string, now = new Date()): Promise<ProjectInvestmentStats> {
+  if (!projectPath) {
+    return emptyProjectInvestmentStats(now);
+  }
+  const cacheKey = `db:${projectPath}`;
+  const signature = getProjectInvestmentSignature(projectPath);
+  const cached = projectInvestmentCache.get(cacheKey);
+  const nowMs = now.getTime();
+  if (cached && cached.signature === signature && nowMs - cached.generatedAtMs <= cacheTtlMs) {
+    return cached.stats;
+  }
+  const indexedRuns = await readRunsFromRunIndex(projectPath, extensionPath);
+  const runs = indexedRuns.length > 0
+    ? indexedRuns
+    : (() => {
+        const digestRuns = readRunsFromDigests(projectPath);
+        return digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(projectPath);
+      })();
+  const stats = buildProjectInvestmentStatsFromRuns(runs, now);
+  projectInvestmentCache.set(cacheKey, {
     signature,
     generatedAtMs: nowMs,
     stats

@@ -4,12 +4,13 @@ import {
   loadExternalPullRequestSummary,
   loadExternalSecuritySummary
 } from './projectExternalSignals';
-import { buildProjectPortfolioSummaries, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
+import { buildProjectPortfolioSummariesFromDatabase, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
 
 interface SidebarProjectLoaderOptions {
   isAvailable: () => boolean;
   postMessage: (message: any) => void;
   getGlobalDataPath: () => string;
+  getExtensionPath: () => string;
   buildGlobalStore: (dataPath: string, portfolio: ProjectPortfolioSummary[]) => any;
   buildGlobalStorePlaceholder: (dataPath: string, portfolio: ProjectPortfolioSummary[]) => any;
 }
@@ -42,10 +43,11 @@ export class SidebarProjectLoader {
   public schedulePortfolioEnrichment(projects: SolopreneurProject[], selectedProjectPath: string): void {
     const requestId = ++this.portfolioRequest;
     setTimeout(() => {
+      void (async () => {
       try {
         if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
         const globalDataPath = this.options.getGlobalDataPath();
-        const portfolio = buildProjectPortfolioSummaries(projects, {
+        const portfolio = await buildProjectPortfolioSummariesFromDatabase(projects, this.options.getExtensionPath(), {
           includeReusableSignals: true,
           globalDataPath
         });
@@ -62,6 +64,7 @@ export class SidebarProjectLoader {
       } catch (error) {
         console.error('SoloMap sidebar failed to enrich portfolio:', error);
       }
+      })();
     }, 1000);
   }
 

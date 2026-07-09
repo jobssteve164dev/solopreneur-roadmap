@@ -70,6 +70,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       isAvailable: () => Boolean(this._view),
       postMessage: (message) => { this._view?.webview.postMessage(message); },
       getGlobalDataPath: () => this._getSettings().globalDataPath,
+      getExtensionPath: () => this._extensionUri.fsPath,
       buildGlobalStore: ensureGlobalEngineeringStore,
       buildGlobalStorePlaceholder: createGlobalEngineeringSnapshotPlaceholder
     });
