@@ -2643,10 +2643,9 @@ test('run index maintenance backfills legacy digests and reports health', async 
   store.close();
 });
 
-test('database-backed portfolio stats backfill run digests for legacy projects', async () => {
+test('database-backed portfolio stats fall back to digests without blocking on backfill', async () => {
   const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
   const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
-  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-db-fallback-'));
   const solopreneurDir = path.join(projectRootA, '.solopreneur');
   const digestRoot = path.join(solopreneurDir, 'run-digests');
@@ -2679,7 +2678,7 @@ test('database-backed portfolio stats backfill run digests for legacy projects',
   assert.equal(stats.soloConversationCount, 1);
   assert.equal(stats.failedRunCount, 1);
   assert.equal(stats.totalDurationMs, 45 * 60 * 1000);
-  assert.equal(fs.existsSync(path.join(solopreneurDir, 'project_journal.db')), true);
+  assert.equal(fs.existsSync(path.join(solopreneurDir, 'project_journal.db')), false);
 
   const summaries = await projectPortfolio.buildProjectPortfolioSummariesFromDatabase(
     [{ name: 'Legacy Invested', path: projectRootA }],
@@ -2688,11 +2687,21 @@ test('database-backed portfolio stats backfill run digests for legacy projects',
   assert.equal(summaries[0].investment.soloConversationCount, 1);
   assert.equal(summaries[0].investment.failedRunCount, 1);
   assert.equal(summaries[0].investment.totalDurationMs, 45 * 60 * 1000);
+  assert.equal(fs.existsSync(path.join(solopreneurDir, 'project_journal.db')), false);
+});
 
-  const store = new SqliteStore(path.join(solopreneurDir, 'project_journal.db'), projectRoot);
-  await store.init();
-  assert.equal(store.getRunIndexEntries().length, 1);
-  store.close();
+test('run index backfill is scoped to explicit project selection or manual refresh', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const sidebarLoaderSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProjectLoader.ts'), 'utf8');
+  const analyticsSource = fs.readFileSync(path.join(projectRoot, 'src/projectAnalytics.ts'), 'utf8');
+  const impactSource = fs.readFileSync(path.join(projectRoot, 'src/agentImpact.ts'), 'utf8');
+
+  assert.match(extensionSource, /function scheduleProjectRunIndexBackfill\(context: vscode\.ExtensionContext, projectPath: string\)/);
+  assert.match(extensionSource, /async function selectProject[\s\S]*?scheduleProjectRunIndexBackfill\(context, projectPath\)/);
+  assert.match(extensionSource, /'project\.refreshExternalData': async[\s\S]*?backfillRunIndexFromDigests\(projectPath, context\.extensionPath\)/);
+  assert.doesNotMatch(sidebarLoaderSource, /backfillRunIndexFromDigests/);
+  assert.doesNotMatch(analyticsSource, /backfillRunIndexFromDigests/);
+  assert.doesNotMatch(impactSource, /backfillRunIndexFromDigests/);
 });
 
 test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {
@@ -6177,6 +6186,44 @@ test('agent impact summary prefers database run index over digests and raw logs'
   assert.equal(summary.totalMinutes, 3);
   assert.equal(summary.changedFiles, 2);
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 3, 2]]);
+});
+
+test('agent impact database path falls back to digests without creating a journal', async () => {
+  const { buildAgentImpactSummaryFromDatabase } = require(path.join(projectRoot, 'out/agentImpact.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-db-fallback-'));
+  const solopreneurDir = path.join(tempRoot, '.solopreneur');
+  const digestRoot = path.join(solopreneurDir, 'run-digests');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Plan,,目标与路径确认,,codex,,Completed,2026-01-01T00:00:00.000Z,2026-01-01T00:10:00.000Z'
+  ].join('\n'));
+  fs.writeFileSync(path.join(digestRoot, 'digest-impact.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'digest-impact',
+    executionLogId: 45,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    agentCli: 'codex',
+    status: 'Completed',
+    startedAt: '2026-06-01T10:00:00.000Z',
+    finishedAt: '2026-06-01T10:06:00.000Z',
+    durationMs: 6 * 60 * 1000,
+    changedFiles: ['src/from-impact-digest.ts'],
+    rawRefs: { sqliteTable: 'execution_logs', executionLogId: 45 }
+  }), 'utf8');
+
+  const summary = await buildAgentImpactSummaryFromDatabase(
+    [{ name: 'Impact Digest Project', path: tempRoot }],
+    projectRoot,
+    new Date('2026-06-01T12:00:00.000Z')
+  );
+
+  assert.equal(summary.totalRuns, 1);
+  assert.equal(summary.completedRuns, 1);
+  assert.equal(summary.totalMinutes, 6);
+  assert.equal(summary.changedFiles, 1);
+  assert.equal(fs.existsSync(path.join(solopreneurDir, 'project_journal.db')), false);
 });
 
 test('step conversations can start independently while dependencies or other runs are active', async () => {

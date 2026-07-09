@@ -74,7 +74,8 @@ SoloMap 的运行数据分为两层：
 第三阶段完成索引修复和健康数据：
 
 - `runIndexMaintenance` 提供从 `run-digests` 回填 `run_records` 的维护入口。
-- DB 优先读路径会先尝试轻量回填，再读取索引；旧项目打开后可自动获得运行索引。
+- 普通侧边栏、设置页和项目组合刷新只做 DB 优先读取；数据库没有索引时立即回落到 `run-digests`，不得在用户主路径里同步触发历史回填。
+- 旧项目索引修复只在用户明确进入单项目上下文时受控执行：选择某个项目后后台迁移该项目，或手动点击该项目刷新按钮时迁移该项目。插件启动、设置页打开和全项目 portfolio enrichment 不得批量迁移旧数据。
 - 维护入口返回 `digestCount`、`indexedCount`、`missingDigestCount`、`backfilledCount`、`ok` 和 `error`，作为本地数据健康状态的数据源。
 - 异常以明确错误字符串返回给调用层，不要求用户理解 SQLite 表结构。
 

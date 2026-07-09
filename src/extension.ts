@@ -26,6 +26,7 @@ import {
 } from './projectExternalSignals';
 import { getWebviewHtml } from './roadmapWebview';
 import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
+import { backfillRunIndexFromDigests } from './runIndexMaintenance';
 import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -648,20 +649,27 @@ async function handleSharedWebviewAction(
     },
     'project.refreshExternalData': async (request) => {
       const projectPath = String(request.projectPath || '');
-      const [issues, pullRequests, delivery, security] = await Promise.all([
+      const [issues, pullRequests, delivery, security, runIndexHealth] = await Promise.all([
         loadExternalIssueSummary(projectPath, { force: true }).catch(() => null),
         loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null),
         loadExternalDeliverySummary(projectPath, { force: true }).catch(() => null),
-        loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null)
+        loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null),
+        backfillRunIndexFromDigests(projectPath, context.extensionPath).catch((error) => {
+          console.error('SoloMap run index backfill failed during project refresh:', error);
+          return null;
+        })
       ]);
       if (issues) await respond({ command: 'projectIssuesLoaded', projectPath, issues });
       if (pullRequests) await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
       if (delivery) await respond({ command: 'projectDeliveryLoaded', projectPath, delivery });
       if (security) await respond({ command: 'projectSecurityLoaded', projectPath, security });
+      if (runIndexHealth?.backfilledCount) {
+        sendLocalProjectsToWebviews(context);
+      }
       await respond({
         command: 'projectRefreshCompleted',
         projectPath,
-        success: Boolean(issues?.available || pullRequests?.available || delivery?.available || security?.available),
+        success: Boolean(issues?.available || pullRequests?.available || delivery?.available || security?.available || runIndexHealth?.ok),
         message: issues?.message || pullRequests?.message || delivery?.message || security?.message || ''
       });
     },
@@ -1305,12 +1313,31 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
   }
+  scheduleProjectRunIndexBackfill(context, projectPath);
   void ensureSyncEngine(context).then((ready) => {
     if (ready && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
       sendNodesToWebview();
       void postFlowStateToWebview(context);
     }
   });
+}
+
+function scheduleProjectRunIndexBackfill(context: vscode.ExtensionContext, projectPath: string): void {
+  if (!projectPath) {
+    return;
+  }
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const health = await backfillRunIndexFromDigests(projectPath, context.extensionPath);
+        if (health.backfilledCount > 0 && getSelectedProjectPath(context) === projectPath) {
+          sendLocalProjectsToWebviews(context);
+        }
+      } catch (error) {
+        console.error('SoloMap run index backfill failed for selected project:', error);
+      }
+    })();
+  }, 0);
 }
 
 async function updateProjectMetadata(context: vscode.ExtensionContext, projectPath: string, updates: Partial<Pick<SolopreneurProject, 'name' | 'type' | 'priority' | 'description' | 'notes'>>): Promise<void> {
