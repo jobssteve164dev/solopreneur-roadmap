@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as Papa from 'papaparse';
 import { readLearningSummary } from './learningLedger';
 import { readProjectInvestmentStats } from './projectAnalytics';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export interface StrategyPyramidProject {
   name: string;
@@ -169,11 +170,7 @@ export interface StrategyPyramidSnapshot {
 export type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
 
 function normalizeGlobalDataPath(rawPath: string): string {
-  const trimmed = String(rawPath || '').trim();
-  if (trimmed) {
-    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
-  }
-  return path.join(path.dirname(process.cwd()), '.solomap-global');
+  return normalizeGlobalDataPathForExtension(rawPath);
 }
 
 function readStrategyRoadmapNodes(projectPath: string): StrategyPyramidNodeSummary[] {

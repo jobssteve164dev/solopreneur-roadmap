@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 export interface SolopreneurProject {
@@ -27,7 +28,20 @@ export function normalizeGlobalDataPathForExtension(rawPath: string, workspaceRo
   if (trimmed) {
     return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
   }
-  return path.join(path.dirname(workspaceRoot || process.cwd()), '.solomap-global');
+  return path.join(getDefaultSolomapGlobalParent(workspaceRoot), '.solomap-global');
+}
+
+export function getDefaultSolomapGlobalParent(workspaceRoot = ''): string {
+  const candidateRoot = String(workspaceRoot || '').trim() || process.cwd();
+  const parent = path.dirname(candidateRoot);
+  if (parent && parent !== path.parse(parent).root) {
+    return parent;
+  }
+  const home = os.homedir();
+  if (home && home !== path.parse(home).root) {
+    return home;
+  }
+  return os.tmpdir();
 }
 
 export function normalizeProjectsForStorage(projects: SolopreneurProject[]): SolopreneurProject[] {

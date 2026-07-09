@@ -6,6 +6,7 @@ import { summarizeDocumentationForReview } from './documentationManifest';
 import { readLearningSummary } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
 import { ProjectInvestmentStats, readProjectInvestmentStats } from './projectAnalytics';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import {
   ProjectDeliverySummary,
   ProjectIssueSummary,
@@ -98,12 +99,7 @@ const methodologyStages: Array<{ key: MethodologyStageKey; label: string }> = [
 ];
 
 export function normalizeGlobalDataPath(rawPath: string, projects: SolopreneurProject[] = []): string {
-  const trimmed = String(rawPath || '').trim();
-  if (trimmed) {
-    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
-  }
-  const firstProjectPath = projects[0]?.path || process.cwd();
-  return path.join(path.dirname(firstProjectPath), '.solomap-global');
+  return normalizeGlobalDataPathForExtension(rawPath, projects[0]?.path || '');
 }
 
 export function getLocalDateKey(date = new Date()): string {

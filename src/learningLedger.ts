@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export type LearningSourceType = 'step_run' | 'solo' | 'flow_loop' | 'review' | 'roadmap_revision' | 'issue' | 'release' | 'strategy' | 'user_correction';
 export type LearningEventType = 'completed' | 'failed' | 'verified' | 'deviated' | 'corrected' | 'blocked' | 'reused' | 'partial' | 'needs_confirmation';
@@ -117,12 +118,7 @@ export interface LearningRetrievalQuery {
 }
 
 function normalizeSolomapGlobalPath(workspaceRoot: string, globalDataPath = ''): string {
-  const trimmed = String(globalDataPath || '').trim();
-  if (trimmed) {
-    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
-  }
-  const baseRoot = workspaceRoot || process.cwd();
-  return path.join(path.dirname(baseRoot), '.solomap-global');
+  return normalizeGlobalDataPathForExtension(globalDataPath, workspaceRoot);
 }
 
 function slugify(value: string): string {

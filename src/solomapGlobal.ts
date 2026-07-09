@@ -4,6 +4,7 @@ import * as childProcess from 'child_process';
 import { RoadmapNode } from './db/types';
 import { appendLearningEvent, buildLearningPromotionContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { shellQuote } from './agentCli';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export interface SolomapSkillRegistryEntry {
   id: string;
@@ -548,12 +549,7 @@ function sanitizeAttachmentScope(scope: string): string {
 }
 
 export function normalizeSolomapGlobalPath(workspaceRoot: string, globalDataPath = ''): string {
-  const trimmed = String(globalDataPath || '').trim();
-  if (trimmed) {
-    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
-  }
-  const baseRoot = workspaceRoot || process.cwd();
-  return path.join(path.dirname(baseRoot), '.solomap-global');
+  return normalizeGlobalDataPathForExtension(globalDataPath, workspaceRoot);
 }
 
 export function getSolomapMemoryRoot(workspaceRoot: string, globalDataPath = ''): string {

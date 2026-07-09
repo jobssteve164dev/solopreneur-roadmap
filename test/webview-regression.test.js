@@ -3094,6 +3094,19 @@ test('global engineering store writes git-friendly portfolio files', () => {
   assert.equal(sidebarModule.__normalizeGlobalDataPath(root, []), globalRoot);
 });
 
+test('default solomap global path avoids filesystem root when process cwd is root', () => {
+  const projectRegistry = require(path.join(projectRoot, 'out', 'projectRegistry.js'));
+  const originalCwd = process.cwd();
+  try {
+    process.chdir(path.parse(originalCwd).root);
+    const globalRoot = projectRegistry.normalizeGlobalDataPathForExtension('', '');
+    assert.notEqual(globalRoot, path.join(path.parse(originalCwd).root, '.solomap-global'));
+    assert.equal(globalRoot, path.join(os.homedir(), '.solomap-global'));
+  } finally {
+    process.chdir(originalCwd);
+  }
+});
+
 test('sidebar GitHub issue cache is validated and ignored by git', () => {
   const sidebarModule = loadCompiledModule(
     'out/projectExternalSignals.js',
