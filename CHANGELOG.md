@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.311 - 2026-07-09
+
+### Added
+- complete project growth data loop (dc0ec60)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.310 - 2026-07-09
 
 ### Added
