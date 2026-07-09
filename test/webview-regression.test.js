@@ -633,6 +633,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /issue\.create/);
   assert.match(script, /issue\.close/);
   assert.match(script, /issue\.getDetails/);
+  assert.match(script, /data-agent-fix-issue/);
+  assert.match(script, /buildIssueActionPrompt/);
+  assert.match(script, /issueAskAgent/);
+  assert.match(script, /修复验证完成后关闭它/);
   assert.match(script, /project\.refreshExternalData/);
   assert.match(script, /data-refresh-project-path/);
   assert.match(script, /data-toggle-delivery-panel/);

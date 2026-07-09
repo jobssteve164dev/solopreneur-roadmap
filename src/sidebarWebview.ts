@@ -4132,6 +4132,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         issueBodyPlaceholder: '补充背景、现象、期望结果...',
         issueCategory: '分类',
         issuePriority: '优先级',
+        issueAskAgent: '交给 Agent 解决并关闭',
+        issueAgentStarted: '已交给 Agent 解决这个 Issue。',
         issueClose: '关闭',
         issueCancel: '取消',
         issueSubmit: '创建',
@@ -4467,6 +4469,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         issueBodyPlaceholder: 'Add context, observed behavior, and expected outcome...',
         issueCategory: 'Category',
         issuePriority: 'Priority',
+        issueAskAgent: 'Ask Agent to resolve and close',
+        issueAgentStarted: 'Asked the Agent to resolve this Issue.',
         issueClose: 'Close',
         issueCancel: 'Cancel',
         issueSubmit: 'Create',
@@ -7149,6 +7153,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           \${issueDetails.stale ? \`<div class="portfolio-issue-empty">\${escapeHtml(t('issueCached'))}</div>\` : ''}
           \${issue.body ? \`<div class="portfolio-issue-comment">\${escapeHtml(issue.body).slice(0, 900)}</div>\` : ''}
           <div class="portfolio-issue-detail-actions">
+            \${issue.state === 'OPEN' ? \`<button class="portfolio-issue-action primary" data-agent-fix-issue="\${escapeHtml(issue.number)}" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('issueAskAgent'))}</button>\` : ''}
             \${issue.url ? \`<button class="portfolio-issue-action" data-open-issue-url="\${escapeHtml(issue.url)}">\${escapeHtml(t('projectOpen'))}</button>\` : ''}
             \${issue.state === 'OPEN' ? \`<button class="portfolio-issue-action danger" data-close-issue="\${escapeHtml(issue.number)}" data-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('issueClose'))}</button>\` : ''}
           </div>
@@ -7287,6 +7292,46 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         missingSummary,
         'Boundary: create only missing files, do not overwrite existing files; keep the foundation small and useful for execution, verification, and auditability. Do not generate a broad documentation system.'
       ].join('\\n');
+    }
+
+    function buildIssueActionPrompt(project, issueDetailsPayload) {
+      const details = issueDetailsPayload || {};
+      const issue = details.issue || {};
+      const comments = Array.isArray(details.comments) ? details.comments : [];
+      const projectName = project && (project.name || project.path) ? (project.name || project.path) : '';
+      const issueNumber = issue.number || expandedIssueNumber || '';
+      const issueTitle = issue.title || '';
+      const issueUrl = issue.url || '';
+      const issueBody = issue.body || '';
+      const commentSummary = comments.length
+        ? comments.slice(0, 8).map((comment, index) => {
+          const author = comment.author || 'comment';
+          const body = String(comment.body || '').slice(0, 900);
+          return (index + 1) + '. ' + author + ': ' + body;
+        }).join('\\n')
+        : (currentLanguage === 'zh' ? '暂无评论。' : 'No comments yet.');
+      if (currentLanguage === 'zh') {
+        return [
+          '请直接解决这个 GitHub Issue，并在修复验证完成后关闭它。',
+          '项目：' + projectName,
+          'Issue：#' + issueNumber + (issueTitle ? ' ' + issueTitle : ''),
+          issueUrl ? '链接：' + issueUrl : '',
+          issueBody ? '正文：\\n' + issueBody.slice(0, 1800) : '正文：暂无。',
+          '评论：',
+          commentSummary,
+          '要求：先复现或确认问题，做必要的最小代码/文档修改，运行相关验证；确认结果成立后关闭该 GitHub Issue。不要只关闭 Issue，不要把修复留给下一轮。'
+        ].filter(Boolean).join('\\n');
+      }
+      return [
+        'Resolve this GitHub Issue directly, then close it after the fix is verified.',
+        'Project: ' + projectName,
+        'Issue: #' + issueNumber + (issueTitle ? ' ' + issueTitle : ''),
+        issueUrl ? 'URL: ' + issueUrl : '',
+        issueBody ? 'Body:\\n' + issueBody.slice(0, 1800) : 'Body: none.',
+        'Comments:',
+        commentSummary,
+        'Requirements: reproduce or confirm the problem first, make the smallest necessary code or doc change, run the relevant verification, then close the GitHub Issue once the result is valid. Do not only close the Issue, and do not leave the fix for another run.'
+      ].filter(Boolean).join('\\n');
     }
 
     function renderProjectDeliveryPanel(project) {
@@ -7853,6 +7898,30 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
             issueNumber: Number(button.getAttribute('data-close-issue') || 0)
           });
+        });
+      });
+      portfolioList.querySelectorAll('[data-agent-fix-issue]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
+          const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
+          const issueNumber = Number(button.getAttribute('data-agent-fix-issue') || 0);
+          if (!projectPath || !project || !issueNumber || !issueDetails || issueDetails.error) return;
+          const targetId = projectSoloTargetId(projectPath);
+          const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
+          const model = getTargetModelValue(targetId, agentCli);
+          projectConversationModes[projectPath] = 'solo';
+          issueActionMessage = t('issueAgentStarted');
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          vscode.postMessage({
+            command: 'conversation.runSolo',
+            projectPath,
+            userMessage: buildIssueActionPrompt(project, issueDetails),
+            agentCli,
+            model,
+            supplementFiles: []
+          });
+          requestSidebarSoloConversationHistory(projectPath, true);
         });
       });
       bindProjectContinueComposer(portfolioList);
