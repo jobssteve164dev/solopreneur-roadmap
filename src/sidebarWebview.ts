@@ -6277,8 +6277,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       miniActions += '</div>';
 
       return \`
-        <div class="sidebar-conversation-node-wrap" data-conv-id="\${escapeHtml(convId)}">
-          <div class="sidebar-conversation-card \${detailExpanded ? 'expanded' : ''}" data-card-trigger-id="\${escapeHtml(convId)}">
+        <div class="sidebar-conversation-node-wrap" data-conv-id="\${escapeHtml(convId)}" data-is-solo="\${isSolo}">
+          <div class="sidebar-conversation-card \${detailExpanded ? 'expanded' : ''}" data-card-trigger-id="\${escapeHtml(convId)}" data-is-solo="\${isSolo}">
             
             <div class="sidebar-conversation-bullet-col">
               <span class="tree-bullet \${statusDotClass}"></span>
@@ -6298,7 +6298,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="sidebar-conversation-right-col">
               \${miniActions}
               <span class="status-badge-new \${statusClassName}">\${escapeHtml(conversationStatusText(statusKey))}</span>
-              <button type="button" class="delivery-toggle-btn" data-conversation-expand-id="\${escapeHtml(convId)}" aria-expanded="\${detailExpanded ? 'true' : 'false'}" title="\${escapeHtml(detailExpanded ? t('issueCollapse') : t('issueExpand'))}">
+              <button type="button" class="delivery-toggle-btn" data-conversation-expand-id="\${escapeHtml(convId)}" data-is-solo="\${isSolo}" aria-expanded="\${detailExpanded ? 'true' : 'false'}" title="\${escapeHtml(detailExpanded ? t('issueCollapse') : t('issueExpand'))}">
                 <span class="expand-arrow-icon codicon \${detailExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
               </button>
             </div>
@@ -6332,7 +6332,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
               \${hasLogs ? \`
                 <div class="sidebar-conversation-logs-toggle-row">
-                  <button class="logs-toggle-btn \${logsExpanded ? 'active' : ''}" data-logs-toggle-id="\${escapeHtml(convId)}">
+                  <button class="logs-toggle-btn \${logsExpanded ? 'active' : ''}" data-logs-toggle-id="\${escapeHtml(convId)}" data-is-solo="\${isSolo}">
                     <span class="codicon \${logsExpanded ? 'codicon-eye-closed' : 'codicon-eye'}"></span>
                     <span>\${logsExpanded ? '隐藏执行明细日志' : '查看执行明细日志 (Command & Output)'}</span>
                   </button>
@@ -6434,6 +6434,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
 
       container.querySelectorAll('[data-card-trigger-id]').forEach(card => {
+        if (!isConversationActionForTree(card)) return;
         card.addEventListener('click', (event) => {
           if (event.target.closest('button') || event.target.closest('.sidebar-conversation-mini-actions')) {
             return;
@@ -6445,6 +6446,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
 
       container.querySelectorAll('[data-conversation-expand-id]').forEach(button => {
+        if (!isConversationActionForTree(button)) return;
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const convId = button.getAttribute('data-conversation-expand-id');
@@ -6454,6 +6456,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
 
       container.querySelectorAll('[data-logs-toggle-id]').forEach(btn => {
+        if (!isConversationActionForTree(btn)) return;
         btn.addEventListener('click', (event) => {
           event.stopPropagation();
           const convId = btn.getAttribute('data-logs-toggle-id');
