@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.312 - 2026-07-09
+
+### Changed
+- fix sidebar failed check action label (0df2259)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.311 - 2026-07-09
 
 ### Added
