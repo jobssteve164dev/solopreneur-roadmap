@@ -1958,7 +1958,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     </header>
 
     <div class="view-tabs" role="tablist">
-      <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">项目概览</span></button>
+      <button class="view-tab active" id="btn-toggle-roadmap-view" type="button"><span class="codicon codicon-map"></span><span id="roadmap-view-tab-label">环节推进</span></button>
       <button class="view-tab solo-tab" id="btn-toggle-solo" type="button"><span class="codicon codicon-comment-discussion"></span><span id="solo-view-tab-label">自由研讨</span></button>
       <button class="view-tab flow-tab" id="btn-toggle-flow" type="button"><span class="codicon codicon-debug-alt-small"></span><span id="flow-view-tab-label">自动闭环</span></button>
     </div>
@@ -2329,7 +2329,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         agentConclusion: 'Agent 结论',
         failureLabel: '失败原因',
         completionCriteria: '完成标准',
-        roadmapView: '项目概览',
+        roadmapView: '环节推进',
         soloTitle: '自由研讨',
         flowTitle: '自动闭环',
         flowPlaceholder: '描述你想让 Flow 自动推进完成的目标...',
@@ -2534,7 +2534,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         agentConclusion: 'Agent conclusion',
         failureLabel: 'Failure reason',
         completionCriteria: 'Completion criteria',
-        roadmapView: 'Project Overview',
+        roadmapView: 'Step Progress',
         soloTitle: 'Free Work',
         flowTitle: 'Auto Loop',
         flowPlaceholder: 'Describe the goal you want Flow to drive to completion...',

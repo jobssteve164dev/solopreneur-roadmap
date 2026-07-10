@@ -338,6 +338,7 @@ export async function activate(context: vscode.ExtensionContext) {
         sidebarProvider.sendProjects();
       }
       if (activePanel) {
+        activePanel.title = getRoadmapPanelTitle(context);
         postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
         postProjectsLoaded(activePanel.webview, getProjectState(context));
       }
@@ -820,6 +821,10 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
 
 function isSoloMapLanguageZh(context: vscode.ExtensionContext): boolean {
   return getPersistedSettings(context).language !== 'en';
+}
+
+function getRoadmapPanelTitle(context: vscode.ExtensionContext): string {
+  return isSoloMapLanguageZh(context) ? 'SoloMap 项目路线图' : 'SoloMap - AI Coding Agent Roadmap';
 }
 
 function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
@@ -2284,6 +2289,7 @@ async function openRoadmapPanel(
   // If panel already exists, reveal it
   if (activePanel) {
     recordLocalUsageEvent(context, 'roadmapOpened');
+    activePanel.title = getRoadmapPanelTitle(context);
     activePanel.reveal(vscode.ViewColumn.One);
     postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
     void postFlowStateToWebview(context);
@@ -2300,7 +2306,7 @@ async function openRoadmapPanel(
   // Create Webview Panel
   activePanel = vscode.window.createWebviewPanel(
     'solopreneurRoadmap',
-    'SoloMap - AI Coding Agent Roadmap',
+    getRoadmapPanelTitle(context),
     vscode.ViewColumn.One,
     {
       enableScripts: true,
