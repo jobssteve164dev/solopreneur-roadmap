@@ -45,6 +45,15 @@ const locales = {
     filesModified: "修改文件数",
     modulesSignalMatrix: "模块与生长信号矩阵",
     architectureEdges: "系统架构与依赖调用链",
+    architectureGraph: "系统如何协同工作",
+    architectureGraphHint: "选择一个模块，查看它会影响的上下游。",
+    graphPrimary: "主路径",
+    graphDependencies: "依赖关系",
+    graphVerification: "验证覆盖",
+    graphRoadmap: "路线图能力",
+    graphCore: "核心能力",
+    graphData: "数据与运行",
+    graphEvidence: "验证与交付",
     structuralGaps: "架构与验证盲区 (Gaps)",
     linkedCapabilities: "关联路线图能力",
     snapshotHistory: "生长分析历史轨迹",
@@ -184,6 +193,15 @@ const locales = {
     filesModified: "Files Modified",
     modulesSignalMatrix: "Modules & Signal Matrix",
     architectureEdges: "Architecture & Dependency Edges",
+    architectureGraph: "How the system works together",
+    architectureGraphHint: "Select a module to see what it affects upstream and downstream.",
+    graphPrimary: "Primary path",
+    graphDependencies: "Dependencies",
+    graphVerification: "Verification",
+    graphRoadmap: "Roadmap capability",
+    graphCore: "Core capability",
+    graphData: "Data & runtime",
+    graphEvidence: "Verification & delivery",
     structuralGaps: "Structural Gaps",
     linkedCapabilities: "Linked Capabilities",
     snapshotHistory: "Snapshot History",
@@ -606,27 +624,62 @@ export function getProjectGrowthWebviewHtml(
     `;
   }
 
-  // Render key dependency relationships
-  let edgesHtml = '';
-  if (viewModel.keyEdges && viewModel.keyEdges.length > 0) {
-    edgesHtml = viewModel.keyEdges.map(edge => {
-      const cleanSrc = edge.sourceId.replace(/^(file:|module:|package:)/, '');
-      const cleanTgt = edge.targetId.replace(/^(file:|module:|package:)/, '');
-      let kindBadge = 'edge-imports';
-      if (edge.kind === 'tested_by') kindBadge = 'edge-tested';
-      if (edge.kind === 'depends_on') kindBadge = 'edge-depends';
-      
-      return `
-        <div class="edge-row">
-          <span class="edge-node src" title="${escapeHtml(edge.sourceId)}">${escapeHtml(cleanSrc)}</span>
-          <span class="edge-arrow-badge ${kindBadge}">${escapeHtml(formatMappedLabel(t.edgeLabels, edge.kind))}</span>
-          <span class="edge-node tgt" title="${escapeHtml(edge.targetId)}">${escapeHtml(cleanTgt)}</span>
+  const graphEdges = (viewModel.keyEdges || []).slice(0, 24);
+  const moduleLabels = new Map((viewModel.modules || []).map((module) => [module.nodeId || (module as any).id, module.label]));
+  const capabilityLabels = new Map((viewModel.capabilities || []).map((capability) => [capability.nodeId, capability.label]));
+  const graphNodeIds = [...new Set(graphEdges.flatMap((edge) => [edge.sourceId, edge.targetId]))];
+  const graphLabel = (nodeId: string) => capabilityLabels.get(nodeId)
+    || moduleLabels.get(nodeId)
+    || nodeId.replace(/^(file:|module:|package:|capability:roadmap:)/, '');
+  const graphLane = (nodeId: string) => {
+    if (nodeId.startsWith('capability:')) return 'roadmap';
+    if (nodeId.startsWith('package:')) return 'data';
+    if (/test|verification|delivery|release|workflow/i.test(nodeId)) return 'evidence';
+    if (/data|db|store|run|execution|journal|memory/i.test(nodeId)) return 'data';
+    return 'core';
+  };
+  const graphLanes = [
+    { id: 'roadmap', label: t.graphRoadmap },
+    { id: 'core', label: t.graphCore },
+    { id: 'data', label: t.graphData },
+    { id: 'evidence', label: t.graphEvidence }
+  ];
+  const graphNodesHtml = graphLanes.map((lane) => {
+    const nodes = graphNodeIds.filter((nodeId) => graphLane(nodeId) === lane.id);
+    return `
+      <div class="graph-lane" data-graph-lane="${lane.id}">
+        <div class="graph-lane-title">${escapeHtml(lane.label)}</div>
+        <div class="graph-lane-nodes">${nodes.map((nodeId) => `
+          <button class="graph-node" type="button" data-graph-node="${escapeHtml(nodeId)}" aria-pressed="false" title="${escapeHtml(nodeId)}">
+            ${escapeHtml(graphLabel(nodeId))}
+          </button>
+        `).join('')}</div>
+      </div>
+    `;
+  }).join('');
+  const graphEdgeKind = (kind: string) => kind === 'tested_by' ? 'verification' : kind === 'depends_on' ? 'dependency' : 'primary';
+  const graphEdgesHtml = graphEdges.map((edge, index) => `
+    <path class="graph-edge edge-${graphEdgeKind(edge.kind)}" data-graph-edge="${index}" data-source="${escapeHtml(edge.sourceId)}" data-target="${escapeHtml(edge.targetId)}" />
+  `).join('');
+  const architectureHtml = graphEdges.length > 0 ? `
+    <section class="architecture-graph" aria-label="${escapeHtml(t.architectureGraph)}">
+      <div class="architecture-graph-head">
+        <div>
+          <h2 class="panel-title"><span class="codicon codicon-git-merge"></span> ${escapeHtml(t.architectureGraph)}</h2>
+          <p>${escapeHtml(t.architectureGraphHint)}</p>
         </div>
-      `;
-    }).join('');
-  } else {
-    edgesHtml = `<div class="empty-state">${escapeHtml(t.emptyEdges)}</div>`;
-  }
+        <div class="graph-view-switch" role="tablist" aria-label="${escapeHtml(t.architectureGraph)}">
+          <button type="button" class="graph-view active" data-graph-view="primary">${escapeHtml(t.graphPrimary)}</button>
+          <button type="button" class="graph-view" data-graph-view="dependency">${escapeHtml(t.graphDependencies)}</button>
+          <button type="button" class="graph-view" data-graph-view="verification">${escapeHtml(t.graphVerification)}</button>
+        </div>
+      </div>
+      <div class="architecture-graph-canvas" data-graph-mode="primary">
+        <svg class="graph-lines" aria-hidden="true" preserveAspectRatio="none" viewBox="0 0 100 100">${graphEdgesHtml}</svg>
+        ${graphNodesHtml}
+      </div>
+    </section>
+  ` : `<div class="empty-state">${escapeHtml(t.emptyEdges)}</div>`;
 
   return `<!DOCTYPE html>
 <html lang="${isZh ? 'zh-CN' : 'en'}">
@@ -685,21 +738,35 @@ export function getProjectGrowthWebviewHtml(
       overflow-x: hidden;
     }
 
-    .container {
-      max-width: 1200px;
+    .app-container {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      width: 100%;
+    }
+
+    .growth-canvas {
+      flex: 1;
+      overflow: auto;
+      padding: clamp(18px, 4vw, 40px);
+      background: radial-gradient(circle at 50% 50%, rgba(20, 25, 45, 0.6) 0%, rgba(10, 12, 22, 0.95) 100%);
+    }
+
+    .growth-content {
+      width: min(1280px, 100%);
       margin: 0 auto;
-      padding: 24px;
-      position: relative;
-      z-index: 1;
     }
 
     header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 24px;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 16px;
+      gap: 16px;
+      padding: 16px 24px;
+      background: rgba(15, 17, 26, 0.7);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      z-index: 10;
     }
 
     .brand-title {
@@ -718,11 +785,8 @@ export function getProjectGrowthWebviewHtml(
       flex-shrink: 0;
     }
 
-    .sub-heading {
-      color: var(--muted);
-      font-size: 13px;
-      margin-top: 4px;
-    }
+    .page-heading { color: var(--fg); font-size: 16px; font-weight: 800; line-height: 1.2; }
+    .header-divider { width: 1px; height: 20px; background: var(--border); }
 
     .header-actions {
       display: flex;
@@ -1220,6 +1284,13 @@ export function getProjectGrowthWebviewHtml(
       gap: 24px;
     }
 
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      align-items: start;
+    }
+
     .left-col,
     .right-col,
     .panel {
@@ -1230,6 +1301,7 @@ export function getProjectGrowthWebviewHtml(
       .dashboard-grid {
         grid-template-columns: 1fr;
       }
+      .detail-grid { grid-template-columns: 1fr; }
       .understanding-shell,
       .growth-v2-grid,
       .orientation-grid,
@@ -1244,7 +1316,7 @@ export function getProjectGrowthWebviewHtml(
     }
 
     @media (max-width: 600px) {
-      .container { padding: 16px; }
+      .growth-canvas { padding: 16px; }
       header {
         align-items: flex-start;
         flex-wrap: wrap;
@@ -1258,9 +1330,6 @@ export function getProjectGrowthWebviewHtml(
         width: 96px;
         height: auto;
       }
-      .sub-heading {
-        overflow-wrap: anywhere;
-      }
       .header-actions {
         width: 100%;
       }
@@ -1273,7 +1342,9 @@ export function getProjectGrowthWebviewHtml(
       .journey-stage:not(:last-child)::after { display: none; }
       .timeline-stats,
       .diff-stats { flex-wrap: wrap; }
-      .edge-node { max-width: 110px; }
+      .architecture-graph-head { flex-direction: column; }
+      .architecture-graph-canvas { grid-template-columns: 1fr 1fr; min-height: 420px; }
+      .graph-lane:nth-child(3) { border-left: 0; }
     }
 
     .panel {
@@ -1664,50 +1735,87 @@ export function getProjectGrowthWebviewHtml(
     .pos { color: var(--success); }
     .neg { color: var(--danger); }
 
-    /* Edge Table */
-    .edge-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .edge-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: rgba(255, 255, 255, 0.01);
-      border: 1px solid var(--border);
-      padding: 8px 12px;
-      border-radius: 6px;
-      font-size: 12px;
+    /* Architecture graph */
+    .architecture-graph {
+      position: relative;
       min-width: 0;
-      gap: 8px;
+      padding: 20px;
+      margin-bottom: 24px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--glass-bg);
+      backdrop-filter: blur(10px);
     }
 
-    .edge-node {
-      font-family: monospace;
+    .architecture-graph-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    .architecture-graph-head .panel-title { margin-bottom: 5px; border: 0; padding: 0; }
+    .architecture-graph-head p { margin: 0; color: var(--muted); font-size: 12px; }
+
+    .graph-view-switch { display: flex; flex-wrap: wrap; gap: 6px; }
+    .graph-view {
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
       color: var(--muted);
-      max-width: 150px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .edge-node.src {
-      color: var(--fg);
-    }
-
-    .edge-arrow-badge {
-      font-size: 9px;
+      font: inherit;
+      font-size: 11px;
       font-weight: 700;
-      padding: 1px 6px;
-      border-radius: 3px;
-      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .graph-view:hover, .graph-view.active { color: #d8fbff; background: rgba(0, 229, 255, 0.12); border-color: rgba(0, 229, 255, 0.32); }
+
+    .architecture-graph-canvas {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      min-height: 270px;
+      padding: 16px 0;
     }
 
-    .edge-arrow-badge.edge-imports { color: var(--accent); background: rgba(0, 229, 255, 0.1); }
-    .edge-arrow-badge.edge-tested { color: var(--success); background: rgba(0, 230, 118, 0.1); }
-    .edge-arrow-badge.edge-depends { color: var(--accent-purple); background: rgba(124, 77, 255, 0.1); }
+    .graph-lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+    .graph-edge { fill: none; stroke: rgba(0, 229, 255, 0.34); stroke-width: 1.6; vector-effect: non-scaling-stroke; transition: opacity 160ms ease, stroke 160ms ease; }
+    .graph-edge.edge-dependency { stroke: rgba(167, 139, 250, 0.52); }
+    .graph-edge.edge-verification { stroke: rgba(0, 230, 118, 0.54); stroke-dasharray: 5 4; }
+    .graph-edge.is-muted { opacity: 0.08; }
+    .graph-edge.is-active { opacity: 1; stroke-width: 2.4; }
+    .architecture-graph-canvas[data-graph-mode="dependency"] .graph-edge:not(.edge-dependency):not(.edge-primary) { opacity: 0.12; }
+    .architecture-graph-canvas[data-graph-mode="verification"] .graph-edge:not(.edge-verification) { opacity: 0.12; }
+
+    .graph-lane { position: relative; z-index: 1; min-width: 0; padding: 0 8px; }
+    .graph-lane + .graph-lane { border-left: 1px solid rgba(255, 255, 255, 0.06); }
+    .graph-lane-title { margin-bottom: 12px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+    .graph-lane-nodes { display: flex; flex-direction: column; gap: 10px; }
+    .graph-node {
+      position: relative;
+      z-index: 2;
+      width: 100%;
+      min-height: 52px;
+      padding: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      background: rgba(15, 17, 26, 0.82);
+      color: var(--fg);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.35;
+      text-align: left;
+      overflow-wrap: anywhere;
+      cursor: pointer;
+      transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+    }
+    .graph-node:hover, .graph-node.is-active { border-color: rgba(0, 229, 255, 0.62); background: rgba(0, 229, 255, 0.12); box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.12), 0 10px 24px rgba(0, 0, 0, 0.26); }
+    .graph-node.is-muted { opacity: 0.35; }
+    .graph-node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     .empty-state {
       text-align: center;
@@ -1720,20 +1828,20 @@ export function getProjectGrowthWebviewHtml(
   </style>
 </head>
 <body>
-  <div class="container">
+  <div class="app-container">
     <header>
-      <div style="display: flex; align-items: center; gap: 16px;">
+      <div style="display: flex; align-items: center; gap: 16px; min-width: 0;">
         <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap"></h1>
-            <div style="width: 1px; height: 20px; background: var(--border);"></div>
-            <div>
-              <h2 style="margin: 0; font-size: 16px; font-weight: 800; color: var(--fg); letter-spacing: 0; line-height: 1.2;">${escapeHtml(t.title)}: ${escapeHtml(projectName)}</h2>
-              <div class="sub-heading">${escapeHtml(t.currentProject)} · ${escapeHtml(projectName)}${projectPath ? ` · ${escapeHtml(t.projectPath)}: ${escapeHtml(projectPath)}` : ''}</div>
-            </div>
-          </div>
+        <div class="header-divider"></div>
+        <div class="page-heading">${escapeHtml(t.title)}</div>
+      </div>
       <div class="header-actions">
         <button type="button" class="btn-refresh" id="btn-refresh"><span class="codicon codicon-refresh"></span> ${escapeHtml(t.refreshBtn)}</button>
-          </div>
-        </header>
+      </div>
+    </header>
+
+    <main class="growth-canvas">
+      <div class="growth-content">
 
         <section class="project-orientation">
           <div class="section-kicker">${escapeHtml(t.understandingTitle)}</div>
@@ -1808,17 +1916,9 @@ export function getProjectGrowthWebviewHtml(
 
     ${diffHtml}
 
-    <div class="dashboard-grid">
-      <div class="left-col">
-        <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-git-commit"></span> ${escapeHtml(t.architectureEdges)}</h2>
-          <div class="edge-list">
-            ${edgesHtml}
-          </div>
-        </div>
-      </div>
+    ${architectureHtml}
 
-      <div class="right-col">
+    <div class="detail-grid">
         <div class="panel">
           <h2 class="panel-title"><span class="codicon codicon-warning"></span> ${escapeHtml(t.structuralGaps)}</h2>
           <div class="gaps-list">
@@ -1839,8 +1939,9 @@ export function getProjectGrowthWebviewHtml(
             ${historyHtml}
           </div>
         </div>
-      </div>
     </div>
+      </div>
+    </main>
   </div>
 
   <script>
@@ -1848,6 +1949,72 @@ export function getProjectGrowthWebviewHtml(
     document.getElementById('btn-refresh').addEventListener('click', () => {
       vscode.postMessage({ command: 'refreshGrowth' });
     });
+
+    const graphCanvas = document.querySelector('.architecture-graph-canvas');
+    if (graphCanvas) {
+      const graphNodes = Array.from(graphCanvas.querySelectorAll('.graph-node'));
+      const graphEdges = Array.from(graphCanvas.querySelectorAll('.graph-edge'));
+      const graphSvg = graphCanvas.querySelector('.graph-lines');
+      const nodeById = new Map(graphNodes.map((node) => [node.dataset.graphNode, node]));
+
+      function drawGraphLines() {
+        const canvasRect = graphCanvas.getBoundingClientRect();
+        graphSvg.setAttribute('viewBox', '0 0 ' + canvasRect.width + ' ' + canvasRect.height);
+        graphEdges.forEach((edge) => {
+          const source = nodeById.get(edge.dataset.source);
+          const target = nodeById.get(edge.dataset.target);
+          if (!source || !target) return;
+          const sourceRect = source.getBoundingClientRect();
+          const targetRect = target.getBoundingClientRect();
+          const sourceIsLeft = sourceRect.left <= targetRect.left;
+          const startX = (sourceIsLeft ? sourceRect.right : sourceRect.left) - canvasRect.left;
+          const endX = (sourceIsLeft ? targetRect.left : targetRect.right) - canvasRect.left;
+          const startY = sourceRect.top - canvasRect.top + sourceRect.height / 2;
+          const endY = targetRect.top - canvasRect.top + targetRect.height / 2;
+          const bend = Math.max(28, Math.abs(endX - startX) * 0.42);
+          edge.setAttribute('d', 'M ' + startX + ' ' + startY + ' C ' + (startX + (sourceIsLeft ? bend : -bend)) + ' ' + startY + ', ' + (endX + (sourceIsLeft ? -bend : bend)) + ' ' + endY + ', ' + endX + ' ' + endY);
+        });
+      }
+
+      function clearGraphSelection() {
+        graphNodes.forEach((node) => {
+          node.classList.remove('is-active', 'is-muted');
+          node.setAttribute('aria-pressed', 'false');
+        });
+        graphEdges.forEach((edge) => edge.classList.remove('is-active', 'is-muted'));
+      }
+
+      graphNodes.forEach((node) => node.addEventListener('click', () => {
+        clearGraphSelection();
+        const selected = node.dataset.graphNode;
+        const connected = new Set([selected]);
+        graphEdges.forEach((edge) => {
+          if (edge.dataset.source === selected || edge.dataset.target === selected) {
+            connected.add(edge.dataset.source);
+            connected.add(edge.dataset.target);
+            edge.classList.add('is-active');
+          } else {
+            edge.classList.add('is-muted');
+          }
+        });
+        graphNodes.forEach((item) => {
+          const active = connected.has(item.dataset.graphNode);
+          item.classList.toggle('is-active', active);
+          item.classList.toggle('is-muted', !active);
+          item.setAttribute('aria-pressed', String(item.dataset.graphNode === selected));
+        });
+      }));
+
+      document.querySelectorAll('.graph-view').forEach((button) => button.addEventListener('click', () => {
+        document.querySelectorAll('.graph-view').forEach((item) => item.classList.toggle('active', item === button));
+        graphCanvas.dataset.graphMode = button.dataset.graphView;
+        clearGraphSelection();
+      }));
+
+      drawGraphLines();
+      window.addEventListener('resize', drawGraphLines);
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(drawGraphLines).observe(graphCanvas);
+    }
   </script>
 </body>
 </html>

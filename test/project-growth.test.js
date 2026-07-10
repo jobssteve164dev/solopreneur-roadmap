@@ -295,7 +295,15 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(zhHtml, /background: var\(--vscode-editor-background, var\(--bg-dark\)\);/);
   assert.doesNotMatch(zhHtml, /neon-glow-container/);
   assert.doesNotMatch(zhHtml, /var\(--bg\)/);
-  assert.match(zhHtml, /当前项目 · Demo · 项目路径: \/workspace\/demo/);
+  assert.match(zhHtml, /class="page-heading">项目生长图<\/div>/);
+  assert.doesNotMatch(zhHtml, /项目生长图: Demo/);
+  assert.doesNotMatch(zhHtml, /当前项目 · Demo/);
+  assert.doesNotMatch(zhHtml, /项目路径: \/workspace\/demo/);
+  assert.match(zhHtml, /class="growth-canvas"/);
+  assert.match(zhHtml, /class="architecture-graph-canvas" data-graph-mode="primary"/);
+  assert.match(zhHtml, /data-graph-view="primary"/);
+  assert.match(zhHtml, /data-graph-node="module:data-layer"/);
+  assert.match(zhHtml, /data-graph-edge="0"/);
   assert.match(zhHtml, /项目概览/);
   assert.match(zhHtml, /帮助独立开发者把零散 AI 对话变成可推进、可验证的项目路线/);
   assert.match(zhHtml, /3\/5/);
@@ -324,7 +332,9 @@ test('project growth webview uses locale labels for roadmap and history metadata
   const enHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', false);
   assert.match(enHtml, /<title>solomap Project Growth Graph<\/title>/);
   assert.match(enHtml, /--glass-panel: rgba\(22, 28, 45, 0\.6\);/);
-  assert.match(enHtml, /Current Project · Demo · Project Path: \/workspace\/demo/);
+  assert.match(enHtml, /class="page-heading">Project Growth Graph<\/div>/);
+  assert.doesNotMatch(enHtml, /Current Project · Demo/);
+  assert.doesNotMatch(enHtml, /Project Path: \/workspace\/demo/);
   assert.match(enHtml, /Project Overview/);
   assert.match(enHtml, /What this project is for/);
   assert.match(enHtml, /Current work · 交付与验证/);
@@ -338,5 +348,5 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(enHtml, /Stage: 交付与验证/);
   assert.match(enHtml, /Files: <strong>4<\/strong>/);
   assert.match(enHtml, /Reason: <strong>View Refresh<\/strong>/);
-  assert.match(enHtml, /Depends On/);
+  assert.match(enHtml, /Dependencies/);
 });
