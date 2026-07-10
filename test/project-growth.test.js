@@ -111,11 +111,14 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.ok(view.focusAreas.some((area) => area.label !== '补强项目数据链路'));
   assert.ok(view.recommendedActions.length > 0);
   assert.ok(view.modules.some((module) => module.nodeId !== 'module:roadmap:roadmap-data' && module.label !== '补强项目数据链路'));
+  assert.equal(new Set(view.modules.map((module) => module.nodeId)).size, view.modules.length);
+  assert.equal(new Set(view.modules.map((module) => module.label)).size, view.modules.length);
   assert.equal(view.modules.find((module) => module.nodeId === 'module:path:test').tests, 1);
   assert.ok(view.capabilities.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.capabilityHealth.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'tested_by'));
+  assert.ok(view.keyEdges.some((edge) => edge.kind === 'implements' && edge.targetId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.every((edge) => edge.sourceId !== edge.targetId));
   assert.ok(view.keyEdges.every((edge) => !edge.sourceId.startsWith('file:') && !edge.targetId.startsWith('file:')));
   assert.ok(view.gaps.some((gap) => gap.source === 'run_index' || gap.source === 'growth_rules'));
@@ -281,6 +284,11 @@ test('project growth webview uses locale labels for roadmap and history metadata
       targetId: 'package:papaparse',
       kind: 'depends_on',
       weight: 1
+    }, {
+      sourceId: 'module:data-layer',
+      targetId: 'capability:roadmap:roadmap-data',
+      kind: 'implements',
+      weight: 1
     }],
     history: [{
       snapshotId: 'growth-test',
@@ -305,10 +313,11 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.doesNotMatch(zhHtml, /项目路径: \/workspace\/demo/);
   assert.match(zhHtml, /class="growth-canvas"/);
   assert.match(zhHtml, /class="architecture-graph-canvas" data-graph-mode="primary"/);
+  assert.match(zhHtml, /产品能力/);
   assert.match(zhHtml, /data-graph-view="primary"/);
   assert.match(zhHtml, /data-graph-node="module:data-layer"/);
   assert.match(zhHtml, /data-graph-edge="0"/);
-  assert.doesNotMatch(zhHtml, /data-graph-node="capability:roadmap:/);
+  assert.match(zhHtml, /data-graph-node="capability:roadmap:roadmap-data"/);
   assert.match(zhHtml, /项目概览/);
   assert.match(zhHtml, /帮助独立开发者把零散 AI 对话变成可推进、可验证的项目路线/);
   assert.match(zhHtml, /3\/5/);
@@ -355,6 +364,6 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(enHtml, /Stage: 交付与验证/);
   assert.match(enHtml, /Files: <strong>4<\/strong>/);
   assert.match(enHtml, /Reason: <strong>View Refresh<\/strong>/);
-  assert.match(enHtml, /Dependencies/);
-  assert.doesNotMatch(enHtml, /data-graph-node="capability:roadmap:/);
+  assert.match(enHtml, /Module collaboration/);
+  assert.match(enHtml, /data-graph-node="capability:roadmap:roadmap-data"/);
 });

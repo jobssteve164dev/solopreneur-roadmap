@@ -262,7 +262,9 @@ const ignoredDirectoryNames = new Set([
   '.cache',
   'coverage',
   '.turbo',
-  '.codegraph'
+  '.codegraph',
+  '.solopreneur',
+  '.agents'
 ]);
 
 const generatedPathPatterns = [
@@ -417,6 +419,24 @@ function buildStructureName(filePaths: string[]): { id: string; label: string; c
       label: commonPath,
       confidence: commonPath.split('/').length >= 2 ? 0.78 : 0.68
     };
+  }
+  if (filePaths.length > 0 && filePaths.every((filePath) => path.dirname(filePath) === 'src')) {
+    const basenames = filePaths.map((filePath) => path.basename(filePath, path.extname(filePath)));
+    if (basenames.length === 1) {
+      return {
+        id: `path:src-${sanitizeIdSegment(basenames[0])}`,
+        label: `src/${basenames[0]}`,
+        confidence: 0.9
+      };
+    }
+    const firstTokens = basenames.map((basename) => splitNameTokens(basename)[0]).filter(Boolean);
+    if (firstTokens.length === basenames.length && firstTokens.every((token) => token === firstTokens[0])) {
+      return {
+        id: `path:src-${sanitizeIdSegment(firstTokens[0])}`,
+        label: `src/${firstTokens[0]}*`,
+        confidence: 0.86
+      };
+    }
   }
   const genericTokens = new Set(['src', 'test', 'tests', 'docs', 'lib', 'app', 'index', 'main']);
   const scoreByToken = new Map<string, number>();
@@ -1008,64 +1028,20 @@ async function loadDependencyCruiserAnalysis(
 
 function buildModuleClusters(files: ScannedFileNode[], dependencyAnalysis: FileDependencyAnalysis | null): string[][] {
   const sourceFiles = files.filter((file) => /^src\//.test(file.path) && !file.isTest && /\.[cm]?[jt]sx?$/.test(file.path));
-  const others = files.filter((file) => !sourceFiles.some((item) => item.path === file.path));
-  const sourceSet = new Set(sourceFiles.map((file) => file.path));
-  const adjacency = new Map<string, Set<string>>();
-  const incoming = dependencyAnalysis?.incomingCounts || new Map<string, number>();
-  const hubThreshold = Math.max(3, Math.ceil(sourceFiles.length / 8));
-  const hubFiles = new Set([...incoming.entries()].filter(([, count]) => count >= hubThreshold).map(([filePath]) => filePath));
+  const sourceGroups = new Map<string, string[]>();
   for (const file of sourceFiles) {
-    adjacency.set(file.path, new Set());
+    const relative = file.path.replace(/^src\//, '');
+    const segments = relative.split('/');
+    const basename = path.basename(relative, path.extname(relative));
+    const family = segments.length > 1 ? segments[0] : (splitNameTokens(basename)[0] || basename.toLowerCase());
+    const key = segments.length > 1 ? `src/${family}` : `src-family:${family}`;
+    const group = sourceGroups.get(key) || [];
+    group.push(file.path);
+    sourceGroups.set(key, group);
   }
-  for (const edge of dependencyAnalysis?.localEdges || []) {
-    if (!sourceSet.has(edge.source) || !sourceSet.has(edge.target) || hubFiles.has(edge.source) || hubFiles.has(edge.target)) {
-      continue;
-    }
-    adjacency.get(edge.source)?.add(edge.target);
-    adjacency.get(edge.target)?.add(edge.source);
-  }
-  const visited = new Set<string>();
-  const clusters: string[][] = [];
-  for (const file of sourceFiles) {
-    if (hubFiles.has(file.path) || visited.has(file.path)) {
-      continue;
-    }
-    const queue = [file.path];
-    const component: string[] = [];
-    visited.add(file.path);
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      component.push(current);
-      for (const neighbor of adjacency.get(current) || []) {
-        if (!visited.has(neighbor)) {
-          visited.add(neighbor);
-          queue.push(neighbor);
-        }
-      }
-    }
-    clusters.push(component.sort((a, b) => a.localeCompare(b)));
-  }
-  for (const hubFile of hubFiles) {
-    const neighbors = (dependencyAnalysis?.localEdges || []).filter((edge) => edge.source === hubFile || edge.target === hubFile);
-    const candidateScores = new Map<number, number>();
-    clusters.forEach((cluster, index) => {
-      const members = new Set(cluster);
-      const score = neighbors.reduce((sum, edge) => {
-        const peer = edge.source === hubFile ? edge.target : edge.source;
-        return sum + (members.has(peer) ? 1 : 0);
-      }, 0);
-      if (score > 0) {
-        candidateScores.set(index, score);
-      }
-    });
-    const best = [...candidateScores.entries()].sort((a, b) => b[1] - a[1])[0];
-    if (best && best[1] >= 2) {
-      clusters[best[0]].push(hubFile);
-      clusters[best[0]].sort((a, b) => a.localeCompare(b));
-    } else {
-      clusters.push([hubFile]);
-    }
-  }
+  const implementationRoots = new Set(['test', 'tests', 'website', 'scripts', 'resources', 'docs', '.github']);
+  const sourcePaths = new Set(sourceFiles.map((file) => file.path));
+  const others = files.filter((file) => !sourcePaths.has(file.path) && implementationRoots.has(file.path.split('/')[0] || ''));
   const otherGroups = new Map<string, string[]>();
   for (const file of others) {
     const top = file.path.split('/')[0] || path.basename(file.path, path.extname(file.path));
@@ -1074,7 +1050,7 @@ function buildModuleClusters(files: ScannedFileNode[], dependencyAnalysis: FileD
     list.push(file.path);
     otherGroups.set(key, list);
   }
-  return clusters
+  return [...sourceGroups.values()].map((group) => group.sort((a, b) => a.localeCompare(b)))
     .concat([...otherGroups.values()].map((group) => group.sort((a, b) => a.localeCompare(b))))
     .filter((cluster) => cluster.length > 0);
 }
@@ -1135,13 +1111,25 @@ function rebuildModulesFromDependencyGraph(
   }
 
   const clusters = buildModuleClusters(scannedFiles, dependencyAnalysis);
+  const mergedClusters = new Map<string, { identity: ReturnType<typeof chooseModuleIdentity>; paths: Set<string> }>();
   for (const cluster of clusters) {
+    const identity = chooseModuleIdentity(cluster, roadmapNodes, byFile);
+    const existing = mergedClusters.get(identity.nodeId);
+    if (existing) {
+      cluster.forEach((filePath) => existing.paths.add(filePath));
+      identity.roadmapNodeIds.forEach((nodeId) => existing.identity.roadmapNodeIds.add(nodeId));
+      existing.identity.confidence = Math.max(existing.identity.confidence, identity.confidence);
+    } else {
+      mergedClusters.set(identity.nodeId, { identity, paths: new Set(cluster) });
+    }
+  }
+  for (const { identity, paths } of mergedClusters.values()) {
+    const cluster = [...paths].sort((a, b) => a.localeCompare(b));
     const clusterFiles = cluster.map((filePath) => scannedFileByPath.get(filePath)).filter(Boolean) as ScannedFileNode[];
     if (clusterFiles.length === 0) {
       continue;
     }
-    const identity = chooseModuleIdentity(cluster, roadmapNodes, byFile);
-    const nodeId = moduleFacts.has(identity.nodeId) ? `${identity.nodeId}:${sanitizeIdSegment(cluster[0])}` : identity.nodeId;
+    const nodeId = identity.nodeId;
     const module: ModuleFact = {
       id: nodeId,
       label: identity.label,
@@ -1158,6 +1146,10 @@ function rebuildModulesFromDependencyGraph(
       latestRunAt: '',
       roadmapNodeIds: new Set(identity.roadmapNodeIds)
     };
+    const countedRuns = new Set<number>();
+    const verificationRuns = new Set<number>();
+    const failureRuns = new Set<number>();
+    let latestRunFailed = false;
     for (const file of clusterFiles) {
       module.loc += file.loc;
       module.bytes += file.bytes;
@@ -1172,20 +1164,27 @@ function rebuildModulesFromDependencyGraph(
         }
       }
       for (const run of byFile.get(file.path) || []) {
+        const runId = Number(run.executionLogId || 0);
         const role = run.files.find((item) => toPosixPath(String(item.filePath || '')) === file.path)?.role || '';
-        if (role === 'changed') module.changedRunCount += 1;
-        if (role === 'touched') module.touchedRunCount += 1;
-        module.verificationCount += verificationByRun.get(Number(run.executionLogId || 0)) || 0;
-        module.failureCount += failureByRun.get(Number(run.executionLogId || 0)) || 0;
+        if (!countedRuns.has(runId)) {
+          countedRuns.add(runId);
+          if (role === 'changed') module.changedRunCount += 1;
+          if (role === 'touched') module.touchedRunCount += 1;
+        }
+        if ((verificationByRun.get(runId) || 0) > 0) verificationRuns.add(runId);
+        if ((failureByRun.get(runId) || 0) > 0) failureRuns.add(runId);
         if (run.nodeId) {
           module.roadmapNodeIds.add(run.nodeId);
         }
         const timestamp = String(run.finishedAt || run.startedAt || '');
         if (timestamp && (!module.latestRunAt || Date.parse(timestamp) > Date.parse(module.latestRunAt))) {
           module.latestRunAt = timestamp;
+          latestRunFailed = (failureByRun.get(runId) || 0) > 0 || run.status === 'Failed';
         }
       }
     }
+    module.verificationCount = verificationRuns.size;
+    module.failureCount = failureRuns.size;
     moduleFacts.set(nodeId, module);
     nodes.set(nodeId, {
       snapshotId,
@@ -1240,7 +1239,7 @@ function rebuildModulesFromDependencyGraph(
         snapshotId,
         nodeId,
         type: 'failure',
-        level: module.failureCount >= 2 ? 'blocked' : 'attention',
+        level: latestRunFailed && module.failureCount >= 2 ? 'blocked' : 'attention',
         value: `关联运行包含 ${module.failureCount} 条失败信号`,
         source: 'run_index',
         sourceRef: module.latestRunAt,
@@ -1281,6 +1280,26 @@ function rebuildModulesFromDependencyGraph(
     }
     moduleEdgeCounts.set(sourceModule, (moduleEdgeCounts.get(sourceModule) || 0) + 1);
     moduleEdgeCounts.set(targetModule, (moduleEdgeCounts.get(targetModule) || 0) + 1);
+  }
+
+  const moduleDependencies = new Map<string, number>();
+  for (const edge of dependencyAnalysis?.localEdges || []) {
+    const sourceModule = fileToModule.get(edge.source);
+    const targetModule = fileToModule.get(edge.target);
+    if (!sourceModule || !targetModule || sourceModule === targetModule) continue;
+    const identity = `${sourceModule}|${targetModule}`;
+    moduleDependencies.set(identity, (moduleDependencies.get(identity) || 0) + 1);
+  }
+  for (const [identity, weight] of moduleDependencies) {
+    const [sourceId, targetId] = identity.split('|');
+    edges.push({
+      snapshotId,
+      sourceId,
+      targetId,
+      kind: 'depends_on',
+      weight,
+      evidence: 'dependency-cruiser:module-aggregate'
+    });
   }
 
   for (const module of moduleFacts.values()) {
@@ -1926,7 +1945,7 @@ export function buildProjectGrowthViewModel(
   }
   const edgeByIdentity = new Map<string, ProjectGrowthEdgeSummary>();
   for (const edge of data.edges) {
-    if (!['imports', 'depends_on', 'tested_by'].includes(edge.kind)) continue;
+    if (!['imports', 'depends_on', 'tested_by', 'implements'].includes(edge.kind)) continue;
     const sourceId = moduleByFile.get(edge.sourceId) || edge.sourceId;
     const targetId = moduleByFile.get(edge.targetId) || edge.targetId;
     if (sourceId === targetId) continue;
@@ -1940,7 +1959,7 @@ export function buildProjectGrowthViewModel(
   }
   const keyEdges = [...edgeByIdentity.values()]
     .sort((a, b) => {
-      const priority = (edge: ProjectGrowthEdgeSummary) => edge.kind === 'tested_by' ? 3 : edge.kind === 'depends_on' ? 2 : 1;
+      const priority = (edge: ProjectGrowthEdgeSummary) => edge.kind === 'implements' ? 4 : edge.kind === 'tested_by' ? 3 : edge.kind === 'depends_on' ? 2 : 1;
       return priority(b) - priority(a) || b.weight - a.weight;
     })
     .slice(0, 120);

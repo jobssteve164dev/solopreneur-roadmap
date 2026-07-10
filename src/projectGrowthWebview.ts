@@ -46,13 +46,14 @@ const locales = {
     modulesSignalMatrix: "模块与生长信号矩阵",
     architectureEdges: "真实模块与依赖关系",
     architectureGraph: "真实模块协同关系",
-    architectureGraphHint: "选择一个真实模块或依赖，查看上下游关系。",
-    graphPrimary: "主路径",
-    graphDependencies: "依赖关系",
+    architectureGraphHint: "从产品能力出发，查看它由哪些模块实现、模块如何协作，以及验证落在哪里。",
+    graphPrimary: "完整构成",
+    graphDependencies: "模块协作",
     graphVerification: "验证覆盖",
-    graphCore: "真实模块",
-    graphData: "外部依赖",
-    graphEvidence: "验证与回归",
+    graphCapability: "产品能力",
+    graphCore: "实现模块",
+    graphData: "调用与依赖",
+    graphEvidence: "验证模块",
     structuralGaps: "架构与验证盲区 (Gaps)",
     linkedCapabilities: "关联路线图能力",
     snapshotHistory: "生长分析历史轨迹",
@@ -198,13 +199,14 @@ const locales = {
     modulesSignalMatrix: "Modules & Signal Matrix",
     architectureEdges: "Real Modules & Dependencies",
     architectureGraph: "Real Module Relationships",
-    architectureGraphHint: "Select a real module or dependency to inspect upstream and downstream links.",
-    graphPrimary: "Primary path",
-    graphDependencies: "Dependencies",
+    architectureGraphHint: "Start with product capabilities, then see which modules implement them, how modules collaborate, and where verification lands.",
+    graphPrimary: "Full structure",
+    graphDependencies: "Module collaboration",
     graphVerification: "Verification",
-    graphCore: "Real modules",
-    graphData: "External dependencies",
-    graphEvidence: "Verification",
+    graphCapability: "Product capabilities",
+    graphCore: "Implementation modules",
+    graphData: "Calls & dependencies",
+    graphEvidence: "Verification modules",
     structuralGaps: "Structural Gaps",
     linkedCapabilities: "Linked Capabilities",
     snapshotHistory: "Snapshot History",
@@ -489,6 +491,7 @@ export function getProjectGrowthWebviewHtml(
     const label = String(mod.label || '');
     if (/^module:(\.solopreneur|CHANGELOG\.md|README\.md|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(id)) return false;
     if (/^\./.test(label) || /\.(md|json|ya?ml|toml|csv|txt|lock)$/i.test(label) || /^(CHANGELOG|README|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(label)) return false;
+    if (['knowledge', 'verification', 'configuration', 'delivery'].includes(String(mod.role || ''))) return false;
     return mod.files > 0 && mod.loc > 0;
   });
   if (displayModules.length > 0) {
@@ -505,32 +508,17 @@ export function getProjectGrowthWebviewHtml(
       const tileWeight = Math.max(1, Math.round(1 + 7 * Math.sqrt(mod.loc / maxModuleLoc)));
       const tileSize = index === 0 ? 'tile-dominant' : index < 3 ? 'tile-large' : index < 7 ? 'tile-medium' : 'tile-small';
       const signalLabel = formatMappedLabel(t.signalLabels, mod.signal);
-      const basisLabel = formatMappedLabel((t as any).labelSourceLabels || {}, (mod as any).labelSource);
       return `
         <div class="module-card ${signalClass} ${tileSize}" style="--tile-weight:${tileWeight}" tabindex="0" role="group" aria-label="${escapeHtml(`${mod.label}, ${signalLabel}, ${mod.loc} ${t.lines}`)}">
           <div class="module-card-head">
             <span class="module-title"><span class="codicon codicon-symbol-module"></span> ${escapeHtml(mod.label)}</span>
             <span class="signal-tag"><span class="signal-mark"></span>${escapeHtml(signalLabel)}</span>
           </div>
-          <div class="module-meta-grid">
-            <div class="meta-item">
-              <span class="meta-label">${escapeHtml(t.files)}</span>
-              <span class="meta-val">${mod.files}</span>
-            </div>
-            <div class="meta-item">
-              <span class="meta-label">${escapeHtml(t.lines)}</span>
-              <span class="meta-val">${mod.loc.toLocaleString()}</span>
-            </div>
-            <div class="meta-item">
-              <span class="meta-label">${escapeHtml(t.tests)}</span>
-              <span class="meta-val">${mod.tests}</span>
-            </div>
-            <div class="meta-item">
-              <span class="meta-label">${escapeHtml(t.confidence)}</span>
-              <span class="meta-val">${Math.round(mod.confidence * 100)}%</span>
-            </div>
+          <div class="module-facts">
+            <span>${mod.files} ${escapeHtml(t.files)}</span>
+            <span>${mod.loc.toLocaleString()} ${escapeHtml(t.lines)}</span>
+            ${mod.tests > 0 ? `<span>${mod.tests} ${escapeHtml(t.tests)}</span>` : ''}
           </div>
-          <div class="module-role-tag">${escapeHtml(t.labelBasis)} · ${escapeHtml(basisLabel)}</div>
         </div>
       `;
     }).join('');
@@ -635,7 +623,7 @@ export function getProjectGrowthWebviewHtml(
     `;
   }
 
-  const graphEdges = (viewModel.keyEdges || []).slice(0, 24);
+  const graphEdges = (viewModel.keyEdges || []).slice(0, 40);
   const moduleLabels = new Map((viewModel.modules || []).map((module) => [module.nodeId || (module as any).id, module.label]));
   const capabilityLabels = new Map((viewModel.capabilities || []).map((capability) => [capability.nodeId, capability.label]));
   const graphNodeIds = [...new Set(graphEdges.flatMap((edge) => [edge.sourceId, edge.targetId]))];
@@ -644,7 +632,9 @@ export function getProjectGrowthWebviewHtml(
     || nodeId.replace(/^(file:|module:|package:|capability:roadmap:)/, '');
   const graphFacts = new Map(graphNodeIds.map((nodeId) => [nodeId, {
     nodeId,
+    isCapability: nodeId.startsWith('capability:'),
     isPackage: nodeId.startsWith('package:'),
+    isModule: nodeId.startsWith('module:'),
     hasVerification: false
   }]));
   for (const edge of graphEdges) {
@@ -655,11 +645,14 @@ export function getProjectGrowthWebviewHtml(
   }
   const graphLane = (nodeId: string) => {
     const fact = graphFacts.get(nodeId);
+    if (fact?.isCapability) return 'capability';
     if (fact?.isPackage) return 'data';
-    if (fact?.hasVerification) return 'evidence';
+    if (fact?.hasVerification && /(^module:path:test|test|spec)/i.test(nodeId)) return 'evidence';
+    if (!fact?.isModule) return 'data';
     return 'core';
   };
   const graphLanes = [
+    { id: 'capability', label: t.graphCapability },
     { id: 'core', label: t.graphCore },
     { id: 'data', label: t.graphData },
     { id: 'evidence', label: t.graphEvidence }
@@ -677,7 +670,7 @@ export function getProjectGrowthWebviewHtml(
       </div>
     `;
   }).join('');
-  const graphEdgeKind = (kind: string) => kind === 'tested_by' ? 'verification' : kind === 'depends_on' ? 'dependency' : 'primary';
+  const graphEdgeKind = (kind: string) => kind === 'tested_by' ? 'verification' : kind === 'depends_on' || kind === 'imports' ? 'dependency' : 'primary';
   const graphEdgesHtml = graphEdges.map((edge, index) => `
     <path class="graph-edge edge-${graphEdgeKind(edge.kind)}" data-graph-edge="${index}" data-source="${escapeHtml(edge.sourceId)}" data-target="${escapeHtml(edge.targetId)}" />
   `).join('');
@@ -1531,6 +1524,20 @@ export function getProjectGrowthWebviewHtml(
       grid-template-columns: 1fr 1fr;
       gap: 10px;
       margin-bottom: 12px;
+    }
+
+    .module-facts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .module-facts span {
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
     }
 
     .meta-item {
