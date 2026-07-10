@@ -1095,20 +1095,6 @@ function chooseModuleIdentity(
     }
   }
   const rankedRoadmap = [...roadmapHits.entries()].sort((a, b) => b[1] - a[1]);
-  if (rankedRoadmap[0]) {
-    const [roadmapNodeId, score] = rankedRoadmap[0];
-    const nextScore = rankedRoadmap[1]?.[1] || 0;
-    if (score >= 2 || score > nextScore) {
-      const roadmapNode = roadmapById.get(roadmapNodeId)!;
-      return {
-        nodeId: `module:roadmap:${sanitizeIdSegment(roadmapNodeId)}`,
-        label: roadmapNode.title || roadmapNodeId,
-        confidence: 0.92,
-        source: 'roadmap',
-        roadmapNodeIds: new Set(rankedRoadmap.map(([nodeId]) => nodeId))
-      };
-    }
-  }
   const structure = buildStructureName(filePaths);
   return {
     nodeId: `module:${structure.id}`,
@@ -1539,7 +1525,6 @@ function shortenNodeLabel(nodeId: string, labelById: Map<string, string>): strin
 }
 
 function moduleLabelSource(labelSource: string): string {
-  if (labelSource === 'roadmap') return 'roadmap';
   if (labelSource === 'import_graph') return 'dependency_cluster';
   return 'scan_fallback';
 }
@@ -1941,7 +1926,7 @@ export function buildProjectGrowthViewModel(
   }
   const edgeByIdentity = new Map<string, ProjectGrowthEdgeSummary>();
   for (const edge of data.edges) {
-    if (!['imports', 'depends_on', 'tested_by', 'implements', 'shaped_by_run'].includes(edge.kind)) continue;
+    if (!['imports', 'depends_on', 'tested_by'].includes(edge.kind)) continue;
     const sourceId = moduleByFile.get(edge.sourceId) || edge.sourceId;
     const targetId = moduleByFile.get(edge.targetId) || edge.targetId;
     if (sourceId === targetId) continue;
@@ -1955,7 +1940,7 @@ export function buildProjectGrowthViewModel(
   }
   const keyEdges = [...edgeByIdentity.values()]
     .sort((a, b) => {
-      const priority = (edge: ProjectGrowthEdgeSummary) => edge.kind === 'implements' ? 4 : edge.kind === 'shaped_by_run' ? 3 : edge.kind === 'tested_by' ? 2 : 1;
+      const priority = (edge: ProjectGrowthEdgeSummary) => edge.kind === 'tested_by' ? 3 : edge.kind === 'depends_on' ? 2 : 1;
       return priority(b) - priority(a) || b.weight - a.weight;
     })
     .slice(0, 120);

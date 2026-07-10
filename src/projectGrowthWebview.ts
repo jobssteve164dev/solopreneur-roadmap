@@ -44,14 +44,13 @@ const locales = {
     filesRemoved: "删除文件数",
     filesModified: "修改文件数",
     modulesSignalMatrix: "模块与生长信号矩阵",
-    architectureEdges: "系统架构与依赖调用链",
-    architectureGraph: "系统如何协同工作",
-    architectureGraphHint: "选择一个模块，查看它会影响的上下游。",
+    architectureEdges: "真实模块与依赖关系",
+    architectureGraph: "真实模块协同关系",
+    architectureGraphHint: "选择一个真实模块或依赖，查看上下游关系。",
     graphPrimary: "主路径",
     graphDependencies: "依赖关系",
     graphVerification: "验证覆盖",
-    graphRoadmap: "路线图能力",
-    graphCore: "已落地模块",
+    graphCore: "真实模块",
     graphData: "外部依赖",
     graphEvidence: "验证与回归",
     structuralGaps: "架构与验证盲区 (Gaps)",
@@ -130,7 +129,6 @@ const locales = {
       filesystem: "项目文件"
     },
     labelSourceLabels: {
-      roadmap: "来自路线图标题",
       dependency_cluster: "来自依赖聚类与共同目录",
       scan_fallback: "来自文件扫描回退命名"
     },
@@ -198,14 +196,13 @@ const locales = {
     filesRemoved: "Files Removed",
     filesModified: "Files Modified",
     modulesSignalMatrix: "Modules & Signal Matrix",
-    architectureEdges: "Architecture & Dependency Edges",
-    architectureGraph: "How the system works together",
-    architectureGraphHint: "Select a module to see what it affects upstream and downstream.",
+    architectureEdges: "Real Modules & Dependencies",
+    architectureGraph: "Real Module Relationships",
+    architectureGraphHint: "Select a real module or dependency to inspect upstream and downstream links.",
     graphPrimary: "Primary path",
     graphDependencies: "Dependencies",
     graphVerification: "Verification",
-    graphRoadmap: "Roadmap capability",
-    graphCore: "Implemented modules",
+    graphCore: "Real modules",
     graphData: "External dependencies",
     graphEvidence: "Verification",
     structuralGaps: "Structural Gaps",
@@ -284,7 +281,6 @@ const locales = {
       filesystem: "Project Files"
     },
     labelSourceLabels: {
-      roadmap: "From roadmap title",
       dependency_cluster: "From dependency cluster and shared path",
       scan_fallback: "From scan fallback naming"
     },
@@ -648,30 +644,22 @@ export function getProjectGrowthWebviewHtml(
     || nodeId.replace(/^(file:|module:|package:|capability:roadmap:)/, '');
   const graphFacts = new Map(graphNodeIds.map((nodeId) => [nodeId, {
     nodeId,
-    isCapability: nodeId.startsWith('capability:'),
     isPackage: nodeId.startsWith('package:'),
-    hasVerification: false,
-    hasRoadmap: false
+    hasVerification: false
   }]));
   for (const edge of graphEdges) {
     if (edge.kind === 'tested_by') {
       graphFacts.get(edge.sourceId) && (graphFacts.get(edge.sourceId)!.hasVerification = true);
       graphFacts.get(edge.targetId) && (graphFacts.get(edge.targetId)!.hasVerification = true);
     }
-    if (edge.kind === 'implements') {
-      graphFacts.get(edge.sourceId) && (graphFacts.get(edge.sourceId)!.hasRoadmap = true);
-      graphFacts.get(edge.targetId) && (graphFacts.get(edge.targetId)!.hasRoadmap = true);
-    }
   }
   const graphLane = (nodeId: string) => {
     const fact = graphFacts.get(nodeId);
-    if (fact?.isCapability) return 'roadmap';
     if (fact?.isPackage) return 'data';
     if (fact?.hasVerification) return 'evidence';
     return 'core';
   };
   const graphLanes = [
-    { id: 'roadmap', label: t.graphRoadmap },
     { id: 'core', label: t.graphCore },
     { id: 'data', label: t.graphData },
     { id: 'evidence', label: t.graphEvidence }
