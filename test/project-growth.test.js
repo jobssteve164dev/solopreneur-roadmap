@@ -161,3 +161,59 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(queriedView.diff.filesAdded, 1);
   assert.equal(queriedView.history.length, 2);
 });
+
+test('project growth webview uses locale labels for roadmap and history metadata', () => {
+  const { getProjectGrowthWebviewHtml } = require(path.join(projectRoot, 'out', 'projectGrowthWebview.js'));
+  const fakeWebview = {
+    asWebviewUri(uri) {
+      return uri;
+    }
+  };
+  const fakeContext = {
+    extensionUri: { fsPath: projectRoot, path: projectRoot },
+    extensionPath: projectRoot
+  };
+  const viewModel = {
+    snapshotId: 'growth-test',
+    generatedAt: '2026-01-03T00:00:00.000Z',
+    treemap: null,
+    gaps: [{
+      nodeId: 'module:data-layer',
+      label: '数据层',
+      level: 'watch',
+      value: '最近被 Agent 触碰，但缺少验证信号',
+      source: 'run_index'
+    }],
+    modules: [],
+    capabilities: [{
+      nodeId: 'capability:roadmap:roadmap-data',
+      label: '补强项目数据链路',
+      stage: '交付与验证',
+      modules: ['module:data-layer'],
+      signal: 'watch'
+    }],
+    keyEdges: [],
+    history: [{
+      snapshotId: 'growth-test',
+      createdAt: '2026-01-03T00:00:00.000Z',
+      scanReason: 'test',
+      gitHead: 'abc123',
+      totals: { files: 4, modules: 3, capabilities: 1, packages: 1, loc: 42, signals: 1 }
+    }],
+    diff: null,
+    totals: { files: 4, modules: 3, capabilities: 1, packages: 1, loc: 42, signals: 1 }
+  };
+
+  const zhHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', true);
+  assert.match(zhHtml, /来源: run_index/);
+  assert.match(zhHtml, /阶段: 交付与验证/);
+  assert.match(zhHtml, /文件: <strong>4<\/strong>/);
+  assert.doesNotMatch(zhHtml, /Source: run_index/);
+  assert.doesNotMatch(zhHtml, /Stage: 交付与验证/);
+  assert.doesNotMatch(zhHtml, /Files: <strong>4<\/strong>/);
+
+  const enHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', false);
+  assert.match(enHtml, /Source: run_index/);
+  assert.match(enHtml, /Stage: 交付与验证/);
+  assert.match(enHtml, /Files: <strong>4<\/strong>/);
+});

@@ -5902,9 +5902,14 @@ test('agent command builder uses non-interactive task runs and native continuati
     /FAIL roadmap validation/
   );
   assert.match(methodologyInstructions, /商业化产品的默认四阶段/);
+  assert.match(methodologyInstructions, /Default Four Stages For Commercial Products/);
+  assert.match(methodologyInstructions, /Goal and audience -> Verifiable delivery/);
   assert.match(methodologyInstructions, /底层判断模型/);
+  assert.match(methodologyInstructions, /underlying judgment model/);
   assert.match(methodologyInstructions, /不要为了满足模板/);
+  assert.match(methodologyInstructions, /Do not create fake customer/);
   assert.match(methodologyInstructions, /完成标准判断/);
+  assert.match(methodologyInstructions, /completion criteria/);
 });
 
 test('documentation manifest indexes project docs and flags noisy docs after runs', () => {

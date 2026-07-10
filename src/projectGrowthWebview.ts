@@ -59,7 +59,13 @@ const locales = {
     tests: "测试数",
     confidence: "置信度",
     role: "职责",
-    reason: "快照原因"
+    reason: "快照原因",
+    source: "来源",
+    stage: "阶段",
+    timelineFiles: "文件",
+    timelineLoc: "代码行",
+    timelineModules: "模块",
+    timelineSignals: "信号"
   },
   en: {
     title: "Project Growth Graph",
@@ -96,7 +102,13 @@ const locales = {
     tests: "Tests",
     confidence: "Confidence",
     role: "Role",
-    reason: "Reason"
+    reason: "Reason",
+    source: "Source",
+    stage: "Stage",
+    timelineFiles: "Files",
+    timelineLoc: "LOC",
+    timelineModules: "Modules",
+    timelineSignals: "Signals"
   }
 };
 
@@ -174,7 +186,7 @@ export function getProjectGrowthWebviewHtml(
           <span class="gap-badge ${badgeClass}">${escapeHtml(gap.level.toUpperCase())}</span>
           <div class="gap-content">
             <div class="gap-title">${escapeHtml(gap.label)}</div>
-            <div class="gap-desc">${escapeHtml(gap.value)} <span class="gap-source">Source: ${escapeHtml(gap.source)}</span></div>
+            <div class="gap-desc">${escapeHtml(gap.value)} <span class="gap-source">${escapeHtml(t.source)}: ${escapeHtml(gap.source)}</span></div>
           </div>
         </div>
       `;
@@ -190,7 +202,7 @@ export function getProjectGrowthWebviewHtml(
       return `
         <div class="cap-card">
           <div class="cap-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(cap.label)}</div>
-          <div class="cap-stage">Stage: ${escapeHtml(cap.stage)}</div>
+          <div class="cap-stage">${escapeHtml(t.stage)}: ${escapeHtml(cap.stage)}</div>
           ${cap.modules && cap.modules.length > 0 ? `
             <div class="cap-modules">
               ${cap.modules.map(m => `<span class="cap-mod-badge">${escapeHtml(m.replace('module:', ''))}</span>`).join('')}
@@ -216,10 +228,10 @@ export function getProjectGrowthWebviewHtml(
             <div class="timeline-time">${escapeHtml(dateStr)} ${isLatest ? `<span class="latest-tag">${escapeHtml(t.latest)}</span>` : ''}</div>
             <div class="timeline-reason">${escapeHtml(t.reason)}: <strong>${escapeHtml(item.scanReason)}</strong></div>
             <div class="timeline-stats">
-              <span>Files: <strong>${item.totals.files}</strong></span>
-              <span>LOC: <strong>${item.totals.loc.toLocaleString()}</strong></span>
-              <span>Modules: <strong>${item.totals.modules}</strong></span>
-              <span>Signals: <strong>${item.totals.signals}</strong></span>
+              <span>${escapeHtml(t.timelineFiles)}: <strong>${item.totals.files}</strong></span>
+              <span>${escapeHtml(t.timelineLoc)}: <strong>${item.totals.loc.toLocaleString()}</strong></span>
+              <span>${escapeHtml(t.timelineModules)}: <strong>${item.totals.modules}</strong></span>
+              <span>${escapeHtml(t.timelineSignals)}: <strong>${item.totals.signals}</strong></span>
             </div>
           </div>
         </div>
