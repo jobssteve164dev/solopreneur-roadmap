@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.319 - 2026-07-10
+
+### Fixed
+- make project views local-first (62d2fe3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.318 - 2026-07-10
 
 ### Changed
