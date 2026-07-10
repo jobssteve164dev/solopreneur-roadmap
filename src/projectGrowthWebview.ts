@@ -23,14 +23,95 @@ function escapeHtml(value: string | number): string {
     .replace(/'/g, '&#39;');
 }
 
+const locales = {
+  zh: {
+    title: "项目代码生长图",
+    subTitle: "分析模块与文件的生长状态、诊断验证空缺并追踪演进历史。",
+    refreshBtn: "刷新生长数据",
+    snapshotTitle: "项目生长图分析快照",
+    generatedAt: "生成时间",
+    snapshotId: "快照标识",
+    totalFiles: "总文件数",
+    loc: "代码行数 (LOC)",
+    modules: "模块数",
+    capabilities: "路线图能力",
+    packages: "依赖包数",
+    signals: "警报信号",
+    recentChanges: "最近一次代码快照演进 (对比上一次)",
+    linesOfCode: "行代码",
+    netFiles: "净文件变化",
+    filesAdded: "新增文件数",
+    filesRemoved: "删除文件数",
+    filesModified: "修改文件数",
+    modulesSignalMatrix: "模块与生长信号矩阵",
+    architectureEdges: "系统架构与依赖调用链",
+    structuralGaps: "架构与验证盲区 (Gaps)",
+    linkedCapabilities: "关联路线图能力",
+    snapshotHistory: "生长分析历史轨迹",
+    emptyModules: "当前项目未检测到模块。",
+    emptyGaps: "所有健康度与分析规则均已满足。无架构与验证盲区！",
+    emptyCaps: "没有关联路线图节点的特性。",
+    emptyHistory: "暂无快照历史记录。",
+    emptyEdges: "未计算出关键架构链路。",
+    latest: "最新",
+    files: "文件数",
+    lines: "行数 (LOC)",
+    tests: "测试数",
+    confidence: "置信度",
+    role: "职责",
+    reason: "快照原因"
+  },
+  en: {
+    title: "Project Growth Graph",
+    subTitle: "Analyze code module growth, diagnose verification gaps, and track historical evolution.",
+    refreshBtn: "Refresh Growth Data",
+    snapshotTitle: "Project Growth Snapshot",
+    generatedAt: "Generated at",
+    snapshotId: "Snapshot ID",
+    totalFiles: "Total Files",
+    loc: "Lines of Code",
+    modules: "Modules",
+    capabilities: "Capabilities",
+    packages: "Packages",
+    signals: "Alert Signals",
+    recentChanges: "Recent Changes (vs Previous Snapshot)",
+    linesOfCode: "Lines of Code",
+    netFiles: "Net Files",
+    filesAdded: "Files Added",
+    filesRemoved: "Files Removed",
+    filesModified: "Files Modified",
+    modulesSignalMatrix: "Modules & Signal Matrix",
+    architectureEdges: "Architecture & Dependency Edges",
+    structuralGaps: "Structural Gaps",
+    linkedCapabilities: "Linked Capabilities",
+    snapshotHistory: "Snapshot History",
+    emptyModules: "No modules detected in this project.",
+    emptyGaps: "All growth and health rules are satisfied. No architectural gaps found!",
+    emptyCaps: "No capabilities linked to the roadmap.",
+    emptyHistory: "No history recorded yet.",
+    emptyEdges: "No key architectural edges computed.",
+    latest: "LATEST",
+    files: "Files",
+    lines: "Lines (LOC)",
+    tests: "Tests",
+    confidence: "Confidence",
+    role: "Role",
+    reason: "Reason"
+  }
+};
+
 export function getProjectGrowthWebviewHtml(
   webview: vscode.Webview,
   context: vscode.ExtensionContext,
   viewModel: ProjectGrowthViewModel,
-  projectName: string
+  projectName: string,
+  isZh: boolean
 ): string {
   const codiconsUri = webview.asWebviewUri(joinExtensionUri(context, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
+  const wordmarkUri = webview.asWebviewUri(joinExtensionUri(context, 'resources', 'logo_with_text.svg'));
   
+  const t = isZh ? locales.zh : locales.en;
+
   const totalFiles = viewModel.totals.files;
   const totalLoc = viewModel.totals.loc;
   const totalModules = viewModel.totals.modules;
@@ -56,28 +137,28 @@ export function getProjectGrowthWebviewHtml(
           </div>
           <div class="module-meta-grid">
             <div class="meta-item">
-              <span class="meta-label">Files</span>
+              <span class="meta-label">${escapeHtml(t.files)}</span>
               <span class="meta-val">${mod.files}</span>
             </div>
             <div class="meta-item">
-              <span class="meta-label">Lines (LOC)</span>
+              <span class="meta-label">${escapeHtml(t.lines)}</span>
               <span class="meta-val">${mod.loc.toLocaleString()}</span>
             </div>
             <div class="meta-item">
-              <span class="meta-label">Tests</span>
+              <span class="meta-label">${escapeHtml(t.tests)}</span>
               <span class="meta-val">${mod.tests}</span>
             </div>
             <div class="meta-item">
-              <span class="meta-label">Confidence</span>
+              <span class="meta-label">${escapeHtml(t.confidence)}</span>
               <span class="meta-val">${Math.round(mod.confidence * 100)}%</span>
             </div>
           </div>
-          <div class="module-role-tag">Role: ${escapeHtml(mod.role)}</div>
+          <div class="module-role-tag">${escapeHtml(t.role)}: ${escapeHtml(mod.role)}</div>
         </div>
       `;
     }).join('');
   } else {
-    moduleCardsHtml = '<div class="empty-state">No modules detected in this project.</div>';
+    moduleCardsHtml = `<div class="empty-state">${escapeHtml(t.emptyModules)}</div>`;
   }
 
   // Render structural gaps (diagnostics)
@@ -99,7 +180,7 @@ export function getProjectGrowthWebviewHtml(
       `;
     }).join('');
   } else {
-    gapsHtml = '<div class="empty-state-healthy"><span class="codicon codicon-check"></span> All growth and health rules are satisfied. No architectural gaps found!</div>';
+    gapsHtml = `<div class="empty-state-healthy"><span class="codicon codicon-check"></span> ${escapeHtml(t.emptyGaps)}</div>`;
   }
 
   // Render capabilities
@@ -119,7 +200,7 @@ export function getProjectGrowthWebviewHtml(
       `;
     }).join('');
   } else {
-    capabilitiesHtml = '<div class="empty-state">No capabilities linked to the roadmap.</div>';
+    capabilitiesHtml = `<div class="empty-state">${escapeHtml(t.emptyCaps)}</div>`;
   }
 
   // Render timeline history
@@ -132,8 +213,8 @@ export function getProjectGrowthWebviewHtml(
         <div class="timeline-item ${isLatest ? 'is-latest' : ''}">
           <div class="timeline-marker"></div>
           <div class="timeline-content">
-            <div class="timeline-time">${escapeHtml(dateStr)} ${isLatest ? '<span class="latest-tag">LATEST</span>' : ''}</div>
-            <div class="timeline-reason">Reason: <strong>${escapeHtml(item.scanReason)}</strong></div>
+            <div class="timeline-time">${escapeHtml(dateStr)} ${isLatest ? `<span class="latest-tag">${escapeHtml(t.latest)}</span>` : ''}</div>
+            <div class="timeline-reason">${escapeHtml(t.reason)}: <strong>${escapeHtml(item.scanReason)}</strong></div>
             <div class="timeline-stats">
               <span>Files: <strong>${item.totals.files}</strong></span>
               <span>LOC: <strong>${item.totals.loc.toLocaleString()}</strong></span>
@@ -145,7 +226,7 @@ export function getProjectGrowthWebviewHtml(
       `;
     }).join('');
   } else {
-    historyHtml = '<div class="empty-state">No history recorded yet.</div>';
+    historyHtml = `<div class="empty-state">${escapeHtml(t.emptyHistory)}</div>`;
   }
 
   // Render diff if available
@@ -157,20 +238,20 @@ export function getProjectGrowthWebviewHtml(
 
     diffHtml = `
       <div class="diff-card">
-        <div class="diff-head"><span class="codicon codicon-git-compare"></span> Recent Changes (vs Previous Snapshot)</div>
+        <div class="diff-head"><span class="codicon codicon-git-compare"></span> ${escapeHtml(t.recentChanges)}</div>
         <div class="diff-stats">
           <div class="diff-stat">
             <span class="diff-num ${d.locDelta >= 0 ? 'pos' : 'neg'}">${locDeltaSign}</span>
-            <span class="diff-label">Lines of Code</span>
+            <span class="diff-label">${escapeHtml(t.linesOfCode)}</span>
           </div>
           <div class="diff-stat">
             <span class="diff-num ${d.filesAdded - d.filesRemoved >= 0 ? 'pos' : 'neg'}">${filesDeltaSign}</span>
-            <span class="diff-label">Net Files</span>
+            <span class="diff-label">${escapeHtml(t.netFiles)}</span>
           </div>
           <div class="diff-stat-details">
-            <div>Files Added: <strong class="pos">+${d.filesAdded}</strong></div>
-            <div>Files Removed: <strong class="neg">-${d.filesRemoved}</strong></div>
-            <div>Files Modified: <strong>${d.filesChanged}</strong></div>
+            <div>${escapeHtml(t.filesAdded)}: <strong class="pos">+${d.filesAdded}</strong></div>
+            <div>${escapeHtml(t.filesRemoved)}: <strong class="neg">-${d.filesRemoved}</strong></div>
+            <div>${escapeHtml(t.filesModified)}: <strong>${d.filesChanged}</strong></div>
           </div>
         </div>
       </div>
@@ -196,11 +277,11 @@ export function getProjectGrowthWebviewHtml(
       `;
     }).join('');
   } else {
-    edgesHtml = '<div class="empty-state">No key architectural edges computed.</div>';
+    edgesHtml = `<div class="empty-state">${escapeHtml(t.emptyEdges)}</div>`;
   }
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${isZh ? 'zh-CN' : 'en'}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -304,19 +385,22 @@ export function getProjectGrowthWebviewHtml(
       padding-bottom: 16px;
     }
 
-    .title-group h1 {
+    .brand-title {
       margin: 0;
-      font-size: 24px;
-      font-weight: 800;
-      background: linear-gradient(135deg, var(--accent), var(--accent-purple));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      display: flex;
+      align-items: center;
     }
 
-    .title-group p {
-      margin: 4px 0 0 0;
+    .brand-wordmark {
+      width: 132px;
+      height: 34px;
+      flex-shrink: 0;
+    }
+
+    .sub-heading {
       color: var(--muted);
       font-size: 13px;
+      margin-top: 4px;
     }
 
     .header-actions {
@@ -800,39 +884,43 @@ export function getProjectGrowthWebviewHtml(
   <div class="neon-glow-container"></div>
   <div class="container">
     <header>
-      <div class="title-group">
-        <h1>Project Growth snapshot: ${escapeHtml(projectName)}</h1>
-        <p>Generated at: ${escapeHtml(new Date(viewModel.generatedAt).toLocaleString())} | Snapshot: <strong>${escapeHtml(viewModel.snapshotId.substring(0, 8))}</strong></p>
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap"></h1>
+        <div style="width: 1px; height: 20px; background: var(--border);"></div>
+        <div>
+          <h2 style="margin: 0; font-size: 16px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent-purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; line-height: 1.2;">${escapeHtml(t.title)}: ${escapeHtml(projectName)}</h2>
+          <div class="sub-heading">${escapeHtml(t.subTitle)}</div>
+        </div>
       </div>
       <div class="header-actions">
-        <button class="btn-refresh" id="btn-refresh"><span class="codicon codicon-refresh"></span> Refresh Growth Data</button>
+        <button type="button" class="btn-refresh" id="btn-refresh"><span class="codicon codicon-refresh"></span> ${escapeHtml(t.refreshBtn)}</button>
       </div>
     </header>
 
     <div class="stats-banner">
       <div class="stat-card">
         <span class="stat-val">${totalFiles}</span>
-        <span class="stat-label">Total Files</span>
+        <span class="stat-label">${escapeHtml(t.totalFiles)}</span>
       </div>
       <div class="stat-card">
         <span class="stat-val">${totalLoc.toLocaleString()}</span>
-        <span class="stat-label">Lines of Code</span>
+        <span class="stat-label">${escapeHtml(t.loc)}</span>
       </div>
       <div class="stat-card">
         <span class="stat-val">${totalModules}</span>
-        <span class="stat-label">Modules</span>
+        <span class="stat-label">${escapeHtml(t.modules)}</span>
       </div>
       <div class="stat-card">
         <span class="stat-val">${totalCapabilities}</span>
-        <span class="stat-label">Capabilities</span>
+        <span class="stat-label">${escapeHtml(t.capabilities)}</span>
       </div>
       <div class="stat-card">
         <span class="stat-val">${totalPackages}</span>
-        <span class="stat-label">Packages</span>
+        <span class="stat-label">${escapeHtml(t.packages)}</span>
       </div>
       <div class="stat-card">
         <span class="stat-val signals-count">${totalSignals}</span>
-        <span class="stat-label">Alert Signals</span>
+        <span class="stat-label">${escapeHtml(t.signals)}</span>
       </div>
     </div>
 
@@ -841,14 +929,14 @@ export function getProjectGrowthWebviewHtml(
     <div class="dashboard-grid">
       <div class="left-col">
         <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-grid"></span> Modules & Signal Matrix</h2>
+          <h2 class="panel-title"><span class="codicon codicon-grid"></span> ${escapeHtml(t.modulesSignalMatrix)}</h2>
           <div class="module-matrix">
             ${moduleCardsHtml}
           </div>
         </div>
 
         <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-git-commit"></span> Architecture & Dependency Edges</h2>
+          <h2 class="panel-title"><span class="codicon codicon-git-commit"></span> ${escapeHtml(t.architectureEdges)}</h2>
           <div class="edge-list">
             ${edgesHtml}
           </div>
@@ -857,21 +945,21 @@ export function getProjectGrowthWebviewHtml(
 
       <div class="right-col">
         <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-warning"></span> Structural Gaps</h2>
+          <h2 class="panel-title"><span class="codicon codicon-warning"></span> ${escapeHtml(t.structuralGaps)}</h2>
           <div class="gaps-list">
             ${gapsHtml}
           </div>
         </div>
 
         <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-milestone"></span> Linked Capabilities</h2>
+          <h2 class="panel-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(t.linkedCapabilities)}</h2>
           <div class="capabilities-list">
             ${capabilitiesHtml}
           </div>
         </div>
 
         <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-history"></span> Snapshot History</h2>
+          <h2 class="panel-title"><span class="codicon codicon-history"></span> ${escapeHtml(t.snapshotHistory)}</h2>
           <div class="timeline">
             ${historyHtml}
           </div>

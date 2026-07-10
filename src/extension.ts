@@ -2354,6 +2354,7 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
   
   const project = getProjects(context).find((p: any) => p.path === projectPath);
   const projectName = project ? project.name : path.basename(projectPath) || 'Project';
+  const isZh = vscode.env.language.startsWith('zh');
 
   await postLocalDataLoad(
     () => getProjectGrowthView(projectPath, context.extensionPath, { refreshIfMissing: true }),
@@ -2363,7 +2364,8 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
         activeProjectGrowthPanel.webview,
         context,
         growthView,
-        projectName
+        projectName,
+        isZh
       );
     },
     (message) => {
