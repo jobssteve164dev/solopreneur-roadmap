@@ -1508,7 +1508,10 @@ export function buildProjectGrowthViewModel(
     }
   }
   const keyEdges = [...edgeByIdentity.values()]
-    .sort((a, b) => b.weight - a.weight)
+    .sort((a, b) => {
+      const priority = (edge: ProjectGrowthEdgeSummary) => edge.kind === 'implements' ? 4 : edge.kind === 'shaped_by_run' ? 3 : edge.kind === 'tested_by' ? 2 : 1;
+      return priority(b) - priority(a) || b.weight - a.weight;
+    })
     .slice(0, 120);
   const history = (options.history || [data]).map((snapshotData) => ({
     snapshotId: snapshotData.snapshot.id,
@@ -1628,20 +1631,40 @@ async function enrichSnapshotWithDependencyCruiser(snapshot: GrowthSnapshotData,
   if (fs.existsSync(tsconfigPath)) args.push('--ts-config', tsconfigPath);
   try {
     const { stdout } = await execFileAsync(process.execPath, args, { cwd: projectPath, timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
-    const result = JSON.parse(stdout || '{}') as { modules?: Array<{ source?: string; dependencies?: Array<{ resolved?: string; circular?: boolean }> }> };
+    const result = JSON.parse(stdout || '{}') as { modules?: Array<{ source?: string; dependencies?: Array<{ resolved?: string; circular?: boolean; couldNotResolve?: boolean }> }> };
     const files = new Set(snapshot.nodes.filter((node) => node.kind === 'file').map((node) => node.path));
+    const moduleByFile = new Map(snapshot.edges.filter((edge) => edge.kind === 'contains' && edge.sourceId.startsWith('module:') && edge.targetId.startsWith('file:')).map((edge) => [edge.targetId.replace(/^file:/, ''), edge.sourceId]));
     const dependencyEdges: GrowthEdgeRecord[] = [];
+    const incoming = new Map<string, number>();
+    const crossModule = new Map<string, number>();
     for (const module of result.modules || []) {
       const source = toPosixPath(String(module.source || ''));
       if (!files.has(source)) continue;
       for (const dependency of module.dependencies || []) {
         const target = toPosixPath(String(dependency.resolved || ''));
+        const sourceModule = moduleByFile.get(source) || '';
+        if (dependency.circular && sourceModule) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: sourceModule, type: 'risk', level: 'attention', value: '模块内存在循环依赖，需要整理边界', source: 'dependency_cruiser', sourceRef: source, createdAt: snapshot.snapshot.createdAt });
+        if (dependency.couldNotResolve && sourceModule) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: sourceModule, type: 'risk', level: 'watch', value: '存在无法解析的源码依赖，结构判断可能不完整', source: 'dependency_cruiser', sourceRef: source, createdAt: snapshot.snapshot.createdAt });
         if (!target || target === source || dependency.circular || !files.has(target)) continue;
+        const targetModule = moduleByFile.get(target) || '';
+        incoming.set(target, (incoming.get(target) || 0) + 1);
+        if (sourceModule && targetModule && sourceModule !== targetModule) {
+          crossModule.set(sourceModule, (crossModule.get(sourceModule) || 0) + 1);
+          crossModule.set(targetModule, (crossModule.get(targetModule) || 0) + 1);
+        }
         dependencyEdges.push({ snapshotId: snapshot.snapshot.id, sourceId: nodeIdForPath('file', source), targetId: nodeIdForPath('file', target), kind: 'imports', weight: 1, evidence: 'dependency-cruiser' });
       }
     }
     if (dependencyEdges.length > 0) {
       snapshot.edges = snapshot.edges.filter((edge) => edge.kind !== 'imports').concat(dependencyEdges);
+      for (const [filePath, count] of incoming) {
+        if (count < 3) continue;
+        const moduleId = moduleByFile.get(filePath);
+        if (moduleId) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: moduleId, type: 'architecture', level: count >= 8 ? 'attention' : 'info', value: `被 ${count} 个源码模块依赖，是项目主干的一部分`, source: 'dependency_cruiser', sourceRef: filePath, createdAt: snapshot.snapshot.createdAt });
+      }
+      for (const [moduleId, count] of crossModule) {
+        if (count >= 4) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: moduleId, type: 'architecture', level: 'watch', value: `与其它模块有 ${count} 条跨边界依赖，建议检查职责边界`, source: 'dependency_cruiser', sourceRef: moduleId, createdAt: snapshot.snapshot.createdAt });
+      }
     }
   } catch (error) {
     console.warn('SoloMap dependency-cruiser scan failed; using lightweight import scan:', error);
