@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.329 - 2026-07-10
+
+### Added
+- derive growth risks from dependency graph (744f182)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.328 - 2026-07-10
 
 ### Added
