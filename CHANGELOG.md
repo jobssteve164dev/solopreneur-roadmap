@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.328 - 2026-07-10
+
+### Added
+- analyze growth dependencies with dependency cruiser (072cda0)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.327 - 2026-07-10
 
 ### Fixed
