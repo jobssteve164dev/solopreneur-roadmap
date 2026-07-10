@@ -1352,6 +1352,9 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
 
   assert.doesNotThrow(() => new vm.Script(script));
+  assert.match(html, /roadmap-view-tab-label">项目概览/);
+  assert.match(script, /roadmapView: '项目概览'/);
+  assert.match(script, /roadmapView: 'Project Overview'/);
   assert.doesNotMatch(html, /<select\b|<option\b/);
   assert.match(html, /data-solo-select/);
   assert.match(script, /renderSoloSelect/);

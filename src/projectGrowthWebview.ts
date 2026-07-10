@@ -638,7 +638,7 @@ export function getProjectGrowthWebviewHtml(
   <title>SoloMap: ${escapeHtml(t.title)}</title>
   <style>
     :root {
-      --bg: #090a10;
+      --bg: var(--vscode-editor-background, #0f111a);
       --fg: #f8fafc;
       --muted: #94a3b8;
       --border: rgba(255, 255, 255, 0.08);
