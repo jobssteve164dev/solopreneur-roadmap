@@ -455,19 +455,33 @@ export function getProjectGrowthWebviewHtml(
 
   // Render module cards
   let moduleCardsHtml = '';
-  if (viewModel.modules && viewModel.modules.length > 0) {
-    moduleCardsHtml = viewModel.modules.map(mod => {
+  const displayModules = (viewModel.modules || []).filter((mod) => {
+    const id = String(mod.nodeId || (mod as any).id || '');
+    const label = String(mod.label || '');
+    if (/^module:(\.solopreneur|CHANGELOG\.md|README\.md|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(id)) return false;
+    if (/^\./.test(label) || /\.(md|json|ya?ml|toml|csv|txt|lock)$/i.test(label) || /^(CHANGELOG|README|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(label)) return false;
+    return mod.files > 0 && mod.loc > 0;
+  });
+  if (displayModules.length > 0) {
+    const maxModuleLoc = Math.max(1, ...displayModules.map((item) => item.loc));
+    moduleCardsHtml = [...displayModules]
+      .sort((a, b) => b.loc - a.loc)
+      .map((mod, index) => {
       let signalClass = 'signal-stable';
       if (mod.signal === 'watch') signalClass = 'signal-watch';
       if (mod.signal === 'attention') signalClass = 'signal-attention';
       if (mod.signal === 'blocked') signalClass = 'signal-blocked';
       if (mod.signal === 'growing') signalClass = 'signal-growing';
 
+      const tileWeight = Math.max(1, Math.round(1 + 7 * Math.sqrt(mod.loc / maxModuleLoc)));
+      const tileSize = index === 0 ? 'tile-dominant' : index < 3 ? 'tile-large' : index < 7 ? 'tile-medium' : 'tile-small';
+      const signalLabel = formatMappedLabel(t.signalLabels, mod.signal);
+      const roleLabel = formatMappedLabel(t.roleLabels, mod.role);
       return `
-        <div class="module-card ${signalClass}">
+        <div class="module-card ${signalClass} ${tileSize}" style="--tile-weight:${tileWeight}" tabindex="0" role="group" aria-label="${escapeHtml(`${mod.label}, ${signalLabel}, ${mod.loc} ${t.lines}`)}">
           <div class="module-card-head">
             <span class="module-title"><span class="codicon codicon-symbol-module"></span> ${escapeHtml(mod.label)}</span>
-            <span class="signal-tag">${escapeHtml(formatMappedLabel(t.signalLabels, mod.signal))}</span>
+            <span class="signal-tag"><span class="signal-mark"></span>${escapeHtml(signalLabel)}</span>
           </div>
           <div class="module-meta-grid">
             <div class="meta-item">
@@ -487,7 +501,7 @@ export function getProjectGrowthWebviewHtml(
               <span class="meta-val">${Math.round(mod.confidence * 100)}%</span>
             </div>
           </div>
-          <div class="module-role-tag">${escapeHtml(t.role)}: ${escapeHtml(formatMappedLabel(t.roleLabels, mod.role))}</div>
+          <div class="module-role-tag">${escapeHtml(roleLabel)}</div>
         </div>
       `;
     }).join('');
@@ -1294,21 +1308,44 @@ export function getProjectGrowthWebviewHtml(
     }
 
     /* Module Matrix */
+    .module-space-panel { margin-bottom: 20px; }
+
+    .module-space-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin: -4px 0 14px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .module-space-legend span { display: inline-flex; align-items: center; gap: 5px; }
+
     .module-matrix {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-      gap: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      gap: 7px;
+      min-height: 330px;
     }
 
     .module-card {
-      background: rgba(255, 255, 255, 0.01);
+      flex: var(--tile-weight, 1) 1 170px;
+      min-width: 150px;
+      min-height: 118px;
+      background: rgba(255, 255, 255, 0.018);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      border-radius: 7px;
+      padding: 14px;
+      transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
       position: relative;
       overflow: hidden;
     }
+
+    .module-card.tile-dominant { min-height: 245px; flex-basis: 42%; }
+    .module-card.tile-large { min-height: 180px; flex-basis: 28%; }
+    .module-card.tile-medium { min-height: 140px; flex-basis: 21%; }
+    .module-card.tile-small { min-height: 112px; flex-basis: 16%; }
 
     .module-card::before {
       content: '';
@@ -1317,6 +1354,22 @@ export function getProjectGrowthWebviewHtml(
       background: var(--muted);
     }
 
+    .module-card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.16;
+      background-image: repeating-linear-gradient(135deg, transparent 0 9px, currentColor 9px 10px);
+      mask-image: linear-gradient(to bottom, transparent 25%, black 100%);
+    }
+
+    .module-card.signal-stable::after { opacity: 0; }
+    .module-card.signal-growing { color: var(--accent); }
+    .module-card.signal-watch { color: var(--warn); }
+    .module-card.signal-attention { color: var(--attention); }
+    .module-card.signal-blocked { color: var(--danger); }
+
     .module-card.signal-stable::before { background: var(--success); }
     .module-card.signal-growing::before { background: var(--accent); }
     .module-card.signal-watch::before { background: var(--warn); }
@@ -1324,10 +1377,11 @@ export function getProjectGrowthWebviewHtml(
     .module-card.signal-blocked::before { background: var(--danger); }
 
     .module-card:hover {
-      transform: translateY(-4px) scale(1.02);
       background: rgba(255, 255, 255, 0.03);
-      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.26);
     }
+
+    .module-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     .module-card.signal-stable:hover { border-color: rgba(0, 230, 118, 0.3); box-shadow: 0 8px 30px rgba(0, 230, 118, 0.08); }
     .module-card.signal-growing:hover { border-color: rgba(0, 240, 255, 0.3); box-shadow: 0 8px 30px rgba(0, 240, 255, 0.08); }
@@ -1348,6 +1402,7 @@ export function getProjectGrowthWebviewHtml(
       display: flex;
       align-items: center;
       gap: 6px;
+      color: var(--fg);
     }
 
     .signal-tag {
@@ -1356,7 +1411,12 @@ export function getProjectGrowthWebviewHtml(
       padding: 2px 6px;
       border-radius: 4px;
       background: rgba(255, 255, 255, 0.06);
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
     }
+
+    .signal-mark { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
 
     .module-card.signal-stable .signal-tag { color: var(--success); background: rgba(0, 230, 118, 0.1); }
     .module-card.signal-growing .signal-tag { color: var(--accent); background: rgba(0, 240, 255, 0.1); }
@@ -1709,20 +1769,21 @@ export function getProjectGrowthWebviewHtml(
           <div class="journey-track">${journeyHtml}</div>
         </section>
 
-        <section class="growth-v2-grid primary-understanding-grid">
-          <div class="growth-v2-panel capability-map-panel">
-            <h2 class="panel-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(t.capabilityMap)}</h2>
-            <div class="capability-health-grid">${capabilityHealthHtml}</div>
+        <section class="panel module-space-panel">
+          <h2 class="panel-title"><span class="codicon codicon-layout"></span> ${escapeHtml(t.modulesSignalMatrix)}</h2>
+          <div class="module-space-legend" aria-label="${escapeHtml(t.modulesSignalMatrix)}">
+            <span><i class="signal-mark" style="color:var(--success)"></i>${escapeHtml(formatMappedLabel(t.signalLabels, 'stable'))}</span>
+            <span><i class="signal-mark" style="color:var(--accent)"></i>${escapeHtml(formatMappedLabel(t.signalLabels, 'growing'))}</span>
+            <span><i class="signal-mark" style="color:var(--warn)"></i>${escapeHtml(formatMappedLabel(t.signalLabels, 'watch'))}</span>
+            <span><i class="signal-mark" style="color:var(--attention)"></i>${escapeHtml(formatMappedLabel(t.signalLabels, 'attention'))}</span>
+            <span><i class="signal-mark" style="color:var(--danger)"></i>${escapeHtml(formatMappedLabel(t.signalLabels, 'blocked'))}</span>
           </div>
-          <div class="priority-actions">
-            <div class="priority-title"><span class="codicon codicon-checklist"></span> ${escapeHtml(t.priorityActions)}</div>
-            <div class="priority-list">${actionCardsHtml}</div>
-          </div>
+          <div class="module-matrix">${moduleCardsHtml}</div>
         </section>
 
-        <section class="growth-v2-panel code-footprint-panel">
-          <h2 class="panel-title"><span class="codicon codicon-pulse"></span> ${escapeHtml(t.growthFocus)}</h2>
-          <div class="focus-area-list">${focusAreasHtml}</div>
+        <section class="growth-v2-panel priority-actions code-footprint-panel">
+          <div class="priority-title"><span class="codicon codicon-checklist"></span> ${escapeHtml(t.priorityActions)}</div>
+          <div class="priority-list">${actionCardsHtml}</div>
         </section>
 
         <div class="detail-section-title">${escapeHtml(t.detailData)}</div>
@@ -1758,13 +1819,6 @@ export function getProjectGrowthWebviewHtml(
 
     <div class="dashboard-grid">
       <div class="left-col">
-        <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-grid"></span> ${escapeHtml(t.modulesSignalMatrix)}</h2>
-          <div class="module-matrix">
-            ${moduleCardsHtml}
-          </div>
-        </div>
-
         <div class="panel">
           <h2 class="panel-title"><span class="codicon codicon-git-commit"></span> ${escapeHtml(t.architectureEdges)}</h2>
           <div class="edge-list">

@@ -56,6 +56,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   const { SqliteStore } = require(path.join(projectRoot, 'out', 'db', 'sqliteStore.js'));
   const {
     buildProjectGrowthViewModel,
+    clearProjectGrowthViewCache,
     getProjectGrowthView,
     refreshProjectGrowthSnapshot
   } = require(path.join(projectRoot, 'out', 'projectGrowth.js'));
@@ -117,7 +118,8 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'tested_by'));
   assert.ok(view.gaps.some((gap) => gap.source === 'run_index' || gap.source === 'growth_rules'));
 
-  const reopened = new SqliteStore(dbPath, projectRoot);
+  const growthDbPath = path.join(solopreneurDir, 'project_growth.db');
+  const reopened = new SqliteStore(growthDbPath, projectRoot);
   await reopened.init();
   const latest = reopened.getLatestGrowthSnapshot();
   reopened.close();
@@ -162,6 +164,11 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(secondView.history.length, 2);
   assert.equal(secondView.history[0].snapshotId, secondView.snapshotId);
 
+  const laterJournalWriter = new SqliteStore(dbPath, projectRoot);
+  await laterJournalWriter.init();
+  laterJournalWriter.logExecution('roadmap-data', 'codex', 'codex exec', 'Later roadmap write', 'Completed');
+  laterJournalWriter.close();
+  clearProjectGrowthViewCache(tempRoot);
   const queriedView = await getProjectGrowthView(tempRoot, projectRoot, {
     refreshIfMissing: false,
     historyLimit: 5
@@ -170,6 +177,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.ok(queriedView.diff);
   assert.equal(queriedView.diff.filesAdded, 1);
   assert.equal(queriedView.history.length, 2);
+  assert.equal(fs.existsSync(growthDbPath), true);
 });
 
 test('project growth webview uses locale labels for roadmap and history metadata', () => {
@@ -289,13 +297,13 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(zhHtml, /3\/5/);
   assert.match(zhHtml, /当前推进 · 交付与验证/);
   assert.match(zhHtml, /接下来最值得做/);
-  assert.match(zhHtml, /项目能力全貌/);
-  assert.match(zhHtml, /代码生长落点/);
-  assert.match(zhHtml, /路线状态/);
+  assert.match(zhHtml, /模块与生长信号矩阵/);
+  assert.match(zhHtml, /module-space-panel/);
+  assert.match(zhHtml, /tile-dominant/);
   assert.match(zhHtml, /待验证/);
   assert.match(zhHtml, /补验证证据/);
   assert.match(zhHtml, /关注/);
-  assert.match(zhHtml, /职责: 数据层/);
+  assert.match(zhHtml, />数据层<\/div>/);
   assert.match(zhHtml, /来源: 运行索引/);
   assert.match(zhHtml, /阶段: 交付与验证/);
   assert.match(zhHtml, /文件: <strong>4<\/strong>/);
@@ -316,12 +324,11 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(enHtml, /What this project is for/);
   assert.match(enHtml, /Current work · 交付与验证/);
   assert.match(enHtml, /Most Useful Next Moves/);
-  assert.match(enHtml, /Project Capability Map/);
-  assert.match(enHtml, /Code Growth Footprint/);
+  assert.match(enHtml, /Modules &amp; Signal Matrix/);
   assert.match(enHtml, /Needs Verification/);
   assert.match(enHtml, /Add verification evidence/);
   assert.match(enHtml, /Watch/);
-  assert.match(enHtml, /Role: Data/);
+  assert.match(enHtml, />Data<\/div>/);
   assert.match(enHtml, /Source: Run Index/);
   assert.match(enHtml, /Stage: 交付与验证/);
   assert.match(enHtml, /Files: <strong>4<\/strong>/);

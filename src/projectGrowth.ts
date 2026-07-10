@@ -1090,7 +1090,7 @@ function isPrimaryGrowthModule(module: ProjectGrowthModuleSummary): boolean {
   if (/^module:(\.solopreneur|CHANGELOG\.md|README\.md|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(id)) {
     return false;
   }
-  if (/^\./.test(label) || /^(CHANGELOG|README|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(label)) {
+  if (/^\./.test(label) || /\.(md|json|ya?ml|toml|csv|txt|lock)$/i.test(label) || /^(CHANGELOG|README|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(label)) {
     return false;
   }
   return module.files > 0 && module.loc > 0;
@@ -1610,23 +1610,27 @@ export async function refreshProjectGrowthSnapshot(
   extensionPath: string,
   options: ProjectGrowthScanOptions = {}
 ): Promise<ProjectGrowthViewModel> {
-  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const store = new SqliteStore(dbPath, extensionPath);
+  const growthDbPath = path.join(projectPath, '.solopreneur', 'project_growth.db');
+  const journalDbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  fs.mkdirSync(path.dirname(growthDbPath), { recursive: true });
+  const growthStore = new SqliteStore(growthDbPath, extensionPath);
+  const journalStore = new SqliteStore(journalDbPath, extensionPath);
   try {
-    await store.init();
-    const previousHistory = store.getGrowthSnapshotHistory(1);
-    const previous = previousHistory[0] ? store.getGrowthSnapshotById(previousHistory[0].id) : null;
-    const snapshot = buildProjectGrowthSnapshot(projectPath, store.getAllNodes(), store.getRunIndexEntries(), options);
-    store.writeGrowthSnapshot(snapshot);
-    const history = store.getGrowthSnapshotHistory(options.historyLimit || 12)
-      .map((item) => store.getGrowthSnapshotById(item.id))
+    await Promise.all([growthStore.init(), journalStore.init()]);
+    migrateLegacyGrowthHistory(journalStore, growthStore);
+    const previousHistory = growthStore.getGrowthSnapshotHistory(1);
+    const previous = previousHistory[0] ? growthStore.getGrowthSnapshotById(previousHistory[0].id) : null;
+    const snapshot = buildProjectGrowthSnapshot(projectPath, journalStore.getAllNodes(), journalStore.getRunIndexEntries(), options);
+    growthStore.writeGrowthSnapshot(snapshot);
+    const history = growthStore.getGrowthSnapshotHistory(options.historyLimit || 12)
+      .map((item) => growthStore.getGrowthSnapshotById(item.id))
       .filter(Boolean) as GrowthSnapshotData[];
     const view = buildProjectGrowthViewModel(snapshot, { previous, history });
     projectGrowthViewCache.set(projectPath, view);
     return view;
   } finally {
-    store.close();
+    journalStore.close();
+    growthStore.close();
   }
 }
 
@@ -1638,15 +1642,26 @@ export async function getProjectGrowthView(
   if (!options.forceRefresh && projectGrowthViewCache.has(projectPath)) {
     return projectGrowthViewCache.get(projectPath)!;
   }
-  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-  const store = new SqliteStore(dbPath, extensionPath);
+  const growthDbPath = path.join(projectPath, '.solopreneur', 'project_growth.db');
+  const journalDbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  fs.mkdirSync(path.dirname(growthDbPath), { recursive: true });
+  const store = new SqliteStore(growthDbPath, extensionPath);
+  let journalStore: SqliteStore | null = null;
   try {
     await store.init();
+    if (!store.getLatestGrowthSnapshot() && fs.existsSync(journalDbPath)) {
+      journalStore = new SqliteStore(journalDbPath, extensionPath);
+      await journalStore.init();
+      migrateLegacyGrowthHistory(journalStore, store);
+    }
     if (options.forceRefresh || (options.refreshIfMissing !== false && !store.getLatestGrowthSnapshot())) {
+      if (!journalStore) {
+        journalStore = new SqliteStore(journalDbPath, extensionPath);
+        await journalStore.init();
+      }
       const previousHistory = store.getGrowthSnapshotHistory(1);
       const previous = previousHistory[0] ? store.getGrowthSnapshotById(previousHistory[0].id) : null;
-      const snapshot = buildProjectGrowthSnapshot(projectPath, store.getAllNodes(), store.getRunIndexEntries(), {
+      const snapshot = buildProjectGrowthSnapshot(projectPath, journalStore.getAllNodes(), journalStore.getRunIndexEntries(), {
         ...options,
         scanReason: options.scanReason || 'query_refresh'
       });
@@ -1674,7 +1689,17 @@ export async function getProjectGrowthView(
     projectGrowthViewCache.set(projectPath, view);
     return view;
   } finally {
+    journalStore?.close();
     store.close();
+  }
+}
+
+function migrateLegacyGrowthHistory(legacyStore: SqliteStore, growthStore: SqliteStore): void {
+  if (growthStore.getLatestGrowthSnapshot()) return;
+  const legacyRows = legacyStore.getGrowthSnapshotHistory(50).reverse();
+  for (const row of legacyRows) {
+    const snapshot = legacyStore.getGrowthSnapshotById(row.id);
+    if (snapshot) growthStore.writeGrowthSnapshot(snapshot);
   }
 }
 
@@ -1682,4 +1707,9 @@ const projectGrowthViewCache = new Map<string, ProjectGrowthViewModel>();
 
 export function getCachedProjectGrowthView(projectPath: string): ProjectGrowthViewModel | null {
   return projectGrowthViewCache.get(projectPath) || null;
+}
+
+export function clearProjectGrowthViewCache(projectPath = ''): void {
+  if (projectPath) projectGrowthViewCache.delete(projectPath);
+  else projectGrowthViewCache.clear();
 }

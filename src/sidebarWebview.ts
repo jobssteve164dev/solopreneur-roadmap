@@ -3899,7 +3899,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       zh: {
         title: 'SoloMap',
         portfolioTitle: '项目总览',
-        openStrategyPyramid: '打开战略金字塔视图',
+        openStrategyPyramid: '跨项目战略金字塔视图',
         globalFocusTitle: '今日安排',
         globalFocusEmpty: '今天还没有明确安排，先添加或选择一个项目。',
         todaySlotUrgent: '先处理',
@@ -4097,7 +4097,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterActive: '进行中',
         filterFailed: '有失败',
         filterCompleted: '已完成',
-        projectOpen: '路线大图',
+        projectOpen: '项目路线图',
         projectGrowth: '项目生长图',
         issueOpenGithub: '打开 Issue',
         pullRequestOpenGithub: '打开 PR',

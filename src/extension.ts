@@ -187,6 +187,7 @@ let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPath = '';
 let projectGrowthLoadSequence = 0;
+let selectedProjectPathInMemory = '';
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
@@ -668,12 +669,14 @@ async function handleSharedWebviewAction(
     }),
     'project.togglePinned': async (request) => toggleProjectPinned(context, String(request.projectPath || '')),
     'project.openRoadmap': async (request) => {
-      await selectProject(context, String(request.projectPath || ''));
-      await vscode.commands.executeCommand('solopreneur.showRoadmap');
+      const projectPath = String(request.projectPath || '');
+      void openRoadmapPanel(context, 'roadmap', projectPath);
+      setTimeout(() => void selectProject(context, projectPath), 0);
     },
     'project.openGrowth': async (request) => {
-      await selectProject(context, String(request.projectPath || ''));
-      await vscode.commands.executeCommand('solopreneur.showProjectGrowth', String(request.projectPath || ''));
+      const projectPath = String(request.projectPath || '');
+      void openProjectGrowthPanel(context, projectPath);
+      setTimeout(() => void selectProject(context, projectPath), 0);
     },
     'project.continue': async (request) => {
       const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
@@ -1380,7 +1383,7 @@ function getProjects(context: vscode.ExtensionContext): SolopreneurProject[] {
 function getSelectedProjectPath(context: vscode.ExtensionContext): string {
   return getSelectedProjectPathFromRegistry(
     getProjects(context),
-    context.globalState.get<string>(selectedProjectKey) || ''
+    selectedProjectPathInMemory || context.globalState.get<string>(selectedProjectKey) || ''
   );
 }
 
@@ -1388,7 +1391,7 @@ function getProjectState(context: vscode.ExtensionContext): { projects: Solopren
   const projects = getProjects(context);
   return {
     projects,
-    selectedProjectPath: getSelectedProjectPathFromRegistry(projects, context.globalState.get<string>(selectedProjectKey) || '')
+    selectedProjectPath: getSelectedProjectPathFromRegistry(projects, selectedProjectPathInMemory || context.globalState.get<string>(selectedProjectKey) || '')
   };
 }
 function getLocalUsageStatsOptions(context: vscode.ExtensionContext) {
@@ -1430,7 +1433,8 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     return;
   }
 
-  await context.globalState.update(selectedProjectKey, projectPath);
+  selectedProjectPathInMemory = projectPath;
+  const persistSelection = context.globalState.update(selectedProjectKey, projectPath);
   syncEngine = null;
   activeProjectRoot = null;
   syncEngineReady = false;
@@ -1477,6 +1481,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
       void postFlowStateToWebview(context);
     }
   });
+  await persistSelection;
 }
 
 function scheduleProjectRunIndexBackfill(context: vscode.ExtensionContext, projectPath: string): void {
@@ -1552,6 +1557,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会把这些会话 ID 作为可选参考交给 Agent，而不是强制续接。',
     '- `documentation.json`：项目解释性文档的索引与审计状态。它由 SoloMap 维护，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
+    '- `project_growth.db`：项目生长快照与生长分析轨迹的独立本地数据库，避免路线图同步覆盖历史。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
     '- `run-digests/`：每次 Agent 调用结束后的结构化执行摘要和跨 Agent 交接信号。下一轮相关任务会读取少量摘要来减少重复探索。',
     '- `execution-graph.json`：由 run digest 自动生成的轻量索引，按环节、Agent、文件、状态、失败和命令组织最近执行信号。',
@@ -2269,7 +2275,11 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   return syncEngineInitPromise;
 }
 
-async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: 'roadmap' | 'solo' | 'flow' = 'roadmap') {
+async function openRoadmapPanel(
+  context: vscode.ExtensionContext,
+  initialView: 'roadmap' | 'solo' | 'flow' = 'roadmap',
+  requestedProjectPath = ''
+) {
   const effectiveInitialView = initialView;
   // If panel already exists, reveal it
   if (activePanel) {
@@ -2280,7 +2290,7 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
     return;
   }
 
-  const projectRoot = getSelectedProjectPath(context);
+  const projectRoot = requestedProjectPath || getSelectedProjectPath(context);
   if (!projectRoot) {
     vscode.window.showErrorMessage('Choose a project folder before launching the Roadmap.');
     return;

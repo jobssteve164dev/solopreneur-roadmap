@@ -1286,7 +1286,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="flow"/);
-  assert.match(elements['portfolio-list'].innerHTML, /路线大图|Open roadmap/);
+  assert.match(elements['portfolio-list'].innerHTML, /项目路线图|Open roadmap/);
 });
 
 test('sidebar resolve survives persisted state and startup data failures', async () => {
@@ -2771,8 +2771,16 @@ test('selected project changes refresh an already open project growth panel', ()
 
 test('sidebar roadmap action uses the concise roadmap label', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
-  assert.match(sidebarSource, /projectOpen: '路线大图'/);
+  assert.match(sidebarSource, /projectOpen: '项目路线图'/);
   assert.doesNotMatch(sidebarSource, /projectOpen: '打开路线大图'/);
+  assert.match(sidebarSource, /openStrategyPyramid: '跨项目战略金字塔视图'/);
+});
+
+test('project panels open before project selection persistence completes', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  assert.match(extensionSource, /'project\.openRoadmap': async[\s\S]*?void openRoadmapPanel\(context, 'roadmap', projectPath\);[\s\S]*?setTimeout\(\(\) => void selectProject\(context, projectPath\), 0\)/);
+  assert.match(extensionSource, /'project\.openGrowth': async[\s\S]*?void openProjectGrowthPanel\(context, projectPath\);[\s\S]*?setTimeout\(\(\) => void selectProject\(context, projectPath\), 0\)/);
+  assert.match(extensionSource, /selectedProjectPathInMemory = projectPath;[\s\S]*?const persistSelection = context\.globalState\.update/);
 });
 
 test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {
