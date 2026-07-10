@@ -3,6 +3,12 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as childProcess from 'child_process';
+import {
+  startTelegramRemoteService,
+  stopTelegramRemoteService,
+  restartTelegramRemoteService,
+  sendTelegramNotification
+} from './telegramRemote';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { SqliteStore } from './db/sqliteStore';
@@ -345,9 +351,95 @@ export async function activate(context: vscode.ExtensionContext) {
       if (activeStrategyPyramidPanel) {
         activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
       }
+      restartTelegramRemoteService(context);
     }
   );
   context.subscriptions.push(settingsSavedDisposable);
+
+  // Register Telegram remote control internal commands
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalGetStatus', () => {
+    const activeProject = activeProjectRoot || '';
+    if (!activeProject) {
+      return { activeProject: false };
+    }
+    const nodes = syncEngine ? syncEngine.getNodes() : [];
+    const activeStepNode = nodes.find(n => n.status === 'Running' || n.status === 'In Progress') || nodes.find(n => n.status === 'Failed') || null;
+    
+    const totalSteps = nodes.length;
+    const completedSteps = nodes.filter(n => n.status === 'Completed').length;
+    const progressPercent = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
+    
+    const project = getProjects(context).find((p: any) => p.path === activeProject);
+    
+    // Get recent 3 executions
+    const allExecutions = syncEngine && activeStepNode ? syncEngine.getAgentExecutions(activeStepNode.id) : [];
+    const recentExecutions = allExecutions
+      .slice(-3)
+      .map(log => ({
+        nodeId: log.nodeId,
+        status: log.status,
+        agentCli: log.agentCli,
+        finishedAt: log.finishedAt,
+        completionReason: log.completionReason,
+        failureReason: log.failureReason
+      }));
+
+    return {
+      activeProject: true,
+      name: project ? project.name : path.basename(activeProject),
+      path: activeProject,
+      progressPercent,
+      currentStep: activeStepNode ? activeStepNode.title : '无',
+      currentStepStatus: activeStepNode ? activeStepNode.status : 'Pending',
+      activeNodeId: activeStepNode ? activeStepNode.id : null,
+      recentExecutions
+    };
+  }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRunAgent', async (nodeId: string) => {
+    await handleRunAgent(context, nodeId, '');
+  }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalStopAgent', () => {
+    let stopped = false;
+    for (const t of vscode.window.terminals) {
+      if (t.name.startsWith('step-') || t.name.startsWith('solo-')) {
+        t.dispose();
+        stopped = true;
+      }
+    }
+    return stopped;
+  }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalApproveNode', async (nodeId: string) => {
+    if (syncEngine) {
+      syncEngine.updateNode(nodeId, { status: 'Completed', completedAt: new Date().toISOString() });
+      sendNodesToWebview();
+      refreshSidebarProjectCards();
+      postNodeConversations(nodeId);
+      return true;
+    }
+    return false;
+  }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalDenyNode', async (nodeId: string) => {
+    if (syncEngine) {
+      syncEngine.updateNode(nodeId, { status: 'Failed' });
+      sendNodesToWebview();
+      refreshSidebarProjectCards();
+      postNodeConversations(nodeId);
+      for (const t of vscode.window.terminals) {
+        if (t.name.startsWith(`step-${nodeId}-`) || t.name.startsWith(`step-${nodeId}`)) {
+          t.dispose();
+        }
+      }
+      return true;
+    }
+    return false;
+  }));
+
+  // Start Telegram remote service
+  startTelegramRemoteService(context);
 
   // Setup wrapper for SyncEngine to allow safe initialization later
   const syncEngineWrapper = {
@@ -811,7 +903,10 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
       ...readLocalProEntitlements()
     },
     proAccount: normalizeProAccountStatus(saved.proAccount),
-    enabledEnhancements: {}
+    enabledEnhancements: {},
+    telegramEnabled: saved.telegramEnabled ?? config.get('telegramEnabled') ?? false,
+    telegramBotToken: saved.telegramBotToken ?? config.get('telegramBotToken') ?? '',
+    telegramChatId: saved.telegramChatId ?? config.get('telegramChatId') ?? ''
   };
   return {
     ...baseSettings,
@@ -831,7 +926,7 @@ function getRoadmapPanelTitle(context: vscode.ExtensionContext): string {
 }
 
 function getStrategyPyramidPanelTitle(context: vscode.ExtensionContext): string {
-  return isSoloMapLanguageZh(context) ? 'SoloMap：战略金字塔' : 'SoloMap: Strategy Pyramid';
+  return isSoloMapLanguageZh(context) ? 'solomap 战略金字塔' : 'solomap Strategy Pyramid';
 }
 
 function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
@@ -851,7 +946,7 @@ function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
 } {
   if (isSoloMapLanguageZh(context)) {
     return {
-      panelTitle: 'SoloMap: 项目生长图',
+      panelTitle: 'solomap 项目生长图',
       openingTitle: '正在打开项目生长图',
       openingMessage: '先打开视图，再读取本地项目代码生长数据。',
       refreshingTitle: '正在刷新项目生长图',
@@ -867,7 +962,7 @@ function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
     };
   }
   return {
-    panelTitle: 'SoloMap: Project Growth Graph',
+    panelTitle: 'solomap Project Growth Graph',
     openingTitle: 'Opening Project Growth Graph',
     openingMessage: 'Opening the view, then reading local project growth data.',
     refreshingTitle: 'Refreshing Project Growth Graph',
@@ -1330,7 +1425,10 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
       : normalizeAutomationSettings(currentSettings.automationTasks),
     proEntitlements: currentSettings.proEntitlements || {},
     proAccount: currentSettings.proAccount,
-    enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), nextGlobalDataPath)
+    enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), nextGlobalDataPath),
+    telegramEnabled: hasSetting('telegramEnabled') ? !!settings.telegramEnabled : !!currentSettings.telegramEnabled,
+    telegramBotToken: hasSetting('telegramBotToken') ? String(settings.telegramBotToken ?? '').trim() : String(currentSettings.telegramBotToken ?? '').trim(),
+    telegramChatId: hasSetting('telegramChatId') ? String(settings.telegramChatId ?? '').trim() : String(currentSettings.telegramChatId ?? '').trim()
   };
   await context.globalState.update(settingsKey, nextSettings);
 
@@ -1342,6 +1440,9 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('reviewerCliPath', nextSettings.reviewerCliPath, vscode.ConfigurationTarget.Global);
   await config.update('collaborationReviewMode', nextSettings.collaborationReviewMode, vscode.ConfigurationTarget.Global);
   await config.update('automationTasks', nextSettings.automationTasks, vscode.ConfigurationTarget.Global);
+  await config.update('telegramEnabled', nextSettings.telegramEnabled, vscode.ConfigurationTarget.Global);
+  await config.update('telegramBotToken', nextSettings.telegramBotToken, vscode.ConfigurationTarget.Global);
+  await config.update('telegramChatId', nextSettings.telegramChatId, vscode.ConfigurationTarget.Global);
   scheduleFocusReminder(context);
   scheduleTimedAutomationTask(context);
 }
@@ -7419,6 +7520,28 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     sendNodesToWebview();
     refreshSidebarProjectCards();
     postNodeConversations(nodeId);
+
+    // Send Telegram Notification
+    if (extensionContextRef && !isContinuationRun) {
+      const pName = projectName(workspaceRoot) || path.basename(workspaceRoot) || 'Project';
+      const nodeTitle = currentNode ? currentNode.title : `环节 ${nodeId}`;
+      let notifyText = '';
+      if (nextStatus === 'Completed') {
+        notifyText = `✅ <b>[${pName}] 环节 "${nodeTitle}" 执行完成！</b>\n决策原因: ${completionReason || '自动判定完成'}`;
+        const filesCount = parseFileSummaryLines(changedFilesSummary).length;
+        if (filesCount > 0) {
+          notifyText += `\n修改了 ${filesCount} 个文件。`;
+        }
+      } else if (nextStatus === 'Failed') {
+        notifyText = `❌ <b>[${pName}] 环节 "${nodeTitle}" 执行失败！</b>\n原因: ${failureReason || '未捕获的具体错误'}`;
+      } else if (nextStatus === 'In Progress') {
+        notifyText = `⚠️ <b>[${pName}] 环节 "${nodeTitle}" 处于推进中。</b>\n详情: ${completionReason || '等待下一步操作。'}`;
+        notifyText += `\n系统已进入人在回路状态，可回复 <code>/approve</code> 批准完成，或回复 <code>/deny</code> 拒绝并终止。`;
+      }
+      if (notifyText) {
+        void sendTelegramNotification(extensionContextRef, notifyText);
+      }
+    }
     if (extensionContextRef) {
       scheduleAutomationTasksAfterRun(extensionContextRef, {
         workspaceRoot,

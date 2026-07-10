@@ -31,6 +31,9 @@ export interface SolopreneurSettings {
   enhancementStatuses?: SolomapEnhancementStatus[];
   skills?: any[];
   connectors?: any[];
+  telegramEnabled?: boolean;
+  telegramBotToken?: string;
+  telegramChatId?: string;
 }
 
 export type AgentModelLoader = (agentCli: string) => Promise<AgentModelCatalog>;

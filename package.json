@@ -162,6 +162,21 @@
             }
           },
           "description": "Optional SoloMap automation tasks. Actions are disabled by default and run after task state updates without blocking the main task."
+        },
+        "solopreneur.telegramEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Telegram remote control and status notifications. / 启用 Telegram 远程控制与状态通知。"
+        },
+        "solopreneur.telegramBotToken": {
+          "type": "string",
+          "default": "",
+          "description": "Telegram Bot Token from @BotFather. / 从 @BotFather 获得的 Telegram Bot Token。"
+        },
+        "solopreneur.telegramChatId": {
+          "type": "string",
+          "default": "",
+          "description": "Your Telegram Chat ID for receiving alerts and authorization requests. / 用于接收警告与授权请求的 Telegram Chat ID。"
         }
       }
     }
