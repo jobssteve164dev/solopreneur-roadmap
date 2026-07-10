@@ -191,6 +191,7 @@ interface FileFact {
   generated: boolean;
   excluded: boolean;
   isTest: boolean;
+  testItemCount: number;
   role: string;
 }
 
@@ -276,6 +277,21 @@ function countLines(filePath: string, maxBytes = 512 * 1024): number {
     }
     const content = fs.readFileSync(filePath, 'utf8');
     return content ? content.split(/\r?\n/).length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function countTestItems(filePath: string, maxBytes = 512 * 1024): number {
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size > maxBytes || !/\.[cm]?[jt]sx?$/i.test(filePath)) {
+      return 0;
+    }
+    const content = fs.readFileSync(filePath, 'utf8');
+    const directTests = content.match(/(?:^|[^\w$.])(?:test|it)\s*\(/gm) || [];
+    const qualifiedTests = content.match(/(?:^|[^\w$.])(?:test|it)\.(?:only|skip|todo)\s*\(/gm) || [];
+    return directTests.length + qualifiedTests.length;
   } catch {
     return 0;
   }
@@ -404,6 +420,7 @@ function walkProjectFiles(projectPath: string, maxFiles: number): FileFact[] {
       }
       const excluded = isGeneratedOrExcluded(relative);
       const isTest = /(^|\/)(test|tests)\//.test(relative) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(relative);
+      const testItemCount = isTest && !excluded ? countTestItems(absolute) : 0;
       result.push({
         relativePath: relative,
         absolutePath: absolute,
@@ -414,6 +431,7 @@ function walkProjectFiles(projectPath: string, maxFiles: number): FileFact[] {
         generated: excluded,
         excluded,
         isTest,
+        testItemCount,
         role: roleForPath(relative)
       });
     }
@@ -500,7 +518,7 @@ function addFileNodes(
       bytes: file.bytes,
       loc: file.loc,
       fileCount: file.excluded ? 0 : 1,
-      testFileCount: file.isTest && !file.excluded ? 1 : 0,
+      testFileCount: file.isTest && !file.excluded ? Math.max(1, file.testItemCount) : 0,
       generated: file.generated,
       excluded: file.excluded,
       primaryRole: file.role,
@@ -753,7 +771,7 @@ function addModuleAndCapabilityNodes(
     module.loc += file.loc;
     module.bytes += file.bytes;
     module.fileCount += 1;
-    module.testFileCount += file.isTest ? 1 : 0;
+    module.testFileCount += file.isTest ? Math.max(1, file.testItemCount) : 0;
     fileToModule.set(file.relativePath, module.id);
     const runs = byFile.get(file.relativePath) || [];
     for (const run of runs) {
@@ -1155,7 +1173,7 @@ function buildCapabilityHealth(
     });
     const moduleNames = displayModules.map((module) => module.label);
     const summary = displayModules.length > 0
-      ? `关联 ${displayModules.length} 个主要生长区域、${files} 个文件${tests > 0 ? `，已有 ${tests} 个测试文件` : '，还缺少测试证据'}。`
+      ? `关联 ${displayModules.length} 个主要生长区域、${files} 个文件${tests > 0 ? `，已有 ${tests} 个测试项` : '，还缺少测试证据'}。`
       : '当前还没有识别到明确的代码或交付证据。';
     let action = 'keep_observing';
     if (status === 'unshaped' || status === 'not_observed') action = 'link_or_revise';
@@ -1209,9 +1227,13 @@ function buildProjectOrientation(capabilities: ProjectGrowthCapabilityHealth[], 
     summary.status = summary.completed === summary.total ? 'completed' : summary.active > 0 ? 'active' : 'pending';
     return summary;
   });
-  const purposeSource = capabilities[0];
+  const capabilityPurpose = capabilities
+    .map((item) => item.label.trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .join('、');
   return {
-    purpose: purpose || purposeSource?.description || purposeSource?.label || '',
+    purpose: purpose || (capabilityPurpose ? `项目围绕${capabilityPurpose}等核心能力持续建设。` : ''),
     currentStage: activeCapability?.stage || '',
     currentStep: activeCapability?.label || '',
     currentStepStatus: activeCapability?.roadmapStatus || '',
@@ -1225,10 +1247,22 @@ function readProjectPurpose(projectPath: string): string {
   const packagePath = path.join(projectPath, 'package.json');
   try {
     const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
-    return String(packageJson.description || '').trim();
-  } catch {
-    return '';
+    const description = String(packageJson.description || '').trim();
+    if (description) return description;
+  } catch {}
+  for (const filename of ['README.md', 'README.zh.md', 'docs/README.zh.md']) {
+    try {
+      const content = fs.readFileSync(path.join(projectPath, filename), 'utf8')
+        .replace(/<!--[^]*?-->/g, '')
+        .replace(/^---\s*$[^]*?^---\s*$/m, '')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !/^#|^!\[|^\[!\[|^<|^```|^[-*]\s/.test(line));
+      const paragraph = content.find((line) => line.length >= 24 && !/下一步|已识别|模块/.test(line));
+      if (paragraph) return paragraph.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+    } catch {}
   }
+  return '';
 }
 
 function buildFocusAreas(
@@ -1301,7 +1335,7 @@ function buildRecommendedActions(
     if (module.tests === 0 && module.loc >= 1200) {
       actions.push({
         title: `${module.label} 缺少验证证据`,
-        detail: `${module.files} 个文件、${module.loc.toLocaleString()} 行代码，但没有识别到测试文件。`,
+        detail: `${module.files} 个文件、${module.loc.toLocaleString()} 行代码，但没有识别到测试项。`,
         target: module.label,
         level: 'needs_verification',
         source: 'growth_rules'
@@ -1588,7 +1622,9 @@ export async function refreshProjectGrowthSnapshot(
     const history = store.getGrowthSnapshotHistory(options.historyLimit || 12)
       .map((item) => store.getGrowthSnapshotById(item.id))
       .filter(Boolean) as GrowthSnapshotData[];
-    return buildProjectGrowthViewModel(snapshot, { previous, history });
+    const view = buildProjectGrowthViewModel(snapshot, { previous, history });
+    projectGrowthViewCache.set(projectPath, view);
+    return view;
   } finally {
     store.close();
   }
@@ -1599,6 +1635,9 @@ export async function getProjectGrowthView(
   extensionPath: string,
   options: ProjectGrowthScanOptions = {}
 ): Promise<ProjectGrowthViewModel> {
+  if (!options.forceRefresh && projectGrowthViewCache.has(projectPath)) {
+    return projectGrowthViewCache.get(projectPath)!;
+  }
   const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const store = new SqliteStore(dbPath, extensionPath);
@@ -1615,11 +1654,15 @@ export async function getProjectGrowthView(
       const history = store.getGrowthSnapshotHistory(options.historyLimit || 12)
         .map((item) => store.getGrowthSnapshotById(item.id))
         .filter(Boolean) as GrowthSnapshotData[];
-      return buildProjectGrowthViewModel(snapshot, { previous, history });
+      const view = buildProjectGrowthViewModel(snapshot, { previous, history });
+      projectGrowthViewCache.set(projectPath, view);
+      return view;
     }
     const latest = store.getLatestGrowthSnapshot();
     if (!latest) {
-      return emptyProjectGrowthViewModel();
+      const view = emptyProjectGrowthViewModel();
+      projectGrowthViewCache.set(projectPath, view);
+      return view;
     }
     const historyRows = store.getGrowthSnapshotHistory(options.historyLimit || 12);
     const previousRow = historyRows.find((item) => item.id !== latest.snapshot.id);
@@ -1627,8 +1670,16 @@ export async function getProjectGrowthView(
     const history = historyRows
       .map((item) => store.getGrowthSnapshotById(item.id))
       .filter(Boolean) as GrowthSnapshotData[];
-    return buildProjectGrowthViewModel(latest, { previous, history });
+    const view = buildProjectGrowthViewModel(latest, { previous, history });
+    projectGrowthViewCache.set(projectPath, view);
+    return view;
   } finally {
     store.close();
   }
+}
+
+const projectGrowthViewCache = new Map<string, ProjectGrowthViewModel>();
+
+export function getCachedProjectGrowthView(projectPath: string): ProjectGrowthViewModel | null {
+  return projectGrowthViewCache.get(projectPath) || null;
 }

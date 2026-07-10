@@ -1286,7 +1286,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="continue"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="flow"/);
-  assert.match(elements['portfolio-list'].innerHTML, /打开路线大图|Open roadmap/);
+  assert.match(elements['portfolio-list'].innerHTML, /路线大图|Open roadmap/);
 });
 
 test('sidebar resolve survives persisted state and startup data failures', async () => {
@@ -2764,7 +2764,15 @@ test('selected project changes refresh an already open project growth panel', ()
   assert.match(extensionSource, /async function selectProject[\s\S]*?if \(activeProjectGrowthPanel\) \{[\s\S]*?activeProjectGrowthPath = projectPath;[\s\S]*?refreshProjectGrowthPanel\(context, projectPath\)/);
   assert.match(extensionSource, /async function openProjectGrowthPanel[\s\S]*?activeProjectGrowthPath = projectPath;/);
   assert.match(extensionSource, /const projectPathToRefresh = activeProjectGrowthPath \|\| getSelectedProjectPath\(context\) \|\| projectPath;/);
+  assert.match(extensionSource, /getCachedProjectGrowthView\(projectPath\)/);
+  assert.match(extensionSource, /activeProjectGrowthPath !== projectPath \|\| loadSequence !== projectGrowthLoadSequence/);
   assert.match(extensionSource, /activeProjectGrowthPath = '';/);
+});
+
+test('sidebar roadmap action uses the concise roadmap label', () => {
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  assert.match(sidebarSource, /projectOpen: '路线大图'/);
+  assert.doesNotMatch(sidebarSource, /projectOpen: '打开路线大图'/);
 });
 
 test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {

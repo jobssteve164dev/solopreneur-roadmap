@@ -46,9 +46,10 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   ].join('\n'));
   writeFile(path.join(tempRoot, 'test', 'store.test.js'), [
     "const assert = require('node:assert/strict');",
+    "const test = require('node:test');",
     "const { loadProject } = require('../src/db/store');",
-    "assert.equal(loadProject().ok, true);",
-    "assert.equal(1, 1);"
+    "test('loads the project', () => assert.equal(loadProject().ok, true));",
+    "test('keeps the test harness healthy', () => assert.equal(1, 1));"
   ].join('\n'));
   writeFile(path.join(tempRoot, 'docs', 'methodology.md'), '# Methodology\n');
 
@@ -109,6 +110,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.ok(view.focusAreas.some((area) => area.label === '数据层'));
   assert.ok(view.recommendedActions.length > 0);
   assert.ok(view.modules.some((module) => module.nodeId === 'module:data-layer'));
+  assert.equal(view.modules.find((module) => module.nodeId === 'module:verification').tests, 2);
   assert.ok(view.capabilities.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.capabilityHealth.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));

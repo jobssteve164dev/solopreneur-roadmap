@@ -4097,7 +4097,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterActive: '进行中',
         filterFailed: '有失败',
         filterCompleted: '已完成',
-        projectOpen: '打开路线大图',
+        projectOpen: '路线大图',
         projectGrowth: '项目生长图',
         issueOpenGithub: '打开 Issue',
         pullRequestOpenGithub: '打开 PR',
