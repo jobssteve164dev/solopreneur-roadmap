@@ -25,7 +25,7 @@ function escapeHtml(value: string | number): string {
 
 const locales = {
   zh: {
-    title: "项目代码生长图",
+    title: "项目生长图",
     subTitle: "分析模块与文件的生长状态、诊断验证空缺并追踪演进历史。",
     refreshBtn: "刷新生长数据",
     snapshotTitle: "项目生长图分析快照",
@@ -50,10 +50,14 @@ const locales = {
     snapshotHistory: "生长分析历史轨迹",
     currentProject: "当前项目",
     projectPath: "项目路径",
-    understandingTitle: "项目现在长成什么样",
-    priorityActions: "优先处理",
-    capabilityMap: "路线图能力落地",
-    growthFocus: "近期生长重点",
+    understandingTitle: "项目概览",
+    projectPurpose: "这个项目要解决什么",
+    roadmapProgress: "路线进度",
+    currentWork: "当前推进",
+    journeyTitle: "项目阶段全貌",
+    priorityActions: "接下来最值得做",
+    capabilityMap: "项目能力全貌",
+    growthFocus: "代码生长落点",
     detailData: "详细数据",
     noActions: "暂未发现必须立即处理的生长缺口。",
     noCapabilities: "当前路线图能力还没有明确代码落地信号。",
@@ -61,6 +65,9 @@ const locales = {
     actionLabel: "建议",
     evidenceLabel: "证据",
     sourceLabel: "来源",
+    roadmapState: "路线状态",
+    landingState: "落地状态",
+    stepsCompleted: "个环节已完成",
     emptyModules: "当前项目未检测到模块。",
     emptyGaps: "所有健康度与分析规则均已满足。无架构与验证盲区！",
     emptyCaps: "没有关联路线图节点的特性。",
@@ -108,7 +115,9 @@ const locales = {
       run_index: "运行索引",
       growth_rules: "生长规则",
       import_graph: "依赖关系",
-      git: "Git 变更"
+      git: "Git 变更",
+      roadmap: "路线图",
+      filesystem: "项目文件"
     },
     edgeLabels: {
       imports: "调用",
@@ -135,6 +144,7 @@ const locales = {
       rework: "反复返工",
       risk: "风险集中",
       unshaped: "未长成",
+      not_observed: "未识别到落地证据",
       stable: "稳定"
     },
     growthActionLabels: {
@@ -144,6 +154,13 @@ const locales = {
       continue_with_evidence: "继续推进并补证据",
       link_or_revise: "补齐代码落地或调整路线图归属",
       release_or_learn: "可进入发布、反馈或沉淀"
+    },
+    roadmapStatusLabels: {
+      Completed: "已完成",
+      Running: "执行中",
+      Failed: "需修正",
+      "In Progress": "推进中",
+      Pending: "待推进"
     }
   },
   en: {
@@ -172,10 +189,14 @@ const locales = {
     snapshotHistory: "Snapshot History",
     currentProject: "Current Project",
     projectPath: "Project Path",
-    understandingTitle: "What This Project Has Become",
-    priorityActions: "Priority Actions",
-    capabilityMap: "Roadmap Capability Landing",
-    growthFocus: "Recent Growth Focus",
+    understandingTitle: "Project Overview",
+    projectPurpose: "What this project is for",
+    roadmapProgress: "Roadmap progress",
+    currentWork: "Current work",
+    journeyTitle: "Project stages",
+    priorityActions: "Most Useful Next Moves",
+    capabilityMap: "Project Capability Map",
+    growthFocus: "Code Growth Footprint",
     detailData: "Detailed Data",
     noActions: "No urgent growth gaps detected.",
     noCapabilities: "No roadmap capability has a clear code landing signal yet.",
@@ -183,6 +204,9 @@ const locales = {
     actionLabel: "Action",
     evidenceLabel: "Evidence",
     sourceLabel: "Source",
+    roadmapState: "Roadmap",
+    landingState: "Evidence",
+    stepsCompleted: "steps completed",
     emptyModules: "No modules detected in this project.",
     emptyGaps: "All growth and health rules are satisfied. No architectural gaps found!",
     emptyCaps: "No capabilities linked to the roadmap.",
@@ -230,7 +254,9 @@ const locales = {
       run_index: "Run Index",
       growth_rules: "Growth Rules",
       import_graph: "Import Graph",
-      git: "Git"
+      git: "Git",
+      roadmap: "Roadmap",
+      filesystem: "Project Files"
     },
     edgeLabels: {
       imports: "Imports",
@@ -257,6 +283,7 @@ const locales = {
       rework: "Rework Loop",
       risk: "Concentrated Risk",
       unshaped: "Not Shaped",
+      not_observed: "No landing evidence found",
       stable: "Stable"
     },
     growthActionLabels: {
@@ -266,6 +293,13 @@ const locales = {
       continue_with_evidence: "Continue with evidence",
       link_or_revise: "Land code or revise roadmap ownership",
       release_or_learn: "Ready for release, feedback, or learning"
+    },
+    roadmapStatusLabels: {
+      Completed: "Completed",
+      Running: "Running",
+      Failed: "Needs correction",
+      "In Progress": "In progress",
+      Pending: "Pending"
     }
   }
 };
@@ -282,6 +316,7 @@ function statusClass(value: string): string {
   if (value === 'risk') return 'attention';
   if (value === 'rework') return 'blocked';
   if (value === 'unshaped') return 'muted';
+  if (value === 'not_observed') return 'muted';
   return 'stable';
 }
 
@@ -326,9 +361,34 @@ export function getProjectGrowthWebviewHtml(
   const insightEvidenceLabel = isZh
     ? viewModel.insight.evidenceLabel
     : (totalSignals > 0 ? `${totalSignals} growth signals` : 'No growth signals yet');
+  const orientation = viewModel.orientation || {
+    purpose: '', currentStage: '', currentStep: '', currentStepStatus: '', completedSteps: 0, totalSteps: 0, stages: []
+  };
+  const progressPercent = orientation.totalSteps > 0
+    ? Math.round((orientation.completedSteps / orientation.totalSteps) * 100)
+    : 0;
+  const rawProjectPurpose = orientation.purpose || insightBody;
+  const bilingualPurpose = rawProjectPurpose.split(/\s+\/\s+/);
+  const projectPurpose = bilingualPurpose.length === 2
+    ? (isZh ? bilingualPurpose[1] : bilingualPurpose[0])
+    : rawProjectPurpose;
+  const currentStepLabel = orientation.currentStep || (isZh ? '暂无待推进环节' : 'No active roadmap step');
+  const currentStageLabel = orientation.currentStage || '-';
+  const currentRoadmapStatus = formatMappedLabel(t.roadmapStatusLabels, orientation.currentStepStatus || 'Pending');
+  const journeyHtml = orientation.stages.length > 0
+    ? orientation.stages.map((stage) => `
+        <div class="journey-stage ${escapeHtml(stage.status)}">
+          <div class="journey-marker"><span class="codicon ${stage.status === 'completed' ? 'codicon-check' : stage.status === 'active' ? 'codicon-play' : 'codicon-circle-outline'}"></span></div>
+          <div class="journey-copy">
+            <strong>${escapeHtml(stage.label)}</strong>
+            <span>${stage.completed}/${stage.total} ${escapeHtml(isZh ? '已完成' : 'completed')}</span>
+          </div>
+        </div>
+      `).join('')
+    : `<div class="empty-state">${escapeHtml(t.noCapabilities)}</div>`;
 
   const actionCardsHtml = viewModel.recommendedActions && viewModel.recommendedActions.length > 0
-    ? viewModel.recommendedActions.map((action) => {
+    ? viewModel.recommendedActions.slice(0, 3).map((action) => {
       const statusLabel = formatMappedLabel(t.growthStatusLabels, action.level);
       const sourceLabel = formatMappedLabel(t.sourceLabels, action.source);
       const actionTitle = isZh ? action.title : `${action.target}: ${statusLabel}`;
@@ -349,31 +409,21 @@ export function getProjectGrowthWebviewHtml(
 
   const capabilityHealthHtml = viewModel.capabilityHealth && viewModel.capabilityHealth.length > 0
     ? viewModel.capabilityHealth.map((capability) => {
-      const capabilitySummary = isZh
-        ? capability.summary
-        : (capability.modules.length > 0
-          ? `Linked to ${capability.modules.length} main growth area${capability.modules.length > 1 ? 's' : ''}.`
-          : 'No clear landing area has been identified in the current code and run index.');
-      const capabilityEvidence = isZh
-        ? capability.evidence.slice(0, 3)
-        : capability.modules.slice(0, 3).map((moduleName) => `${t.evidenceLabel}: ${moduleName}`);
       return `
         <div class="capability-health-card ${statusClass(capability.status)}">
           <div class="capability-health-head">
             <span class="capability-name">${escapeHtml(capability.label)}</span>
-            <span class="status-pill ${statusClass(capability.status)}">${escapeHtml(formatMappedLabel(t.growthStatusLabels, capability.status))}</span>
+            <span class="roadmap-state ${escapeHtml(capability.roadmapStatus.toLowerCase().replace(/\s+/g, '-'))}">${escapeHtml(t.roadmapState)} · ${escapeHtml(formatMappedLabel(t.roadmapStatusLabels, capability.roadmapStatus))}</span>
           </div>
-          <div class="capability-stage">${escapeHtml(t.stage)}: ${escapeHtml(capability.stage || '-')}</div>
-          <div class="capability-summary">${escapeHtml(capabilitySummary)}</div>
-          <div class="capability-action"><span>${escapeHtml(t.actionLabel)}</span>${escapeHtml(formatMappedLabel(t.growthActionLabels, capability.action))}</div>
+          <div class="capability-stage">${escapeHtml(capability.stage || '-')}</div>
+          ${capability.description ? `<div class="capability-description">${escapeHtml(capability.description)}</div>` : ''}
+          <div class="capability-state-line">
+            <span>${escapeHtml(t.landingState)}</span>
+            <strong class="${statusClass(capability.status)}">${escapeHtml(formatMappedLabel(t.growthStatusLabels, capability.status))}</strong>
+          </div>
           ${capability.modules && capability.modules.length > 0 ? `
             <div class="capability-modules">
               ${capability.modules.slice(0, 6).map((moduleName) => `<span>${escapeHtml(moduleName)}</span>`).join('')}
-            </div>
-          ` : ''}
-          ${capabilityEvidence && capabilityEvidence.length > 0 ? `
-            <div class="evidence-list">
-              ${capabilityEvidence.map((item) => `<div>${escapeHtml(item)}</div>`).join('')}
             </div>
           ` : ''}
         </div>
@@ -692,6 +742,122 @@ export function getProjectGrowthWebviewHtml(
       gap: 10px;
     }
 
+    .project-orientation,
+    .journey-panel {
+      border-bottom: 1px solid var(--border);
+      padding: 4px 0 20px;
+      margin-bottom: 20px;
+    }
+
+    .orientation-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(220px, 0.6fr) minmax(260px, 0.8fr);
+      gap: 24px;
+      align-items: center;
+    }
+
+    .project-purpose span,
+    .current-work span,
+    .progress-head span,
+    .progress-caption {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-style: normal;
+    }
+
+    .project-purpose h2 {
+      margin: 6px 0 0;
+      font-size: 20px;
+      line-height: 1.35;
+      font-weight: 650;
+    }
+
+    .progress-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .progress-track {
+      height: 7px;
+      overflow: hidden;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .progress-track span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: var(--success);
+    }
+
+    .progress-caption { margin-top: 6px; }
+
+    .current-work {
+      border-left: 2px solid var(--accent);
+      padding-left: 14px;
+    }
+
+    .current-work strong {
+      display: block;
+      margin: 4px 0;
+      font-size: 14px;
+    }
+
+    .current-work em {
+      color: var(--accent);
+      font-size: 11px;
+      font-style: normal;
+      font-weight: 700;
+    }
+
+    .journey-track {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 0;
+    }
+
+    .journey-stage {
+      position: relative;
+      display: flex;
+      gap: 9px;
+      padding: 4px 14px 4px 0;
+      min-width: 0;
+    }
+
+    .journey-stage:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      top: 12px;
+      left: 24px;
+      right: 4px;
+      height: 1px;
+      background: var(--border);
+      z-index: -1;
+    }
+
+    .journey-marker {
+      width: 24px;
+      height: 24px;
+      flex: 0 0 24px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      background: var(--bg);
+      color: var(--muted);
+    }
+
+    .journey-stage.completed .journey-marker { color: var(--success); border-color: rgba(0, 230, 118, 0.4); }
+    .journey-stage.active .journey-marker { color: var(--accent); border-color: rgba(0, 240, 255, 0.5); }
+
+    .journey-copy { min-width: 0; }
+    .journey-copy strong { display: block; font-size: 12px; line-height: 1.3; }
+    .journey-copy span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+
     .understanding-shell {
       display: grid;
       grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
@@ -909,8 +1075,53 @@ export function getProjectGrowthWebviewHtml(
 
     .capability-health-grid {
       display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
     }
+
+    .primary-understanding-grid {
+      grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.7fr);
+    }
+
+    .capability-description {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+      margin-top: 8px;
+    }
+
+    .capability-state-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .capability-state-line strong.formed,
+    .capability-state-line strong.stable { color: var(--success); }
+    .capability-state-line strong.growing { color: var(--accent); }
+    .capability-state-line strong.watch { color: var(--warn); }
+    .capability-state-line strong.attention,
+    .capability-state-line strong.blocked { color: var(--attention); }
+    .capability-state-line strong.muted { color: var(--muted); }
+
+    .roadmap-state {
+      flex-shrink: 0;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .roadmap-state.completed { color: var(--success); }
+    .roadmap-state.running,
+    .roadmap-state.in-progress { color: var(--accent); }
+    .roadmap-state.failed { color: var(--attention); }
+
+    .code-footprint-panel { margin-bottom: 20px; }
 
     .focus-area-row {
       display: grid;
@@ -1004,18 +1215,60 @@ export function getProjectGrowthWebviewHtml(
       gap: 24px;
     }
 
+    .left-col,
+    .right-col,
+    .panel {
+      min-width: 0;
+    }
+
     @media (max-width: 900px) {
       .dashboard-grid {
         grid-template-columns: 1fr;
       }
       .understanding-shell,
       .growth-v2-grid,
+      .orientation-grid,
       .focus-area-row {
         grid-template-columns: 1fr;
       }
+      .capability-health-grid { grid-template-columns: 1fr; }
       .focus-metrics {
         justify-content: flex-start;
+        min-width: 0;
       }
+    }
+
+    @media (max-width: 600px) {
+      .container { padding: 16px; }
+      header {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      header > div:first-child {
+        min-width: 0;
+        align-items: flex-start !important;
+      }
+      .brand-wordmark {
+        width: 96px;
+        height: auto;
+      }
+      .sub-heading {
+        overflow-wrap: anywhere;
+      }
+      .header-actions {
+        width: 100%;
+      }
+      button.btn-refresh {
+        width: 100%;
+        min-height: 44px;
+        justify-content: center;
+      }
+      .journey-track { grid-template-columns: 1fr; gap: 10px; }
+      .journey-stage:not(:last-child)::after { display: none; }
+      .timeline-stats,
+      .diff-stats { flex-wrap: wrap; }
+      .edge-node { max-width: 110px; }
     }
 
     .panel {
@@ -1376,6 +1629,8 @@ export function getProjectGrowthWebviewHtml(
       padding: 8px 12px;
       border-radius: 6px;
       font-size: 12px;
+      min-width: 0;
+      gap: 8px;
     }
 
     .edge-node {
@@ -1414,14 +1669,13 @@ export function getProjectGrowthWebviewHtml(
   </style>
 </head>
 <body>
-  <div class="neon-glow-container"></div>
   <div class="container">
     <header>
       <div style="display: flex; align-items: center; gap: 16px;">
         <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap"></h1>
             <div style="width: 1px; height: 20px; background: var(--border);"></div>
             <div>
-              <h2 style="margin: 0; font-size: 16px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent-purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; line-height: 1.2;">${escapeHtml(t.title)}: ${escapeHtml(projectName)}</h2>
+              <h2 style="margin: 0; font-size: 16px; font-weight: 800; color: var(--fg); letter-spacing: 0; line-height: 1.2;">${escapeHtml(t.title)}: ${escapeHtml(projectName)}</h2>
               <div class="sub-heading">${escapeHtml(t.currentProject)} · ${escapeHtml(projectName)}${projectPath ? ` · ${escapeHtml(t.projectPath)}: ${escapeHtml(projectPath)}` : ''}</div>
             </div>
           </div>
@@ -1430,16 +1684,35 @@ export function getProjectGrowthWebviewHtml(
           </div>
         </header>
 
-        <section class="understanding-shell">
-          <div class="understanding-main">
-            <div class="section-kicker">${escapeHtml(t.understandingTitle)}</div>
-            <h2>${escapeHtml(insightHeadline)}</h2>
-            <p>${escapeHtml(insightBody)}</p>
-            <div class="understanding-chips">
-              <span>${escapeHtml(insightHealthLabel)}</span>
-              <span>${escapeHtml(insightFocusLabel)}</span>
-              <span>${escapeHtml(insightEvidenceLabel)}</span>
+        <section class="project-orientation">
+          <div class="section-kicker">${escapeHtml(t.understandingTitle)}</div>
+          <div class="orientation-grid">
+            <div class="project-purpose">
+              <span>${escapeHtml(t.projectPurpose)}</span>
+              <h2>${escapeHtml(projectPurpose)}</h2>
             </div>
+            <div class="roadmap-progress">
+              <div class="progress-head"><span>${escapeHtml(t.roadmapProgress)}</span><strong>${orientation.completedSteps}/${orientation.totalSteps}</strong></div>
+              <div class="progress-track"><span style="width: ${progressPercent}%"></span></div>
+              <div class="progress-caption">${progressPercent}% · ${orientation.completedSteps} ${escapeHtml(t.stepsCompleted)}</div>
+            </div>
+            <div class="current-work">
+              <span>${escapeHtml(t.currentWork)} · ${escapeHtml(currentStageLabel)}</span>
+              <strong>${escapeHtml(currentStepLabel)}</strong>
+              <em>${escapeHtml(currentRoadmapStatus)}</em>
+            </div>
+          </div>
+        </section>
+
+        <section class="journey-panel">
+          <h2 class="panel-title"><span class="codicon codicon-map"></span> ${escapeHtml(t.journeyTitle)}</h2>
+          <div class="journey-track">${journeyHtml}</div>
+        </section>
+
+        <section class="growth-v2-grid primary-understanding-grid">
+          <div class="growth-v2-panel capability-map-panel">
+            <h2 class="panel-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(t.capabilityMap)}</h2>
+            <div class="capability-health-grid">${capabilityHealthHtml}</div>
           </div>
           <div class="priority-actions">
             <div class="priority-title"><span class="codicon codicon-checklist"></span> ${escapeHtml(t.priorityActions)}</div>
@@ -1447,15 +1720,9 @@ export function getProjectGrowthWebviewHtml(
           </div>
         </section>
 
-        <section class="growth-v2-grid">
-          <div class="growth-v2-panel">
-            <h2 class="panel-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(t.capabilityMap)}</h2>
-            <div class="capability-health-grid">${capabilityHealthHtml}</div>
-          </div>
-          <div class="growth-v2-panel">
-            <h2 class="panel-title"><span class="codicon codicon-pulse"></span> ${escapeHtml(t.growthFocus)}</h2>
-            <div class="focus-area-list">${focusAreasHtml}</div>
-          </div>
+        <section class="growth-v2-panel code-footprint-panel">
+          <h2 class="panel-title"><span class="codicon codicon-pulse"></span> ${escapeHtml(t.growthFocus)}</h2>
+          <div class="focus-area-list">${focusAreasHtml}</div>
         </section>
 
         <div class="detail-section-title">${escapeHtml(t.detailData)}</div>

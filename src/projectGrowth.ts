@@ -118,6 +118,27 @@ export interface ProjectGrowthCapabilityHealth {
   modules: string[];
   evidence: string[];
   signal: ProjectGrowthSummaryNode['colorSignal'];
+  roadmapStatus: string;
+  description: string;
+}
+
+export interface ProjectGrowthStageSummary {
+  label: string;
+  completed: number;
+  active: number;
+  pending: number;
+  total: number;
+  status: string;
+}
+
+export interface ProjectGrowthOrientation {
+  purpose: string;
+  currentStage: string;
+  currentStep: string;
+  currentStepStatus: string;
+  completedSteps: number;
+  totalSteps: number;
+  stages: ProjectGrowthStageSummary[];
 }
 
 export interface ProjectGrowthFocusArea {
@@ -145,6 +166,7 @@ export interface ProjectGrowthViewModel {
   snapshotId: string;
   generatedAt: string;
   projectPath: string;
+  orientation: ProjectGrowthOrientation;
   insight: ProjectGrowthInsightSummary;
   capabilityHealth: ProjectGrowthCapabilityHealth[];
   focusAreas: ProjectGrowthFocusArea[];
@@ -836,11 +858,8 @@ function addModuleAndCapabilityNodes(
     }
   }
 
-  for (const nodeId of new Set([...modules.values()].flatMap((module) => [...module.roadmapNodeIds]))) {
-    const roadmapNode = roadmapById.get(nodeId);
-    if (!roadmapNode) {
-      continue;
-    }
+  for (const roadmapNode of roadmapNodes) {
+    const nodeId = roadmapNode.id;
     const capabilityId = `capability:roadmap:${nodeId}`;
     nodes.set(capabilityId, {
       snapshotId,
@@ -868,6 +887,27 @@ function addModuleAndCapabilityNodes(
       confidence: 0.78,
       updatedAt: nowIso
     });
+    signals.push({
+      snapshotId,
+      nodeId: capabilityId,
+      type: 'roadmap_context',
+      level: 'info',
+      value: roadmapNode.description || '',
+      source: 'roadmap',
+      sourceRef: roadmapNode.status || 'Pending',
+      createdAt: nowIso
+    });
+    for (const dependencyId of String(roadmapNode.dependencies || '').split(',').map((value) => value.trim()).filter(Boolean)) {
+      if (!roadmapById.has(dependencyId)) continue;
+      edges.push({
+        snapshotId,
+        sourceId: `capability:roadmap:${dependencyId}`,
+        targetId: capabilityId,
+        kind: 'precedes',
+        weight: 1,
+        evidence: 'roadmap:dependencies'
+      });
+    }
   }
 
   for (const module of modules.values()) {
@@ -968,6 +1008,15 @@ function emptyProjectGrowthViewModel(): ProjectGrowthViewModel {
     snapshotId: '',
     generatedAt: '',
     projectPath: '',
+    orientation: {
+      purpose: '',
+      currentStage: '',
+      currentStep: '',
+      currentStepStatus: '',
+      completedSteps: 0,
+      totalSteps: 0,
+      stages: []
+    },
     insight: {
       headline: '还没有项目生长快照',
       body: '选择项目后刷新生长数据，SoloMap 会从代码、路线图、运行记录和验证信号里提炼项目理解。',
@@ -1073,6 +1122,10 @@ function buildCapabilityHealth(
 ): ProjectGrowthCapabilityHealth[] {
   const moduleById = new Map(modules.map((module) => [module.nodeId, module]));
   return capabilities.map((capability) => {
+    const capabilitySignals = nodeSignals.get(capability.nodeId) || [];
+    const roadmapContext = capabilitySignals.find((signal) => signal.type === 'roadmap_context');
+    const roadmapStatus = roadmapContext?.sourceRef || 'Pending';
+    const description = roadmapContext?.value || '';
     const linkedModules = capability.modules
       .map((moduleId) => moduleById.get(moduleId))
       .filter(Boolean) as ProjectGrowthModuleSummary[];
@@ -1083,7 +1136,7 @@ function buildCapabilityHealth(
     const strongestSignal = displayModules
       .map((module) => module.signal)
       .sort((a, b) => signalWeight(b) - signalWeight(a))[0] || capability.signal;
-    let status = 'unshaped';
+    let status = roadmapStatus === 'Completed' ? 'not_observed' : 'unshaped';
     if (displayModules.length > 0 && tests > 0 && signalWeight(strongestSignal) <= signalWeight('watch')) {
       status = 'formed';
     } else if (displayModules.some((module) => module.signal === 'blocked')) {
@@ -1103,9 +1156,9 @@ function buildCapabilityHealth(
     const moduleNames = displayModules.map((module) => module.label);
     const summary = displayModules.length > 0
       ? `关联 ${displayModules.length} 个主要生长区域、${files} 个文件${tests > 0 ? `，已有 ${tests} 个测试文件` : '，还缺少测试证据'}。`
-      : '还没有在当前代码和运行索引中识别到明确落地区域。';
+      : '当前还没有识别到明确的代码或交付证据。';
     let action = 'keep_observing';
-    if (status === 'unshaped') action = 'link_or_revise';
+    if (status === 'unshaped' || status === 'not_observed') action = 'link_or_revise';
     if (status === 'needs_verification') action = 'add_verification';
     if (status === 'risk' || status === 'rework') action = 'reduce_risk';
     if (status === 'formed') action = 'release_or_learn';
@@ -1118,9 +1171,64 @@ function buildCapabilityHealth(
       action,
       modules: moduleNames.length > 0 ? moduleNames : capability.modules.map((moduleId) => shortenNodeLabel(moduleId, nodeLabelById)),
       evidence,
-      signal: strongestSignal
+      signal: strongestSignal,
+      roadmapStatus,
+      description
     };
   });
+}
+
+function buildProjectOrientation(capabilities: ProjectGrowthCapabilityHealth[], purpose = ''): ProjectGrowthOrientation {
+  const statusRank = (status: string): number => {
+    if (status === 'Running') return 5;
+    if (status === 'Failed') return 4;
+    if (status === 'In Progress') return 3;
+    if (status === 'Pending') return 2;
+    return 1;
+  };
+  const completedSteps = capabilities.filter((item) => item.roadmapStatus === 'Completed').length;
+  const activeCapability = capabilities
+    .filter((item) => item.roadmapStatus !== 'Completed')
+    .sort((a, b) => statusRank(b.roadmapStatus) - statusRank(a.roadmapStatus))[0] || capabilities[capabilities.length - 1];
+  const stageOrder: string[] = [];
+  const stageMap = new Map<string, ProjectGrowthStageSummary>();
+  for (const capability of capabilities) {
+    const stage = capability.stage || '未分阶段';
+    if (!stageMap.has(stage)) {
+      stageOrder.push(stage);
+      stageMap.set(stage, { label: stage, completed: 0, active: 0, pending: 0, total: 0, status: 'pending' });
+    }
+    const summary = stageMap.get(stage)!;
+    summary.total += 1;
+    if (capability.roadmapStatus === 'Completed') summary.completed += 1;
+    else if (['Running', 'Failed', 'In Progress'].includes(capability.roadmapStatus)) summary.active += 1;
+    else summary.pending += 1;
+  }
+  const stages = stageOrder.map((stage) => {
+    const summary = stageMap.get(stage)!;
+    summary.status = summary.completed === summary.total ? 'completed' : summary.active > 0 ? 'active' : 'pending';
+    return summary;
+  });
+  const purposeSource = capabilities[0];
+  return {
+    purpose: purpose || purposeSource?.description || purposeSource?.label || '',
+    currentStage: activeCapability?.stage || '',
+    currentStep: activeCapability?.label || '',
+    currentStepStatus: activeCapability?.roadmapStatus || '',
+    completedSteps,
+    totalSteps: capabilities.length,
+    stages
+  };
+}
+
+function readProjectPurpose(projectPath: string): string {
+  const packagePath = path.join(projectPath, 'package.json');
+  try {
+    const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    return String(packageJson.description || '').trim();
+  } catch {
+    return '';
+  }
 }
 
 function buildFocusAreas(
@@ -1176,9 +1284,12 @@ function buildRecommendedActions(
 ): ProjectGrowthRecommendedAction[] {
   const actions: ProjectGrowthRecommendedAction[] = [];
   for (const capability of capabilities) {
-    if (['unshaped', 'needs_verification', 'risk', 'rework'].includes(capability.status)) {
+    const isOpenRoadmapWork = capability.roadmapStatus !== 'Completed';
+    if (isOpenRoadmapWork && ['unshaped', 'needs_verification', 'risk', 'rework'].includes(capability.status)) {
       actions.push({
-        title: `${capability.label} 需要处理`,
+        title: capability.roadmapStatus === 'Pending' && capability.status === 'unshaped'
+          ? `${capability.label}：按路线图开始推进`
+          : `${capability.label} 需要处理`,
         detail: capability.summary,
         target: capability.stage || '路线图能力',
         level: capability.status,
@@ -1332,7 +1443,7 @@ export function buildProjectGrowthViewModel(
     }));
   const capabilities = data.nodes
     .filter((node) => node.kind === 'capability')
-    .sort((a, b) => a.label.localeCompare(b.label))
+    .sort((a, b) => a.nodeId.localeCompare(b.nodeId, undefined, { numeric: true }))
     .map((node) => ({
       nodeId: node.nodeId,
       label: node.label,
@@ -1361,11 +1472,14 @@ export function buildProjectGrowthViewModel(
   const capabilityHealth = buildCapabilityHealth(capabilities, modules, signalsByNode, labelById);
   const focusAreas = buildFocusAreas(modules, signalsByNode);
   const recommendedActions = buildRecommendedActions(gaps, modules, capabilityHealth, labelById);
+  const projectPurpose = data.signals.find((signal) => signal.nodeId === 'directory:.' && signal.type === 'project_purpose')?.value || '';
+  const orientation = buildProjectOrientation(capabilityHealth, projectPurpose);
   const totals = calculateGrowthTotals(data);
   return {
     snapshotId: data.snapshot.id,
     generatedAt: data.snapshot.createdAt,
     projectPath: data.snapshot.projectPath,
+    orientation,
     insight: buildInsightSummary(totals, modules, capabilityHealth, recommendedActions),
     capabilityHealth,
     focusAreas,
@@ -1402,6 +1516,19 @@ export function buildProjectGrowthSnapshot(
   aggregateDirectoryMetrics(nodes);
   addImportEdges(projectPath, snapshotId, files, nodes, edges);
   addModuleAndCapabilityNodes(snapshotId, files, roadmapNodes, runEntries, nodes, edges, signals, labels, nowIso);
+  const projectPurpose = readProjectPurpose(projectPath);
+  if (projectPurpose) {
+    signals.push({
+      snapshotId,
+      nodeId: 'directory:.',
+      type: 'project_purpose',
+      level: 'info',
+      value: projectPurpose,
+      source: 'filesystem',
+      sourceRef: 'package.json',
+      createdAt: nowIso
+    });
+  }
   addGitSignals(snapshotId, readGitChurn(projectPath), nodes, signals, nowIso);
 
   const importCounts = new Map<string, number>();
