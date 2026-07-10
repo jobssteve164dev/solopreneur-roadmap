@@ -100,9 +100,55 @@ export interface ProjectGrowthTotals {
   signals: number;
 }
 
+export interface ProjectGrowthInsightSummary {
+  headline: string;
+  body: string;
+  healthLabel: string;
+  focusLabel: string;
+  evidenceLabel: string;
+}
+
+export interface ProjectGrowthCapabilityHealth {
+  nodeId: string;
+  label: string;
+  stage: string;
+  status: string;
+  summary: string;
+  action: string;
+  modules: string[];
+  evidence: string[];
+  signal: ProjectGrowthSummaryNode['colorSignal'];
+}
+
+export interface ProjectGrowthFocusArea {
+  nodeId: string;
+  label: string;
+  status: string;
+  summary: string;
+  action: string;
+  files: number;
+  loc: number;
+  tests: number;
+  confidence: number;
+  evidence: string[];
+}
+
+export interface ProjectGrowthRecommendedAction {
+  title: string;
+  detail: string;
+  target: string;
+  level: string;
+  source: string;
+}
+
 export interface ProjectGrowthViewModel {
   snapshotId: string;
   generatedAt: string;
+  projectPath: string;
+  insight: ProjectGrowthInsightSummary;
+  capabilityHealth: ProjectGrowthCapabilityHealth[];
+  focusAreas: ProjectGrowthFocusArea[];
+  recommendedActions: ProjectGrowthRecommendedAction[];
   treemap: ProjectGrowthSummaryNode | null;
   gaps: ProjectGrowthGap[];
   modules: ProjectGrowthModuleSummary[];
@@ -921,6 +967,17 @@ function emptyProjectGrowthViewModel(): ProjectGrowthViewModel {
   return {
     snapshotId: '',
     generatedAt: '',
+    projectPath: '',
+    insight: {
+      headline: '还没有项目生长快照',
+      body: '选择项目后刷新生长数据，SoloMap 会从代码、路线图、运行记录和验证信号里提炼项目理解。',
+      healthLabel: '等待数据',
+      focusLabel: '暂无重点',
+      evidenceLabel: '暂无证据'
+    },
+    capabilityHealth: [],
+    focusAreas: [],
+    recommendedActions: [],
     treemap: null,
     gaps: [],
     modules: [],
@@ -941,6 +998,225 @@ function calculateGrowthTotals(data: GrowthSnapshotData): ProjectGrowthTotals {
     loc: data.nodes.filter((node) => node.kind === 'file' && !node.excluded).reduce((sum, node) => sum + node.loc, 0),
     signals: data.signals.length
   };
+}
+
+function signalWeight(signal: ProjectGrowthSummaryNode['colorSignal']): number {
+  if (signal === 'blocked') return 5;
+  if (signal === 'attention') return 4;
+  if (signal === 'watch') return 3;
+  if (signal === 'growing') return 2;
+  return 1;
+}
+
+function signalStatusLabel(signal: ProjectGrowthSummaryNode['colorSignal'], tests: number, confidence: number): string {
+  if (signal === 'blocked') return 'rework';
+  if (signal === 'attention') return 'risk';
+  if (signal === 'watch') return tests > 0 ? 'growing' : 'needs_verification';
+  if (signal === 'growing') return 'growing';
+  if (tests > 0 && confidence >= 0.75) return 'formed';
+  return 'stable';
+}
+
+function isPrimaryGrowthModule(module: ProjectGrowthModuleSummary): boolean {
+  const id = module.nodeId || '';
+  const label = module.label || '';
+  if (/^module:(\.solopreneur|CHANGELOG\.md|README\.md|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(id)) {
+    return false;
+  }
+  if (/^\./.test(label) || /^(CHANGELOG|README|package(?:-lock)?\.json|tsconfig\.json|log)$/i.test(label)) {
+    return false;
+  }
+  return module.files > 0 && module.loc > 0;
+}
+
+function shortenNodeLabel(nodeId: string, labelById: Map<string, string>): string {
+  const label = labelById.get(nodeId) || nodeId.replace(/^(module:|file:|capability:roadmap:)/, '');
+  return label.replace(/^module:/, '').replace(/^file:/, '');
+}
+
+function buildInsightSummary(
+  totals: ProjectGrowthTotals,
+  modules: ProjectGrowthModuleSummary[],
+  capabilities: ProjectGrowthCapabilityHealth[],
+  actions: ProjectGrowthRecommendedAction[]
+): ProjectGrowthInsightSummary {
+  const primaryModules = modules.filter(isPrimaryGrowthModule);
+  const shapedCapabilities = capabilities.filter((item) => item.modules.length > 0).length;
+  const formedCapabilities = capabilities.filter((item) => item.status === 'formed').length;
+  const active = primaryModules
+    .filter((module) => ['blocked', 'attention', 'watch', 'growing'].includes(module.signal))
+    .sort((a, b) => signalWeight(b.signal) - signalWeight(a.signal) || b.loc - a.loc);
+  const topFocus = active[0]?.label || primaryModules[0]?.label || '项目主干';
+  const healthLabel = actions.length > 0 ? `${actions.length} 个优先处理点` : '暂无明显阻塞';
+  const evidenceLabel = totals.signals > 0 ? `${totals.signals} 条生长信号` : '暂无生长信号';
+  const focusLabel = active.length > 0 ? `${topFocus} 最值得先看` : '项目结构相对稳定';
+  const capabilityText = capabilities.length > 0
+    ? `${shapedCapabilities}/${capabilities.length} 个路线图能力已有代码痕迹`
+    : `${primaryModules.length} 个主要模块已识别`;
+  const body = capabilities.length > 0
+    ? `${capabilityText}，其中 ${formedCapabilities} 个已有验证或稳定证据。当前重点不是文件数量，而是先处理影响理解和推进的能力缺口。`
+    : `${capabilityText}。当前重点是把代码区域继续归并到真实产品能力，并补齐验证证据。`;
+  return {
+    headline: `${totals.files} 个文件沉淀为 ${primaryModules.length} 个主要生长区域`,
+    body,
+    healthLabel,
+    focusLabel,
+    evidenceLabel
+  };
+}
+
+function buildCapabilityHealth(
+  capabilities: ProjectGrowthCapabilitySummary[],
+  modules: ProjectGrowthModuleSummary[],
+  nodeSignals: Map<string, GrowthSignalRecord[]>,
+  nodeLabelById: Map<string, string>
+): ProjectGrowthCapabilityHealth[] {
+  const moduleById = new Map(modules.map((module) => [module.nodeId, module]));
+  return capabilities.map((capability) => {
+    const linkedModules = capability.modules
+      .map((moduleId) => moduleById.get(moduleId))
+      .filter(Boolean) as ProjectGrowthModuleSummary[];
+    const primaryLinkedModules = linkedModules.filter(isPrimaryGrowthModule);
+    const displayModules = primaryLinkedModules.length > 0 ? primaryLinkedModules : linkedModules;
+    const tests = displayModules.reduce((sum, module) => sum + module.tests, 0);
+    const files = displayModules.reduce((sum, module) => sum + module.files, 0);
+    const strongestSignal = displayModules
+      .map((module) => module.signal)
+      .sort((a, b) => signalWeight(b) - signalWeight(a))[0] || capability.signal;
+    let status = 'unshaped';
+    if (displayModules.length > 0 && tests > 0 && signalWeight(strongestSignal) <= signalWeight('watch')) {
+      status = 'formed';
+    } else if (displayModules.some((module) => module.signal === 'blocked')) {
+      status = 'rework';
+    } else if (displayModules.some((module) => module.signal === 'attention')) {
+      status = 'risk';
+    } else if (displayModules.length > 0 && tests === 0) {
+      status = 'needs_verification';
+    } else if (displayModules.length > 0) {
+      status = 'growing';
+    }
+    const evidence = displayModules.slice(0, 4).map((module) => {
+      const signals = nodeSignals.get(module.nodeId) || [];
+      const reason = signals.find((signal) => signal.level === 'blocked' || signal.level === 'attention' || signal.level === 'watch')?.value;
+      return reason ? `${module.label}: ${reason}` : `${module.label}: ${module.files} 个文件 / ${module.tests} 个测试`;
+    });
+    const moduleNames = displayModules.map((module) => module.label);
+    const summary = displayModules.length > 0
+      ? `关联 ${displayModules.length} 个主要生长区域、${files} 个文件${tests > 0 ? `，已有 ${tests} 个测试文件` : '，还缺少测试证据'}。`
+      : '还没有在当前代码和运行索引中识别到明确落地区域。';
+    let action = 'keep_observing';
+    if (status === 'unshaped') action = 'link_or_revise';
+    if (status === 'needs_verification') action = 'add_verification';
+    if (status === 'risk' || status === 'rework') action = 'reduce_risk';
+    if (status === 'formed') action = 'release_or_learn';
+    return {
+      nodeId: capability.nodeId,
+      label: capability.label,
+      stage: capability.stage,
+      status,
+      summary,
+      action,
+      modules: moduleNames.length > 0 ? moduleNames : capability.modules.map((moduleId) => shortenNodeLabel(moduleId, nodeLabelById)),
+      evidence,
+      signal: strongestSignal
+    };
+  });
+}
+
+function buildFocusAreas(
+  modules: ProjectGrowthModuleSummary[],
+  nodeSignals: Map<string, GrowthSignalRecord[]>
+): ProjectGrowthFocusArea[] {
+  return modules
+    .filter(isPrimaryGrowthModule)
+    .map((module) => {
+      const signals = nodeSignals.get(module.nodeId) || [];
+      const notableSignals = signals
+        .filter((signal) => ['blocked', 'attention', 'watch'].includes(signal.level))
+        .slice(0, 3);
+      const status = signalStatusLabel(module.signal, module.tests, module.confidence);
+      const evidence = notableSignals.length > 0
+        ? notableSignals.map((signal) => signal.value)
+        : [`${module.files} 个文件 / ${module.tests} 个测试 / ${Math.round(module.confidence * 100)}% 归类置信度`];
+      let action = 'keep_observing';
+      if (status === 'needs_verification') action = 'add_verification';
+      if (status === 'risk' || status === 'rework') action = 'reduce_risk';
+      if (status === 'growing') action = 'continue_with_evidence';
+      return {
+        nodeId: module.nodeId,
+        label: module.label,
+        status,
+        summary: `${module.role} · ${module.files} 个文件 · ${module.loc.toLocaleString()} 行 · ${module.tests} 个测试`,
+        action,
+        files: module.files,
+        loc: module.loc,
+        tests: module.tests,
+        confidence: module.confidence,
+        evidence
+      };
+    })
+    .sort((a, b) => {
+      const statusRank = (value: string) => {
+        if (value === 'rework') return 5;
+        if (value === 'risk') return 4;
+        if (value === 'needs_verification') return 3;
+        if (value === 'growing') return 2;
+        return 1;
+      };
+      return statusRank(b.status) - statusRank(a.status) || b.loc - a.loc;
+    })
+    .slice(0, 8);
+}
+
+function buildRecommendedActions(
+  gaps: ProjectGrowthGap[],
+  modules: ProjectGrowthModuleSummary[],
+  capabilities: ProjectGrowthCapabilityHealth[],
+  nodeLabelById: Map<string, string>
+): ProjectGrowthRecommendedAction[] {
+  const actions: ProjectGrowthRecommendedAction[] = [];
+  for (const capability of capabilities) {
+    if (['unshaped', 'needs_verification', 'risk', 'rework'].includes(capability.status)) {
+      actions.push({
+        title: `${capability.label} 需要处理`,
+        detail: capability.summary,
+        target: capability.stage || '路线图能力',
+        level: capability.status,
+        source: 'roadmap'
+      });
+    }
+  }
+  for (const module of modules.filter(isPrimaryGrowthModule)) {
+    if (module.tests === 0 && module.loc >= 1200) {
+      actions.push({
+        title: `${module.label} 缺少验证证据`,
+        detail: `${module.files} 个文件、${module.loc.toLocaleString()} 行代码，但没有识别到测试文件。`,
+        target: module.label,
+        level: 'needs_verification',
+        source: 'growth_rules'
+      });
+    }
+  }
+  for (const gap of gaps) {
+    const isFileGitNoise = gap.nodeId.startsWith('file:') && gap.source === 'git';
+    if (isFileGitNoise) {
+      continue;
+    }
+    actions.push({
+      title: `${shortenNodeLabel(gap.nodeId, nodeLabelById)} 需要关注`,
+      detail: gap.value,
+      target: gap.label,
+      level: gap.level,
+      source: gap.source
+    });
+  }
+  const seen = new Set<string>();
+  return actions.filter((action) => {
+    const key = `${action.title}\u001f${action.detail}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 8);
 }
 
 function signalKey(signal: GrowthSignalRecord): string {
@@ -1019,6 +1295,12 @@ export function buildProjectGrowthViewModel(
   const root = data.nodes.find((node) => node.nodeId === 'directory:.') || data.nodes.find((node) => node.kind === 'directory') || null;
   const actionableLevels = new Set(['watch', 'attention', 'blocked']);
   const labelById = new Map(data.nodes.map((node) => [node.nodeId, node.label || node.path || node.nodeId]));
+  const signalsByNode = new Map<string, GrowthSignalRecord[]>();
+  for (const signal of data.signals) {
+    const list = signalsByNode.get(signal.nodeId) || [];
+    list.push(signal);
+    signalsByNode.set(signal.nodeId, list);
+  }
   const incomingByTarget = new Map<string, string[]>();
   for (const edge of data.edges.filter((edge) => edge.kind === 'implements' || edge.kind === 'belongs_to_step')) {
     const list = incomingByTarget.get(edge.targetId) || [];
@@ -1076,9 +1358,18 @@ export function buildProjectGrowthViewModel(
     gitHead: snapshotData.snapshot.gitHead,
     totals: calculateGrowthTotals(snapshotData)
   }));
+  const capabilityHealth = buildCapabilityHealth(capabilities, modules, signalsByNode, labelById);
+  const focusAreas = buildFocusAreas(modules, signalsByNode);
+  const recommendedActions = buildRecommendedActions(gaps, modules, capabilityHealth, labelById);
+  const totals = calculateGrowthTotals(data);
   return {
     snapshotId: data.snapshot.id,
     generatedAt: data.snapshot.createdAt,
+    projectPath: data.snapshot.projectPath,
+    insight: buildInsightSummary(totals, modules, capabilityHealth, recommendedActions),
+    capabilityHealth,
+    focusAreas,
+    recommendedActions,
     treemap: root ? buildNode(root) : null,
     gaps,
     modules,
@@ -1086,7 +1377,7 @@ export function buildProjectGrowthViewModel(
     keyEdges,
     history,
     diff: buildProjectGrowthDiff(options.previous || null, data),
-    totals: calculateGrowthTotals(data)
+    totals
   };
 }
 

@@ -48,6 +48,19 @@ const locales = {
     structuralGaps: "架构与验证盲区 (Gaps)",
     linkedCapabilities: "关联路线图能力",
     snapshotHistory: "生长分析历史轨迹",
+    currentProject: "当前项目",
+    projectPath: "项目路径",
+    understandingTitle: "项目现在长成什么样",
+    priorityActions: "优先处理",
+    capabilityMap: "路线图能力落地",
+    growthFocus: "近期生长重点",
+    detailData: "详细数据",
+    noActions: "暂未发现必须立即处理的生长缺口。",
+    noCapabilities: "当前路线图能力还没有明确代码落地信号。",
+    noFocusAreas: "当前没有明显的重点生长区域。",
+    actionLabel: "建议",
+    evidenceLabel: "证据",
+    sourceLabel: "来源",
     emptyModules: "当前项目未检测到模块。",
     emptyGaps: "所有健康度与分析规则均已满足。无架构与验证盲区！",
     emptyCaps: "没有关联路线图节点的特性。",
@@ -114,6 +127,23 @@ const locales = {
       agent_run: "Agent 运行后",
       solo: "Solo 对话后",
       agent_continuation: "续聊后"
+    },
+    growthStatusLabels: {
+      formed: "已成形",
+      growing: "正在生长",
+      needs_verification: "待验证",
+      rework: "反复返工",
+      risk: "风险集中",
+      unshaped: "未长成",
+      stable: "稳定"
+    },
+    growthActionLabels: {
+      keep_observing: "保持观察",
+      add_verification: "补验证证据",
+      reduce_risk: "先收口风险",
+      continue_with_evidence: "继续推进并补证据",
+      link_or_revise: "补齐代码落地或调整路线图归属",
+      release_or_learn: "可进入发布、反馈或沉淀"
     }
   },
   en: {
@@ -140,6 +170,19 @@ const locales = {
     structuralGaps: "Structural Gaps",
     linkedCapabilities: "Linked Capabilities",
     snapshotHistory: "Snapshot History",
+    currentProject: "Current Project",
+    projectPath: "Project Path",
+    understandingTitle: "What This Project Has Become",
+    priorityActions: "Priority Actions",
+    capabilityMap: "Roadmap Capability Landing",
+    growthFocus: "Recent Growth Focus",
+    detailData: "Detailed Data",
+    noActions: "No urgent growth gaps detected.",
+    noCapabilities: "No roadmap capability has a clear code landing signal yet.",
+    noFocusAreas: "No obvious growth focus area detected yet.",
+    actionLabel: "Action",
+    evidenceLabel: "Evidence",
+    sourceLabel: "Source",
     emptyModules: "No modules detected in this project.",
     emptyGaps: "All growth and health rules are satisfied. No architectural gaps found!",
     emptyCaps: "No capabilities linked to the roadmap.",
@@ -206,6 +249,23 @@ const locales = {
       agent_run: "After Agent Run",
       solo: "After Solo Conversation",
       agent_continuation: "After Continuation"
+    },
+    growthStatusLabels: {
+      formed: "Formed",
+      growing: "Growing",
+      needs_verification: "Needs Verification",
+      rework: "Rework Loop",
+      risk: "Concentrated Risk",
+      unshaped: "Not Shaped",
+      stable: "Stable"
+    },
+    growthActionLabels: {
+      keep_observing: "Keep observing",
+      add_verification: "Add verification evidence",
+      reduce_risk: "Reduce risk first",
+      continue_with_evidence: "Continue with evidence",
+      link_or_revise: "Land code or revise roadmap ownership",
+      release_or_learn: "Ready for release, feedback, or learning"
     }
   }
 };
@@ -213,6 +273,16 @@ const locales = {
 function formatMappedLabel(labels: Record<string, string>, value: string): string {
   const normalized = String(value || '').trim();
   return labels[normalized] || normalized.replace(/_/g, ' ');
+}
+
+function statusClass(value: string): string {
+  if (value === 'formed') return 'formed';
+  if (value === 'growing') return 'growing';
+  if (value === 'needs_verification') return 'watch';
+  if (value === 'risk') return 'attention';
+  if (value === 'rework') return 'blocked';
+  if (value === 'unshaped') return 'muted';
+  return 'stable';
 }
 
 export function getProjectGrowthWebviewHtml(
@@ -234,6 +304,104 @@ export function getProjectGrowthWebviewHtml(
   const totalCapabilities = viewModel.totals.capabilities;
   const totalPackages = viewModel.totals.packages;
   const totalSignals = viewModel.totals.signals;
+  const projectPath = viewModel.projectPath || '';
+  const focusCount = viewModel.focusAreas?.length || totalModules;
+  const shapedCapabilities = (viewModel.capabilityHealth || []).filter((item) => item.modules.length > 0).length;
+  const formedCapabilities = (viewModel.capabilityHealth || []).filter((item) => item.status === 'formed').length;
+  const topFocus = viewModel.focusAreas?.[0]?.label || viewModel.modules?.[0]?.label || (isZh ? '项目主干' : 'Project core');
+  const insightHeadline = isZh
+    ? viewModel.insight.headline
+    : (totalFiles > 0 ? `${totalFiles} files are organized into ${focusCount} main growth areas` : 'No project growth snapshot yet');
+  const insightBody = isZh
+    ? viewModel.insight.body
+    : (totalCapabilities > 0
+      ? `${shapedCapabilities}/${totalCapabilities} roadmap capabilities have code landing signals, and ${formedCapabilities} already have verification or stable evidence. The next useful view is not file volume, but the capability gaps that affect understanding and delivery.`
+      : `${focusCount} main growth areas have been identified. The next useful step is to connect code areas to real product capabilities and add verification evidence.`);
+  const insightHealthLabel = isZh
+    ? viewModel.insight.healthLabel
+    : (viewModel.recommendedActions.length > 0 ? `${viewModel.recommendedActions.length} priority actions` : 'No obvious blockers');
+  const insightFocusLabel = isZh
+    ? viewModel.insight.focusLabel
+    : `${topFocus} is the first area to inspect`;
+  const insightEvidenceLabel = isZh
+    ? viewModel.insight.evidenceLabel
+    : (totalSignals > 0 ? `${totalSignals} growth signals` : 'No growth signals yet');
+
+  const actionCardsHtml = viewModel.recommendedActions && viewModel.recommendedActions.length > 0
+    ? viewModel.recommendedActions.map((action) => {
+      const statusLabel = formatMappedLabel(t.growthStatusLabels, action.level);
+      const sourceLabel = formatMappedLabel(t.sourceLabels, action.source);
+      const actionTitle = isZh ? action.title : `${action.target}: ${statusLabel}`;
+      const actionDetail = isZh ? action.detail : `${t.actionLabel}: ${formatMappedLabel(t.growthActionLabels, action.level === 'needs_verification' ? 'add_verification' : action.level === 'risk' || action.level === 'rework' ? 'reduce_risk' : 'keep_observing')}`;
+      return `
+        <div class="action-card ${statusClass(action.level)}">
+          <div class="action-card-head">
+            <span class="status-pill ${statusClass(action.level)}">${escapeHtml(statusLabel)}</span>
+            <span class="action-source">${escapeHtml(sourceLabel)}</span>
+          </div>
+          <div class="action-title">${escapeHtml(actionTitle)}</div>
+          <div class="action-detail">${escapeHtml(actionDetail)}</div>
+          <div class="action-target">${escapeHtml(action.target)}</div>
+        </div>
+      `;
+    }).join('')
+    : `<div class="empty-state-healthy"><span class="codicon codicon-check"></span> ${escapeHtml(t.noActions)}</div>`;
+
+  const capabilityHealthHtml = viewModel.capabilityHealth && viewModel.capabilityHealth.length > 0
+    ? viewModel.capabilityHealth.map((capability) => {
+      const capabilitySummary = isZh
+        ? capability.summary
+        : (capability.modules.length > 0
+          ? `Linked to ${capability.modules.length} main growth area${capability.modules.length > 1 ? 's' : ''}.`
+          : 'No clear landing area has been identified in the current code and run index.');
+      const capabilityEvidence = isZh
+        ? capability.evidence.slice(0, 3)
+        : capability.modules.slice(0, 3).map((moduleName) => `${t.evidenceLabel}: ${moduleName}`);
+      return `
+        <div class="capability-health-card ${statusClass(capability.status)}">
+          <div class="capability-health-head">
+            <span class="capability-name">${escapeHtml(capability.label)}</span>
+            <span class="status-pill ${statusClass(capability.status)}">${escapeHtml(formatMappedLabel(t.growthStatusLabels, capability.status))}</span>
+          </div>
+          <div class="capability-stage">${escapeHtml(t.stage)}: ${escapeHtml(capability.stage || '-')}</div>
+          <div class="capability-summary">${escapeHtml(capabilitySummary)}</div>
+          <div class="capability-action"><span>${escapeHtml(t.actionLabel)}</span>${escapeHtml(formatMappedLabel(t.growthActionLabels, capability.action))}</div>
+          ${capability.modules && capability.modules.length > 0 ? `
+            <div class="capability-modules">
+              ${capability.modules.slice(0, 6).map((moduleName) => `<span>${escapeHtml(moduleName)}</span>`).join('')}
+            </div>
+          ` : ''}
+          ${capabilityEvidence && capabilityEvidence.length > 0 ? `
+            <div class="evidence-list">
+              ${capabilityEvidence.map((item) => `<div>${escapeHtml(item)}</div>`).join('')}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }).join('')
+    : `<div class="empty-state">${escapeHtml(t.noCapabilities)}</div>`;
+
+  const focusAreasHtml = viewModel.focusAreas && viewModel.focusAreas.length > 0
+    ? viewModel.focusAreas.map((area) => {
+      const focusSummary = isZh
+        ? area.summary
+        : `${formatMappedLabel(t.roleLabels, area.summary.split(' · ')[0])} · ${area.files} files · ${area.loc.toLocaleString()} LOC · ${area.tests} tests`;
+      return `
+        <div class="focus-area-row ${statusClass(area.status)}">
+          <div class="focus-main">
+            <div class="focus-title">${escapeHtml(area.label)} <span class="status-pill ${statusClass(area.status)}">${escapeHtml(formatMappedLabel(t.growthStatusLabels, area.status))}</span></div>
+            <div class="focus-summary">${escapeHtml(focusSummary)}</div>
+            <div class="focus-action">${escapeHtml(t.actionLabel)}: ${escapeHtml(formatMappedLabel(t.growthActionLabels, area.action))}</div>
+          </div>
+          <div class="focus-metrics">
+            <span>${escapeHtml(t.files)} <strong>${area.files}</strong></span>
+            <span>${escapeHtml(t.lines)} <strong>${area.loc.toLocaleString()}</strong></span>
+            <span>${escapeHtml(t.tests)} <strong>${area.tests}</strong></span>
+          </div>
+        </div>
+      `;
+    }).join('')
+    : `<div class="empty-state">${escapeHtml(t.noFocusAreas)}</div>`;
 
   // Render module cards
   let moduleCardsHtml = '';
@@ -524,6 +692,247 @@ export function getProjectGrowthWebviewHtml(
       gap: 10px;
     }
 
+    .understanding-shell {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
+      gap: 18px;
+      align-items: stretch;
+      margin-bottom: 20px;
+    }
+
+    .understanding-main,
+    .priority-actions,
+    .growth-v2-panel {
+      background: rgba(255, 255, 255, 0.025);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      backdrop-filter: blur(12px);
+    }
+
+    .section-kicker,
+    .detail-section-title {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+      margin-bottom: 8px;
+    }
+
+    .understanding-main h2 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      line-height: 1.18;
+      letter-spacing: 0;
+    }
+
+    .understanding-main p {
+      color: var(--muted);
+      margin: 0;
+      font-size: 13px;
+      max-width: 760px;
+    }
+
+    .understanding-chips,
+    .capability-modules,
+    .focus-metrics {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .understanding-chips span,
+    .capability-modules span,
+    .focus-metrics span,
+    .action-target {
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.035);
+      padding: 4px 8px;
+      font-size: 11px;
+    }
+
+    .priority-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--fg);
+      font-size: 13px;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .priority-list,
+    .focus-area-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .action-card,
+    .capability-health-card,
+    .focus-area-row {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+      padding: 12px;
+    }
+
+    .action-card.attention,
+    .capability-health-card.attention,
+    .focus-area-row.attention {
+      border-color: rgba(255, 145, 0, 0.24);
+      background: rgba(255, 145, 0, 0.04);
+    }
+
+    .action-card.blocked,
+    .capability-health-card.blocked,
+    .focus-area-row.blocked {
+      border-color: rgba(255, 23, 68, 0.24);
+      background: rgba(255, 23, 68, 0.04);
+    }
+
+    .action-card.watch,
+    .capability-health-card.watch,
+    .focus-area-row.watch {
+      border-color: rgba(255, 214, 0, 0.22);
+      background: rgba(255, 214, 0, 0.035);
+    }
+
+    .action-card-head,
+    .capability-health-head,
+    .focus-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .status-pill.formed,
+    .status-pill.stable {
+      color: var(--success);
+      border-color: rgba(0, 230, 118, 0.24);
+      background: rgba(0, 230, 118, 0.08);
+    }
+
+    .status-pill.growing {
+      color: var(--accent);
+      border-color: rgba(0, 240, 255, 0.22);
+      background: rgba(0, 240, 255, 0.08);
+    }
+
+    .status-pill.watch {
+      color: var(--warn);
+      border-color: rgba(255, 214, 0, 0.24);
+      background: rgba(255, 214, 0, 0.08);
+    }
+
+    .status-pill.attention {
+      color: var(--attention);
+      border-color: rgba(255, 145, 0, 0.24);
+      background: rgba(255, 145, 0, 0.08);
+    }
+
+    .status-pill.blocked {
+      color: var(--danger);
+      border-color: rgba(255, 23, 68, 0.24);
+      background: rgba(255, 23, 68, 0.08);
+    }
+
+    .action-title,
+    .capability-name,
+    .focus-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--fg);
+    }
+
+    .action-detail,
+    .capability-summary,
+    .focus-summary,
+    .focus-action,
+    .capability-stage,
+    .evidence-list {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .action-source {
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .capability-action {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--fg);
+    }
+
+    .capability-action span {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .evidence-list {
+      margin-top: 10px;
+      display: grid;
+      gap: 4px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding-top: 10px;
+    }
+
+    .growth-v2-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+      margin-bottom: 20px;
+    }
+
+    .capability-health-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .focus-area-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .focus-title {
+      justify-content: flex-start;
+    }
+
+    .focus-metrics {
+      margin-top: 0;
+      justify-content: flex-end;
+      min-width: 220px;
+    }
+
+    .detail-section-title {
+      margin: 8px 0 12px;
+    }
+
     button.btn-refresh {
       background: rgba(255, 255, 255, 0.04);
       border: 1px solid var(--border);
@@ -598,6 +1007,14 @@ export function getProjectGrowthWebviewHtml(
     @media (max-width: 900px) {
       .dashboard-grid {
         grid-template-columns: 1fr;
+      }
+      .understanding-shell,
+      .growth-v2-grid,
+      .focus-area-row {
+        grid-template-columns: 1fr;
+      }
+      .focus-metrics {
+        justify-content: flex-start;
       }
     }
 
@@ -1002,18 +1419,48 @@ export function getProjectGrowthWebviewHtml(
     <header>
       <div style="display: flex; align-items: center; gap: 16px;">
         <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap"></h1>
-        <div style="width: 1px; height: 20px; background: var(--border);"></div>
-        <div>
-          <h2 style="margin: 0; font-size: 16px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent-purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; line-height: 1.2;">${escapeHtml(t.title)}: ${escapeHtml(projectName)}</h2>
-          <div class="sub-heading">${escapeHtml(t.subTitle)}</div>
-        </div>
-      </div>
+            <div style="width: 1px; height: 20px; background: var(--border);"></div>
+            <div>
+              <h2 style="margin: 0; font-size: 16px; font-weight: 800; background: linear-gradient(135deg, var(--accent), var(--accent-purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; letter-spacing: -0.5px; line-height: 1.2;">${escapeHtml(t.title)}: ${escapeHtml(projectName)}</h2>
+              <div class="sub-heading">${escapeHtml(t.currentProject)} · ${escapeHtml(projectName)}${projectPath ? ` · ${escapeHtml(t.projectPath)}: ${escapeHtml(projectPath)}` : ''}</div>
+            </div>
+          </div>
       <div class="header-actions">
         <button type="button" class="btn-refresh" id="btn-refresh"><span class="codicon codicon-refresh"></span> ${escapeHtml(t.refreshBtn)}</button>
-      </div>
-    </header>
+          </div>
+        </header>
 
-    <div class="stats-banner">
+        <section class="understanding-shell">
+          <div class="understanding-main">
+            <div class="section-kicker">${escapeHtml(t.understandingTitle)}</div>
+            <h2>${escapeHtml(insightHeadline)}</h2>
+            <p>${escapeHtml(insightBody)}</p>
+            <div class="understanding-chips">
+              <span>${escapeHtml(insightHealthLabel)}</span>
+              <span>${escapeHtml(insightFocusLabel)}</span>
+              <span>${escapeHtml(insightEvidenceLabel)}</span>
+            </div>
+          </div>
+          <div class="priority-actions">
+            <div class="priority-title"><span class="codicon codicon-checklist"></span> ${escapeHtml(t.priorityActions)}</div>
+            <div class="priority-list">${actionCardsHtml}</div>
+          </div>
+        </section>
+
+        <section class="growth-v2-grid">
+          <div class="growth-v2-panel">
+            <h2 class="panel-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(t.capabilityMap)}</h2>
+            <div class="capability-health-grid">${capabilityHealthHtml}</div>
+          </div>
+          <div class="growth-v2-panel">
+            <h2 class="panel-title"><span class="codicon codicon-pulse"></span> ${escapeHtml(t.growthFocus)}</h2>
+            <div class="focus-area-list">${focusAreasHtml}</div>
+          </div>
+        </section>
+
+        <div class="detail-section-title">${escapeHtml(t.detailData)}</div>
+
+        <div class="stats-banner">
       <div class="stat-card">
         <span class="stat-val">${totalFiles}</span>
         <span class="stat-label">${escapeHtml(t.totalFiles)}</span>

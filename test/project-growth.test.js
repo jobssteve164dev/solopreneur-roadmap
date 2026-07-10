@@ -101,8 +101,13 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(view.totals.packages, 1);
   assert.ok(view.treemap);
   assert.equal(view.treemap.label, 'Project');
+  assert.ok(view.insight);
+  assert.match(view.insight.headline, /主要生长区域/);
+  assert.ok(view.focusAreas.some((area) => area.label === '数据层'));
+  assert.ok(view.recommendedActions.length > 0);
   assert.ok(view.modules.some((module) => module.nodeId === 'module:data-layer'));
   assert.ok(view.capabilities.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
+  assert.ok(view.capabilityHealth.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'tested_by'));
   assert.ok(view.gaps.some((gap) => gap.source === 'run_index' || gap.source === 'growth_rules'));
@@ -176,6 +181,44 @@ test('project growth webview uses locale labels for roadmap and history metadata
   const viewModel = {
     snapshotId: 'growth-test',
     generatedAt: '2026-01-03T00:00:00.000Z',
+    projectPath: '/workspace/demo',
+    insight: {
+      headline: '4 个文件沉淀为 1 个主要生长区域',
+      body: '补强项目数据链路已经有代码落地，但还需要补验证证据。',
+      healthLabel: '1 个优先处理点',
+      focusLabel: '数据层 最值得先看',
+      evidenceLabel: '1 条生长信号'
+    },
+    capabilityHealth: [{
+      nodeId: 'capability:roadmap:roadmap-data',
+      label: '补强项目数据链路',
+      stage: '交付与验证',
+      status: 'needs_verification',
+      summary: '关联 1 个生长区域、2 个文件，还缺少测试证据。',
+      action: 'add_verification',
+      modules: ['数据层'],
+      evidence: ['数据层: 最近被 Agent 触碰，但缺少验证信号'],
+      signal: 'watch'
+    }],
+    focusAreas: [{
+      nodeId: 'module:data-layer',
+      label: '数据层',
+      status: 'needs_verification',
+      summary: 'data · 2 个文件 · 24 行 · 0 个测试',
+      action: 'add_verification',
+      files: 2,
+      loc: 24,
+      tests: 0,
+      confidence: 0.82,
+      evidence: ['最近被 Agent 触碰，但缺少验证信号']
+    }],
+    recommendedActions: [{
+      title: '补强项目数据链路：补验证证据',
+      detail: '关联 1 个生长区域、2 个文件，还缺少测试证据。',
+      target: '交付与验证',
+      level: 'needs_verification',
+      source: 'roadmap'
+    }],
     treemap: null,
     gaps: [{
       nodeId: 'module:data-layer',
@@ -221,6 +264,13 @@ test('project growth webview uses locale labels for roadmap and history metadata
 
   const zhHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', true);
   assert.match(zhHtml, /<title>SoloMap: 项目代码生长图<\/title>/);
+  assert.match(zhHtml, /当前项目 · Demo · 项目路径: \/workspace\/demo/);
+  assert.match(zhHtml, /项目现在长成什么样/);
+  assert.match(zhHtml, /优先处理/);
+  assert.match(zhHtml, /路线图能力落地/);
+  assert.match(zhHtml, /近期生长重点/);
+  assert.match(zhHtml, /待验证/);
+  assert.match(zhHtml, /补验证证据/);
   assert.match(zhHtml, /关注/);
   assert.match(zhHtml, /职责: 数据层/);
   assert.match(zhHtml, /来源: 运行索引/);
@@ -238,6 +288,13 @@ test('project growth webview uses locale labels for roadmap and history metadata
 
   const enHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', false);
   assert.match(enHtml, /<title>SoloMap: Project Growth Graph<\/title>/);
+  assert.match(enHtml, /Current Project · Demo · Project Path: \/workspace\/demo/);
+  assert.match(enHtml, /What This Project Has Become/);
+  assert.match(enHtml, /Priority Actions/);
+  assert.match(enHtml, /Roadmap Capability Landing/);
+  assert.match(enHtml, /Recent Growth Focus/);
+  assert.match(enHtml, /Needs Verification/);
+  assert.match(enHtml, /Add verification evidence/);
   assert.match(enHtml, /Watch/);
   assert.match(enHtml, /Role: Data/);
   assert.match(enHtml, /Source: Run Index/);

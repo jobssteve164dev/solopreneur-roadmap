@@ -185,6 +185,7 @@ let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
+let activeProjectGrowthPath = '';
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
@@ -1446,6 +1447,16 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
   }
+  if (activeProjectGrowthPanel) {
+    const copy = getProjectGrowthPanelCopy(context);
+    activeProjectGrowthPath = projectPath;
+    activeProjectGrowthPanel.title = copy.panelTitle;
+    activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
+      title: copy.openingTitle,
+      message: copy.openingMessage
+    });
+    void refreshProjectGrowthPanel(context, projectPath);
+  }
   scheduleProjectRunIndexBackfill(context, projectPath);
   void ensureSyncEngine(context).then((ready) => {
     if (ready && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
@@ -2358,6 +2369,7 @@ async function handleOpenProjectGrowth(context: vscode.ExtensionContext, project
 
 async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
   const copy = getProjectGrowthPanelCopy(context);
+  activeProjectGrowthPath = projectPath;
   if (activeProjectGrowthPanel) {
     activeProjectGrowthPanel.reveal(vscode.ViewColumn.One);
     activeProjectGrowthPanel.title = copy.panelTitle;
@@ -2399,6 +2411,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
       switch (message.command) {
         case 'refreshGrowth':
           const refreshCopy = getProjectGrowthPanelCopy(context);
+          const projectPathToRefresh = activeProjectGrowthPath || getSelectedProjectPath(context) || projectPath;
           activeProjectGrowthPanel!.webview.html = buildLocalDataStatusHtml(
             activeProjectGrowthPanel!.webview,
             context,
@@ -2408,12 +2421,12 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
             }
           );
           try {
-            await refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+            await refreshProjectGrowthSnapshot(projectPathToRefresh, context.extensionPath, {
               scanReason: 'webview_refresh',
               maxFiles: 5000
             });
           } catch (e) {}
-          void refreshProjectGrowthPanel(context, projectPath);
+          void refreshProjectGrowthPanel(context, projectPathToRefresh);
           break;
       }
     }
@@ -2422,6 +2435,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
   activeProjectGrowthPanel.onDidDispose(
     () => {
       activeProjectGrowthPanel = null;
+      activeProjectGrowthPath = '';
     },
     null,
     context.subscriptions
@@ -2433,6 +2447,7 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
   if (!panel) {
     return;
   }
+  activeProjectGrowthPath = projectPath;
   
   const project = getProjects(context).find((p: any) => p.path === projectPath);
   const projectName = project ? project.name : path.basename(projectPath) || 'Project';

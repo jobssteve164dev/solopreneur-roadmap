@@ -2757,6 +2757,16 @@ test('run index backfill is scoped to explicit project selection or manual refre
   assert.doesNotMatch(impactSource, /backfillRunIndexFromDigests/);
 });
 
+test('selected project changes refresh an already open project growth panel', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+
+  assert.match(extensionSource, /let activeProjectGrowthPath = '';/);
+  assert.match(extensionSource, /async function selectProject[\s\S]*?if \(activeProjectGrowthPanel\) \{[\s\S]*?activeProjectGrowthPath = projectPath;[\s\S]*?refreshProjectGrowthPanel\(context, projectPath\)/);
+  assert.match(extensionSource, /async function openProjectGrowthPanel[\s\S]*?activeProjectGrowthPath = projectPath;/);
+  assert.match(extensionSource, /const projectPathToRefresh = activeProjectGrowthPath \|\| getSelectedProjectPath\(context\) \|\| projectPath;/);
+  assert.match(extensionSource, /activeProjectGrowthPath = '';/);
+});
+
 test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-lifecycle-a-'));
