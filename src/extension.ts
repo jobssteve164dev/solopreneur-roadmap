@@ -375,14 +375,21 @@ export async function activate(context: vscode.ExtensionContext) {
     const allExecutions = syncEngine && activeStepNode ? syncEngine.getAgentExecutions(activeStepNode.id) : [];
     const recentExecutions = allExecutions
       .slice(-3)
-      .map(log => ({
-        nodeId: log.nodeId,
-        status: log.status,
-        agentCli: log.agentCli,
-        finishedAt: log.finishedAt,
-        completionReason: log.completionReason,
-        failureReason: log.failureReason
-      }));
+      .map(log => {
+        const outputText = log.output || '';
+        const finishedAtMatch = outputText.match(/Run finished at:\s*(.*)/i);
+        const completionReasonMatch = outputText.match(/Completion decision:\s*(.*)/i);
+        const failureReasonMatch = outputText.match(/Failure reason:\s*([\s\S]*?)(?:\n\n|$)/i);
+        
+        return {
+          nodeId: log.nodeId,
+          status: log.status,
+          agentCli: log.agentCli,
+          finishedAt: finishedAtMatch ? finishedAtMatch[1].trim() : log.timestamp,
+          completionReason: completionReasonMatch ? completionReasonMatch[1].trim() : '',
+          failureReason: failureReasonMatch ? failureReasonMatch[1].trim() : ''
+        };
+      });
 
     return {
       activeProject: true,

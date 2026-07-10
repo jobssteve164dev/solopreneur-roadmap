@@ -635,7 +635,7 @@ export function getProjectGrowthWebviewHtml(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link href="${codiconsUri}" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <title>SoloMap: ${escapeHtml(t.title)}</title>
+  <title>solomap ${escapeHtml(t.title)}</title>
   <style>
     :root {
       --bg-dark: #0f111a;
@@ -678,7 +678,7 @@ export function getProjectGrowthWebviewHtml(
 
     body {
       margin: 0;
-      background: radial-gradient(circle at 50% 50%, rgba(20, 25, 45, 0.6) 0%, rgba(10, 12, 22, 0.95) 100%);
+      background: var(--vscode-editor-background, var(--bg-dark));
       color: var(--fg);
       font-family: var(--font);
       line-height: 1.5;
@@ -858,9 +858,18 @@ export function getProjectGrowthWebviewHtml(
     .growth-v2-panel {
       background: var(--glass-panel);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 18px;
-      backdrop-filter: blur(12px);
+      border-radius: 12px;
+      padding: 20px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.24);
+      transition: all 0.3s ease;
+    }
+
+    .understanding-main:hover,
+    .priority-actions:hover,
+    .growth-v2-panel:hover {
+      border-color: rgba(255, 255, 255, 0.12);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32);
     }
 
     .section-kicker,
@@ -928,9 +937,17 @@ export function getProjectGrowthWebviewHtml(
     .capability-health-card,
     .focus-area-row {
       border: 1px solid var(--border);
-      border-radius: 10px;
-      background: rgba(255, 255, 255, 0.04);
-      padding: 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 16px;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .action-card:hover,
+    .capability-health-card:hover,
+    .focus-area-row:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.15);
+      transform: translateY(-1px);
     }
 
     .action-card.attention,
@@ -1132,10 +1149,10 @@ export function getProjectGrowthWebviewHtml(
     }
 
     button.btn-refresh {
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid var(--border);
+      background: rgba(0, 229, 255, 0.1);
+      border: 1px solid rgba(0, 229, 255, 0.28);
       border-radius: 8px;
-      color: var(--fg);
+      color: #d7f3ff;
       padding: 8px 16px;
       cursor: pointer;
       display: inline-flex;
@@ -1143,14 +1160,15 @@ export function getProjectGrowthWebviewHtml(
       gap: 8px;
       font-family: var(--font);
       font-size: 13px;
-      font-weight: 500;
+      font-weight: 600;
       transition: all 0.3s;
     }
 
     button.btn-refresh:hover {
-      background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.2);
-      box-shadow: 0 0 12px rgba(0, 229, 255, 0.15);
+      background: #00e5ff;
+      border-color: #00e5ff;
+      color: #000;
+      box-shadow: 0 0 12px rgba(0, 229, 255, 0.35);
     }
 
     /* Stats Banner */
