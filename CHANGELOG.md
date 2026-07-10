@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.318 - 2026-07-10
+
+### Changed
+- improve project growth overview for newcomers (0c16915)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.317 - 2026-07-10
 
 ### Changed
