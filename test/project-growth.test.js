@@ -116,6 +116,8 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.ok(view.capabilityHealth.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'tested_by'));
+  assert.ok(view.keyEdges.every((edge) => edge.sourceId !== edge.targetId));
+  assert.ok(view.keyEdges.every((edge) => !edge.sourceId.startsWith('file:') && !edge.targetId.startsWith('file:')));
   assert.ok(view.gaps.some((gap) => gap.source === 'run_index' || gap.source === 'growth_rules'));
 
   const growthDbPath = path.join(solopreneurDir, 'project_growth.db');

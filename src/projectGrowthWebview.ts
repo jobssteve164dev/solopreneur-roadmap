@@ -343,7 +343,8 @@ export function getProjectGrowthWebviewHtml(
   context: vscode.ExtensionContext,
   viewModel: ProjectGrowthViewModel,
   projectName: string,
-  isZh: boolean
+  isZh: boolean,
+  projects: Array<{ name: string; path: string }> = []
 ): string {
   const codiconsUri = webview.asWebviewUri(joinExtensionUri(context, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
   const wordmarkUri = webview.asWebviewUri(joinExtensionUri(context, 'resources', 'logo_with_text.svg'));
@@ -753,8 +754,7 @@ export function getProjectGrowthWebviewHtml(
     }
 
     .growth-content {
-      width: min(1280px, 100%);
-      margin: 0 auto;
+      width: 100%;
     }
 
     header {
@@ -791,7 +791,23 @@ export function getProjectGrowthWebviewHtml(
     .header-actions {
       display: flex;
       gap: 10px;
+      align-items: center;
     }
+
+    .project-select {
+      width: clamp(150px, 18vw, 240px);
+      min-width: 0;
+      height: 34px;
+      padding: 0 28px 0 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--fg);
+      background: rgba(255, 255, 255, 0.05);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .project-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     .project-orientation,
     .journey-panel {
@@ -1836,6 +1852,9 @@ export function getProjectGrowthWebviewHtml(
         <div class="page-heading">${escapeHtml(t.title)}</div>
       </div>
       <div class="header-actions">
+        <select class="project-select" id="project-select" aria-label="${escapeHtml(t.currentProject)}">
+          ${projects.map((project) => `<option value="${escapeHtml(project.path)}"${project.path === viewModel.projectPath ? ' selected' : ''}>${escapeHtml(project.name)}</option>`).join('')}
+        </select>
         <button type="button" class="btn-refresh" id="btn-refresh"><span class="codicon codicon-refresh"></span> ${escapeHtml(t.refreshBtn)}</button>
       </div>
     </header>
@@ -1948,6 +1967,9 @@ export function getProjectGrowthWebviewHtml(
     const vscode = acquireVsCodeApi();
     document.getElementById('btn-refresh').addEventListener('click', () => {
       vscode.postMessage({ command: 'refreshGrowth' });
+    });
+    document.getElementById('project-select').addEventListener('change', (event) => {
+      vscode.postMessage({ command: 'project.select', projectPath: event.target.value });
     });
 
     const graphCanvas = document.querySelector('.architecture-graph-canvas');

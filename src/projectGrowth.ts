@@ -1485,17 +1485,29 @@ export function buildProjectGrowthViewModel(
       modules: [...new Set(incomingByTarget.get(node.nodeId) || [])],
       signal: summarizeDirectoryStatus(node, data.signals)
     }));
-  const keyEdges = data.edges
-    .filter((edge) => ['imports', 'depends_on', 'tested_by', 'implements', 'shaped_by_run'].includes(edge.kind))
+  const moduleByFile = new Map<string, string>();
+  for (const edge of data.edges) {
+    if (edge.kind === 'contains' && edge.sourceId.startsWith('module:') && edge.targetId.startsWith('file:')) {
+      moduleByFile.set(edge.targetId, edge.sourceId);
+    }
+  }
+  const edgeByIdentity = new Map<string, ProjectGrowthEdgeSummary>();
+  for (const edge of data.edges) {
+    if (!['imports', 'depends_on', 'tested_by', 'implements', 'shaped_by_run'].includes(edge.kind)) continue;
+    const sourceId = moduleByFile.get(edge.sourceId) || edge.sourceId;
+    const targetId = moduleByFile.get(edge.targetId) || edge.targetId;
+    if (sourceId === targetId) continue;
+    const identity = `${sourceId}|${targetId}|${edge.kind}`;
+    const existing = edgeByIdentity.get(identity);
+    if (existing) {
+      existing.weight += edge.weight;
+    } else {
+      edgeByIdentity.set(identity, { sourceId, targetId, kind: edge.kind, weight: edge.weight, evidence: edge.evidence });
+    }
+  }
+  const keyEdges = [...edgeByIdentity.values()]
     .sort((a, b) => b.weight - a.weight)
-    .slice(0, 120)
-    .map((edge) => ({
-      sourceId: edge.sourceId,
-      targetId: edge.targetId,
-      kind: edge.kind,
-      weight: edge.weight,
-      evidence: edge.evidence
-    }));
+    .slice(0, 120);
   const history = (options.history || [data]).map((snapshotData) => ({
     snapshotId: snapshotData.snapshot.id,
     createdAt: snapshotData.snapshot.createdAt,

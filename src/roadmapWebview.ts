@@ -436,6 +436,16 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       flex-shrink: 0;
     }
 
+    .page-heading {
+      color: var(--text-main);
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+
+    .header-divider { width: 1px; height: 20px; background: var(--border-glass); }
+
     button:hover {
       transform: translateY(-1px);
       box-shadow: 0 4px 15px rgba(0, 229, 255, 0.4);
@@ -1941,7 +1951,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 <body>
   <div class="app-container">
     <header>
-      <h1 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap"></h1>
+      <div class="brand-title">
+        <img class="brand-wordmark" src="${wordmarkUri}" width="132" height="34" alt="SoloMap">
+        <div class="header-divider"></div>
+        <div class="page-heading" id="roadmap-page-title">项目路线图</div>
+      </div>
       <div class="controls">
         <div class="solo-select project-select" id="project-select" data-solo-select data-value="">
           <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
@@ -2707,6 +2721,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     function applyLanguage() {
       setText('app-title', t('title'));
+      setText('roadmap-page-title', currentLanguage === 'zh' ? '项目路线图' : 'Project Roadmap');
       if (btnRemoveProject) btnRemoveProject.title = t('removeProject');
       if (btnToggleSolo) btnToggleSolo.title = t('soloTitle');
       if (btnToggleFlow) btnToggleFlow.title = t('flowTitle');

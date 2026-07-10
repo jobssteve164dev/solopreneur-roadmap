@@ -720,8 +720,10 @@ async function handleSharedWebviewAction(
       }
     },
     'settings.get': async () => {
-      await refreshProAccountStatus(context);
       await postSettingsLoaded(target, getSettingsWithRuntimeState(context));
+      void refreshProAccountStatus(context).catch((error) => {
+        console.warn('SoloMap Pro status refresh failed after settings loaded:', error);
+      });
     },
     'settings.update': async (request) => {
       await updatePersistedSettings(context, {
@@ -1584,7 +1586,8 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
         context,
         cachedGrowth,
         project?.name || path.basename(projectPath) || 'Project',
-        isSoloMapLanguageZh(context)
+        isSoloMapLanguageZh(context),
+        projects
       );
     } else {
       activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
@@ -2524,7 +2527,8 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           context,
           cachedGrowth,
           getProjects(context).find((item) => item.path === projectPath)?.name || path.basename(projectPath) || 'Project',
-          isSoloMapLanguageZh(context)
+          isSoloMapLanguageZh(context),
+          getProjects(context)
         )
       : buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
           title: copy.openingTitle,
@@ -2558,6 +2562,14 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
   activeProjectGrowthPanel.webview.onDidReceiveMessage(
     async (message) => {
       switch (message.command) {
+        case 'project.select': {
+          const nextProjectPath = String(message.projectPath || '');
+          if (!nextProjectPath || !getProjects(context).some((item) => item.path === nextProjectPath)) break;
+          activeProjectGrowthPath = nextProjectPath;
+          void refreshProjectGrowthPanel(context, nextProjectPath);
+          setTimeout(() => void selectProject(context, nextProjectPath), 0);
+          break;
+        }
         case 'refreshGrowth':
           const refreshCopy = getProjectGrowthPanelCopy(context);
           const projectPathToRefresh = activeProjectGrowthPath || getSelectedProjectPath(context) || projectPath;
@@ -2613,7 +2625,8 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
         context,
         growthView,
         projectName,
-        isZh
+        isZh,
+        getProjects(context)
       );
     },
     (message) => {
