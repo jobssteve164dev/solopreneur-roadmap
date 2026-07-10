@@ -134,6 +134,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
     edge.kind === 'imports'
     && edge.sourceId === 'file:src/extension.ts'
     && edge.targetId === 'file:src/db/store.ts'
+    && edge.evidence === 'dependency-cruiser'
   )));
   assert.ok(latest.edges.some((edge) => (
     edge.kind === 'tested_by'

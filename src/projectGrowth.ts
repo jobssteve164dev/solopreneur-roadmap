@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
+import { promisify } from 'util';
 import { SqliteStore } from './db/sqliteStore';
 import {
   GrowthEdgeRecord,
@@ -241,6 +242,7 @@ const generatedPathPatterns = [
 ];
 
 const importRegex = /\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g;
+const execFileAsync = promisify(execFile);
 
 function toPosixPath(value: string): string {
   return value.replace(/\\/g, '/');
@@ -1617,6 +1619,35 @@ export function buildProjectGrowthSnapshot(
   };
 }
 
+async function enrichSnapshotWithDependencyCruiser(snapshot: GrowthSnapshotData, projectPath: string, extensionPath: string): Promise<void> {
+  const sourceRoot = path.join(projectPath, 'src');
+  const cliPath = path.join(extensionPath, 'node_modules', 'dependency-cruiser', 'bin', 'dependency-cruise.mjs');
+  if (!fs.existsSync(sourceRoot) || !fs.existsSync(cliPath)) return;
+  const tsconfigPath = path.join(projectPath, 'tsconfig.json');
+  const args = [cliPath, sourceRoot, '--no-config', '--include-only', '^src/', '--output-type', 'json'];
+  if (fs.existsSync(tsconfigPath)) args.push('--ts-config', tsconfigPath);
+  try {
+    const { stdout } = await execFileAsync(process.execPath, args, { cwd: projectPath, timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
+    const result = JSON.parse(stdout || '{}') as { modules?: Array<{ source?: string; dependencies?: Array<{ resolved?: string; circular?: boolean }> }> };
+    const files = new Set(snapshot.nodes.filter((node) => node.kind === 'file').map((node) => node.path));
+    const dependencyEdges: GrowthEdgeRecord[] = [];
+    for (const module of result.modules || []) {
+      const source = toPosixPath(String(module.source || ''));
+      if (!files.has(source)) continue;
+      for (const dependency of module.dependencies || []) {
+        const target = toPosixPath(String(dependency.resolved || ''));
+        if (!target || target === source || dependency.circular || !files.has(target)) continue;
+        dependencyEdges.push({ snapshotId: snapshot.snapshot.id, sourceId: nodeIdForPath('file', source), targetId: nodeIdForPath('file', target), kind: 'imports', weight: 1, evidence: 'dependency-cruiser' });
+      }
+    }
+    if (dependencyEdges.length > 0) {
+      snapshot.edges = snapshot.edges.filter((edge) => edge.kind !== 'imports').concat(dependencyEdges);
+    }
+  } catch (error) {
+    console.warn('SoloMap dependency-cruiser scan failed; using lightweight import scan:', error);
+  }
+}
+
 export async function refreshProjectGrowthSnapshot(
   projectPath: string,
   extensionPath: string,
@@ -1633,6 +1664,7 @@ export async function refreshProjectGrowthSnapshot(
     const previousHistory = growthStore.getGrowthSnapshotHistory(1);
     const previous = previousHistory[0] ? growthStore.getGrowthSnapshotById(previousHistory[0].id) : null;
     const snapshot = buildProjectGrowthSnapshot(projectPath, journalStore.getAllNodes(), journalStore.getRunIndexEntries(), options);
+    await enrichSnapshotWithDependencyCruiser(snapshot, projectPath, extensionPath);
     growthStore.writeGrowthSnapshot(snapshot);
     const history = growthStore.getGrowthSnapshotHistory(options.historyLimit || 12)
       .map((item) => growthStore.getGrowthSnapshotById(item.id))
