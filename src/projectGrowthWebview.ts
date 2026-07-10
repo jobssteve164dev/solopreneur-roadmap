@@ -732,23 +732,28 @@ export function getProjectGrowthWebviewHtml(
 
     body {
       margin: 0;
+      height: 100vh;
       background: var(--vscode-editor-background, var(--bg-dark));
       color: var(--fg);
       font-family: var(--font);
       line-height: 1.5;
-      overflow-x: hidden;
+      overflow: hidden;
     }
 
     .app-container {
       display: flex;
       flex-direction: column;
-      min-height: 100vh;
-      width: 100%;
+      height: 100vh;
+      width: 100vw;
+      min-height: 0;
     }
 
     .growth-canvas {
       flex: 1;
-      overflow: auto;
+      min-height: 0;
+      width: 100%;
+      overflow-y: auto;
+      overflow-x: hidden;
       padding: clamp(18px, 4vw, 40px);
       background: radial-gradient(circle at 50% 50%, rgba(20, 25, 45, 0.6) 0%, rgba(10, 12, 22, 0.95) 100%);
     }
