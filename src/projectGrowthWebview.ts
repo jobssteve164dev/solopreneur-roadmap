@@ -732,12 +732,12 @@ export function getProjectGrowthWebviewHtml(
 
     body {
       margin: 0;
-      height: 100vh;
+      padding: 0;
       background: var(--vscode-editor-background, var(--bg-dark));
       color: var(--fg);
       font-family: var(--font);
       line-height: 1.5;
-      overflow: hidden;
+      overflow-x: hidden;
     }
 
     .app-container {
@@ -745,17 +745,17 @@ export function getProjectGrowthWebviewHtml(
       flex-direction: column;
       height: 100vh;
       width: 100vw;
-      min-height: 0;
     }
 
     .growth-canvas {
       flex: 1;
-      min-height: 0;
-      width: 100%;
-      overflow-y: auto;
-      overflow-x: hidden;
+      position: relative;
+      overflow: auto;
       padding: clamp(18px, 4vw, 40px);
       background: radial-gradient(circle at 50% 50%, rgba(20, 25, 45, 0.6) 0%, rgba(10, 12, 22, 0.95) 100%);
+      display: flex;
+      flex-direction: column;
+      gap: 30px;
     }
 
     .growth-content {
