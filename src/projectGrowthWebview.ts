@@ -51,9 +51,9 @@ const locales = {
     graphDependencies: "依赖关系",
     graphVerification: "验证覆盖",
     graphRoadmap: "路线图能力",
-    graphCore: "核心能力",
-    graphData: "数据与运行",
-    graphEvidence: "验证与交付",
+    graphCore: "已落地模块",
+    graphData: "外部依赖",
+    graphEvidence: "验证与回归",
     structuralGaps: "架构与验证盲区 (Gaps)",
     linkedCapabilities: "关联路线图能力",
     snapshotHistory: "生长分析历史轨迹",
@@ -87,6 +87,7 @@ const locales = {
     lines: "行数 (LOC)",
     tests: "测试数",
     confidence: "置信度",
+    labelBasis: "命名依据",
     role: "职责",
     reason: "快照原因",
     source: "来源",
@@ -127,6 +128,11 @@ const locales = {
       git: "Git 变更",
       roadmap: "路线图",
       filesystem: "项目文件"
+    },
+    labelSourceLabels: {
+      roadmap: "来自路线图标题",
+      dependency_cluster: "来自依赖聚类与共同目录",
+      scan_fallback: "来自文件扫描回退命名"
     },
     edgeLabels: {
       imports: "调用",
@@ -199,9 +205,9 @@ const locales = {
     graphDependencies: "Dependencies",
     graphVerification: "Verification",
     graphRoadmap: "Roadmap capability",
-    graphCore: "Core capability",
-    graphData: "Data & runtime",
-    graphEvidence: "Verification & delivery",
+    graphCore: "Implemented modules",
+    graphData: "External dependencies",
+    graphEvidence: "Verification",
     structuralGaps: "Structural Gaps",
     linkedCapabilities: "Linked Capabilities",
     snapshotHistory: "Snapshot History",
@@ -235,6 +241,7 @@ const locales = {
     lines: "Lines (LOC)",
     tests: "Tests",
     confidence: "Confidence",
+    labelBasis: "Naming basis",
     role: "Role",
     reason: "Reason",
     source: "Source",
@@ -275,6 +282,11 @@ const locales = {
       git: "Git",
       roadmap: "Roadmap",
       filesystem: "Project Files"
+    },
+    labelSourceLabels: {
+      roadmap: "From roadmap title",
+      dependency_cluster: "From dependency cluster and shared path",
+      scan_fallback: "From scan fallback naming"
     },
     edgeLabels: {
       imports: "Imports",
@@ -453,13 +465,15 @@ export function getProjectGrowthWebviewHtml(
   const focusAreasHtml = viewModel.focusAreas && viewModel.focusAreas.length > 0
     ? viewModel.focusAreas.map((area) => {
       const focusSummary = isZh
-        ? area.summary
-        : `${formatMappedLabel(t.roleLabels, area.summary.split(' · ')[0])} · ${area.files} files · ${area.loc.toLocaleString()} LOC · ${area.tests} tests`;
+        ? `${area.files} 个文件 · ${area.loc.toLocaleString()} 行 · ${area.tests} 个测试`
+        : `${area.files} files · ${area.loc.toLocaleString()} LOC · ${area.tests} tests`;
+      const labelBasis = formatMappedLabel((t as any).labelSourceLabels || {}, area.labelSource);
       return `
         <div class="focus-area-row ${statusClass(area.status)}">
           <div class="focus-main">
             <div class="focus-title">${escapeHtml(area.label)} <span class="status-pill ${statusClass(area.status)}">${escapeHtml(formatMappedLabel(t.growthStatusLabels, area.status))}</span></div>
             <div class="focus-summary">${escapeHtml(focusSummary)}</div>
+            <div class="focus-action">${escapeHtml(t.labelBasis)}: ${escapeHtml(labelBasis)}</div>
             <div class="focus-action">${escapeHtml(t.actionLabel)}: ${escapeHtml(formatMappedLabel(t.growthActionLabels, area.action))}</div>
           </div>
           <div class="focus-metrics">
@@ -495,7 +509,7 @@ export function getProjectGrowthWebviewHtml(
       const tileWeight = Math.max(1, Math.round(1 + 7 * Math.sqrt(mod.loc / maxModuleLoc)));
       const tileSize = index === 0 ? 'tile-dominant' : index < 3 ? 'tile-large' : index < 7 ? 'tile-medium' : 'tile-small';
       const signalLabel = formatMappedLabel(t.signalLabels, mod.signal);
-      const roleLabel = formatMappedLabel(t.roleLabels, mod.role);
+      const basisLabel = formatMappedLabel((t as any).labelSourceLabels || {}, (mod as any).labelSource);
       return `
         <div class="module-card ${signalClass} ${tileSize}" style="--tile-weight:${tileWeight}" tabindex="0" role="group" aria-label="${escapeHtml(`${mod.label}, ${signalLabel}, ${mod.loc} ${t.lines}`)}">
           <div class="module-card-head">
@@ -520,7 +534,7 @@ export function getProjectGrowthWebviewHtml(
               <span class="meta-val">${Math.round(mod.confidence * 100)}%</span>
             </div>
           </div>
-          <div class="module-role-tag">${escapeHtml(roleLabel)}</div>
+          <div class="module-role-tag">${escapeHtml(t.labelBasis)} · ${escapeHtml(basisLabel)}</div>
         </div>
       `;
     }).join('');
@@ -632,11 +646,28 @@ export function getProjectGrowthWebviewHtml(
   const graphLabel = (nodeId: string) => capabilityLabels.get(nodeId)
     || moduleLabels.get(nodeId)
     || nodeId.replace(/^(file:|module:|package:|capability:roadmap:)/, '');
+  const graphFacts = new Map(graphNodeIds.map((nodeId) => [nodeId, {
+    nodeId,
+    isCapability: nodeId.startsWith('capability:'),
+    isPackage: nodeId.startsWith('package:'),
+    hasVerification: false,
+    hasRoadmap: false
+  }]));
+  for (const edge of graphEdges) {
+    if (edge.kind === 'tested_by') {
+      graphFacts.get(edge.sourceId) && (graphFacts.get(edge.sourceId)!.hasVerification = true);
+      graphFacts.get(edge.targetId) && (graphFacts.get(edge.targetId)!.hasVerification = true);
+    }
+    if (edge.kind === 'implements') {
+      graphFacts.get(edge.sourceId) && (graphFacts.get(edge.sourceId)!.hasRoadmap = true);
+      graphFacts.get(edge.targetId) && (graphFacts.get(edge.targetId)!.hasRoadmap = true);
+    }
+  }
   const graphLane = (nodeId: string) => {
-    if (nodeId.startsWith('capability:')) return 'roadmap';
-    if (nodeId.startsWith('package:')) return 'data';
-    if (/test|verification|delivery|release|workflow/i.test(nodeId)) return 'evidence';
-    if (/data|db|store|run|execution|journal|memory/i.test(nodeId)) return 'data';
+    const fact = graphFacts.get(nodeId);
+    if (fact?.isCapability) return 'roadmap';
+    if (fact?.isPackage) return 'data';
+    if (fact?.hasVerification) return 'evidence';
     return 'core';
   };
   const graphLanes = [

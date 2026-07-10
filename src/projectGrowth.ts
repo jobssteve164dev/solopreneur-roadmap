@@ -69,6 +69,7 @@ export interface ProjectGrowthModuleSummary {
   nodeId: string;
   label: string;
   role: string;
+  labelSource: string;
   loc: number;
   files: number;
   tests: number;
@@ -147,6 +148,7 @@ export interface ProjectGrowthFocusArea {
   label: string;
   status: string;
   summary: string;
+  labelSource: string;
   action: string;
   files: number;
   loc: number;
@@ -1536,6 +1538,12 @@ function shortenNodeLabel(nodeId: string, labelById: Map<string, string>): strin
   return label.replace(/^module:/, '').replace(/^file:/, '');
 }
 
+function moduleLabelSource(labelSource: string): string {
+  if (labelSource === 'roadmap') return 'roadmap';
+  if (labelSource === 'import_graph') return 'dependency_cluster';
+  return 'scan_fallback';
+}
+
 function buildInsightSummary(
   totals: ProjectGrowthTotals,
   modules: ProjectGrowthModuleSummary[],
@@ -1724,6 +1732,7 @@ function buildFocusAreas(
         label: module.label,
         status,
         summary: `${module.role} · ${module.files} 个文件 · ${module.loc.toLocaleString()} 行 · ${module.tests} 个测试`,
+        labelSource: module.labelSource,
         action,
         files: module.files,
         loc: module.loc,
@@ -1875,6 +1884,9 @@ export function buildProjectGrowthViewModel(
   const root = data.nodes.find((node) => node.nodeId === 'directory:.') || data.nodes.find((node) => node.kind === 'directory') || null;
   const actionableLevels = new Set(['watch', 'attention', 'blocked']);
   const labelById = new Map(data.nodes.map((node) => [node.nodeId, node.label || node.path || node.nodeId]));
+  const labelSourceById = new Map(
+    data.labels.map((label) => [label.nodeId, moduleLabelSource(label.source)])
+  );
   const signalsByNode = new Map<string, GrowthSignalRecord[]>();
   for (const signal of data.signals) {
     const list = signalsByNode.get(signal.nodeId) || [];
@@ -1904,6 +1916,7 @@ export function buildProjectGrowthViewModel(
       nodeId: node.nodeId,
       label: node.label,
       role: node.primaryRole,
+      labelSource: labelSourceById.get(node.nodeId) || 'scan_fallback',
       loc: node.loc,
       files: node.fileCount,
       tests: node.testFileCount,
