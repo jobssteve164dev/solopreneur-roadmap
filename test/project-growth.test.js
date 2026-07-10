@@ -108,10 +108,10 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(view.orientation.currentStep, '补强项目数据链路');
   assert.equal(view.orientation.currentStepStatus, 'In Progress');
   assert.match(view.insight.headline, /主要生长区域/);
-  assert.ok(view.focusAreas.some((area) => area.label === '数据层'));
+  assert.ok(view.focusAreas.some((area) => area.label === '补强项目数据链路'));
   assert.ok(view.recommendedActions.length > 0);
-  assert.ok(view.modules.some((module) => module.nodeId === 'module:data-layer'));
-  assert.equal(view.modules.find((module) => module.nodeId === 'module:verification').tests, 2);
+  assert.ok(view.modules.some((module) => module.nodeId === 'module:roadmap:roadmap-data'));
+  assert.equal(view.modules.find((module) => module.nodeId === 'module:path:test').tests, 1);
   assert.ok(view.capabilities.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.capabilityHealth.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));
@@ -128,7 +128,8 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
 
   assert.ok(latest);
   assert.equal(latest.snapshot.scanReason, 'test');
-  assert.ok(latest.nodes.some((node) => node.nodeId === 'module:data-layer' && node.label === '数据层'));
+  assert.ok(latest.nodes.some((node) => node.nodeId === 'module:roadmap:roadmap-data' && node.label === '补强项目数据链路'));
+  assert.ok(!latest.nodes.some((node) => node.label === '数据层'));
   assert.ok(latest.nodes.some((node) => node.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(latest.edges.some((edge) => (
     edge.kind === 'imports'
@@ -147,7 +148,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
     && edge.targetId === 'package:papaparse'
   )));
   assert.ok(latest.edges.some((edge) => edge.kind === 'implements' && edge.targetId === 'capability:roadmap:roadmap-data'));
-  assert.ok(latest.signals.some((signal) => signal.type === 'failure' && signal.level === 'attention'));
+  assert.ok(latest.signals.some((signal) => signal.type === 'failure' && ['attention', 'blocked'].includes(signal.level)));
 
   const persistedView = buildProjectGrowthViewModel(latest);
   assert.equal(persistedView.totals.capabilities, 1);

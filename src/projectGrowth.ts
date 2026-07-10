@@ -213,6 +213,43 @@ interface ModuleFact {
   roadmapNodeIds: Set<string>;
 }
 
+interface DependencyCruiserDependency {
+  resolved?: string;
+  circular?: boolean;
+  couldNotResolve?: boolean;
+  dependencyTypes?: string[];
+}
+
+interface DependencyCruiserModule {
+  source?: string;
+  orphan?: boolean;
+  dependencies?: DependencyCruiserDependency[];
+}
+
+interface DependencyCruiserResult {
+  modules?: DependencyCruiserModule[];
+}
+
+interface ScannedFileNode {
+  path: string;
+  label: string;
+  loc: number;
+  bytes: number;
+  isTest: boolean;
+  primaryRole: string;
+}
+
+interface FileDependencyAnalysis {
+  result: DependencyCruiserResult;
+  localEdges: Array<{ source: string; target: string; circular: boolean; couldNotResolve: boolean }>;
+  incomingCounts: Map<string, number>;
+}
+
+interface DependencyCacheEntry {
+  signature: string;
+  analysis: FileDependencyAnalysis;
+}
+
 const ignoredDirectoryNames = new Set([
   '.git',
   'node_modules',
@@ -243,6 +280,7 @@ const generatedPathPatterns = [
 
 const importRegex = /\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)/g;
 const execFileAsync = promisify(execFile);
+const dependencyCruiserCache = new Map<string, DependencyCacheEntry>();
 
 function toPosixPath(value: string): string {
   return value.replace(/\\/g, '/');
@@ -325,32 +363,112 @@ function roleForPath(relativePath: string): string {
   return 'implementation';
 }
 
-function moduleForPath(relativePath: string): { id: string; label: string; role: string; confidence: number } {
-  const rules: Array<{ pattern: RegExp; id: string; label: string; role: string; confidence: number }> = [
-    { pattern: /^src\/db\//, id: 'module:data-layer', label: '数据层', role: 'data', confidence: 0.9 },
-    { pattern: /^src\/.*Webview\.ts$/, id: 'module:webview-ui', label: 'Webview 界面层', role: 'interface', confidence: 0.86 },
-    { pattern: /^src\/sidebar/i, id: 'module:sidebar-cockpit', label: '侧边栏驾驶舱', role: 'product-ui', confidence: 0.86 },
-    { pattern: /^src\/roadmap/i, id: 'module:roadmap-cockpit', label: '路线图大图', role: 'product-ui', confidence: 0.86 },
-    { pattern: /^src\/(agent|run|flow|learning|conversation|projectGrowth)/i, id: 'module:agent-execution', label: 'Agent 执行与经验层', role: 'execution', confidence: 0.82 },
-    { pattern: /^src\/strategy/i, id: 'module:strategy-pyramid', label: '战略驾驶舱', role: 'product-ui', confidence: 0.82 },
-    { pattern: /^src\//, id: 'module:extension-host', label: '插件宿主与业务逻辑', role: 'extension-host', confidence: 0.65 },
-    { pattern: /^(test|tests)\//, id: 'module:verification', label: '验证回归层', role: 'verification', confidence: 0.9 },
-    { pattern: /^docs\//, id: 'module:project-knowledge', label: '项目知识层', role: 'knowledge', confidence: 0.9 },
-    { pattern: /^resources\//, id: 'module:runtime-resources', label: '运行资源层', role: 'runtime-resource', confidence: 0.82 },
-    { pattern: /^website\//, id: 'module:website', label: '官网与市场页面', role: 'website', confidence: 0.86 },
-    { pattern: /^\.github\//, id: 'module:delivery-automation', label: '交付自动化', role: 'delivery', confidence: 0.88 }
-  ];
-  const matched = rules.find((rule) => rule.pattern.test(relativePath));
-  if (matched) {
-    return matched;
+function sanitizeIdSegment(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'module';
+}
+
+function splitNameTokens(value: string): string[] {
+  return String(value || '')
+    .replace(/\.[^.]+$/g, '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => token.toLowerCase());
+}
+
+function titleCaseLabel(value: string): string {
+  return splitNameTokens(value)
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(' ');
+}
+
+function commonDirectoryPath(filePaths: string[]): string {
+  if (filePaths.length === 0) return '';
+  const directories = filePaths
+    .map((filePath) => toPosixPath(path.dirname(filePath)))
+    .filter((dirPath) => dirPath && dirPath !== '.');
+  if (directories.length === 0) {
+    return '';
   }
-  const top = relativePath.split('/')[0] || 'project';
+  const segments = directories.map((dirPath) => dirPath.split('/'));
+  const prefix: string[] = [];
+  for (let index = 0; index < Math.min(...segments.map((item) => item.length)); index++) {
+    const segment = segments[0][index];
+    if (segments.every((item) => item[index] === segment)) {
+      prefix.push(segment);
+    } else {
+      break;
+    }
+  }
+  return prefix.join('/');
+}
+
+function buildStructureName(filePaths: string[]): { id: string; label: string; confidence: number } {
+  const commonPath = commonDirectoryPath(filePaths);
+  if (commonPath && commonPath !== 'src') {
+    return {
+      id: `path:${sanitizeIdSegment(commonPath.replace(/\//g, '-'))}`,
+      label: commonPath,
+      confidence: commonPath.split('/').length >= 2 ? 0.78 : 0.68
+    };
+  }
+  const genericTokens = new Set(['src', 'test', 'tests', 'docs', 'lib', 'app', 'index', 'main']);
+  const scoreByToken = new Map<string, number>();
+  const filesByToken = new Map<string, Set<string>>();
+  for (const filePath of filePaths) {
+    const seen = new Set<string>();
+    const parts = toPosixPath(filePath).split('/');
+    for (const part of parts) {
+      for (const token of splitNameTokens(part)) {
+        if (genericTokens.has(token)) {
+          continue;
+        }
+        scoreByToken.set(token, (scoreByToken.get(token) || 0) + 1);
+        if (!filesByToken.has(token)) {
+          filesByToken.set(token, new Set());
+        }
+        filesByToken.get(token)!.add(filePath);
+        seen.add(token);
+      }
+    }
+    if (seen.size === 0) {
+      const basename = path.basename(filePath).replace(/\.[^.]+$/g, '');
+      scoreByToken.set(basename.toLowerCase(), (scoreByToken.get(basename.toLowerCase()) || 0) + 1);
+    }
+  }
+  const ranked = [...scoreByToken.entries()]
+    .map(([token, score]) => ({
+      token,
+      score,
+      fileSpread: filesByToken.get(token)?.size || 0
+    }))
+    .sort((a, b) => b.fileSpread - a.fileSpread || b.score - a.score || a.token.localeCompare(b.token));
+  const winner = ranked[0];
+  if (winner) {
+    return {
+      id: `scan:${sanitizeIdSegment(winner.token)}`,
+      label: titleCaseLabel(winner.token),
+      confidence: winner.fileSpread >= 2 ? 0.64 : 0.56
+    };
+  }
+  const fallback = filePaths[0] || 'module';
   return {
-    id: `module:${top}`,
-    label: top,
-    role: roleForPath(relativePath),
-    confidence: 0.45
+    id: `file:${sanitizeIdSegment(path.basename(fallback, path.extname(fallback)))}`,
+    label: path.basename(fallback, path.extname(fallback)),
+    confidence: 0.48
   };
+}
+
+function dominantRoleForFiles(files: ScannedFileNode[]): string {
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    counts.set(file.primaryRole || 'implementation', (counts.get(file.primaryRole || 'implementation') || 0) + Math.max(1, file.loc || 1));
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'implementation';
 }
 
 function readGitHead(projectPath: string): string {
@@ -716,178 +834,25 @@ function buildRunFileMaps(runEntries: RunIndexEntry[]): {
   return { byFile, verificationByRun, failureByRun };
 }
 
-function ensureModule(
+function addCapabilityNodes(
   snapshotId: string,
-  modules: Map<string, ModuleFact>,
-  moduleInfo: { id: string; label: string; role: string }
-): ModuleFact {
-  const existing = modules.get(moduleInfo.id);
-  if (existing) {
-    return existing;
-  }
-  const created: ModuleFact = {
-    id: moduleInfo.id,
-    label: moduleInfo.label,
-    role: moduleInfo.role,
-    paths: new Set(),
-    loc: 0,
-    bytes: 0,
-    fileCount: 0,
-    testFileCount: 0,
-    changedRunCount: 0,
-    touchedRunCount: 0,
-    verificationCount: 0,
-    failureCount: 0,
-    latestRunAt: '',
-    roadmapNodeIds: new Set()
-  };
-  modules.set(moduleInfo.id, created);
-  return created;
-}
-
-function addModuleAndCapabilityNodes(
-  snapshotId: string,
-  files: FileFact[],
   roadmapNodes: RoadmapNode[],
-  runEntries: RunIndexEntry[],
   nodes: Map<string, GrowthNodeRecord>,
   edges: GrowthEdgeRecord[],
   signals: GrowthSignalRecord[],
   labels: GrowthModuleLabelRecord[],
   nowIso: string
 ): void {
-  const { byFile, verificationByRun, failureByRun } = buildRunFileMaps(runEntries);
-  const modules = new Map<string, ModuleFact>();
   const roadmapById = new Map(roadmapNodes.map((node) => [node.id, node]));
-  const fileToModule = new Map<string, string>();
-  const moduleConfidence = new Map<string, number>();
-
-  for (const file of files) {
-    if (file.excluded) {
-      continue;
-    }
-    const moduleInfo = moduleForPath(file.relativePath);
-    moduleConfidence.set(moduleInfo.id, Math.max(moduleConfidence.get(moduleInfo.id) || 0, moduleInfo.confidence));
-    const module = ensureModule(snapshotId, modules, moduleInfo);
-    module.paths.add(file.relativePath);
-    module.loc += file.loc;
-    module.bytes += file.bytes;
-    module.fileCount += 1;
-    module.testFileCount += file.isTest ? Math.max(1, file.testItemCount) : 0;
-    fileToModule.set(file.relativePath, module.id);
-    const runs = byFile.get(file.relativePath) || [];
-    for (const run of runs) {
-      const role = run.files.find((item) => toPosixPath(String(item.filePath || '')) === file.relativePath)?.role || '';
-      if (role === 'changed') module.changedRunCount += 1;
-      if (role === 'touched') module.touchedRunCount += 1;
-      module.verificationCount += verificationByRun.get(Number(run.executionLogId || 0)) || 0;
-      module.failureCount += failureByRun.get(Number(run.executionLogId || 0)) || 0;
-      if (run.nodeId) {
-        module.roadmapNodeIds.add(run.nodeId);
-      }
-      if (run.finishedAt && (!module.latestRunAt || Date.parse(run.finishedAt) > Date.parse(module.latestRunAt))) {
-        module.latestRunAt = run.finishedAt;
-      }
-    }
-  }
-
-  for (const module of modules.values()) {
-    nodes.set(module.id, {
-      snapshotId,
-      nodeId: module.id,
-      parentId: 'directory:.',
-      kind: 'module',
-      path: [...module.paths].sort()[0] || '',
-      label: module.label,
-      language: '',
-      bytes: module.bytes,
-      loc: module.loc,
-      fileCount: module.fileCount,
-      testFileCount: module.testFileCount,
-      generated: false,
-      excluded: false,
-      primaryRole: module.role,
-      confidence: moduleConfidence.get(module.id) || 0.5
-    });
-    labels.push({
-      snapshotId,
-      nodeId: module.id,
-      label: module.label,
-      role: module.role,
-      source: 'rule',
-      confidence: moduleConfidence.get(module.id) || 0.5,
-      updatedAt: nowIso
-    });
-    for (const filePath of module.paths) {
-      edges.push({
-        snapshotId,
-        sourceId: module.id,
-        targetId: nodeIdForPath('file', filePath),
-        kind: 'contains',
-        weight: 1,
-        evidence: 'module-rule'
-      });
-    }
-    if (module.changedRunCount || module.touchedRunCount) {
-      signals.push({
-        snapshotId,
-        nodeId: module.id,
-        type: 'activity',
-        level: module.changedRunCount >= 3 ? 'attention' : 'info',
-        value: `最近 Agent 运行触碰 ${module.changedRunCount + module.touchedRunCount} 次`,
-        source: 'run_index',
-        sourceRef: module.latestRunAt,
-        createdAt: nowIso
-      });
-    }
-    if (module.failureCount > 0) {
-      signals.push({
-        snapshotId,
-        nodeId: module.id,
-        type: 'failure',
-        level: module.failureCount >= 2 ? 'blocked' : 'attention',
-        value: `关联运行包含 ${module.failureCount} 条失败信号`,
-        source: 'run_index',
-        sourceRef: module.latestRunAt,
-        createdAt: nowIso
-      });
-    }
-    if ((module.changedRunCount + module.touchedRunCount) > 0 && module.verificationCount === 0) {
-      signals.push({
-        snapshotId,
-        nodeId: module.id,
-        type: 'risk',
-        level: 'watch',
-        value: '最近被 Agent 触碰，但缺少验证信号',
-        source: 'growth_rules',
-        sourceRef: module.latestRunAt,
-        createdAt: nowIso
-      });
-    }
-    if (module.loc >= 1600 && module.testFileCount === 0) {
-      signals.push({
-        snapshotId,
-        nodeId: module.id,
-        type: 'risk',
-        level: 'attention',
-        value: '模块体量较大且未识别到测试文件',
-        source: 'growth_rules',
-        sourceRef: module.id,
-        createdAt: nowIso
-      });
-    }
-  }
-
   for (const roadmapNode of roadmapNodes) {
-    const nodeId = roadmapNode.id;
-    const capabilityId = `capability:roadmap:${nodeId}`;
+    const capabilityId = `capability:roadmap:${roadmapNode.id}`;
     nodes.set(capabilityId, {
       snapshotId,
       nodeId: capabilityId,
       parentId: '',
       kind: 'capability',
       path: '',
-      label: roadmapNode.title || nodeId,
+      label: roadmapNode.title || roadmapNode.id,
       language: '',
       bytes: 0,
       loc: 0,
@@ -896,15 +861,15 @@ function addModuleAndCapabilityNodes(
       generated: false,
       excluded: false,
       primaryRole: roadmapNode.stage || 'roadmap',
-      confidence: 0.78
+      confidence: 0.88
     });
     labels.push({
       snapshotId,
       nodeId: capabilityId,
-      label: roadmapNode.title || nodeId,
+      label: roadmapNode.title || roadmapNode.id,
       role: roadmapNode.stage || 'roadmap',
       source: 'roadmap',
-      confidence: 0.78,
+      confidence: 0.88,
       updatedAt: nowIso
     });
     signals.push({
@@ -918,7 +883,9 @@ function addModuleAndCapabilityNodes(
       createdAt: nowIso
     });
     for (const dependencyId of String(roadmapNode.dependencies || '').split(',').map((value) => value.trim()).filter(Boolean)) {
-      if (!roadmapById.has(dependencyId)) continue;
+      if (!roadmapById.has(dependencyId)) {
+        continue;
+      }
       edges.push({
         snapshotId,
         sourceId: `capability:roadmap:${dependencyId}`,
@@ -929,8 +896,406 @@ function addModuleAndCapabilityNodes(
       });
     }
   }
+}
 
-  for (const module of modules.values()) {
+function collectScannedFiles(nodes: Map<string, GrowthNodeRecord>): ScannedFileNode[] {
+  return [...nodes.values()]
+    .filter((node) => node.kind === 'file' && !node.excluded)
+    .map((node) => ({
+      path: node.path,
+      label: node.label,
+      loc: node.loc,
+      bytes: node.bytes,
+      isTest: node.primaryRole === 'verification' || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(node.path),
+      primaryRole: node.primaryRole || roleForPath(node.path)
+    }));
+}
+
+function buildDependencyCruiserAnalysis(
+  snapshotId: string,
+  result: DependencyCruiserResult,
+  files: Set<string>,
+  edges: GrowthEdgeRecord[]
+): FileDependencyAnalysis {
+  const localEdges: Array<{ source: string; target: string; circular: boolean; couldNotResolve: boolean }> = [];
+  const incomingCounts = new Map<string, number>();
+  const dependencyEdges: GrowthEdgeRecord[] = [];
+  for (const module of result.modules || []) {
+    const source = toPosixPath(String(module.source || ''));
+    if (!files.has(source)) {
+      continue;
+    }
+    for (const dependency of module.dependencies || []) {
+      const target = toPosixPath(String(dependency.resolved || ''));
+      if (!target || target === source || !files.has(target)) {
+        continue;
+      }
+      incomingCounts.set(target, (incomingCounts.get(target) || 0) + 1);
+      localEdges.push({
+        source,
+        target,
+        circular: Boolean(dependency.circular),
+        couldNotResolve: Boolean(dependency.couldNotResolve)
+      });
+      if (!dependency.circular) {
+        dependencyEdges.push({
+          snapshotId,
+          sourceId: nodeIdForPath('file', source),
+          targetId: nodeIdForPath('file', target),
+          kind: 'imports',
+          weight: 1,
+          evidence: 'dependency-cruiser'
+        });
+      }
+    }
+  }
+  if (dependencyEdges.length > 0) {
+    const preserved = edges.filter((edge) => edge.kind !== 'imports');
+    edges.length = 0;
+    edges.push(...preserved, ...dependencyEdges);
+  }
+  return { result, localEdges, incomingCounts };
+}
+
+function dependencySignatureForFiles(files: ScannedFileNode[]): string {
+  return files
+    .filter((file) => /^src\//.test(file.path) && !file.isTest && /\.[cm]?[jt]sx?$/.test(file.path))
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map((file) => `${file.path}:${file.bytes}:${file.loc}`)
+    .join('|');
+}
+
+async function loadDependencyCruiserAnalysis(
+  projectPath: string,
+  extensionPath: string,
+  snapshotId: string,
+  files: ScannedFileNode[],
+  edges: GrowthEdgeRecord[]
+): Promise<FileDependencyAnalysis | null> {
+  const sourceRoot = path.join(projectPath, 'src');
+  const cliPath = path.join(extensionPath, 'node_modules', 'dependency-cruiser', 'bin', 'dependency-cruise.mjs');
+  const fileSet = new Set(files.map((file) => file.path));
+  const signature = dependencySignatureForFiles(files);
+  if (!signature || !fs.existsSync(sourceRoot) || !fs.existsSync(cliPath)) {
+    return null;
+  }
+  const cached = dependencyCruiserCache.get(projectPath);
+  if (cached && cached.signature === signature) {
+    return buildDependencyCruiserAnalysis(snapshotId, cached.analysis.result, fileSet, edges);
+  }
+  const tsconfigPath = path.join(projectPath, 'tsconfig.json');
+  const args = [cliPath, sourceRoot, '--no-config', '--include-only', '^src/', '--output-type', 'json'];
+  if (fs.existsSync(tsconfigPath)) {
+    args.push('--ts-config', tsconfigPath);
+  }
+  try {
+    const { stdout } = await execFileAsync(process.execPath, args, {
+      cwd: projectPath,
+      timeout: 20000,
+      maxBuffer: 8 * 1024 * 1024
+    });
+    const result = JSON.parse(stdout || '{}') as DependencyCruiserResult;
+    const analysis = buildDependencyCruiserAnalysis(snapshotId, result, fileSet, edges);
+    dependencyCruiserCache.set(projectPath, { signature, analysis });
+    return analysis;
+  } catch (error) {
+    console.warn('SoloMap dependency-cruiser scan failed; using lightweight import scan:', error);
+    return null;
+  }
+}
+
+function buildModuleClusters(files: ScannedFileNode[], dependencyAnalysis: FileDependencyAnalysis | null): string[][] {
+  const sourceFiles = files.filter((file) => /^src\//.test(file.path) && !file.isTest && /\.[cm]?[jt]sx?$/.test(file.path));
+  const others = files.filter((file) => !sourceFiles.some((item) => item.path === file.path));
+  const sourceSet = new Set(sourceFiles.map((file) => file.path));
+  const adjacency = new Map<string, Set<string>>();
+  const incoming = dependencyAnalysis?.incomingCounts || new Map<string, number>();
+  const hubThreshold = Math.max(3, Math.ceil(sourceFiles.length / 8));
+  const hubFiles = new Set([...incoming.entries()].filter(([, count]) => count >= hubThreshold).map(([filePath]) => filePath));
+  for (const file of sourceFiles) {
+    adjacency.set(file.path, new Set());
+  }
+  for (const edge of dependencyAnalysis?.localEdges || []) {
+    if (!sourceSet.has(edge.source) || !sourceSet.has(edge.target) || hubFiles.has(edge.source) || hubFiles.has(edge.target)) {
+      continue;
+    }
+    adjacency.get(edge.source)?.add(edge.target);
+    adjacency.get(edge.target)?.add(edge.source);
+  }
+  const visited = new Set<string>();
+  const clusters: string[][] = [];
+  for (const file of sourceFiles) {
+    if (hubFiles.has(file.path) || visited.has(file.path)) {
+      continue;
+    }
+    const queue = [file.path];
+    const component: string[] = [];
+    visited.add(file.path);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      component.push(current);
+      for (const neighbor of adjacency.get(current) || []) {
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor);
+          queue.push(neighbor);
+        }
+      }
+    }
+    clusters.push(component.sort((a, b) => a.localeCompare(b)));
+  }
+  for (const hubFile of hubFiles) {
+    const neighbors = (dependencyAnalysis?.localEdges || []).filter((edge) => edge.source === hubFile || edge.target === hubFile);
+    const candidateScores = new Map<number, number>();
+    clusters.forEach((cluster, index) => {
+      const members = new Set(cluster);
+      const score = neighbors.reduce((sum, edge) => {
+        const peer = edge.source === hubFile ? edge.target : edge.source;
+        return sum + (members.has(peer) ? 1 : 0);
+      }, 0);
+      if (score > 0) {
+        candidateScores.set(index, score);
+      }
+    });
+    const best = [...candidateScores.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (best && best[1] >= 2) {
+      clusters[best[0]].push(hubFile);
+      clusters[best[0]].sort((a, b) => a.localeCompare(b));
+    } else {
+      clusters.push([hubFile]);
+    }
+  }
+  const otherGroups = new Map<string, string[]>();
+  for (const file of others) {
+    const top = file.path.split('/')[0] || path.basename(file.path, path.extname(file.path));
+    const key = top === file.path ? path.basename(file.path, path.extname(file.path)) : top;
+    const list = otherGroups.get(key) || [];
+    list.push(file.path);
+    otherGroups.set(key, list);
+  }
+  return clusters
+    .concat([...otherGroups.values()].map((group) => group.sort((a, b) => a.localeCompare(b))))
+    .filter((cluster) => cluster.length > 0);
+}
+
+function chooseModuleIdentity(
+  filePaths: string[],
+  roadmapNodes: RoadmapNode[],
+  runsByFile: Map<string, RunIndexEntry[]>
+): { nodeId: string; label: string; confidence: number; source: string; roadmapNodeIds: Set<string> } {
+  const roadmapById = new Map(roadmapNodes.map((node) => [node.id, node]));
+  const roadmapHits = new Map<string, number>();
+  for (const filePath of filePaths) {
+    for (const run of runsByFile.get(filePath) || []) {
+      if (!run.nodeId || !roadmapById.has(run.nodeId)) {
+        continue;
+      }
+      roadmapHits.set(run.nodeId, (roadmapHits.get(run.nodeId) || 0) + 1);
+    }
+  }
+  const rankedRoadmap = [...roadmapHits.entries()].sort((a, b) => b[1] - a[1]);
+  if (rankedRoadmap[0]) {
+    const [roadmapNodeId, score] = rankedRoadmap[0];
+    const nextScore = rankedRoadmap[1]?.[1] || 0;
+    if (score >= 2 || score > nextScore) {
+      const roadmapNode = roadmapById.get(roadmapNodeId)!;
+      return {
+        nodeId: `module:roadmap:${sanitizeIdSegment(roadmapNodeId)}`,
+        label: roadmapNode.title || roadmapNodeId,
+        confidence: 0.92,
+        source: 'roadmap',
+        roadmapNodeIds: new Set(rankedRoadmap.map(([nodeId]) => nodeId))
+      };
+    }
+  }
+  const structure = buildStructureName(filePaths);
+  return {
+    nodeId: `module:${structure.id}`,
+    label: structure.label,
+    confidence: structure.confidence,
+    source: 'import_graph',
+    roadmapNodeIds: new Set(rankedRoadmap.map(([nodeId]) => nodeId))
+  };
+}
+
+function rebuildModulesFromDependencyGraph(
+  snapshotId: string,
+  roadmapNodes: RoadmapNode[],
+  runEntries: RunIndexEntry[],
+  nodes: Map<string, GrowthNodeRecord>,
+  edges: GrowthEdgeRecord[],
+  signals: GrowthSignalRecord[],
+  labels: GrowthModuleLabelRecord[],
+  dependencyAnalysis: FileDependencyAnalysis | null,
+  nowIso: string
+): void {
+  const { byFile, verificationByRun, failureByRun } = buildRunFileMaps(runEntries);
+  const scannedFiles = collectScannedFiles(nodes);
+  const scannedFileByPath = new Map(scannedFiles.map((file) => [file.path, file]));
+  const moduleFacts = new Map<string, ModuleFact>();
+  const fileToModule = new Map<string, string>();
+  const testedFilesBySource = new Map<string, Set<string>>();
+  const moduleEdgeCounts = new Map<string, number>();
+
+  for (const edge of edges) {
+    if (edge.kind === 'tested_by' && edge.sourceId.startsWith('file:') && edge.targetId.startsWith('file:')) {
+      const source = edge.sourceId.replace(/^file:/, '');
+      const target = edge.targetId.replace(/^file:/, '');
+      const tests = testedFilesBySource.get(source) || new Set<string>();
+      tests.add(target);
+      testedFilesBySource.set(source, tests);
+    }
+  }
+
+  const clusters = buildModuleClusters(scannedFiles, dependencyAnalysis);
+  for (const cluster of clusters) {
+    const clusterFiles = cluster.map((filePath) => scannedFileByPath.get(filePath)).filter(Boolean) as ScannedFileNode[];
+    if (clusterFiles.length === 0) {
+      continue;
+    }
+    const identity = chooseModuleIdentity(cluster, roadmapNodes, byFile);
+    const nodeId = moduleFacts.has(identity.nodeId) ? `${identity.nodeId}:${sanitizeIdSegment(cluster[0])}` : identity.nodeId;
+    const module: ModuleFact = {
+      id: nodeId,
+      label: identity.label,
+      role: dominantRoleForFiles(clusterFiles),
+      paths: new Set(cluster),
+      loc: 0,
+      bytes: 0,
+      fileCount: 0,
+      testFileCount: 0,
+      changedRunCount: 0,
+      touchedRunCount: 0,
+      verificationCount: 0,
+      failureCount: 0,
+      latestRunAt: '',
+      roadmapNodeIds: new Set(identity.roadmapNodeIds)
+    };
+    for (const file of clusterFiles) {
+      module.loc += file.loc;
+      module.bytes += file.bytes;
+      module.fileCount += 1;
+      fileToModule.set(file.path, nodeId);
+      if (file.isTest) {
+        module.testFileCount += 1;
+      }
+      for (const testPath of testedFilesBySource.get(file.path) || []) {
+        if (scannedFileByPath.has(testPath)) {
+          module.testFileCount += 1;
+        }
+      }
+      for (const run of byFile.get(file.path) || []) {
+        const role = run.files.find((item) => toPosixPath(String(item.filePath || '')) === file.path)?.role || '';
+        if (role === 'changed') module.changedRunCount += 1;
+        if (role === 'touched') module.touchedRunCount += 1;
+        module.verificationCount += verificationByRun.get(Number(run.executionLogId || 0)) || 0;
+        module.failureCount += failureByRun.get(Number(run.executionLogId || 0)) || 0;
+        if (run.nodeId) {
+          module.roadmapNodeIds.add(run.nodeId);
+        }
+        const timestamp = String(run.finishedAt || run.startedAt || '');
+        if (timestamp && (!module.latestRunAt || Date.parse(timestamp) > Date.parse(module.latestRunAt))) {
+          module.latestRunAt = timestamp;
+        }
+      }
+    }
+    moduleFacts.set(nodeId, module);
+    nodes.set(nodeId, {
+      snapshotId,
+      nodeId,
+      parentId: 'directory:.',
+      kind: 'module',
+      path: [...module.paths].sort()[0] || '',
+      label: identity.label,
+      language: '',
+      bytes: module.bytes,
+      loc: module.loc,
+      fileCount: module.fileCount,
+      testFileCount: module.testFileCount,
+      generated: false,
+      excluded: false,
+      primaryRole: module.role,
+      confidence: identity.confidence
+    });
+    labels.push({
+      snapshotId,
+      nodeId,
+      label: identity.label,
+      role: module.role,
+      source: identity.source,
+      confidence: identity.confidence,
+      updatedAt: nowIso
+    });
+    for (const filePath of module.paths) {
+      edges.push({
+        snapshotId,
+        sourceId: nodeId,
+        targetId: nodeIdForPath('file', filePath),
+        kind: 'contains',
+        weight: 1,
+        evidence: 'module-scan'
+      });
+    }
+    if (module.changedRunCount || module.touchedRunCount) {
+      signals.push({
+        snapshotId,
+        nodeId,
+        type: 'activity',
+        level: module.changedRunCount >= 3 ? 'attention' : 'info',
+        value: `最近 Agent 运行触碰 ${module.changedRunCount + module.touchedRunCount} 次`,
+        source: 'run_index',
+        sourceRef: module.latestRunAt,
+        createdAt: nowIso
+      });
+    }
+    if (module.failureCount > 0) {
+      signals.push({
+        snapshotId,
+        nodeId,
+        type: 'failure',
+        level: module.failureCount >= 2 ? 'blocked' : 'attention',
+        value: `关联运行包含 ${module.failureCount} 条失败信号`,
+        source: 'run_index',
+        sourceRef: module.latestRunAt,
+        createdAt: nowIso
+      });
+    }
+    if ((module.changedRunCount + module.touchedRunCount) > 0 && module.verificationCount === 0) {
+      signals.push({
+        snapshotId,
+        nodeId,
+        type: 'risk',
+        level: 'watch',
+        value: '最近被 Agent 触碰，但缺少验证信号',
+        source: 'growth_rules',
+        sourceRef: module.latestRunAt,
+        createdAt: nowIso
+      });
+    }
+    if (module.loc >= 1600 && module.testFileCount === 0) {
+      signals.push({
+        snapshotId,
+        nodeId,
+        type: 'risk',
+        level: 'attention',
+        value: '模块体量较大且未识别到测试文件',
+        source: 'growth_rules',
+        sourceRef: nodeId,
+        createdAt: nowIso
+      });
+    }
+  }
+
+  for (const edge of dependencyAnalysis?.localEdges || []) {
+    const sourceModule = fileToModule.get(edge.source);
+    const targetModule = fileToModule.get(edge.target);
+    if (!sourceModule || !targetModule || sourceModule === targetModule) {
+      continue;
+    }
+    moduleEdgeCounts.set(sourceModule, (moduleEdgeCounts.get(sourceModule) || 0) + 1);
+    moduleEdgeCounts.set(targetModule, (moduleEdgeCounts.get(targetModule) || 0) + 1);
+  }
+
+  for (const module of moduleFacts.values()) {
     for (const roadmapNodeId of module.roadmapNodeIds) {
       const capabilityId = `capability:roadmap:${roadmapNodeId}`;
       if (!nodes.has(capabilityId)) {
@@ -953,6 +1318,74 @@ function addModuleAndCapabilityNodes(
         evidence: roadmapNodeId
       });
     }
+    const crossBoundaryCount = moduleEdgeCounts.get(module.id) || 0;
+    if (crossBoundaryCount >= 4) {
+      signals.push({
+        snapshotId,
+        nodeId: module.id,
+        type: 'architecture',
+        level: 'watch',
+        value: `与其它模块存在 ${crossBoundaryCount} 条跨边界依赖，需要检查职责边界`,
+        source: 'dependency_cruiser',
+        sourceRef: module.id,
+        createdAt: nowIso
+      });
+    }
+    for (const filePath of module.paths) {
+      const incomingCount = dependencyAnalysis?.incomingCounts.get(filePath) || 0;
+      if (incomingCount >= 3) {
+        signals.push({
+          snapshotId,
+          nodeId: module.id,
+          type: 'architecture',
+          level: incomingCount >= 8 ? 'attention' : 'info',
+          value: `被 ${incomingCount} 个源码文件依赖，是当前项目主干的一部分`,
+          source: 'dependency_cruiser',
+          sourceRef: filePath,
+          createdAt: nowIso
+        });
+      }
+      const dependencyModule = (dependencyAnalysis?.result.modules || []).find((item) => toPosixPath(String(item.source || '')) === filePath);
+      if (!dependencyModule) {
+        continue;
+      }
+      if (dependencyModule.orphan && /^src\//.test(filePath)) {
+        signals.push({
+          snapshotId,
+          nodeId: module.id,
+          type: 'ownership',
+          level: 'watch',
+          value: '存在未接入明显主链的源码区域，可能需要补归属或回收实验残留',
+          source: 'dependency_cruiser',
+          sourceRef: filePath,
+          createdAt: nowIso
+        });
+      }
+      if ((dependencyModule.dependencies || []).some((dependency) => dependency.circular)) {
+        signals.push({
+          snapshotId,
+          nodeId: module.id,
+          type: 'risk',
+          level: 'attention',
+          value: '模块内存在循环依赖，需要整理边界',
+          source: 'dependency_cruiser',
+          sourceRef: filePath,
+          createdAt: nowIso
+        });
+      }
+      if ((dependencyModule.dependencies || []).some((dependency) => dependency.couldNotResolve)) {
+        signals.push({
+          snapshotId,
+          nodeId: module.id,
+          type: 'risk',
+          level: 'watch',
+          value: '存在无法解析的源码依赖，结构判断可能不完整',
+          source: 'dependency_cruiser',
+          sourceRef: filePath,
+          createdAt: nowIso
+        });
+      }
+    }
   }
 
   for (const [filePath, runs] of byFile.entries()) {
@@ -960,7 +1393,6 @@ function addModuleAndCapabilityNodes(
     if (!nodes.has(fileNodeId)) {
       continue;
     }
-    const moduleId = fileToModule.get(filePath);
     const latestRun = runs
       .slice()
       .sort((a, b) => Date.parse(String(b.finishedAt || b.startedAt || '')) - Date.parse(String(a.finishedAt || a.startedAt || '')))[0];
@@ -974,6 +1406,7 @@ function addModuleAndCapabilityNodes(
       sourceRef: latestRun ? String(latestRun.executionLogId || '') : '',
       createdAt: nowIso
     });
+    const moduleId = fileToModule.get(filePath);
     if (moduleId) {
       edges.push({
         snapshotId,
@@ -1566,7 +1999,7 @@ export function buildProjectGrowthSnapshot(
   addFileNodes(snapshotId, files, nodes, edges);
   aggregateDirectoryMetrics(nodes);
   addImportEdges(projectPath, snapshotId, files, nodes, edges);
-  addModuleAndCapabilityNodes(snapshotId, files, roadmapNodes, runEntries, nodes, edges, signals, labels, nowIso);
+  addCapabilityNodes(snapshotId, roadmapNodes, nodes, edges, signals, labels, nowIso);
   const projectPurpose = readProjectPurpose(projectPath);
   if (projectPurpose) {
     signals.push({
@@ -1622,53 +2055,39 @@ export function buildProjectGrowthSnapshot(
   };
 }
 
-async function enrichSnapshotWithDependencyCruiser(snapshot: GrowthSnapshotData, projectPath: string, extensionPath: string): Promise<void> {
-  const sourceRoot = path.join(projectPath, 'src');
-  const cliPath = path.join(extensionPath, 'node_modules', 'dependency-cruiser', 'bin', 'dependency-cruise.mjs');
-  if (!fs.existsSync(sourceRoot) || !fs.existsSync(cliPath)) return;
-  const tsconfigPath = path.join(projectPath, 'tsconfig.json');
-  const args = [cliPath, sourceRoot, '--no-config', '--include-only', '^src/', '--output-type', 'json'];
-  if (fs.existsSync(tsconfigPath)) args.push('--ts-config', tsconfigPath);
-  try {
-    const { stdout } = await execFileAsync(process.execPath, args, { cwd: projectPath, timeout: 20000, maxBuffer: 8 * 1024 * 1024 });
-    const result = JSON.parse(stdout || '{}') as { modules?: Array<{ source?: string; dependencies?: Array<{ resolved?: string; circular?: boolean; couldNotResolve?: boolean }> }> };
-    const files = new Set(snapshot.nodes.filter((node) => node.kind === 'file').map((node) => node.path));
-    const moduleByFile = new Map(snapshot.edges.filter((edge) => edge.kind === 'contains' && edge.sourceId.startsWith('module:') && edge.targetId.startsWith('file:')).map((edge) => [edge.targetId.replace(/^file:/, ''), edge.sourceId]));
-    const dependencyEdges: GrowthEdgeRecord[] = [];
-    const incoming = new Map<string, number>();
-    const crossModule = new Map<string, number>();
-    for (const module of result.modules || []) {
-      const source = toPosixPath(String(module.source || ''));
-      if (!files.has(source)) continue;
-      for (const dependency of module.dependencies || []) {
-        const target = toPosixPath(String(dependency.resolved || ''));
-        const sourceModule = moduleByFile.get(source) || '';
-        if (dependency.circular && sourceModule) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: sourceModule, type: 'risk', level: 'attention', value: '模块内存在循环依赖，需要整理边界', source: 'dependency_cruiser', sourceRef: source, createdAt: snapshot.snapshot.createdAt });
-        if (dependency.couldNotResolve && sourceModule) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: sourceModule, type: 'risk', level: 'watch', value: '存在无法解析的源码依赖，结构判断可能不完整', source: 'dependency_cruiser', sourceRef: source, createdAt: snapshot.snapshot.createdAt });
-        if (!target || target === source || dependency.circular || !files.has(target)) continue;
-        const targetModule = moduleByFile.get(target) || '';
-        incoming.set(target, (incoming.get(target) || 0) + 1);
-        if (sourceModule && targetModule && sourceModule !== targetModule) {
-          crossModule.set(sourceModule, (crossModule.get(sourceModule) || 0) + 1);
-          crossModule.set(targetModule, (crossModule.get(targetModule) || 0) + 1);
-        }
-        dependencyEdges.push({ snapshotId: snapshot.snapshot.id, sourceId: nodeIdForPath('file', source), targetId: nodeIdForPath('file', target), kind: 'imports', weight: 1, evidence: 'dependency-cruiser' });
-      }
-    }
-    if (dependencyEdges.length > 0) {
-      snapshot.edges = snapshot.edges.filter((edge) => edge.kind !== 'imports').concat(dependencyEdges);
-      for (const [filePath, count] of incoming) {
-        if (count < 3) continue;
-        const moduleId = moduleByFile.get(filePath);
-        if (moduleId) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: moduleId, type: 'architecture', level: count >= 8 ? 'attention' : 'info', value: `被 ${count} 个源码模块依赖，是项目主干的一部分`, source: 'dependency_cruiser', sourceRef: filePath, createdAt: snapshot.snapshot.createdAt });
-      }
-      for (const [moduleId, count] of crossModule) {
-        if (count >= 4) snapshot.signals.push({ snapshotId: snapshot.snapshot.id, nodeId: moduleId, type: 'architecture', level: 'watch', value: `与其它模块有 ${count} 条跨边界依赖，建议检查职责边界`, source: 'dependency_cruiser', sourceRef: moduleId, createdAt: snapshot.snapshot.createdAt });
-      }
-    }
-  } catch (error) {
-    console.warn('SoloMap dependency-cruiser scan failed; using lightweight import scan:', error);
-  }
+async function finalizeProjectGrowthSnapshot(
+  snapshot: GrowthSnapshotData,
+  projectPath: string,
+  extensionPath: string,
+  roadmapNodes: RoadmapNode[],
+  runEntries: RunIndexEntry[]
+): Promise<void> {
+  const nodes = new Map(snapshot.nodes.map((node) => [node.nodeId, node]));
+  const edges = [...snapshot.edges];
+  const signals = [...snapshot.signals];
+  const labels = [...snapshot.labels];
+  const dependencyAnalysis = await loadDependencyCruiserAnalysis(
+    projectPath,
+    extensionPath,
+    snapshot.snapshot.id,
+    collectScannedFiles(nodes),
+    edges
+  );
+  rebuildModulesFromDependencyGraph(
+    snapshot.snapshot.id,
+    roadmapNodes,
+    runEntries,
+    nodes,
+    edges,
+    signals,
+    labels,
+    dependencyAnalysis,
+    snapshot.snapshot.createdAt
+  );
+  snapshot.nodes = [...nodes.values()];
+  snapshot.edges = edges;
+  snapshot.signals = signals;
+  snapshot.labels = labels;
 }
 
 export async function refreshProjectGrowthSnapshot(
@@ -1686,8 +2105,10 @@ export async function refreshProjectGrowthSnapshot(
     migrateLegacyGrowthHistory(journalStore, growthStore);
     const previousHistory = growthStore.getGrowthSnapshotHistory(1);
     const previous = previousHistory[0] ? growthStore.getGrowthSnapshotById(previousHistory[0].id) : null;
-    const snapshot = buildProjectGrowthSnapshot(projectPath, journalStore.getAllNodes(), journalStore.getRunIndexEntries(), options);
-    await enrichSnapshotWithDependencyCruiser(snapshot, projectPath, extensionPath);
+    const roadmapNodes = journalStore.getAllNodes();
+    const runEntries = journalStore.getRunIndexEntries();
+    const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
+    await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
     growthStore.writeGrowthSnapshot(snapshot);
     const history = growthStore.getGrowthSnapshotHistory(options.historyLimit || 12)
       .map((item) => growthStore.getGrowthSnapshotById(item.id))
@@ -1728,10 +2149,13 @@ export async function getProjectGrowthView(
       }
       const previousHistory = store.getGrowthSnapshotHistory(1);
       const previous = previousHistory[0] ? store.getGrowthSnapshotById(previousHistory[0].id) : null;
-      const snapshot = buildProjectGrowthSnapshot(projectPath, journalStore.getAllNodes(), journalStore.getRunIndexEntries(), {
+      const roadmapNodes = journalStore.getAllNodes();
+      const runEntries = journalStore.getRunIndexEntries();
+      const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, {
         ...options,
         scanReason: options.scanReason || 'query_refresh'
       });
+      await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
       store.writeGrowthSnapshot(snapshot);
       const history = store.getGrowthSnapshotHistory(options.historyLimit || 12)
         .map((item) => store.getGrowthSnapshotById(item.id))
