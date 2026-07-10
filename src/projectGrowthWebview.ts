@@ -65,7 +65,56 @@ const locales = {
     timelineFiles: "文件",
     timelineLoc: "代码行",
     timelineModules: "模块",
-    timelineSignals: "信号"
+    timelineSignals: "信号",
+    signalLabels: {
+      stable: "稳定",
+      growing: "增长中",
+      watch: "关注",
+      attention: "需处理",
+      blocked: "受阻",
+      warning: "需处理",
+      error: "错误",
+      info: "信息"
+    },
+    roleLabels: {
+      data: "数据层",
+      interface: "界面层",
+      "product-ui": "产品界面",
+      execution: "执行层",
+      knowledge: "知识层",
+      verification: "验证层",
+      "runtime-resource": "运行资源",
+      website: "官网",
+      delivery: "交付自动化",
+      "extension-host": "插件宿主",
+      implementation: "实现层",
+      configuration: "配置",
+      dependency: "依赖"
+    },
+    sourceLabels: {
+      run_index: "运行索引",
+      growth_rules: "生长规则",
+      import_graph: "依赖关系",
+      git: "Git 变更"
+    },
+    edgeLabels: {
+      imports: "调用",
+      depends_on: "依赖",
+      tested_by: "测试覆盖",
+      implements: "支撑能力",
+      shaped_by_run: "由运行塑造"
+    },
+    scanReasonLabels: {
+      manual: "手动扫描",
+      manual_command: "手动刷新",
+      manual_refresh: "手动刷新",
+      webview_refresh: "图内刷新",
+      project_refresh: "项目刷新",
+      query_refresh: "首次读取补齐",
+      agent_run: "Agent 运行后",
+      solo: "Solo 对话后",
+      agent_continuation: "续聊后"
+    }
   },
   en: {
     title: "Project Growth Graph",
@@ -108,9 +157,63 @@ const locales = {
     timelineFiles: "Files",
     timelineLoc: "LOC",
     timelineModules: "Modules",
-    timelineSignals: "Signals"
+    timelineSignals: "Signals",
+    signalLabels: {
+      stable: "Stable",
+      growing: "Growing",
+      watch: "Watch",
+      attention: "Attention",
+      blocked: "Blocked",
+      warning: "Warning",
+      error: "Error",
+      info: "Info"
+    },
+    roleLabels: {
+      data: "Data",
+      interface: "Interface",
+      "product-ui": "Product UI",
+      execution: "Execution",
+      knowledge: "Knowledge",
+      verification: "Verification",
+      "runtime-resource": "Runtime Resource",
+      website: "Website",
+      delivery: "Delivery Automation",
+      "extension-host": "Extension Host",
+      implementation: "Implementation",
+      configuration: "Configuration",
+      dependency: "Dependency"
+    },
+    sourceLabels: {
+      run_index: "Run Index",
+      growth_rules: "Growth Rules",
+      import_graph: "Import Graph",
+      git: "Git"
+    },
+    edgeLabels: {
+      imports: "Imports",
+      depends_on: "Depends On",
+      tested_by: "Tested By",
+      implements: "Implements",
+      shaped_by_run: "Shaped By Run"
+    },
+    scanReasonLabels: {
+      manual: "Manual Scan",
+      manual_command: "Manual Refresh",
+      manual_refresh: "Manual Refresh",
+      webview_refresh: "View Refresh",
+      project_refresh: "Project Refresh",
+      query_refresh: "Initial Query Refresh",
+      agent_run: "After Agent Run",
+      solo: "After Solo Conversation",
+      agent_continuation: "After Continuation"
+    }
   }
 };
+
+function formatMappedLabel(labels: Record<string, string>, value: string): string {
+  const normalized = String(value || '').trim();
+  return labels[normalized] || normalized.replace(/_/g, ' ');
+}
 
 export function getProjectGrowthWebviewHtml(
   webview: vscode.Webview,
@@ -123,6 +226,7 @@ export function getProjectGrowthWebviewHtml(
   const wordmarkUri = webview.asWebviewUri(joinExtensionUri(context, 'resources', 'logo_with_text.svg'));
   
   const t = isZh ? locales.zh : locales.en;
+  const localeCode = isZh ? 'zh-CN' : 'en-US';
 
   const totalFiles = viewModel.totals.files;
   const totalLoc = viewModel.totals.loc;
@@ -145,7 +249,7 @@ export function getProjectGrowthWebviewHtml(
         <div class="module-card ${signalClass}">
           <div class="module-card-head">
             <span class="module-title"><span class="codicon codicon-symbol-module"></span> ${escapeHtml(mod.label)}</span>
-            <span class="signal-tag">${escapeHtml(mod.signal.toUpperCase())}</span>
+            <span class="signal-tag">${escapeHtml(formatMappedLabel(t.signalLabels, mod.signal))}</span>
           </div>
           <div class="module-meta-grid">
             <div class="meta-item">
@@ -165,7 +269,7 @@ export function getProjectGrowthWebviewHtml(
               <span class="meta-val">${Math.round(mod.confidence * 100)}%</span>
             </div>
           </div>
-          <div class="module-role-tag">${escapeHtml(t.role)}: ${escapeHtml(mod.role)}</div>
+          <div class="module-role-tag">${escapeHtml(t.role)}: ${escapeHtml(formatMappedLabel(t.roleLabels, mod.role))}</div>
         </div>
       `;
     }).join('');
@@ -183,10 +287,10 @@ export function getProjectGrowthWebviewHtml(
       
       return `
         <div class="gap-item">
-          <span class="gap-badge ${badgeClass}">${escapeHtml(gap.level.toUpperCase())}</span>
+          <span class="gap-badge ${badgeClass}">${escapeHtml(formatMappedLabel(t.signalLabels, gap.level))}</span>
           <div class="gap-content">
             <div class="gap-title">${escapeHtml(gap.label)}</div>
-            <div class="gap-desc">${escapeHtml(gap.value)} <span class="gap-source">${escapeHtml(t.source)}: ${escapeHtml(gap.source)}</span></div>
+            <div class="gap-desc">${escapeHtml(gap.value)} <span class="gap-source">${escapeHtml(t.source)}: ${escapeHtml(formatMappedLabel(t.sourceLabels, gap.source))}</span></div>
           </div>
         </div>
       `;
@@ -220,13 +324,13 @@ export function getProjectGrowthWebviewHtml(
   if (viewModel.history && viewModel.history.length > 0) {
     historyHtml = viewModel.history.map((item, idx) => {
       const isLatest = idx === 0;
-      const dateStr = new Date(item.createdAt).toLocaleString();
+      const dateStr = new Date(item.createdAt).toLocaleString(localeCode);
       return `
         <div class="timeline-item ${isLatest ? 'is-latest' : ''}">
           <div class="timeline-marker"></div>
           <div class="timeline-content">
             <div class="timeline-time">${escapeHtml(dateStr)} ${isLatest ? `<span class="latest-tag">${escapeHtml(t.latest)}</span>` : ''}</div>
-            <div class="timeline-reason">${escapeHtml(t.reason)}: <strong>${escapeHtml(item.scanReason)}</strong></div>
+            <div class="timeline-reason">${escapeHtml(t.reason)}: <strong>${escapeHtml(formatMappedLabel(t.scanReasonLabels, item.scanReason))}</strong></div>
             <div class="timeline-stats">
               <span>${escapeHtml(t.timelineFiles)}: <strong>${item.totals.files}</strong></span>
               <span>${escapeHtml(t.timelineLoc)}: <strong>${item.totals.loc.toLocaleString()}</strong></span>
@@ -283,7 +387,7 @@ export function getProjectGrowthWebviewHtml(
       return `
         <div class="edge-row">
           <span class="edge-node src" title="${escapeHtml(edge.sourceId)}">${escapeHtml(cleanSrc)}</span>
-          <span class="edge-arrow-badge ${kindBadge}">${escapeHtml(edge.kind)}</span>
+          <span class="edge-arrow-badge ${kindBadge}">${escapeHtml(formatMappedLabel(t.edgeLabels, edge.kind))}</span>
           <span class="edge-node tgt" title="${escapeHtml(edge.targetId)}">${escapeHtml(cleanTgt)}</span>
         </div>
       `;
@@ -299,7 +403,7 @@ export function getProjectGrowthWebviewHtml(
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link href="${codiconsUri}" rel="stylesheet">
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-  <title>SoloMap: Project Growth Graph</title>
+  <title>SoloMap: ${escapeHtml(t.title)}</title>
   <style>
     :root {
       --bg: #090a10;

@@ -7562,7 +7562,9 @@ test('partial settings updates preserve existing user settings after extension u
     'out/extension.js',
     [
       'module.exports.__updatePersistedSettings = updatePersistedSettings;',
-      'module.exports.__getPersistedSettings = getPersistedSettings;'
+      'module.exports.__getPersistedSettings = getPersistedSettings;',
+      'module.exports.__isSoloMapLanguageZh = isSoloMapLanguageZh;',
+      'module.exports.__getProjectGrowthPanelCopy = getProjectGrowthPanelCopy;'
     ].join('\n')
   );
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-partial-settings-'));
@@ -7638,6 +7640,17 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(persisted.automationTasks.scheduledTasks[0].timeOfDay, '08:30');
   assert.equal(persisted.automationTasks.scheduledTasks[1].enabled, false);
   assert.equal(persisted.automationTasks.triggers.scheduled_time.prompt, 'Start the daily task');
+
+  map.set('solopreneur.settings', { ...savedSettings, language: 'zh' });
+  assert.equal(extensionModule.__isSoloMapLanguageZh(context), true);
+  assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).panelTitle, 'SoloMap: 项目生长图');
+  assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshNoProject, '请先选择一个项目文件夹再刷新项目生长数据。');
+  assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), '项目生长数据已刷新：4 个文件，3 个模块。');
+  map.set('solopreneur.settings', { ...savedSettings, language: 'en' });
+  assert.equal(extensionModule.__isSoloMapLanguageZh(context), false);
+  assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).panelTitle, 'SoloMap: Project Growth Graph');
+  assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshNoProject, 'Choose a project folder before refreshing project growth data.');
+  assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), 'Project growth data refreshed: 4 files, 3 modules.');
 });
 
 test('scheduled automation computes the next daily trigger time', () => {

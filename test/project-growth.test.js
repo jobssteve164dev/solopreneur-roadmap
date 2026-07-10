@@ -184,7 +184,17 @@ test('project growth webview uses locale labels for roadmap and history metadata
       value: '最近被 Agent 触碰，但缺少验证信号',
       source: 'run_index'
     }],
-    modules: [],
+    modules: [{
+      id: 'module:data-layer',
+      label: '数据层',
+      role: 'data',
+      signal: 'watch',
+      files: 2,
+      loc: 24,
+      tests: 1,
+      confidence: 0.82,
+      paths: ['src/data.js']
+    }],
     capabilities: [{
       nodeId: 'capability:roadmap:roadmap-data',
       label: '补强项目数据链路',
@@ -192,11 +202,16 @@ test('project growth webview uses locale labels for roadmap and history metadata
       modules: ['module:data-layer'],
       signal: 'watch'
     }],
-    keyEdges: [],
+    keyEdges: [{
+      sourceId: 'module:data-layer',
+      targetId: 'package:papaparse',
+      kind: 'depends_on',
+      weight: 1
+    }],
     history: [{
       snapshotId: 'growth-test',
       createdAt: '2026-01-03T00:00:00.000Z',
-      scanReason: 'test',
+      scanReason: 'webview_refresh',
       gitHead: 'abc123',
       totals: { files: 4, modules: 3, capabilities: 1, packages: 1, loc: 42, signals: 1 }
     }],
@@ -205,15 +220,29 @@ test('project growth webview uses locale labels for roadmap and history metadata
   };
 
   const zhHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', true);
-  assert.match(zhHtml, /来源: run_index/);
+  assert.match(zhHtml, /<title>SoloMap: 项目代码生长图<\/title>/);
+  assert.match(zhHtml, /关注/);
+  assert.match(zhHtml, /职责: 数据层/);
+  assert.match(zhHtml, /来源: 运行索引/);
   assert.match(zhHtml, /阶段: 交付与验证/);
   assert.match(zhHtml, /文件: <strong>4<\/strong>/);
-  assert.doesNotMatch(zhHtml, /Source: run_index/);
+  assert.match(zhHtml, /快照原因: <strong>图内刷新<\/strong>/);
+  assert.match(zhHtml, /依赖/);
+  assert.doesNotMatch(zhHtml, /WATCH/);
+  assert.doesNotMatch(zhHtml, /run_index/);
+  assert.doesNotMatch(zhHtml, /depends_on/);
+  assert.doesNotMatch(zhHtml, /webview_refresh/);
+  assert.doesNotMatch(zhHtml, /Source: Run Index/);
   assert.doesNotMatch(zhHtml, /Stage: 交付与验证/);
   assert.doesNotMatch(zhHtml, /Files: <strong>4<\/strong>/);
 
   const enHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', false);
-  assert.match(enHtml, /Source: run_index/);
+  assert.match(enHtml, /<title>SoloMap: Project Growth Graph<\/title>/);
+  assert.match(enHtml, /Watch/);
+  assert.match(enHtml, /Role: Data/);
+  assert.match(enHtml, /Source: Run Index/);
   assert.match(enHtml, /Stage: 交付与验证/);
   assert.match(enHtml, /Files: <strong>4<\/strong>/);
+  assert.match(enHtml, /Reason: <strong>View Refresh<\/strong>/);
+  assert.match(enHtml, /Depends On/);
 });

@@ -286,9 +286,10 @@ export async function activate(context: vscode.ExtensionContext) {
   const refreshProjectGrowthDisposable = vscode.commands.registerCommand(
     'solopreneur.refreshProjectGrowthData',
     async () => {
+      const copy = getProjectGrowthPanelCopy(context);
       const projectPath = getSelectedProjectPath(context);
       if (!projectPath) {
-        vscode.window.showErrorMessage('Choose a project folder before refreshing project growth data.');
+        vscode.window.showErrorMessage(copy.refreshNoProject);
         return;
       }
       try {
@@ -298,9 +299,9 @@ export async function activate(context: vscode.ExtensionContext) {
         });
         activePanel?.webview.postMessage({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
         sidebarProvider?.postMessage({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
-        vscode.window.showInformationMessage(`Project growth data refreshed: ${growthView.totals.files} files, ${growthView.totals.modules} modules.`);
+        vscode.window.showInformationMessage(copy.refreshDone(growthView.totals.files, growthView.totals.modules));
       } catch (error) {
-        vscode.window.showErrorMessage(`Project growth data refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+        vscode.window.showErrorMessage(copy.refreshFailed(error instanceof Error ? error.message : String(error)));
       }
     }
   );
@@ -809,6 +810,59 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     enabledEnhancements: getEnabledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
     skills: readSolomapSkillRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).skills || [],
     connectors: readSolomapMcpRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).connectors || []
+  };
+}
+
+function isSoloMapLanguageZh(context: vscode.ExtensionContext): boolean {
+  return getPersistedSettings(context).language !== 'en';
+}
+
+function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
+  panelTitle: string;
+  openingTitle: string;
+  openingMessage: string;
+  refreshingTitle: string;
+  refreshingMessage: string;
+  loadFailedTitle: string;
+  loadFailedMessage: string;
+  loadFailedFallback: string;
+  retryLabel: string;
+  openNoProject: string;
+  refreshNoProject: string;
+  refreshDone: (files: number, modules: number) => string;
+  refreshFailed: (message: string) => string;
+} {
+  if (isSoloMapLanguageZh(context)) {
+    return {
+      panelTitle: 'SoloMap: 项目生长图',
+      openingTitle: '正在打开项目生长图',
+      openingMessage: '先打开视图，再读取本地项目代码生长数据。',
+      refreshingTitle: '正在刷新项目生长图',
+      refreshingMessage: '正在重新分析项目代码生长数据。',
+      loadFailedTitle: '项目生长图加载失败',
+      loadFailedMessage: '本地项目分析数据没有成功读取。',
+      loadFailedFallback: '项目生长图本地数据加载失败。',
+      retryLabel: '重试',
+      openNoProject: '请先选择一个项目文件夹再打开项目生长图。',
+      refreshNoProject: '请先选择一个项目文件夹再刷新项目生长数据。',
+      refreshDone: (files, modules) => `项目生长数据已刷新：${files} 个文件，${modules} 个模块。`,
+      refreshFailed: (message) => `项目生长数据刷新失败：${message}`
+    };
+  }
+  return {
+    panelTitle: 'SoloMap: Project Growth Graph',
+    openingTitle: 'Opening Project Growth Graph',
+    openingMessage: 'Opening the view, then reading local project growth data.',
+    refreshingTitle: 'Refreshing Project Growth Graph',
+    refreshingMessage: 'Reanalyzing local project growth data.',
+    loadFailedTitle: 'Project Growth Graph Failed to Load',
+    loadFailedMessage: 'Local project analysis data could not be loaded.',
+    loadFailedFallback: 'Project growth local data failed to load.',
+    retryLabel: 'Retry',
+    openNoProject: 'Choose a project folder before opening the project growth graph.',
+    refreshNoProject: 'Choose a project folder before refreshing project growth data.',
+    refreshDone: (files, modules) => `Project growth data refreshed: ${files} files, ${modules} modules.`,
+    refreshFailed: (message) => `Project growth data refresh failed: ${message}`
   };
 }
 
@@ -2296,21 +2350,23 @@ async function openRoadmapPanel(context: vscode.ExtensionContext, initialView: '
 async function handleOpenProjectGrowth(context: vscode.ExtensionContext, projectPath?: string): Promise<void> {
   const pathStr = projectPath || getSelectedProjectPath(context) || getWorkspaceRoot() || '';
   if (!pathStr) {
-    vscode.window.showErrorMessage('请先选择一个项目文件夹再打开项目生长图。');
+    vscode.window.showErrorMessage(getProjectGrowthPanelCopy(context).openNoProject);
     return;
   }
   await openProjectGrowthPanel(context, pathStr);
 }
 
 async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
+  const copy = getProjectGrowthPanelCopy(context);
   if (activeProjectGrowthPanel) {
     activeProjectGrowthPanel.reveal(vscode.ViewColumn.One);
+    activeProjectGrowthPanel.title = copy.panelTitle;
     activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(
       activeProjectGrowthPanel.webview,
       context,
       {
-        title: '正在打开项目生长图',
-        message: '先打开视图，再读取本地项目代码生长数据。'
+        title: copy.openingTitle,
+        message: copy.openingMessage
       }
     );
     void refreshProjectGrowthPanel(context, projectPath);
@@ -2319,7 +2375,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
 
   activeProjectGrowthPanel = vscode.window.createWebviewPanel(
     'solopreneurProjectGrowth',
-    'SoloMap: Project Growth Graph',
+    copy.panelTitle,
     vscode.ViewColumn.One,
     {
       enableScripts: true,
@@ -2332,8 +2388,8 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
     activeProjectGrowthPanel.webview,
     context,
     {
-      title: '正在打开项目生长图',
-      message: '先打开视图，再读取本地项目代码生长数据。'
+      title: copy.openingTitle,
+      message: copy.openingMessage
     }
   );
   void refreshProjectGrowthPanel(context, projectPath);
@@ -2342,12 +2398,13 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
     async (message) => {
       switch (message.command) {
         case 'refreshGrowth':
+          const refreshCopy = getProjectGrowthPanelCopy(context);
           activeProjectGrowthPanel!.webview.html = buildLocalDataStatusHtml(
             activeProjectGrowthPanel!.webview,
             context,
             {
-              title: '正在刷新项目生长图',
-              message: '正在重新分析项目代码生长数据。'
+              title: refreshCopy.refreshingTitle,
+              message: refreshCopy.refreshingMessage
             }
           );
           try {
@@ -2379,7 +2436,8 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
   
   const project = getProjects(context).find((p: any) => p.path === projectPath);
   const projectName = project ? project.name : path.basename(projectPath) || 'Project';
-  const isZh = vscode.env.language.startsWith('zh');
+  const isZh = isSoloMapLanguageZh(context);
+  const copy = getProjectGrowthPanelCopy(context);
 
   await postLocalDataLoad(
     () => getProjectGrowthView(projectPath, context.extensionPath, { refreshIfMissing: true }),
@@ -2396,14 +2454,14 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
     (message) => {
       if (!activeProjectGrowthPanel) return;
       activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
-        title: '项目生长图加载失败',
-        message: '本地项目分析数据没有成功读取。',
+        title: copy.loadFailedTitle,
+        message: copy.loadFailedMessage,
         detail: message,
-        actionLabel: '重试',
+        actionLabel: copy.retryLabel,
         actionCommand: 'refreshGrowth'
       });
     },
-    '项目生长图本地数据加载失败。'
+    copy.loadFailedFallback
   );
 }
 
