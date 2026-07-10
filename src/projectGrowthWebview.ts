@@ -638,19 +638,20 @@ export function getProjectGrowthWebviewHtml(
   <title>SoloMap: ${escapeHtml(t.title)}</title>
   <style>
     :root {
-      --bg: var(--vscode-editor-background, #0f111a);
-      --fg: #f8fafc;
+      --bg-dark: #0f111a;
+      --fg: #e2e8f0;
       --muted: #94a3b8;
       --border: rgba(255, 255, 255, 0.08);
-      --glass-bg: rgba(255, 255, 255, 0.02);
-      --glass-panel: rgba(15, 23, 42, 0.65);
-      --accent: #00f0ff;
+      --glass-bg: rgba(22, 28, 45, 0.6);
+      --glass-panel: rgba(22, 28, 45, 0.6);
+      --accent: #00e5ff;
       --accent-purple: #7c4dff;
       --success: #00e676;
       --warn: #ffd600;
       --attention: #ff9100;
       --danger: #ff1744;
-      --font: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --heading-font: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
     * { box-sizing: border-box; }
@@ -677,43 +678,11 @@ export function getProjectGrowthWebviewHtml(
 
     body {
       margin: 0;
-      background: var(--bg);
+      background: radial-gradient(circle at 50% 50%, rgba(20, 25, 45, 0.6) 0%, rgba(10, 12, 22, 0.95) 100%);
       color: var(--fg);
       font-family: var(--font);
       line-height: 1.5;
       overflow-x: hidden;
-    }
-
-    /* Ambient background glow */
-    .neon-glow-container {
-      position: fixed;
-      top: 0; left: 0; right: 0; bottom: 0;
-      z-index: -10;
-      overflow: hidden;
-      pointer-events: none;
-    }
-    .neon-glow-container::before, .neon-glow-container::after {
-      content: '';
-      position: absolute;
-      width: 400px;
-      height: 400px;
-      border-radius: 50%;
-      filter: blur(140px);
-      opacity: 0.1;
-      animation: floatNeon 20s infinite alternate ease-in-out;
-    }
-    .neon-glow-container::before {
-      background: radial-gradient(circle, var(--accent), var(--accent-purple));
-      top: -5%; left: 5%;
-    }
-    .neon-glow-container::after {
-      background: radial-gradient(circle, #ff007c, var(--accent-purple));
-      bottom: -5%; right: 10%;
-      animation-delay: -10s;
-    }
-    @keyframes floatNeon {
-      0% { transform: translate(0, 0) scale(1); }
-      100% { transform: translate(80px, 40px) scale(1.1); }
     }
 
     .container {
@@ -737,6 +706,10 @@ export function getProjectGrowthWebviewHtml(
       margin: 0;
       display: flex;
       align-items: center;
+    }
+
+    h1, h2, h3, .panel-title, .priority-title {
+      font-family: var(--heading-font);
     }
 
     .brand-wordmark {
@@ -861,12 +834,12 @@ export function getProjectGrowthWebviewHtml(
       place-items: center;
       border: 1px solid var(--border);
       border-radius: 50%;
-      background: var(--bg);
+      background: var(--vscode-editor-background, var(--bg-dark));
       color: var(--muted);
     }
 
     .journey-stage.completed .journey-marker { color: var(--success); border-color: rgba(0, 230, 118, 0.4); }
-    .journey-stage.active .journey-marker { color: var(--accent); border-color: rgba(0, 240, 255, 0.5); }
+    .journey-stage.active .journey-marker { color: var(--accent); border-color: rgba(0, 229, 255, 0.5); }
 
     .journey-copy { min-width: 0; }
     .journey-copy strong { display: block; font-size: 12px; line-height: 1.3; }
@@ -883,9 +856,9 @@ export function getProjectGrowthWebviewHtml(
     .understanding-main,
     .priority-actions,
     .growth-v2-panel {
-      background: rgba(255, 255, 255, 0.025);
+      background: var(--glass-panel);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 8px;
       padding: 18px;
       backdrop-filter: blur(12px);
     }
@@ -956,7 +929,7 @@ export function getProjectGrowthWebviewHtml(
     .focus-area-row {
       border: 1px solid var(--border);
       border-radius: 10px;
-      background: rgba(255, 255, 255, 0.02);
+      background: rgba(255, 255, 255, 0.04);
       padding: 12px;
     }
 
@@ -1013,8 +986,8 @@ export function getProjectGrowthWebviewHtml(
 
     .status-pill.growing {
       color: var(--accent);
-      border-color: rgba(0, 240, 255, 0.22);
-      background: rgba(0, 240, 255, 0.08);
+      border-color: rgba(0, 229, 255, 0.22);
+      background: rgba(0, 229, 255, 0.08);
     }
 
     .status-pill.watch {
@@ -1177,7 +1150,7 @@ export function getProjectGrowthWebviewHtml(
     button.btn-refresh:hover {
       background: rgba(255, 255, 255, 0.08);
       border-color: rgba(255, 255, 255, 0.2);
-      box-shadow: 0 0 12px rgba(0, 240, 255, 0.15);
+      box-shadow: 0 0 12px rgba(0, 229, 255, 0.15);
     }
 
     /* Stats Banner */
@@ -1191,7 +1164,7 @@ export function getProjectGrowthWebviewHtml(
     .stat-card {
       background: var(--glass-bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 8px;
       padding: 16px;
       backdrop-filter: blur(8px);
       text-align: center;
@@ -1199,7 +1172,7 @@ export function getProjectGrowthWebviewHtml(
     }
 
     .stat-card:hover {
-      border-color: rgba(0, 240, 255, 0.2);
+      border-color: rgba(0, 229, 255, 0.2);
       transform: translateY(-2px);
     }
 
@@ -1288,7 +1261,7 @@ export function getProjectGrowthWebviewHtml(
     .panel {
       background: var(--glass-bg);
       border: 1px solid var(--border);
-      border-radius: 16px;
+      border-radius: 8px;
       padding: 20px;
       backdrop-filter: blur(12px);
       margin-bottom: 24px;
@@ -1384,7 +1357,7 @@ export function getProjectGrowthWebviewHtml(
     .module-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
     .module-card.signal-stable:hover { border-color: rgba(0, 230, 118, 0.3); box-shadow: 0 8px 30px rgba(0, 230, 118, 0.08); }
-    .module-card.signal-growing:hover { border-color: rgba(0, 240, 255, 0.3); box-shadow: 0 8px 30px rgba(0, 240, 255, 0.08); }
+    .module-card.signal-growing:hover { border-color: rgba(0, 229, 255, 0.3); box-shadow: 0 8px 30px rgba(0, 229, 255, 0.08); }
     .module-card.signal-watch:hover { border-color: rgba(255, 214, 0, 0.3); box-shadow: 0 8px 30px rgba(255, 214, 0, 0.08); }
     .module-card.signal-attention:hover { border-color: rgba(255, 145, 0, 0.3); box-shadow: 0 8px 30px rgba(255, 145, 0, 0.08); }
     .module-card.signal-blocked:hover { border-color: rgba(255, 23, 68, 0.3); box-shadow: 0 8px 30px rgba(255, 23, 68, 0.08); }
@@ -1419,7 +1392,7 @@ export function getProjectGrowthWebviewHtml(
     .signal-mark { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
 
     .module-card.signal-stable .signal-tag { color: var(--success); background: rgba(0, 230, 118, 0.1); }
-    .module-card.signal-growing .signal-tag { color: var(--accent); background: rgba(0, 240, 255, 0.1); }
+    .module-card.signal-growing .signal-tag { color: var(--accent); background: rgba(0, 229, 255, 0.1); }
     .module-card.signal-watch .signal-tag { color: var(--warn); background: rgba(255, 214, 0, 0.1); }
     .module-card.signal-attention .signal-tag { color: var(--attention); background: rgba(255, 145, 0, 0.1); }
     .module-card.signal-blocked .signal-tag { color: var(--danger); background: rgba(255, 23, 68, 0.1); }
@@ -1576,7 +1549,7 @@ export function getProjectGrowthWebviewHtml(
       height: 9px;
       border-radius: 50%;
       background: var(--border);
-      border: 2px solid var(--bg);
+      border: 2px solid var(--vscode-editor-background, var(--bg-dark));
       transition: all 0.3s;
     }
 
@@ -1596,7 +1569,7 @@ export function getProjectGrowthWebviewHtml(
 
     .latest-tag {
       font-size: 9px;
-      background: rgba(0, 240, 255, 0.1);
+      background: rgba(0, 229, 255, 0.1);
       color: var(--accent);
       padding: 1px 4px;
       border-radius: 3px;
@@ -1617,8 +1590,8 @@ export function getProjectGrowthWebviewHtml(
 
     /* Diff Card */
     .diff-card {
-      background: rgba(0, 240, 255, 0.02);
-      border: 1px solid rgba(0, 240, 255, 0.1);
+      background: rgba(0, 229, 255, 0.02);
+      border: 1px solid rgba(0, 229, 255, 0.1);
       border-radius: 12px;
       padding: 16px;
       margin-bottom: 24px;
@@ -1714,7 +1687,7 @@ export function getProjectGrowthWebviewHtml(
       text-transform: uppercase;
     }
 
-    .edge-arrow-badge.edge-imports { color: var(--accent); background: rgba(0, 240, 255, 0.1); }
+    .edge-arrow-badge.edge-imports { color: var(--accent); background: rgba(0, 229, 255, 0.1); }
     .edge-arrow-badge.edge-tested { color: var(--success); background: rgba(0, 230, 118, 0.1); }
     .edge-arrow-badge.edge-depends { color: var(--accent-purple); background: rgba(124, 77, 255, 0.1); }
 

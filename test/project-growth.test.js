@@ -291,7 +291,10 @@ test('project growth webview uses locale labels for roadmap and history metadata
 
   const zhHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', true);
   assert.match(zhHtml, /<title>SoloMap: 项目生长图<\/title>/);
-  assert.match(zhHtml, /--bg: var\(--vscode-editor-background, #0f111a\);/);
+  assert.match(zhHtml, /--accent: #00e5ff;/);
+  assert.match(zhHtml, /background: radial-gradient\(circle at 50% 50%, rgba\(20, 25, 45, 0\.6\) 0%, rgba\(10, 12, 22, 0\.95\) 100%\);/);
+  assert.doesNotMatch(zhHtml, /neon-glow-container/);
+  assert.doesNotMatch(zhHtml, /var\(--bg\)/);
   assert.match(zhHtml, /当前项目 · Demo · 项目路径: \/workspace\/demo/);
   assert.match(zhHtml, /项目概览/);
   assert.match(zhHtml, /帮助独立开发者把零散 AI 对话变成可推进、可验证的项目路线/);
@@ -320,7 +323,7 @@ test('project growth webview uses locale labels for roadmap and history metadata
 
   const enHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', false);
   assert.match(enHtml, /<title>SoloMap: Project Growth Graph<\/title>/);
-  assert.match(enHtml, /--bg: var\(--vscode-editor-background, #0f111a\);/);
+  assert.match(enHtml, /--glass-panel: rgba\(22, 28, 45, 0\.6\);/);
   assert.match(enHtml, /Current Project · Demo · Project Path: \/workspace\/demo/);
   assert.match(enHtml, /Project Overview/);
   assert.match(enHtml, /What this project is for/);

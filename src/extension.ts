@@ -342,6 +342,9 @@ export async function activate(context: vscode.ExtensionContext) {
         postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
         postProjectsLoaded(activePanel.webview, getProjectState(context));
       }
+      if (activeStrategyPyramidPanel) {
+        activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
+      }
     }
   );
   context.subscriptions.push(settingsSavedDisposable);
@@ -825,6 +828,10 @@ function isSoloMapLanguageZh(context: vscode.ExtensionContext): boolean {
 
 function getRoadmapPanelTitle(context: vscode.ExtensionContext): string {
   return isSoloMapLanguageZh(context) ? 'SoloMap 项目路线图' : 'SoloMap - AI Coding Agent Roadmap';
+}
+
+function getStrategyPyramidPanelTitle(context: vscode.ExtensionContext): string {
+  return isSoloMapLanguageZh(context) ? 'SoloMap：战略金字塔' : 'SoloMap: Strategy Pyramid';
 }
 
 function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
@@ -2529,6 +2536,7 @@ async function hasLocalStrategyPyramidAccess(context: vscode.ExtensionContext): 
 
 async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {
   if (activeStrategyPyramidPanel) {
+    activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
     activeStrategyPyramidPanel.reveal(vscode.ViewColumn.One);
     activeStrategyPyramidPanel.webview.html = buildLocalDataStatusHtml(
       activeStrategyPyramidPanel.webview,
@@ -2544,7 +2552,7 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
 
   activeStrategyPyramidPanel = vscode.window.createWebviewPanel(
     'solopreneurStrategyPyramid',
-    'SoloMap: Strategy Pyramid',
+    getStrategyPyramidPanelTitle(context),
     vscode.ViewColumn.One,
     {
       enableScripts: true,
