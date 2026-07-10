@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.317 - 2026-07-10
+
+### Changed
+- improve project growth graph v2 (dc6c1b6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.316 - 2026-07-10
 
 ### Fixed
