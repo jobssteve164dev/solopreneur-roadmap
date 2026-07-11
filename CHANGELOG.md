@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.335 - 2026-07-11
+
+### Fixed
+- restore bundled webview icons (21cdad0)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.334 - 2026-07-10
 
 ### Changed
