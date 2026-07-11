@@ -4,6 +4,9 @@ import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
 
 function joinExtensionUri(extensionUri: vscode.Uri, ...segments: string[]): vscode.Uri {
   const base = extensionUri as any;
+  if (typeof base?.with === 'function') {
+    return base.with({ path: path.posix.join(base.path, ...segments) });
+  }
   const basePath = base?.fsPath || base?.path || String(base);
   const joined = path.join(basePath, ...segments);
   return {

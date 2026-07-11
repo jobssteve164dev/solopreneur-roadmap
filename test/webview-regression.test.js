@@ -485,6 +485,21 @@ test('extension manifest uses SoloMap visible branding', () => {
   assert.equal(manifest.contributes.configuration.properties['solopreneur.taskPermissionMode'], undefined);
 });
 
+test('webviews preserve extension URI schemes when loading bundled icons', () => {
+  const webviewSources = [
+    'sidebarWebview.ts',
+    'roadmapWebview.ts',
+    'projectGrowthWebview.ts',
+    'strategyPyramidWebview.ts',
+    'localDataLoader.ts'
+  ].map(file => fs.readFileSync(path.join(projectRoot, 'src', file), 'utf8'));
+
+  for (const source of webviewSources) {
+    assert.match(source, /base\.with\(\{ path: path\.posix\.join\(base\.path, \.\.\.segments\) \}\)/);
+    assert.match(source, /'@vscode', 'codicons', 'dist', 'codicon\.css'/);
+  }
+});
+
 test('ability settings copy is localized in English webviews', () => {
   const sources = [
     fs.readFileSync(path.join(projectRoot, 'src', 'roadmapWebview.ts'), 'utf8'),

@@ -4,6 +4,9 @@ import { ProjectGrowthViewModel } from './projectGrowth';
 
 function joinExtensionUri(context: vscode.ExtensionContext, ...segments: string[]): vscode.Uri {
   const base = context.extensionUri as any;
+  if (typeof base?.with === 'function') {
+    return base.with({ path: path.posix.join(base.path, ...segments) });
+  }
   const basePath = base?.fsPath || base?.path || String(base);
   const joined = path.join(basePath, ...segments);
   return {
