@@ -167,6 +167,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './localUsageStats') {
           return require(path.join(projectRoot, 'out/localUsageStats.js'));
         }
+        if (id === './localDiagnostics') {
+          return require(path.join(projectRoot, 'out/localDiagnostics.js'));
+        }
         if (id === './externalDataLoader') {
           return require(path.join(projectRoot, 'out/externalDataLoader.js'));
         }
@@ -569,6 +572,28 @@ test('feedback issue URL includes local usage summary when provided', () => {
   assert.match(body, /Local usage summary:/);
   assert.match(body, /Activations: 2/);
   assert.match(body, /No project paths included/);
+});
+
+test('feedback diagnostics include runtime and sanitized recent errors without local secrets', () => {
+  const diagnostics = require(path.join(projectRoot, 'out/localDiagnostics.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-diagnostics-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const secret = 'ghp-this_should_never_leave_the_device';
+  diagnostics.recordLocalDiagnosticError(globalRoot, 'sidebar.action.project.refresh', new Error(
+    `Failed at ${path.join(os.homedir(), 'private-project', 'roadmap.csv')}?token=${secret}`
+  ));
+  const summary = diagnostics.buildLocalDiagnosticSummary(
+    { extensionMode: 1 },
+    globalRoot,
+    { appName: 'Visual Studio Code', version: '1.100.0', remoteName: '', uiKind: 1, uriScheme: 'vscode' }
+  );
+
+  assert.match(summary, /Runtime environment:/);
+  assert.match(summary, /Visual Studio Code 1\.100\.0/);
+  assert.match(summary, /Recent local errors: 1/);
+  assert.match(summary, /sidebar\.action\.project\.refresh/);
+  assert.match(summary, /<path>/);
+  assert.doesNotMatch(summary, /private-project|roadmap\.csv|ghp-this_should_never_leave_the_device/);
 });
 
 test('pasted image attachments are saved as project-relative SoloMap files', () => {

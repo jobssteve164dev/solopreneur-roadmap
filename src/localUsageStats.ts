@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as Papa from 'papaparse';
 import type * as vscode from 'vscode';
 import { normalizeGlobalDataPathForExtension, SolopreneurProject } from './projectRegistry';
+import { buildLocalDiagnosticSummary } from './localDiagnostics';
 
 export interface LocalUsageStats {
   schemaVersion: number;
@@ -292,7 +293,11 @@ export function recordLocalUsageEvent(context: vscode.ExtensionContext, options:
   return stats;
 }
 
-export function buildFeedbackUsageSummary(context: vscode.ExtensionContext, options: LocalUsageStatsOptions): string {
+export function buildFeedbackUsageSummary(
+  context: vscode.ExtensionContext,
+  options: LocalUsageStatsOptions,
+  host: { appName?: string; version?: string; remoteName?: string; uiKind?: number; uriScheme?: string } = {}
+): string {
   const stats = recordLocalUsageEvent(context, options, 'feedbackIssueOpened');
   const snapshot = stats.snapshot;
   return [
@@ -320,6 +325,8 @@ export function buildFeedbackUsageSummary(context: vscode.ExtensionContext, opti
     `- Projects with delivery cache: ${snapshot.deliveryCacheProjectCount}`,
     `- Local Agent run directories: ${snapshot.agentRunDirectoryCount}`,
     `- Latest local Agent run: ${snapshot.latestAgentRunAt || 'none'}`,
+    '',
+    buildLocalDiagnosticSummary(context, options.globalDataPath, host),
     '',
     'Privacy:',
     '- No project paths, project names, Issue titles, Agent outputs, prompts, logs, or file contents are included.'

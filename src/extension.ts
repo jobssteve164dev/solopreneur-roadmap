@@ -140,6 +140,7 @@ import {
   LocalUsageStats,
   recordLocalUsageEvent as recordLocalUsageEventInStats
 } from './localUsageStats';
+import { recordLocalDiagnosticError } from './localDiagnostics';
 import { clearProjectInvestmentCache } from './projectAnalytics';
 import {
   buildPassportProUrl,
@@ -507,7 +508,8 @@ async function handleSharedWebviewAction(
       postNodeConversations(nodeId);
     }
   };
-  return dispatchPluginAction(message, surface, {
+  try {
+    return await dispatchPluginAction(message, surface, {
     'conversation.runStep': async (request) => {
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
@@ -835,6 +837,7 @@ async function handleSharedWebviewAction(
         loadExternalDeliverySummary(projectPath, { force: true }).catch(() => null),
         loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null),
         backfillRunIndexFromDigests(projectPath, context.extensionPath).catch((error) => {
+          recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'project.refresh.run_index', error);
           console.error('SoloMap run index backfill failed during project refresh:', error);
           return null;
         }),
@@ -842,6 +845,7 @@ async function handleSharedWebviewAction(
           scanReason: 'project_refresh',
           maxFiles: 5000
         }).catch((error) => {
+          recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'project.refresh.growth', error);
           console.error('SoloMap project growth refresh failed during project refresh:', error);
           return null;
         })
@@ -890,7 +894,15 @@ async function handleSharedWebviewAction(
         buildFeedbackUsageSummary(context)
       )));
     }
-  });
+    });
+  } catch (error) {
+    recordLocalDiagnosticError(
+      getPersistedSettings(context).globalDataPath,
+      `webview.${surface}.${String(message?.command || 'unknown')}`,
+      error
+    );
+    throw error;
+  }
 }
 
 function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSettings {
@@ -1529,7 +1541,13 @@ function recordLocalUsageEvent(context: vscode.ExtensionContext, event: LocalUsa
 }
 
 function buildFeedbackUsageSummary(context: vscode.ExtensionContext): string {
-  return buildFeedbackUsageSummaryFromStats(context, getLocalUsageStatsOptions(context));
+  return buildFeedbackUsageSummaryFromStats(context, getLocalUsageStatsOptions(context), {
+    appName: vscode.env.appName,
+    version: vscode.version,
+    remoteName: vscode.env.remoteName,
+    uiKind: vscode.env.uiKind,
+    uriScheme: vscode.env.uriScheme
+  });
 }
 async function saveProjects(context: vscode.ExtensionContext, projects: SolopreneurProject[]): Promise<void> {
   const normalizedProjects = normalizeProjectsForStorage(projects);

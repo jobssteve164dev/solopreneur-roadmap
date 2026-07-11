@@ -40,6 +40,6 @@ body:
     id: local_usage_summary
     attributes:
       label: Local usage summary
-      description: SoloMap may prefill anonymous local counters here only when you open this issue from the extension. Remove it if you do not want to share it.
+      description: SoloMap may prefill anonymous counters, runtime details, and recent sanitized error fingerprints only when you open this issue from the extension. Remove it if you do not want to share it.
     validations:
       required: false

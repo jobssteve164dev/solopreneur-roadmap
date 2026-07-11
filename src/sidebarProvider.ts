@@ -3,6 +3,15 @@ import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { SolopreneurSettings } from './pluginContracts';
 import { getSidebarFallbackHtml, getSidebarWebviewHtml } from './sidebarWebview';
+import { recordLocalDiagnosticError } from './localDiagnostics';
+
+function getDiagnosticDataPath(getSettings: () => SolopreneurSettings): string {
+  try {
+    return getSettings().globalDataPath;
+  } catch {
+    return '';
+  }
+}
 import { SidebarProjectLoader } from './sidebarProjectLoader';
 import { createGlobalEngineeringSnapshotPlaceholder, ensureGlobalEngineeringStore } from './globalEngineeringStore';
 import { readTodayReview, startDailyReviewAgent } from './dailyReview';
@@ -97,6 +106,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
       webviewView.webview.html = getSidebarWebviewHtml(webviewView.webview, this._extensionUri);
     } catch (error) {
+      recordLocalDiagnosticError(getDiagnosticDataPath(this._getSettings), 'sidebar.render', error);
       console.error('SoloMap sidebar failed to render initial HTML:', error);
       webviewView.webview.html = getSidebarFallbackHtml('SoloMap sidebar could not render. Open the command palette and run "Developer: Reload Window".');
     }
@@ -183,6 +193,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
         }
       } catch (error) {
+        recordLocalDiagnosticError(getDiagnosticDataPath(this._getSettings), `sidebar.action.${String(data?.command || 'unknown')}`, error);
         console.error('SoloMap sidebar message failed:', data?.command, error);
         this._view?.webview.postMessage({
           command: 'sidebarActionFailed',
