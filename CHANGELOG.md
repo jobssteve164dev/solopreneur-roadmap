@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.337 - 2026-07-12
+
+### Fixed
+- render today plan cold start copy (f9a54e9)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.336 - 2026-07-11
 
 ### Added
