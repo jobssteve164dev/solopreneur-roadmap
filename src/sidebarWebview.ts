@@ -7164,9 +7164,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (!items.length) {
           globalFocusPanel.innerHTML = \`
             <div class="global-focus-head">
-              <span class="global-focus-title"><span class="codicon codicon-target"></span>\\\${escapeHtml(t('globalFocusTitle'))}</span>
+              <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
             </div>
-            <div class="empty-portfolio">\\\${escapeHtml(t('globalFocusEmpty'))}</div>
+            <div class="empty-portfolio">\${escapeHtml(t('globalFocusEmpty'))}</div>
           \`;
           return;
         }

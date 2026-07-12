@@ -801,10 +801,17 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   ], `
     globalThis.__setDeliveryActionPanelExpanded = (value) => { deliveryActionPanelExpanded = Boolean(value); };
     globalThis.__renderProjectDeliveryPanel = renderProjectDeliveryPanel;
+    globalThis.__renderGlobalFocus = renderGlobalFocus;
     globalThis.__renderIssueDetailWithPayload = (payload) => { issueDetails = payload; return renderIssueDetail('/workspace/app'); };
     globalThis.__getCurrentPortfolio = () => currentProjects.portfolio;
     globalThis.__resetActiveProjectPath = () => { activeProjectPath = ''; currentProjects.selectedProjectPath = ''; };
   `);
+
+  context.__renderGlobalFocus([], '');
+  const coldStartTodayPlan = elements['global-focus-panel'].innerHTML;
+  assert.match(coldStartTodayPlan, /今日安排/);
+  assert.match(coldStartTodayPlan, /今天还没有明确安排/);
+  assert.doesNotMatch(coldStartTodayPlan, /globalFocusTitle|globalFocusEmpty|escapeHtml|\$\{/);
 
   context.__setDeliveryActionPanelExpanded(true);
   const securityPanelHtml = context.__renderProjectDeliveryPanel({
@@ -1101,6 +1108,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     }
   });
   const initialTodayPlan = elements['global-focus-panel'].innerHTML;
+  assert.match(initialTodayPlan, /今日安排/);
+  assert.doesNotMatch(initialTodayPlan, /globalFocusTitle|globalFocusEmpty|escapeHtml|\$\{/);
   const extractTodayProjectOrder = (html) => [...String(html).matchAll(/global-focus-name">([^<]+)</g)].map((match) => match[1]);
   const initialTodayProjectOrder = extractTodayProjectOrder(initialTodayPlan);
   assert.deepEqual(initialTodayProjectOrder, ['Alpha', 'Beta']);
