@@ -810,8 +810,14 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   context.__renderGlobalFocus([], '');
   const coldStartTodayPlan = elements['global-focus-panel'].innerHTML;
   assert.match(coldStartTodayPlan, /今日安排/);
-  assert.match(coldStartTodayPlan, /今天还没有明确安排/);
+  assert.match(coldStartTodayPlan, /正在整理今日安排/);
   assert.doesNotMatch(coldStartTodayPlan, /globalFocusTitle|globalFocusEmpty|escapeHtml|\$\{/);
+
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: { projects: [], selectedProjectPath: '', portfolio: [] }
+  });
+  assert.match(elements['global-focus-panel'].innerHTML, /还没有项目，先添加一个项目/);
 
   context.__setDeliveryActionPanelExpanded(true);
   const securityPanelHtml = context.__renderProjectDeliveryPanel({

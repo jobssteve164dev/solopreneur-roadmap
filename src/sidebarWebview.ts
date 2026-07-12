@@ -3773,6 +3773,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectSoloDrafts = {};
     const projectRefreshPaths = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
+    let projectDataLoaded = false;
     let hoveredConversationCard = null;
     let focusedConversationCard = null;
     let pendingAsyncPortfolioRender = null;
@@ -3904,6 +3905,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         portfolioTitle: '项目总览',
         openStrategyPyramid: '跨项目战略金字塔视图',
         globalFocusTitle: '今日安排',
+        globalFocusLoading: '正在整理今日安排…',
+        globalFocusNoProjects: '还没有项目，先添加一个项目，SoloMap 会为你整理今日安排。',
         globalFocusEmpty: '今天还没有明确安排，先添加或选择一个项目。',
         todaySlotUrgent: '先处理',
         todaySlotMain: '主推进',
@@ -4260,6 +4263,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         portfolioTitle: 'Project Portfolio',
         openStrategyPyramid: 'Open Strategy Pyramid',
         globalFocusTitle: 'Today',
+        globalFocusLoading: 'Preparing today’s plan…',
+        globalFocusNoProjects: 'No projects yet. Add one and SoloMap will organize today’s plan for you.',
         globalFocusEmpty: 'No clear plan yet. Add or choose a project first.',
         todaySlotUrgent: 'Handle',
         todaySlotMain: 'Push',
@@ -5706,6 +5711,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
     }
 
+    renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'settings.get' });
@@ -5764,6 +5771,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }
 
         case 'projectsLoaded':
+          projectDataLoaded = true;
           const incomingSelectedProjectPath = message.projects.selectedProjectPath || '';
           const selectedProjectPath = activeProjectPath && incomingSelectedProjectPath && incomingSelectedProjectPath !== activeProjectPath
             ? activeProjectPath
@@ -7162,11 +7170,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const store = currentProjects.globalStore || {};
         const rhythm = getTodayWorkRhythm();
         if (!items.length) {
+          const emptyMessageKey = !projectDataLoaded
+            ? 'globalFocusLoading'
+            : currentProjects.projects.length === 0
+              ? 'globalFocusNoProjects'
+              : 'globalFocusEmpty';
           globalFocusPanel.innerHTML = \`
             <div class="global-focus-head">
               <span class="global-focus-title"><span class="codicon codicon-target"></span>\${escapeHtml(t('globalFocusTitle'))}</span>
             </div>
-            <div class="empty-portfolio">\${escapeHtml(t('globalFocusEmpty'))}</div>
+            <div class="empty-portfolio">\${escapeHtml(t(emptyMessageKey))}</div>
           \`;
           return;
         }
