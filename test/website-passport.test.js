@@ -841,6 +841,8 @@ test('Workbench page renders early access application form, roadmap preview, and
   assert.match(htmlEn, /SoloMap Workbench/);
   assert.match(htmlEn, /Join Pro Early Access/);
   assert.match(htmlEn, /Pro Feature Roadmap &amp; Voting/);
+  assert.match(htmlEn, /GitHub Issues Inbox/);
+  assert.doesNotMatch(htmlEn, /Listing &amp; Discovery Experiments/);
   assert.match(htmlEn, /Your Pro Entitlements/);
 
   // 2. Chinese workbench page
@@ -850,6 +852,8 @@ test('Workbench page renders early access application form, roadmap preview, and
   assert.match(htmlZh, /SoloMap 官网工作台/);
   assert.match(htmlZh, /申请 Pro Early Access/);
   assert.match(htmlZh, /Pro 功能路线图与共创投票/);
+  assert.match(htmlZh, /GitHub Issues 收件箱/);
+  assert.doesNotMatch(htmlZh, /双 Listing 引流实验/);
 
   // 3. Early access apply API success path
   const resApplyOk = await worker.default.fetch(new Request('https://solomap.app/api/early-access/apply', {

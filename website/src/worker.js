@@ -204,11 +204,11 @@ const content = {
         desc: "Vote for the capabilities you need most. We build by voting weight.",
         voteSuccess: "Thank you for voting! Your priority preference has been saved.",
         items: [
-          ["Strategy Pyramid", "Visual tradeoff cockpit across side projects. (Shipped)", "tg_remote", "Shipped"],
+          ["Strategy Pyramid", "Visual tradeoff cockpit across side projects. (Shipped)", "strategy_pyramid", "Shipped"],
           ["Project Growth Graph", "File and LOC evolution charts showing testing gaps and coverage. (Shipped)", "growth_graph", "Shipped"],
           ["Web Workbench", "A web UI to preview and co-create your roadmaps. (In Progress)", "web_workbench", "In Progress"],
           ["Telegram Bot Remote control", "Asynchronously approve agent runs and get finished notifications on mobile. (Planned)", "tg_remote", "Vote & Co-create"],
-          ["Listing & Discovery Experiments", "Alternative VS Code extension lists to improve organic discovery. (Planned)", "listing_exp", "Vote & Co-create"]
+          ["GitHub Issues Inbox", "Bring open issues into SoloMap and send them directly to an Agent. (Planned)", "github_issues_inbox", "Vote & Co-create"]
         ]
       },
       proEntitlements: {
@@ -378,7 +378,7 @@ const content = {
           ["项目生长图", "显示模块文件 LOC 演进、测试空缺与覆盖度 (已上线)", "growth_graph", "已上线"],
           ["官网工作台", "脱离编辑器的路线图预览与 Early Access 控制面 (进行中)", "web_workbench", "进行中"],
           ["Telegram 远程控制", "离开电脑后接收 Agent 执行完成通知并可异步批准 (计划中)", "tg_remote", "投票共创"],
-          ["双 Listing 引流实验", "在两边市场测试更强匹配度的 Listing 占位流量 (计划中)", "listing_exp", "投票共创"]
+          ["GitHub Issues 收件箱", "把待处理 Issue 带入 SoloMap，并直接交给 Agent 解决 (计划中)", "github_issues_inbox", "投票共创"]
         ]
       },
       proEntitlements: {
