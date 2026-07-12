@@ -607,7 +607,7 @@ export function summarizeSecurityCache(repo: string, cache: SecurityCacheFile, s
     openCriticalHigh: stale ? 0 : priorityAlerts.length,
     openTotal: stale ? 0 : openAlerts.length,
     status: stale ? 'unknown' : priorityAlerts.length > 0 ? 'risk' : 'healthy',
-    alerts: priorityAlerts.concat(openAlerts.filter((alert) => !['critical', 'high'].includes(alert.severity))).slice(0, 5),
+    alerts: priorityAlerts.concat(openAlerts.filter((alert) => !['critical', 'high'].includes(alert.severity))),
     message: stale ? 'Showing last synced security signals' : cache.message
   };
 }

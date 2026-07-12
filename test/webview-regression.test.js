@@ -801,6 +801,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   ], `
     globalThis.__setDeliveryActionPanelExpanded = (value) => { deliveryActionPanelExpanded = Boolean(value); };
     globalThis.__renderProjectDeliveryPanel = renderProjectDeliveryPanel;
+    globalThis.__buildSecurityActionPrompt = buildSecurityActionPrompt;
     globalThis.__renderGlobalFocus = renderGlobalFocus;
     globalThis.__renderIssueDetailWithPayload = (payload) => { issueDetails = payload; return renderIssueDetail('/workspace/app'); };
     globalThis.__getCurrentPortfolio = () => currentProjects.portfolio;
@@ -830,17 +831,25 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       alerts: [
         { source: 'Dependabot', title: 'critical package', severity: 'critical', state: 'open', url: 'https://github.com/owner/repo/security/dependabot/1' },
         { source: 'CodeQL', title: 'high code path', severity: 'high', state: 'open', url: 'https://github.com/owner/repo/security/code-scanning/2' },
-        { source: 'Dependabot', title: 'medium package', severity: 'medium', state: 'open', url: 'https://github.com/owner/repo/security/dependabot/3' }
+        { source: 'Dependabot', title: 'medium package', severity: 'medium', state: 'open', url: 'https://github.com/owner/repo/security/dependabot/3' },
+        ...Array.from({ length: 5 }, (_, index) => ({ source: 'Dependabot', title: `high package ${index + 3}`, severity: 'high', state: 'open', url: `https://github.com/owner/repo/security/dependabot/${index + 4}` }))
       ]
     }
   });
   assert.match(securityPanelHtml, /critical package/);
   assert.match(securityPanelHtml, /high code path/);
+  assert.match(securityPanelHtml, /high package 7/);
   assert.doesNotMatch(securityPanelHtml, /medium package/);
+  assert.match(securityPanelHtml, /portfolio-delivery-list security-risk-list/);
   assert.equal((securityPanelHtml.match(/data-open-security-audit=/g) || []).length, 1);
   assert.match(securityPanelHtml, /data-open-security-audit="https:\/\/github\.com\/owner\/repo\/security"/);
   assert.match(securityPanelHtml, /data-agent-fix-security-project-path="\/workspace\/app"/);
   assert.doesNotMatch(securityPanelHtml, /打开路线大图/);
+  const securityPrompt = context.__buildSecurityActionPrompt({ security: {
+    alerts: Array.from({ length: 7 }, (_, index) => ({ source: 'Dependabot', title: `risk ${index + 1}`, severity: 'high' }))
+  } });
+  assert.match(securityPrompt, /risk 1/);
+  assert.match(securityPrompt, /risk 7/);
 
   const prPanelHtml = context.__renderProjectDeliveryPanel({
     name: 'app',
@@ -3676,6 +3685,7 @@ test('sidebar security summary counts only live critical and high alerts', () =>
       { source: 'Dependabot', title: 'critical package', severity: 'critical', state: 'open', url: 'https://github.com/owner/repo/security/dependabot/1' },
       { source: 'CodeQL', title: 'high code path', severity: 'high', state: 'open', url: 'https://github.com/owner/repo/security/code-scanning/2' },
       { source: 'Dependabot', title: 'medium package', severity: 'medium', state: 'open', url: '' },
+      ...Array.from({ length: 5 }, (_, index) => ({ source: 'Dependabot', title: `high package ${index + 3}`, severity: 'high', state: 'open', url: '' })),
       { source: 'CodeQL', title: 'fixed path', severity: 'critical', state: 'fixed', url: '' }
     ]
   };
@@ -3685,8 +3695,10 @@ test('sidebar security summary counts only live critical and high alerts', () =>
   assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /security-cache\.json/);
   const read = sidebarModule.__readSecurityCache(root, 'owner/repo');
   const live = sidebarModule.__summarizeSecurityCache('owner/repo', read, false);
-  assert.equal(live.openCriticalHigh, 2);
-  assert.equal(live.openTotal, 3);
+  assert.equal(live.openCriticalHigh, 7);
+  assert.equal(live.openTotal, 8);
+  assert.equal(live.alerts.length, 8);
+  assert.equal(live.alerts.some((alert) => alert.title === 'high package 7'), true);
   assert.equal(live.status, 'risk');
   const stale = sidebarModule.__summarizeSecurityCache('owner/repo', read, true);
   assert.equal(stale.openCriticalHigh, 0);

@@ -2754,6 +2754,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       margin-top: 8px;
     }
 
+    .portfolio-delivery-list.security-risk-list {
+      max-height: 220px;
+      overflow-y: auto;
+      padding-right: 3px;
+      scrollbar-gutter: stable;
+    }
+
     .portfolio-issue-row {
       width: 100%;
       border: 1px solid rgba(255, 255, 255, 0.07);
@@ -7877,7 +7884,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
                 + '</button>'
               : '')
             + '</div>'
-            + '<div class="portfolio-delivery-list">' + securityRows + '</div>'
+            + '<div class="portfolio-delivery-list security-risk-list">' + securityRows + '</div>'
             + '</div>'
           : '')
         + (foundationRows
