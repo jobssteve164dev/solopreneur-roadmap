@@ -875,6 +875,8 @@ test('website headless auth renders product-owned forms and creates a protected 
     assert.match(workbenchHtml, /@media\(max-width:960px\)/);
     assert.match(workbenchHtml, /Your projects will appear here/);
     assert.match(workbenchHtml, /Project data in the extension stays local/);
+    assert.match(workbenchHtml, /<footer>/);
+    assert.match(workbenchHtml, /Local-first roadmap and strategy cockpit/);
     assert.doesNotMatch(workbenchHtml, /Pro Feature Roadmap &amp; Voting/);
   } finally {
     global.fetch = originalFetch;
