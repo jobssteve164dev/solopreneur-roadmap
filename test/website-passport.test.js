@@ -830,49 +830,51 @@ test('Privacy Policy and Terms of Service endpoints render correct bilingual cop
   assert.match(termsZh, /许可授予与使用范围/);
 });
 
-test('Workbench page renders early access application form, roadmap preview, and handles apply request', async () => {
+test('website headless auth renders product-owned forms and creates a protected workbench session', async () => {
   const worker = await loadWebsiteWorker();
-  const env = { SITE_ORIGIN: 'https://solomap.app' };
+  const env = { SITE_ORIGIN: 'https://solomap.app', SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret' };
+  const originalFetch = global.fetch;
+  global.fetch = async (input, init = {}) => {
+    assert.equal(String(input), 'https://passport.szlk.ai/api/v1/auth/login');
+    assert.equal(init.headers['x-szlk-product'], 'solomap');
+    assert.equal(init.headers['x-szlk-secret'], 'test-product-secret');
+    assert.deepEqual(JSON.parse(init.body), { email: 'developer@solomap.app', password: 'correct-password' });
+    return new Response(JSON.stringify({ ok: true, data: { user: { id: 'user-1', email: 'developer@solomap.app', name: 'Solo Dev', emailVerified: true } } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const loginPage = await worker.default.fetch(new Request('https://solomap.app/login'), env);
+    const loginHtml = await loginPage.text();
+    assert.equal(loginPage.status, 200);
+    assert.match(loginHtml, /Sign in to SoloMap/);
+    assert.match(loginHtml, /Create one/);
+    assert.doesNotMatch(loginHtml, /api\/oidc\/authorize/);
 
-  // 1. English workbench page
-  const resEn = await worker.default.fetch(new Request('https://solomap.app/workbench'), env);
-  const htmlEn = await resEn.text();
-  assert.equal(resEn.status, 200);
-  assert.match(htmlEn, /SoloMap Workbench/);
-  assert.match(htmlEn, /Join Pro Early Access/);
-  assert.match(htmlEn, /Pro Feature Roadmap &amp; Voting/);
-  assert.match(htmlEn, /GitHub Issues Inbox/);
-  assert.doesNotMatch(htmlEn, /Listing &amp; Discovery Experiments/);
-  assert.match(htmlEn, /Your Pro Entitlements/);
+    const registerPage = await worker.default.fetch(new Request('https://solomap.app/zh/register'), env);
+    assert.match(await registerPage.text(), /创建 SoloMap 账号/);
 
-  // 2. Chinese workbench page
-  const resZh = await worker.default.fetch(new Request('https://solomap.app/zh/workbench'), env);
-  const htmlZh = await resZh.text();
-  assert.equal(resZh.status, 200);
-  assert.match(htmlZh, /SoloMap 官网工作台/);
-  assert.match(htmlZh, /申请 Pro Early Access/);
-  assert.match(htmlZh, /Pro 功能路线图与共创投票/);
-  assert.match(htmlZh, /GitHub Issues 收件箱/);
-  assert.doesNotMatch(htmlZh, /双 Listing 引流实验/);
+    const anonymousWorkbench = await worker.default.fetch(new Request('https://solomap.app/workbench'), env);
+    assert.equal(anonymousWorkbench.status, 302);
+    assert.match(anonymousWorkbench.headers.get('location') || '', /\/login\?return_to=/);
 
-  // 3. Early access apply API success path
-  const resApplyOk = await worker.default.fetch(new Request('https://solomap.app/api/early-access/apply', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: 'developer@solomap.app' })
-  }), env);
-  const applyOkBody = await resApplyOk.json();
-  assert.equal(resApplyOk.status, 200);
-  assert.equal(applyOkBody.ok, true);
-  assert.equal(applyOkBody.message, 'Application submitted');
+    const login = await worker.default.fetch(new Request('https://solomap.app/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://solomap.app' },
+      body: JSON.stringify({ email: 'developer@solomap.app', password: 'correct-password', returnTo: '/workbench' })
+    }), env);
+    const cookie = login.headers.get('set-cookie') || '';
+    assert.equal(login.status, 200);
+    assert.match(cookie, /^__Host-solomap_session=/);
+    assert.match(cookie, /HttpOnly/);
+    assert.match(cookie, /SameSite=Lax/);
 
-  // 4. Early access apply API error path (invalid email)
-  const resApplyErr = await worker.default.fetch(new Request('https://solomap.app/api/early-access/apply', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ email: 'invalid-email' })
-  }), env);
-  const applyErrBody = await resApplyErr.json();
-  assert.equal(resApplyErr.status, 400);
-  assert.equal(applyErrBody.ok, false);
+    const workbench = await worker.default.fetch(new Request('https://solomap.app/workbench', { headers: { cookie } }), env);
+    const workbenchHtml = await workbench.text();
+    assert.equal(workbench.status, 200);
+    assert.match(workbenchHtml, /Welcome back, Solo Dev/);
+    assert.match(workbenchHtml, /Your projects will appear here/);
+    assert.match(workbenchHtml, /Project data in the extension stays local/);
+    assert.doesNotMatch(workbenchHtml, /Pro Feature Roadmap &amp; Voting/);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

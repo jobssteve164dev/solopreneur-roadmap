@@ -1,3 +1,12 @@
+import {
+  assertSameOrigin,
+  clearSessionCookie,
+  createSessionCookie,
+  passportHeadlessRequest,
+  readSession,
+  safeReturnTo
+} from "./headlessAuth.js";
+
 const SITE_ORIGIN = "https://solomap.app";
 const MARKETPLACE_URL = "https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap";
 const OPEN_VSX_URL = "https://open-vsx.org/extension/SZLK/solopreneur-roadmap";
@@ -547,10 +556,10 @@ function textResponse(body, contentType = "text/plain; charset=utf-8") {
   });
 }
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: apiHeaders
+    headers: { ...apiHeaders, ...extraHeaders }
   });
 }
 
@@ -1719,6 +1728,14 @@ function buildStyles() {
       --cyan: #49d6d0;
       --green: #a5d66d;
       --shadow: rgba(0, 0, 0, 0.35);
+      --fg: var(--ink);
+      --accent: var(--cyan);
+      --accent-purple: #a99cff;
+      --success: var(--green);
+      --danger: #ff6b78;
+      --border: var(--line);
+      --glass-bg: rgba(26, 23, 20, 0.9);
+      --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
@@ -3355,7 +3372,7 @@ function buildHeader(t, locale, currentPath) {
         <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
         <a href="${GITHUB_URL}">${escapeHtml(t.nav.github)}</a>
         <a class="language-link" href="${alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
-        <a class="install-link" href="${installHref}">${escapeHtml(t.nav.install)}</a>
+        <a class="install-link" href="${locale === "zh" ? "/zh/workbench" : "/workbench"}">${locale === "zh" ? "工作台" : "Workbench"}</a>
       </div>
     </nav>
   </header>`;
@@ -3992,7 +4009,7 @@ function buildPage(locale, origin, stats) {
 </html>`;
 }
 
-async function buildWorkbenchPage(request, env) {
+async function buildLegacyWorkbenchPage(request, env) {
   const url = new URL(request.url);
   const origin = env.SITE_ORIGIN || url.origin;
   const locale = url.pathname.startsWith("/zh") ? "zh" : "en";
@@ -4390,6 +4407,90 @@ async function buildWorkbenchPage(request, env) {
   </script>
 </body>
 </html>`;
+}
+
+function authCopy(locale) {
+  return locale === "zh" ? {
+    loginTitle: "登录 SoloMap", registerTitle: "创建 SoloMap 账号", loginLead: "回到你的个人项目工作台。", registerLead: "一个账号，管理订阅、设备与官网工作台。",
+    name: "你的名字", email: "邮箱", password: "密码", passwordHint: "至少 8 个字符", login: "登录", register: "创建账号", forgot: "忘记密码？", noAccount: "还没有账号？", hasAccount: "已有账号？", create: "立即注册", back: "返回登录",
+    verifyTitle: "查收验证邮件", verifyText: "验证链接已发送到你的邮箱。完成验证后即可登录 SoloMap。", resetTitle: "重设密码", resetLead: "输入注册邮箱，我们会发送密码重设链接。", newPasswordLead: "设置一个新的登录密码。", sendReset: "发送重设邮件", savePassword: "保存新密码", resetSent: "如果该账号存在，重设邮件已经发出。", passwordSaved: "密码已更新，现在可以登录。",
+    genericError: "操作没有完成，请稍后重试。", emailUnverified: "请先完成邮箱验证，再登录。", submitting: "正在处理…"
+  } : {
+    loginTitle: "Sign in to SoloMap", registerTitle: "Create your SoloMap account", loginLead: "Return to your personal project workbench.", registerLead: "One account for your subscription, devices, and web workbench.",
+    name: "Your name", email: "Email", password: "Password", passwordHint: "At least 8 characters", login: "Sign in", register: "Create account", forgot: "Forgot password?", noAccount: "New to SoloMap?", hasAccount: "Already have an account?", create: "Create one", back: "Back to sign in",
+    verifyTitle: "Check your inbox", verifyText: "We sent a verification link to your email. Verify it, then sign in to SoloMap.", resetTitle: "Reset your password", resetLead: "Enter your account email and we will send a reset link.", newPasswordLead: "Choose a new password for your account.", sendReset: "Send reset email", savePassword: "Save new password", resetSent: "If the account exists, a reset email has been sent.", passwordSaved: "Your password has been updated. You can now sign in.",
+    genericError: "We could not complete that action. Please try again.", emailUnverified: "Verify your email before signing in.", submitting: "Working…"
+  };
+}
+
+function buildAuthPage(request, mode) {
+  const url = new URL(request.url);
+  const locale = url.pathname.startsWith("/zh") ? "zh" : "en";
+  const t = content[locale];
+  const copy = authCopy(locale);
+  const isRegister = mode === "register";
+  const isForgot = mode === "forgot";
+  const isReset = mode === "reset";
+  const returnTo = safeReturnTo(url.searchParams.get("return_to"), locale === "zh" ? "/zh/workbench" : "/workbench");
+  const pageTitle = isRegister ? copy.registerTitle : isForgot || isReset ? copy.resetTitle : copy.loginTitle;
+  const lead = isRegister ? copy.registerLead : isForgot ? copy.resetLead : isReset ? copy.newPasswordLead : copy.loginLead;
+  const endpoint = isRegister ? "register" : isForgot ? "forgot-password" : isReset ? "reset-password" : "login";
+  return `<!doctype html><html lang="${t.lang}"><head>
+  ${buildHead({ ...t, meta: { ...t.meta, title: pageTitle, description: lead, ogDescription: lead } }, url.origin, url.pathname, locale === "zh" ? url.pathname.replace(/^\/zh/, "") || "/" : `/zh${url.pathname}`)}
+  ${buildStyles()}<style>
+  .auth-main{min-height:calc(100dvh - 160px);display:grid;place-items:center;padding:56px 20px}.auth-shell{width:min(100%,440px)}.auth-brand{display:flex;justify-content:center;margin-bottom:24px}.auth-card{padding:32px;border:1px solid var(--border);border-radius:20px;background:var(--glass-bg);box-shadow:0 24px 70px rgba(0,0,0,.28)}.auth-card h1{font-size:30px;margin:0 0 8px}.auth-lead{color:var(--muted);margin:0 0 28px}.auth-field{margin-bottom:18px}.auth-field label{display:block;margin-bottom:7px;font-size:14px;font-weight:650}.auth-field input{box-sizing:border-box;width:100%;min-height:48px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.035);color:var(--fg);font:inherit}.auth-field input:focus{outline:3px solid rgba(0,240,255,.18);border-color:var(--accent)}.auth-help{display:block;margin-top:6px;color:var(--muted);font-size:12px}.auth-submit{width:100%;min-height:48px;border:0;border-radius:10px;background:var(--accent);color:#071014;font:inherit;font-weight:750;cursor:pointer}.auth-submit:disabled{opacity:.65;cursor:wait}.auth-message{display:none;margin:0 0 16px;padding:12px 14px;border-radius:10px;font-size:14px}.auth-message.error{display:block;color:#ffb4bf;background:rgba(255,68,96,.1);border:1px solid rgba(255,68,96,.25)}.auth-message.success{display:block;color:#96f5d7;background:rgba(0,220,160,.1);border:1px solid rgba(0,220,160,.25)}.auth-switch{text-align:center;color:var(--muted);margin:20px 0 0}.auth-switch a,.auth-links a{color:var(--accent)}.auth-links{text-align:right;margin:-8px 0 18px;font-size:13px}@media(max-width:520px){.auth-main{padding:28px 16px}.auth-card{padding:24px}}
+  </style></head><body>${buildHeader(t, locale, url.pathname)}<main class="auth-main"><div class="auth-shell"><section class="auth-card"><h1>${escapeHtml(pageTitle)}</h1><p class="auth-lead">${escapeHtml(lead)}</p><div id="auth-message" class="auth-message" role="status" aria-live="polite"></div><form id="auth-form">
+  ${isRegister ? `<div class="auth-field"><label for="name">${escapeHtml(copy.name)}</label><input id="name" name="name" autocomplete="name" required></div>` : ""}
+  ${isReset ? "" : `<div class="auth-field"><label for="email">${escapeHtml(copy.email)}</label><input id="email" name="email" type="email" autocomplete="email" required></div>`}
+  ${isForgot ? "" : `<div class="auth-field"><label for="password">${escapeHtml(copy.password)}</label><input id="password" name="password" type="password" autocomplete="${isRegister || isReset ? "new-password" : "current-password"}" minlength="8" required>${isRegister || isReset ? `<span class="auth-help">${escapeHtml(copy.passwordHint)}</span>` : ""}</div>`}
+  ${!isRegister && !isForgot && !isReset ? `<div class="auth-links"><a href="${locale === "zh" ? "/zh" : ""}/forgot-password">${escapeHtml(copy.forgot)}</a></div>` : ""}
+  <button class="auth-submit" id="auth-submit" type="submit">${escapeHtml(isRegister ? copy.register : isForgot ? copy.sendReset : isReset ? copy.savePassword : copy.login)}</button></form>
+  <p class="auth-switch">${isRegister ? `${escapeHtml(copy.hasAccount)} <a href="${locale === "zh" ? "/zh" : ""}/login">${escapeHtml(copy.login)}</a>` : isForgot || isReset ? `<a href="${locale === "zh" ? "/zh" : ""}/login">${escapeHtml(copy.back)}</a>` : `${escapeHtml(copy.noAccount)} <a href="${locale === "zh" ? "/zh" : ""}/register?return_to=${encodeURIComponent(returnTo)}">${escapeHtml(copy.create)}</a>`}</p></section></div></main>${buildFooter(t)}
+  <script>document.getElementById('auth-form').addEventListener('submit',async(event)=>{event.preventDefault();const form=event.currentTarget;const button=document.getElementById('auth-submit');const message=document.getElementById('auth-message');button.disabled=true;button.textContent=${JSON.stringify(copy.submitting)};message.className='auth-message';try{const body=Object.fromEntries(new FormData(form).entries());body.returnTo=${JSON.stringify(returnTo)};${isReset ? `body.token=${JSON.stringify(url.searchParams.get("token") || "")};` : ""}const response=await fetch('/api/auth/${endpoint}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});const result=await response.json();if(!response.ok)throw new Error(result.code==='email_not_verified'?${JSON.stringify(copy.emailUnverified)}:(result.message||${JSON.stringify(copy.genericError)}));if(${JSON.stringify(isRegister)}){form.style.display='none';message.textContent=${JSON.stringify(copy.verifyText)};message.className='auth-message success';}else if(${JSON.stringify(isForgot)}){form.style.display='none';message.textContent=${JSON.stringify(copy.resetSent)};message.className='auth-message success';}else if(${JSON.stringify(isReset)}){form.style.display='none';message.innerHTML=${JSON.stringify(copy.passwordSaved)}+' <a href="${locale === "zh" ? "/zh" : ""}/login">${escapeHtml(copy.login)}</a>';message.className='auth-message success';}else{location.href=result.returnTo||${JSON.stringify(returnTo)};return;}}catch(error){message.textContent=error.message||${JSON.stringify(copy.genericError)};message.className='auth-message error';}button.disabled=false;button.textContent=${JSON.stringify(isRegister ? copy.register : isForgot ? copy.sendReset : isReset ? copy.savePassword : copy.login)};});</script></body></html>`;
+}
+
+async function buildPersonalWorkbenchPage(request, env, session) {
+  const url = new URL(request.url);
+  const locale = url.pathname.startsWith("/zh") ? "zh" : "en";
+  const t = content[locale];
+  const zh = locale === "zh";
+  const name = session.name || session.email.split("@")[0];
+  const pagePath = zh ? "/zh/workbench" : "/workbench";
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { ...t.meta, title: zh ? "SoloMap 个人工作台" : "SoloMap Personal Workbench", description: zh ? "查看并推进你的 SoloMap 项目。" : "See and move your SoloMap projects forward.", ogDescription: "SoloMap" } }, url.origin, pagePath, zh ? "/workbench" : "/zh/workbench")}${buildStyles()}<style>
+  .desk{display:grid;grid-template-columns:240px minmax(0,1fr);min-height:calc(100dvh - 72px)}.desk-side{padding:28px 20px;border-right:1px solid var(--border);background:rgba(255,255,255,.018)}.desk-side strong{display:block;margin:0 10px 24px}.desk-nav{display:grid;gap:8px}.desk-nav a{min-height:44px;display:flex;align-items:center;padding:0 12px;border-radius:9px;color:var(--muted);text-decoration:none}.desk-nav a.active{background:rgba(0,240,255,.09);color:var(--fg)}.desk-main{padding:42px clamp(20px,5vw,68px)}.desk-top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:38px}.desk-top h1{margin:0 0 8px;font-size:34px}.desk-top p{margin:0;color:var(--muted)}.desk-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px}.desk-card{border:1px solid var(--border);border-radius:16px;background:var(--glass-bg);padding:24px}.desk-card h2{margin:0 0 8px;font-size:19px}.desk-card p{color:var(--muted);line-height:1.65}.empty-projects{min-height:260px;display:grid;place-items:center;text-align:center;padding:32px}.empty-projects>div{max-width:520px}.empty-projects h2{font-size:24px}.desk-actions{display:flex;justify-content:center;flex-wrap:wrap;gap:12px;margin-top:22px}.account-line{display:flex;align-items:center;gap:12px;margin:20px 0}.avatar{width:44px;height:44px;display:grid;place-items:center;border-radius:50%;background:rgba(0,240,255,.12);color:var(--accent);font-weight:800}.account-line span{display:block;color:var(--muted);font-size:13px;overflow-wrap:anywhere}.logout{width:100%;min-height:44px;border:1px solid var(--border);border-radius:9px;background:transparent;color:var(--fg);cursor:pointer}.boundary-note{margin-top:18px;padding-top:18px;border-top:1px solid var(--border);font-size:13px;color:var(--muted)}@media(max-width:900px){.desk{grid-template-columns:1fr}.desk-side{display:none}.desk-grid{grid-template-columns:1fr}.desk-main{padding-top:28px}}@media(max-width:600px){.desk-top{display:block}.desk-top .button{margin-top:18px}.desk-card{padding:20px}}
+  </style></head><body>${buildHeader(t, locale, pagePath)}<div class="desk"><aside class="desk-side"><strong>${zh ? "个人工作台" : "Personal workbench"}</strong><nav class="desk-nav" aria-label="${zh ? "工作台导航" : "Workbench navigation"}"><a class="active" href="${pagePath}">${zh ? "我的项目" : "My projects"}</a><a href="${zh ? "/zh/pro" : "/pro"}">SoloMap Pro</a></nav></aside><main class="desk-main"><header class="desk-top"><div><h1>${zh ? `你好，${escapeHtml(name)}` : `Welcome back, ${escapeHtml(name)}`}</h1><p>${zh ? "从这里查看你的项目，并继续下一步。" : "See your projects here and continue with the next step."}</p></div><a class="button secondary" href="${MARKETPLACE_URL}">${zh ? "打开 VS Code 插件" : "Open the VS Code extension"}</a></header><div class="desk-grid"><section class="desk-card empty-projects"><div><h2>${zh ? "你的项目会出现在这里" : "Your projects will appear here"}</h2><p>${zh ? "目前项目仍由 SoloMap 插件保存在你的本地工作区。先在 VS Code 中打开一个项目，创建路线图并开始推进。" : "For now, SoloMap keeps projects in your local workspace. Open a project in VS Code, create its roadmap, and start moving it forward."}</p><div class="desk-actions"><a class="button primary" href="${MARKETPLACE_URL}">${zh ? "安装或打开 SoloMap" : "Install or open SoloMap"}</a><a class="button ghost" href="${zh ? "/zh/docs" : "/docs"}">${zh ? "查看使用指南" : "Read the guide"}</a></div></div></section><aside class="desk-card"><h2>${zh ? "账号" : "Account"}</h2><div class="account-line"><div class="avatar">${escapeHtml(name.slice(0,1).toUpperCase())}</div><div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(session.email)}</span></div></div><button class="logout" id="logout" type="button">${zh ? "退出登录" : "Sign out"}</button><p class="boundary-note">${zh ? "官网当前只承载账号与个人工作台。插件中的项目数据仍保存在本地，不会自动上传。" : "The website currently hosts your account and personal workbench only. Project data in the extension stays local and is not uploaded automatically."}</p></aside></div></main></div><script>document.getElementById('logout').addEventListener('click',async()=>{await fetch('/api/auth/logout',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});location.href='${zh ? "/zh/login" : "/login"}';});</script></body></html>`;
+}
+
+async function handleHeadlessAuth(request, env, mode) {
+  try {
+    assertSameOrigin(request);
+    const body = await request.json();
+    const appBaseUrl = new URL(request.url).origin;
+    if (mode === "login") {
+      const result = await passportHeadlessRequest(env, "auth/login", { email: body.email, password: body.password });
+      if (result.needsEmailVerification || !result.user?.emailVerified) return jsonResponse({ ok: false, code: "email_not_verified", message: "Verify your email before signing in." }, 403);
+      return jsonResponse({ ok: true, user: result.user, returnTo: safeReturnTo(body.returnTo) }, 200, { "set-cookie": await createSessionCookie(request, env, result.user) });
+    }
+    if (mode === "register") {
+      const result = await passportHeadlessRequest(env, "auth/register", { email: body.email, password: body.password, name: body.name, appBaseUrl });
+      return jsonResponse({ ok: true, needsEmailVerification: true, user: result.user });
+    }
+    if (mode === "forgot-password") {
+      await passportHeadlessRequest(env, "auth/forgot-password", { email: body.email, appBaseUrl });
+      return jsonResponse({ ok: true });
+    }
+    if (mode === "verify-email") {
+      await passportHeadlessRequest(env, "auth/verify-email", { token: body.token });
+      return jsonResponse({ ok: true });
+    }
+    if (mode === "reset-password") {
+      await passportHeadlessRequest(env, "auth/reset-password", { token: body.token, password: body.password });
+      return jsonResponse({ ok: true });
+    }
+    return jsonResponse({ ok: false, code: "invalid_auth_mode" }, 404);
+  } catch (error) {
+    return jsonResponse({ ok: false, code: error.code || "auth_failed", message: error.message || "Authentication failed" }, Number(error.status) || 500);
+  }
 }
 
 async function handleEarlyAccessApply(request, env) {
@@ -4898,6 +4999,39 @@ export default {
       return textResponse("ok");
     }
 
+    const authPageMatch = url.pathname.match(/^\/(?:zh\/)?(login|register|forgot-password|reset-password)$/);
+    if (request.method === "GET" && authPageMatch) {
+      const session = await readSession(request, env);
+      if (session && authPageMatch[1] !== "forgot-password") {
+        return Response.redirect(`${url.origin}${url.pathname.startsWith("/zh") ? "/zh/workbench" : "/workbench"}`, 302);
+      }
+      const authMode = authPageMatch[1] === "forgot-password" ? "forgot" : authPageMatch[1] === "reset-password" ? "reset" : authPageMatch[1];
+      return htmlResponse(buildAuthPage(request, authMode), 200, {
+        "cache-control": "no-store",
+        "content-security-policy": ["default-src 'none'", "style-src 'unsafe-inline'", "script-src 'unsafe-inline'", "connect-src 'self'", "img-src 'self' https://raw.githubusercontent.com data:", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'"].join("; ")
+      });
+    }
+
+    if (request.method === "GET" && (url.pathname === "/verify-email" || url.pathname === "/zh/verify-email")) {
+      const localePath = url.pathname.startsWith("/zh") ? "/zh" : "";
+      const token = String(url.searchParams.get("token") || "");
+      const result = await handleHeadlessAuth(new Request(`${url.origin}/api/auth/verify-email`, { method: "POST", headers: { "content-type": "application/json", "origin": url.origin }, body: JSON.stringify({ token }) }), env, "verify-email");
+      return Response.redirect(`${url.origin}${localePath}/login?verified=${result.ok ? "1" : "0"}`, 302);
+    }
+
+    const authApiMatch = url.pathname.match(/^\/api\/auth\/(login|register|forgot-password|verify-email|reset-password)$/);
+    if (request.method === "POST" && authApiMatch) return handleHeadlessAuth(request, env, authApiMatch[1]);
+
+    if (request.method === "GET" && url.pathname === "/api/auth/session") {
+      const session = await readSession(request, env);
+      return jsonResponse({ authenticated: Boolean(session), user: session ? { id: session.id, email: session.email, name: session.name } : null, expiresAt: session?.expiresAt || null });
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/logout") {
+      try { assertSameOrigin(request); } catch (error) { return jsonResponse({ ok: false, code: error.code, message: error.message }, error.status); }
+      return jsonResponse({ ok: true, authenticated: false }, 200, { "set-cookie": clearSessionCookie(request) });
+    }
+
     if (url.pathname === "/api/passport/start") {
       return handlePassportStart(request, env);
     }
@@ -4916,6 +5050,11 @@ export default {
 
     if (url.pathname === "/workbench" || url.pathname === "/zh/workbench") {
       const workbenchLocale = url.pathname.startsWith("/zh") ? "zh" : "en";
+      const session = await readSession(request, env);
+      if (!session) {
+        const loginPath = workbenchLocale === "zh" ? "/zh/login" : "/login";
+        return Response.redirect(`${url.origin}${loginPath}?return_to=${encodeURIComponent(url.pathname)}`, 302);
+      }
       const workbenchHeaders = {
         "Set-Cookie": `lang_pref=${workbenchLocale}; Path=/; Max-Age=31536000; SameSite=Lax`,
         "content-security-policy": [
@@ -4930,7 +5069,7 @@ export default {
           "frame-ancestors 'none'"
         ].join("; ")
       };
-      return htmlResponse(await buildWorkbenchPage(request, env), 200, workbenchHeaders);
+      return htmlResponse(await buildPersonalWorkbenchPage(request, env, session), 200, { ...workbenchHeaders, "cache-control": "no-store" });
     }
 
     if (url.pathname === "/api/early-access/apply" && request.method === "POST") {
