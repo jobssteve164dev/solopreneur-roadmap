@@ -6,6 +6,14 @@ import {
   readSession,
   safeReturnTo
 } from "./headlessAuth.js";
+import {
+  alternateLegalPath,
+  findLegalRoute,
+  getLegalContent,
+  legalPath,
+  legalRoutes,
+  legalSupplementRoute
+} from "./legalDocuments.js";
 
 const SITE_ORIGIN = "https://solomap.app";
 const MARKETPLACE_URL = "https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap";
@@ -3452,8 +3460,8 @@ function buildFooter(t) {
         </div>
         <div class="footer-legal-links">
           <a href="${t.privacyPath}">${escapeHtml(t.footer.privacy)}</a>
-          <a href="${t.pathPrefix}/privacy-policy">${isZh ? "隐私政策" : "Privacy Policy"}</a>
-          <a href="${t.pathPrefix}/terms-of-service">${isZh ? "用户协议" : "Terms of Service"}</a>
+          ${legalRoutes.map((route) => `<a href="${legalPath(route.slug, isZh ? "zh" : "en")}">${escapeHtml(route.label[isZh ? "zh" : "en"])}</a>`).join("")}
+          <a href="${legalPath(legalSupplementRoute.slug, isZh ? "zh" : "en")}">${escapeHtml(legalSupplementRoute.label[isZh ? "zh" : "en"])}</a>
         </div>
       </div>
     </div>
@@ -3493,8 +3501,8 @@ function buildHtmlSitemapPage(locale, origin) {
       <li><a href="${t.homePath}"><strong>${isZh ? "SoloMap 首页" : "SoloMap Home"}</strong></a></li>
       <li><a href="${t.pathPrefix}/pro"><strong>SoloMap Pro ${isZh ? "订阅页" : "Subscription"}</strong></a></li>
       <li><a href="${t.privacyPath}"><strong>${isZh ? "本地优先说明" : "Local-first Note"}</strong></a></li>
-      <li><a href="${t.pathPrefix}/privacy-policy"><strong>${isZh ? "隐私政策" : "Privacy Policy"}</strong></a></li>
-      <li><a href="${t.pathPrefix}/terms-of-service"><strong>${isZh ? "用户协议" : "Terms of Service"}</strong></a></li>
+      ${legalRoutes.map((route) => `<li><a href="${legalPath(route.slug, locale)}"><strong>${escapeHtml(route.label[locale])}</strong></a></li>`).join("")}
+      <li><a href="${legalPath(legalSupplementRoute.slug, locale)}"><strong>${escapeHtml(legalSupplementRoute.label[locale])}</strong></a></li>
     </ul>
 
     <h2 style="margin-top: 32px;">${isZh ? "产品指南与文档" : "Product Guides & Documentation"}</h2>
@@ -3727,6 +3735,8 @@ function buildTermsOfServicePage(locale, origin) {
 </html>`;
 }
 function alternatePathFor(pathname, locale) {
+  const legalRoute = findLegalRoute(pathname);
+  if (legalRoute) return alternateLegalPath(legalRoute.slug, legalRoute.locale);
   if (pathname === "/") return "/zh";
   if (pathname === "/zh" || pathname === "/zh/") return "/";
   if (pathname === "/pro") return "/zh/pro";
@@ -4644,7 +4654,90 @@ function buildDocPage(locale, slug, origin) {
 </html>`;
 }
 
+const INTERNAL_LEGAL_SECTION_IDS = new Set(["product_display_boundary", "professional_review"]);
+
+function formatLegalDate(value, locale) {
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-GB", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC"
+  }).format(date);
+}
+
+function renderLegalSections(document) {
+  return document.composition
+    .flatMap((part) => part.sections)
+    .filter((section) => !INTERNAL_LEGAL_SECTION_IDS.has(section.id))
+    .map((section) => {
+      const paragraphs = section.body_markdown
+        .split(/\n{2,}/)
+        .map((paragraph) => paragraph.trim())
+        .filter(Boolean)
+        .map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`)
+        .join("");
+      return `<section><h2>${escapeHtml(section.title)}</h2>${paragraphs}</section>`;
+    })
+    .join("");
+}
+
+async function buildLegalDocumentPage(route, locale, origin, env) {
+  const t = content[locale];
+  const document = await getLegalContent(env, route);
+  const title = route.supplement
+    ? (locale === "zh" ? "SoloMap 产品法律补充说明" : "SoloMap Product Legal Supplement")
+    : document.title;
+  const effectiveLabel = locale === "zh" ? "生效日期" : "Effective date";
+  const description = locale === "zh"
+    ? `${title}，适用于 SoloMap 产品与服务。`
+    : `${title} applicable to the SoloMap product and services.`;
+
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>
+  ${buildHead(
+    { ...t, meta: { ...t.meta, title, description, ogDescription: description } },
+    origin,
+    legalPath(route.slug, locale),
+    alternateLegalPath(route.slug, locale)
+  )}
+  ${buildStyles()}
+</head>
+<body>
+  ${buildHeader(t, locale, legalPath(route.slug, locale))}
+  <main class="privacy-page">
+    <div class="privacy-nav"><a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a></div>
+    <article class="privacy-article">
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(effectiveLabel)}：${escapeHtml(formatLegalDate(document.effective_at, locale))}</p>
+      ${renderLegalSections(document)}
+    </article>
+  </main>
+  ${buildFooter(t)}
+</body>
+</html>`;
+}
+
+function buildLegalUnavailablePage(locale, origin) {
+  const t = content[locale];
+  const title = locale === "zh" ? "法律文件暂时无法显示" : "Legal document temporarily unavailable";
+  const message = locale === "zh"
+    ? "请稍后重试。SoloMap 不会在无法确认文件适用产品时展示其他产品的法律内容。"
+    : "Please try again shortly. SoloMap will not show another product's legal content when the applicable document cannot be confirmed.";
+  return `<!doctype html>
+<html lang="${t.lang}">
+<head>${buildHead({ ...t, meta: { ...t.meta, title, description: message, ogDescription: message } }, origin, t.homePath, t.alternateHomePath)}${buildStyles()}</head>
+<body>${buildHeader(t, locale, t.homePath)}<main class="privacy-page"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a href="${t.homePath}">${locale === "zh" ? "返回首页" : "Return home"}</a></p></main>${buildFooter(t)}</body>
+</html>`;
+}
+
 function resolveRoute(pathname) {
+  const legalRoute = findLegalRoute(pathname);
+  if (legalRoute) {
+    return { type: "legal-document", locale: legalRoute.locale, legalRoute, status: 200 };
+  }
   if (pathname === "/" || pathname === "/en") {
     return { type: "home", locale: "en", status: 200 };
   }
@@ -4704,8 +4797,12 @@ function buildSitemap(origin) {
       changefreq: "monthly"
     })),
     { en: "/privacy-local-first", zh: "/zh/privacy-local-first", priority: "0.4", changefreq: "yearly" },
-    { en: "/privacy-policy", zh: "/zh/privacy-policy", priority: "0.4", changefreq: "yearly" },
-    { en: "/terms-of-service", zh: "/zh/terms-of-service", priority: "0.4", changefreq: "yearly" },
+    ...[...legalRoutes, legalSupplementRoute].map((route) => ({
+      en: legalPath(route.slug, "en"),
+      zh: legalPath(route.slug, "zh"),
+      priority: "0.4",
+      changefreq: "yearly"
+    })),
     { en: "/sitemap", zh: "/zh/sitemap", priority: "0.5", changefreq: "weekly" }
   ];
   const renderUrl = (loc, pair) => `  <url>
@@ -5150,6 +5247,14 @@ Sitemap: ${origin}/sitemap.xml
     }
     if (route.type === "privacy") {
       return htmlResponse(buildLocalFirstPage(route.locale, origin), route.status, extraHeaders);
+    }
+    if (route.type === "legal-document") {
+      try {
+        return htmlResponse(await buildLegalDocumentPage(route.legalRoute, route.locale, origin, env), route.status, extraHeaders);
+      } catch (error) {
+        console.error("Unable to load SoloMap legal document", error);
+        return htmlResponse(buildLegalUnavailablePage(route.locale, origin), 502, extraHeaders);
+      }
     }
     if (route.type === "privacy-policy") {
       return htmlResponse(buildPrivacyPolicyPage(route.locale, origin), route.status, extraHeaders);
