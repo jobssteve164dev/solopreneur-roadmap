@@ -703,6 +703,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /conversation\.getProjectHistory/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
+  assert.match(html, /id="dependency-panel" style="display: none;/);
+  assert.match(html, /id="btn-check-dependencies"[^>]*aria-expanded="false"/);
   assert.match(html, /id="agent-readiness-panel"/);
   assert.match(html, /id="pro-account-panel"/);
   assert.match(html, /id="btn-open-pro-authorization"/);
@@ -785,6 +787,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     'btn-open-feedback',
     'btn-test-cli',
     'btn-save-settings',
+    'dependency-panel',
     'btn-check-dependencies',
     'btn-open-agent-install',
     'btn-prepare-agent-automation',
@@ -922,6 +925,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
 
   elements['btn-toggle-settings'].listeners.click();
   assert.equal(elements['settings-panel'].style.display, 'block');
+  assert.equal(elements['dependency-panel'].style.display, '');
   elements['setting-language'].listeners.click({
     target: elements['setting-language'].__options[1],
     stopPropagation() {}
@@ -938,6 +942,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.ok(postedMessages.some((message) => message.command === 'entitlement.login'));
   assert.ok(postedMessages.some((message) => message.command === 'entitlement.paste'));
   elements['btn-check-dependencies'].listeners.click();
+  assert.equal(elements['dependency-panel'].style.display, 'block');
+  assert.equal(elements['btn-check-dependencies'].attributes['aria-expanded'], 'true');
   elements['btn-open-agent-install'].listeners.click();
   elements['btn-prepare-agent-automation'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
@@ -947,6 +953,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   elements['setting-feedback-body'].value = '打开侧边栏时先显示项目。';
   elements['btn-open-feedback'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'checkDependencies'));
+  elements['btn-check-dependencies'].listeners.click();
+  assert.equal(elements['dependency-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'agent-install'));
   assert.ok(postedMessages.some((message) => message.command === 'prepareAgentAutomation'));
   assert.ok(postedMessages.some((message) => message.command === 'openDependencyAction' && message.action === 'github-auth'));

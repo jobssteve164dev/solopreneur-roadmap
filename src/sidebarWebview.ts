@@ -3588,7 +3588,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       <div class="settings-card-title"><span class="codicon codicon-checklist"></span><span id="settings-section-readiness">Readiness</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
-      <div class="dependency-panel" id="dependency-panel">
+      <button class="dependency-action-btn" id="btn-check-dependencies" type="button" aria-expanded="false" style="width: 100%;"><span class="codicon codicon-search"></span><span id="text-check-dependencies">Diagnose</span></button>
+      <div class="dependency-panel" id="dependency-panel" style="display: none; margin-top: 8px;">
         <div class="dependency-row">
           <div class="dependency-main">
             <span class="dependency-name" id="dependency-agent-name">Agent CLI</span>
@@ -3611,7 +3612,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           <span class="dependency-status" id="dependency-github-status">Check</span>
         </div>
         <div class="dependency-actions">
-          <button class="dependency-action-btn" id="btn-check-dependencies"><span class="codicon codicon-search"></span><span id="text-check-dependencies">Check</span></button>
           <button class="dependency-action-btn" id="btn-open-agent-install"><span class="codicon codicon-cloud-download"></span><span id="text-open-agent-install">Install</span></button>
           <button class="dependency-action-btn" id="btn-prepare-agent-automation"><span class="codicon codicon-shield"></span><span id="text-prepare-agent-automation">Prepare</span></button>
           <button class="dependency-action-btn" id="btn-open-agent-check"><span class="codicon codicon-terminal"></span><span id="text-open-agent-check">Agent</span></button>
@@ -3719,6 +3719,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnRefreshAgentImpact = document.getElementById('btn-refresh-agent-impact');
     const agentImpactList = document.getElementById('agent-impact-list');
     const btnCheckDependencies = document.getElementById('btn-check-dependencies');
+    const dependencyPanel = document.getElementById('dependency-panel');
     const btnOpenAgentInstall = document.getElementById('btn-open-agent-install');
     const btnPrepareAgentAutomation = document.getElementById('btn-prepare-agent-automation');
     const btnOpenAgentCheck = document.getElementById('btn-open-agent-check');
@@ -4193,7 +4194,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
         dependencies: '本地依赖状态',
-        checkDependencies: '检查',
+        checkDependencies: '诊断',
         dependencyReady: '就绪',
         dependencyAction: '处理',
         dependencyNotChecked: '尚未检查。',
@@ -4551,7 +4552,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
         dependencies: 'Local readiness',
-        checkDependencies: 'Check',
+        checkDependencies: 'Diagnose',
         dependencyReady: 'Ready',
         dependencyAction: 'Action',
         dependencyNotChecked: 'Not checked yet.',
@@ -6064,7 +6065,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     });
 
     btnCheckDependencies.addEventListener('click', () => {
-      requestDependencyCheck();
+      const expanded = btnCheckDependencies.getAttribute('aria-expanded') === 'true';
+      btnCheckDependencies.setAttribute('aria-expanded', String(!expanded));
+      if (dependencyPanel) dependencyPanel.style.display = expanded ? 'none' : 'block';
+      if (!expanded) requestDependencyCheck();
     });
 
     btnOpenAgentCheck.addEventListener('click', () => {
