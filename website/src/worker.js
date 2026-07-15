@@ -3064,26 +3064,50 @@ function buildStyles() {
       .preview-body { grid-template-columns: 1fr; }
       .preview-side { display: none; }
       .footer-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 32px;
       }
     }
     @media (max-width: 560px) {
       .shell { width: min(100% - 28px, 1160px); }
+      .nav { min-height: 64px; gap: 10px; }
       .brand span { font-size: 15px; }
       .links { gap: 8px; }
       .install-link,
-      .language-link { padding: 8px 10px; }
-      h1 { font-size: 44px; }
+      .language-link { min-height: 44px; padding: 8px 10px; }
+      h1 { font-size: clamp(38px, 12vw, 44px); line-height: 1.02; }
       .hero-copy { font-size: 17px; }
       .button { width: 100%; }
       .install-actions { grid-template-columns: 1fr; }
       .section { padding: 58px 0; }
+      .section-head { margin-bottom: 24px; }
+      .card,
+      .answer-copy,
+      .trust-copy,
+      .price,
+      .install-panel { padding: 20px; }
+      .comparison-table,
+      .comparison-table tbody,
+      .comparison-table tr,
+      .comparison-table th,
+      .comparison-table td { display: block; width: 100%; }
+      .comparison-table tr { border-top: 1px solid var(--line); }
+      .comparison-table tr:first-child { border-top: 0; }
+      .comparison-table th,
+      .comparison-table td { border-top: 0; padding: 10px 14px; }
+      .comparison-table th { padding-top: 14px; }
+      .comparison-table td:last-child { padding-bottom: 14px; }
       .product-preview { min-height: 500px; }
       .preview-main { padding: 14px; }
       .roadmap-strip,
       .next-actions { grid-template-columns: 1fr; }
       .roadmap-step { min-height: 86px; }
+      .footer-grid { grid-template-columns: 1fr; gap: 28px; }
+      footer { padding: 44px 0 28px; }
+    }
+    @media (max-width: 380px) {
+      .brand span { display: none; }
+      .brand { flex-shrink: 0; }
     }
     @media (min-width: 1440px) {
       .shell { width: min(1280px, calc(100% - 64px)); }
@@ -4457,8 +4481,8 @@ async function buildPersonalWorkbenchPage(request, env, session) {
   const name = session.name || session.email.split("@")[0];
   const pagePath = zh ? "/zh/workbench" : "/workbench";
   return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { ...t.meta, title: zh ? "SoloMap 个人工作台" : "SoloMap Personal Workbench", description: zh ? "查看并推进你的 SoloMap 项目。" : "See and move your SoloMap projects forward.", ogDescription: "SoloMap" } }, url.origin, pagePath, zh ? "/workbench" : "/zh/workbench")}${buildStyles()}<style>
-  .desk{display:grid;grid-template-columns:240px minmax(0,1fr);min-height:calc(100dvh - 72px)}.desk-side{padding:28px 20px;border-right:1px solid var(--border);background:rgba(255,255,255,.018)}.desk-side strong{display:block;margin:0 10px 24px}.desk-nav{display:grid;gap:8px}.desk-nav a{min-height:44px;display:flex;align-items:center;padding:0 12px;border-radius:9px;color:var(--muted);text-decoration:none}.desk-nav a.active{background:rgba(0,240,255,.09);color:var(--fg)}.desk-main{padding:42px clamp(20px,5vw,68px)}.desk-top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:38px}.desk-top h1{margin:0 0 8px;font-size:34px}.desk-top p{margin:0;color:var(--muted)}.desk-grid{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:24px}.desk-card{border:1px solid var(--border);border-radius:16px;background:var(--glass-bg);padding:24px}.desk-card h2{margin:0 0 8px;font-size:19px}.desk-card p{color:var(--muted);line-height:1.65}.empty-projects{min-height:260px;display:grid;place-items:center;text-align:center;padding:32px}.empty-projects>div{max-width:520px}.empty-projects h2{font-size:24px}.desk-actions{display:flex;justify-content:center;flex-wrap:wrap;gap:12px;margin-top:22px}.account-line{display:flex;align-items:center;gap:12px;margin:20px 0}.avatar{width:44px;height:44px;display:grid;place-items:center;border-radius:50%;background:rgba(0,240,255,.12);color:var(--accent);font-weight:800}.account-line span{display:block;color:var(--muted);font-size:13px;overflow-wrap:anywhere}.logout{width:100%;min-height:44px;border:1px solid var(--border);border-radius:9px;background:transparent;color:var(--fg);cursor:pointer}.boundary-note{margin-top:18px;padding-top:18px;border-top:1px solid var(--border);font-size:13px;color:var(--muted)}@media(max-width:900px){.desk{grid-template-columns:1fr}.desk-side{display:none}.desk-grid{grid-template-columns:1fr}.desk-main{padding-top:28px}}@media(max-width:600px){.desk-top{display:block}.desk-top .button{margin-top:18px}.desk-card{padding:20px}}
-  </style></head><body>${buildHeader(t, locale, pagePath)}<div class="desk"><aside class="desk-side"><strong>${zh ? "个人工作台" : "Personal workbench"}</strong><nav class="desk-nav" aria-label="${zh ? "工作台导航" : "Workbench navigation"}"><a class="active" href="${pagePath}">${zh ? "我的项目" : "My projects"}</a><a href="${zh ? "/zh/pro" : "/pro"}">SoloMap Pro</a></nav></aside><main class="desk-main"><header class="desk-top"><div><h1>${zh ? `你好，${escapeHtml(name)}` : `Welcome back, ${escapeHtml(name)}`}</h1><p>${zh ? "从这里查看你的项目，并继续下一步。" : "See your projects here and continue with the next step."}</p></div><a class="button secondary" href="${MARKETPLACE_URL}">${zh ? "打开 VS Code 插件" : "Open the VS Code extension"}</a></header><div class="desk-grid"><section class="desk-card empty-projects"><div><h2>${zh ? "你的项目会出现在这里" : "Your projects will appear here"}</h2><p>${zh ? "目前项目仍由 SoloMap 插件保存在你的本地工作区。先在 VS Code 中打开一个项目，创建路线图并开始推进。" : "For now, SoloMap keeps projects in your local workspace. Open a project in VS Code, create its roadmap, and start moving it forward."}</p><div class="desk-actions"><a class="button primary" href="${MARKETPLACE_URL}">${zh ? "安装或打开 SoloMap" : "Install or open SoloMap"}</a><a class="button ghost" href="${zh ? "/zh/docs" : "/docs"}">${zh ? "查看使用指南" : "Read the guide"}</a></div></div></section><aside class="desk-card"><h2>${zh ? "账号" : "Account"}</h2><div class="account-line"><div class="avatar">${escapeHtml(name.slice(0,1).toUpperCase())}</div><div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(session.email)}</span></div></div><button class="logout" id="logout" type="button">${zh ? "退出登录" : "Sign out"}</button><p class="boundary-note">${zh ? "官网当前只承载账号与个人工作台。插件中的项目数据仍保存在本地，不会自动上传。" : "The website currently hosts your account and personal workbench only. Project data in the extension stays local and is not uploaded automatically."}</p></aside></div></main></div><script>document.getElementById('logout').addEventListener('click',async()=>{await fetch('/api/auth/logout',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});location.href='${zh ? "/zh/login" : "/login"}';});</script></body></html>`;
+  .desk{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:calc(100dvh - 72px)}.desk-side{padding:34px 24px 34px 0;border-right:1px solid var(--border)}.desk-side strong{display:block;margin:0 12px 24px}.desk-nav{display:grid;gap:8px}.desk-nav a{min-height:44px;display:flex;align-items:center;padding:0 12px;border-radius:9px;color:var(--muted);text-decoration:none}.desk-nav a.active{background:rgba(0,240,255,.09);color:var(--fg)}.desk-main{min-width:0;padding:40px 0 56px 40px}.desk-top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:38px}.desk-top h1{margin:0 0 8px;font-size:clamp(30px,3vw,38px);line-height:1.12}.desk-top p{margin:0;color:var(--muted)}.desk-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,320px);gap:24px}.desk-card{min-width:0;border:1px solid var(--border);border-radius:16px;background:var(--glass-bg);padding:24px}.desk-card h2{margin:0 0 8px;font-size:19px}.desk-card p{color:var(--muted);line-height:1.65}.empty-projects{min-height:280px;display:grid;place-items:center;text-align:center;padding:32px}.empty-projects>div{max-width:520px}.empty-projects h2{font-size:24px}.desk-actions{display:flex;justify-content:center;flex-wrap:wrap;gap:12px;margin-top:22px}.account-line{display:flex;align-items:center;gap:12px;margin:20px 0}.account-line>div:last-child{min-width:0}.avatar{width:44px;height:44px;flex:0 0 44px;display:grid;place-items:center;border-radius:50%;background:rgba(0,240,255,.12);color:var(--accent);font-weight:800}.account-line span{display:block;color:var(--muted);font-size:13px;overflow-wrap:anywhere}.logout{width:100%;min-height:44px;border:1px solid var(--border);border-radius:9px;background:transparent;color:var(--fg);cursor:pointer}.boundary-note{margin-top:18px;padding-top:18px;border-top:1px solid var(--border);font-size:13px;color:var(--muted)}@media(max-width:960px){.desk{grid-template-columns:1fr}.desk-side{padding:16px 0;border-right:0;border-bottom:1px solid var(--border)}.desk-side>strong{display:none}.desk-nav{display:flex;gap:8px;overflow-x:auto}.desk-nav a{flex:0 0 auto}.desk-main{padding:30px 0 48px}.desk-grid{grid-template-columns:1fr}}@media(max-width:600px){.desk-top{display:block;margin-bottom:26px}.desk-top .button{margin-top:18px}.desk-card{padding:20px}.empty-projects{min-height:240px;padding:24px 20px}.desk-actions{display:grid}.desk-actions .button{width:100%}}
+  </style></head><body>${buildHeader(t, locale, pagePath)}<div class="desk shell"><aside class="desk-side"><strong>${zh ? "个人工作台" : "Personal workbench"}</strong><nav class="desk-nav" aria-label="${zh ? "工作台导航" : "Workbench navigation"}"><a class="active" href="${pagePath}">${zh ? "我的项目" : "My projects"}</a><a href="${zh ? "/zh/pro" : "/pro"}">SoloMap Pro</a></nav></aside><main class="desk-main"><header class="desk-top"><div><h1>${zh ? `你好，${escapeHtml(name)}` : `Welcome back, ${escapeHtml(name)}`}</h1><p>${zh ? "从这里查看你的项目，并继续下一步。" : "See your projects here and continue with the next step."}</p></div><a class="button secondary" href="${MARKETPLACE_URL}">${zh ? "打开 VS Code 插件" : "Open the VS Code extension"}</a></header><div class="desk-grid"><section class="desk-card empty-projects"><div><h2>${zh ? "你的项目会出现在这里" : "Your projects will appear here"}</h2><p>${zh ? "目前项目仍由 SoloMap 插件保存在你的本地工作区。先在 VS Code 中打开一个项目，创建路线图并开始推进。" : "For now, SoloMap keeps projects in your local workspace. Open a project in VS Code, create its roadmap, and start moving it forward."}</p><div class="desk-actions"><a class="button primary" href="${MARKETPLACE_URL}">${zh ? "安装或打开 SoloMap" : "Install or open SoloMap"}</a><a class="button ghost" href="${zh ? "/zh/docs" : "/docs"}">${zh ? "查看使用指南" : "Read the guide"}</a></div></div></section><aside class="desk-card"><h2>${zh ? "账号" : "Account"}</h2><div class="account-line"><div class="avatar">${escapeHtml(name.slice(0,1).toUpperCase())}</div><div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(session.email)}</span></div></div><button class="logout" id="logout" type="button">${zh ? "退出登录" : "Sign out"}</button><p class="boundary-note">${zh ? "官网当前只承载账号与个人工作台。插件中的项目数据仍保存在本地，不会自动上传。" : "The website currently hosts your account and personal workbench only. Project data in the extension stays local and is not uploaded automatically."}</p></aside></div></main></div><script>document.getElementById('logout').addEventListener('click',async()=>{await fetch('/api/auth/logout',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});location.href='${zh ? "/zh/login" : "/login"}';});</script></body></html>`;
 }
 
 async function handleHeadlessAuth(request, env, mode) {

@@ -871,6 +871,8 @@ test('website headless auth renders product-owned forms and creates a protected 
     const workbenchHtml = await workbench.text();
     assert.equal(workbench.status, 200);
     assert.match(workbenchHtml, /Welcome back, Solo Dev/);
+    assert.match(workbenchHtml, /class="desk shell"/);
+    assert.match(workbenchHtml, /@media\(max-width:960px\)/);
     assert.match(workbenchHtml, /Your projects will appear here/);
     assert.match(workbenchHtml, /Project data in the extension stays local/);
     assert.doesNotMatch(workbenchHtml, /Pro Feature Roadmap &amp; Voting/);
