@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.344 - 2026-07-15
+
+### Fixed
+- restore workbench footer (25f13f8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.343 - 2026-07-15
 
 ### Fixed
