@@ -467,6 +467,7 @@ export async function activate(context: vscode.ExtensionContext) {
       getSoloConversationHistory: async (projectPath) => getSoloConversationHistoryForProject(context, projectPath),
       getStepConversationHistory: async (projectPath, nodeId) => getStepConversationHistoryForProject(context, projectPath, nodeId),
       getProjectConversationHistory: async (projectPath) => getProjectConversationHistoryForProject(context, projectPath),
+      getProjectConversationSnapshot: async (projectPath) => getProjectConversationSnapshotForProject(context, projectPath),
       dispatchSharedAction: async (message, target) => handleSharedWebviewAction(context, message, 'sidebar', target)
     }
   );
@@ -595,6 +596,11 @@ async function handleSharedWebviewAction(
     'conversation.getProjectHistory': async (request) => {
       if (sidebarProvider) {
         await sidebarProvider.sendProjectConversationHistory(String(request.projectPath || getSelectedProjectPath(context) || ''));
+      }
+    },
+    'conversation.getProjectSnapshot': async (request) => {
+      if (sidebarProvider) {
+        await sidebarProvider.sendProjectConversationSnapshot(String(request.projectPath || getSelectedProjectPath(context) || ''));
       }
     },
     'conversation.continue': async (request) => {
@@ -2326,6 +2332,36 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
     return hydrateProjectConversationContinuations(projectPath, store.getAllExecutionLogs())
       .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
       .slice(0, sidebarProjectConversationHistoryLimit);
+  } finally {
+    store.close();
+  }
+}
+
+async function getProjectConversationSnapshotForProject(
+  context: vscode.ExtensionContext,
+  projectPath: string
+): Promise<{ solo: AgentConversation[]; project: AgentConversation[] }> {
+  if (!getProjects(context).some((project) => project.path === projectPath)) {
+    return { solo: [], project: [] };
+  }
+  const excludeNodeIds = new Set([soloConversationId, roadmapRevisionId]);
+  const buildSnapshot = (soloLogs: AgentConversation[], projectLogs: AgentConversation[]) => ({
+    solo: selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, soloLogs), 1),
+    project: hydrateProjectConversationContinuations(projectPath, projectLogs)
+      .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
+      .slice(0, sidebarProjectConversationHistoryLimit)
+  });
+  if (syncEngine && activeProjectRoot === projectPath) {
+    return buildSnapshot(syncEngine.getAgentExecutions(soloConversationId), syncEngine.getProjectAgentExecutions());
+  }
+  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  if (!fs.existsSync(journalPath)) {
+    return { solo: [], project: [] };
+  }
+  const store = new SqliteStore(journalPath, context.extensionPath);
+  await store.init();
+  try {
+    return buildSnapshot(store.getExecutionLogs(soloConversationId), store.getAllExecutionLogs());
   } finally {
     store.close();
   }

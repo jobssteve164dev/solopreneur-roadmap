@@ -3741,6 +3741,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let activeProjectPath = '';
     let activePortfolioFilter = 'all';
     let sidebarSoloConversations = [];
+    const sidebarSoloConversationsByProject = {};
     const sidebarExpandedConversations = {};
     const sidebarLogsExpandedConversations = {};
     const sidebarStepConversations = {};
@@ -4690,6 +4691,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       sidebarProjectConversationRequested[key] = true;
       sidebarProjectConversationRequestedAt[key] = Date.now();
       vscode.postMessage({ command: 'conversation.getProjectHistory', projectPath: key });
+    }
+
+    function requestSidebarProjectConversationSnapshot(projectPath, force = false) {
+      const key = String(projectPath || '');
+      const refreshSolo = shouldRefreshSidebarProjectData(key, sidebarSoloConversationRequestedAt, force);
+      const refreshProject = shouldRefreshSidebarProjectData(key, sidebarProjectConversationRequestedAt, force);
+      if (!refreshSolo && !refreshProject) return;
+      const requestedAt = Date.now();
+      sidebarSoloConversationRequestedAt[key] = requestedAt;
+      sidebarProjectConversationRequestedAt[key] = requestedAt;
+      sidebarProjectConversationRequested[key] = true;
+      vscode.postMessage({ command: 'conversation.getProjectSnapshot', projectPath: key });
     }
 
     function applyLanguage() {
@@ -5937,9 +5950,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'sidebarSoloConversationLoaded':
+          sidebarSoloConversationsByProject[message.projectPath] = message.conversations || [];
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           if (sameConversations(sidebarSoloConversations, message.conversations || [])) return;
-          sidebarSoloConversations = message.conversations || [];
+          sidebarSoloConversations = sidebarSoloConversationsByProject[message.projectPath];
           pruneSidebarConversationExpansionState([
             ...sidebarSoloConversations,
             ...(sidebarProjectConversations[message.projectPath] || [])
@@ -5962,7 +5976,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }
 
         case 'sidebarProjectConversationLoaded':
-          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          if (message.projectPath !== currentProjects.selectedProjectPath) {
+            sidebarProjectConversations[message.projectPath] = message.conversations || [];
+            sidebarProjectConversationRequested[message.projectPath] = true;
+            return;
+          }
           if (sameConversations(sidebarProjectConversations[message.projectPath], message.conversations || [])) {
             sidebarProjectConversationRequested[message.projectPath] = true;
             return;
@@ -5972,6 +5990,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           pruneSidebarConversationExpansionState([
             ...sidebarSoloConversations,
             ...(sidebarProjectConversations[message.projectPath] || [])
+          ]);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'sidebarProjectConversationSnapshotLoaded':
+          sidebarSoloConversationsByProject[message.projectPath] = message.soloConversations || [];
+          sidebarProjectConversations[message.projectPath] = message.projectConversations || [];
+          sidebarProjectConversationRequested[message.projectPath] = true;
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          sidebarSoloConversations = sidebarSoloConversationsByProject[message.projectPath];
+          pruneSidebarConversationExpansionState([
+            ...sidebarSoloConversations,
+            ...sidebarProjectConversations[message.projectPath]
           ]);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
@@ -6110,7 +6141,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     bindSoloSelect(projectSelect, (value) => {
       activateProjectInSidebar(value);
-      requestSidebarProjectConversationHistory(value, true);
       vscode.postMessage({
         command: 'project.select',
         projectPath: value
@@ -8432,14 +8462,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
       activeProjectPath = projectPath;
       currentProjects.selectedProjectPath = projectPath;
+      sidebarSoloConversations = sidebarSoloConversationsByProject[projectPath] || [];
       setSoloSelectValue(projectSelect, projectPath);
       updateScheduledTasksTarget();
       activePortfolioFilter = 'all';
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, projectPath);
       renderPortfolio(currentProjects.portfolio, projectPath);
-      requestSidebarSoloConversationHistory(projectPath);
-      requestSidebarProjectConversationHistory(projectPath);
+      requestSidebarProjectConversationSnapshot(projectPath);
       setTimeout(() => {
         const selectedCard = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('.portfolio-card.is-selected') : null;
         if (selectedCard && typeof selectedCard.scrollIntoView === 'function') {

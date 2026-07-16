@@ -1264,7 +1264,14 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     target: elements['project-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === '/workspace/second'),
     stopPropagation() {}
   });
-  assert.ok(postedMessages.some((message) => message.command === 'conversation.getProjectHistory' && message.projectPath === '/workspace/second'));
+  assert.equal(
+    postedMessages.filter((message) => message.command === 'conversation.getProjectSnapshot' && message.projectPath === '/workspace/second').length,
+    1
+  );
+  assert.equal(
+    postedMessages.filter((message) => message.command === 'conversation.getHistory' || message.command === 'conversation.getProjectHistory').length,
+    0
+  );
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {
@@ -1921,11 +1928,13 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /\.sidebar-conversation-mini-actions > span \.codicon/);
   assert.match(html, /if \(!detailExpanded && rollbackBtn\)/);
   assert.match(html, /if \(!detailExpanded && continueBtn\)/);
-  assert.match(sidebarSource, /sendProjectConversationHistory\(projectState\.selectedProjectPath\)/);
+  assert.match(sidebarSource, /sendProjectConversationSnapshot\(projectState\.selectedProjectPath\)/);
+  assert.doesNotMatch(sidebarSource, /void this\.sendSoloConversationHistory\(projectState\.selectedProjectPath\)[\s\S]*?void this\.sendProjectConversationHistory/);
   assert.match(html, /latestSidebarProjectConversation/);
   assert.match(html, /sidebarConversationRefreshTtlMs\s*=\s*30000/);
   assert.match(html, /requestSidebarSoloConversationHistory/);
   assert.match(html, /requestSidebarProjectConversationHistory/);
+  assert.match(html, /requestSidebarProjectConversationSnapshot/);
   assert.match(html, /shouldRefreshSidebarProjectData/);
   assert.match(html, /projectPath === currentProjects\.selectedProjectPath\) return/);
   assert.doesNotMatch(html, /function buildConversationTree\(conversations\)/);
@@ -2061,6 +2070,11 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /portfolioList\.addEventListener\('focusin'[\s\S]*?focusedConversationCard/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?renderPortfolioFromAsyncUpdate/);
+  assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.soloConversations[\s\S]*?renderPortfolioFromAsyncUpdate/);
+  assert.match(html, /function activateProjectInSidebar[\s\S]*?requestSidebarProjectConversationSnapshot\(projectPath\)/);
+  assert.match(html, /const sidebarSoloConversationsByProject = \{\}/);
+  assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?sidebarSoloConversationsByProject\[message\.projectPath\][\s\S]*?if \(message\.projectPath !== currentProjects\.selectedProjectPath\) return/);
+  assert.match(html, /function activateProjectInSidebar[\s\S]*?sidebarSoloConversations = sidebarSoloConversationsByProject\[projectPath\] \|\| \[\]/);
   assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
