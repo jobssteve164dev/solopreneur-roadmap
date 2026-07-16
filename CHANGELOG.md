@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.346 - 2026-07-16
+
+### Changed
+- fix sidebar conversation sentinel refresh (736d7dc)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.345 - 2026-07-16
 
 ### Added
