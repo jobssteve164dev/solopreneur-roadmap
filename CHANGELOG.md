@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.345 - 2026-07-16
+
+### Added
+- serve governed SoloMap legal documents (7e5386a)
+
+### Fixed
+- make sidebar project switching immediate (220c96a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.344 - 2026-07-15
 
 ### Fixed
