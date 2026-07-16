@@ -197,6 +197,7 @@ let projectGrowthLoadSequence = 0;
 let selectedProjectPathInMemory = '';
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
+const processingAgentStatusFiles = new Set<string>();
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
 let activeProjectRoot: string | null = null;
@@ -2545,14 +2546,6 @@ async function openRoadmapPanel(
   activePanel.onDidDispose(
     () => {
       activePanel = null;
-      if (watcher) {
-        watcher.dispose();
-        watcher = null;
-      }
-      if (statusPoller) {
-        clearInterval(statusPoller);
-        statusPoller = null;
-      }
     },
     null,
     context.subscriptions
@@ -7072,23 +7065,25 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
 }
 
 async function processAgentStatusFile(statusFilePath: string): Promise<void> {
-  if (!fs.existsSync(statusFilePath)) {
+  const normalizedStatusFilePath = path.resolve(statusFilePath);
+  if (!fs.existsSync(normalizedStatusFilePath) || processingAgentStatusFiles.has(normalizedStatusFilePath)) {
     return;
   }
 
+  processingAgentStatusFiles.add(normalizedStatusFilePath);
   try {
-    const fileContent = fs.readFileSync(statusFilePath, 'utf8').trim();
+    const fileContent = fs.readFileSync(normalizedStatusFilePath, 'utf8').trim();
     if (!fileContent) {
       return;
     }
 
     const statusData = JSON.parse(fileContent);
-    const statusWorkspaceRoot = String(inferWorkspaceRootFromStatusFilePath(statusFilePath) || statusData.workspaceRoot || '').trim();
+    const statusWorkspaceRoot = String(inferWorkspaceRootFromStatusFilePath(normalizedStatusFilePath) || statusData.workspaceRoot || '').trim();
     if (statusWorkspaceRoot && activeProjectRoot && statusWorkspaceRoot !== activeProjectRoot) {
       return;
     }
     if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
-      await processFlowStatusFile(statusFilePath, statusData);
+      await processFlowStatusFile(normalizedStatusFilePath, statusData);
       return;
     }
     const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
@@ -7642,12 +7637,12 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     agentTerminalNamesByConversationId.delete(Number(executionLogId || 0));
     setTimeout(() => {
-      const currentStatus = readAgentStatus(statusFilePath);
+      const currentStatus = readAgentStatus(normalizedStatusFilePath);
       const belongsToProcessedRun = currentStatus
         && Number(currentStatus.executionLogId || 0) === Number(executionLogId || 0)
         && String(currentStatus.status || '') === String(status || '');
-      if (belongsToProcessedRun && fs.existsSync(statusFilePath)) {
-        fs.writeFileSync(statusFilePath, JSON.stringify({
+      if (belongsToProcessedRun && fs.existsSync(normalizedStatusFilePath)) {
+        fs.writeFileSync(normalizedStatusFilePath, JSON.stringify({
           ...currentStatus,
           status: 'Processed',
           processedAt: new Date().toISOString()
@@ -7656,6 +7651,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }, 1000);
   } catch (e) {
     // JSON might be partially written; watcher or poller will retry.
+  } finally {
+    processingAgentStatusFiles.delete(normalizedStatusFilePath);
   }
 }
 

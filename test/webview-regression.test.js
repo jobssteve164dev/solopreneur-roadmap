@@ -2484,6 +2484,20 @@ test('local project actions use local refresh instead of external portfolio refr
   assert.doesNotMatch(source, /sidebarProvider\.sendProjects\(\);\n\s*}\n\s*return true;\n\s*} catch \(error\) \{/);
 });
 
+test('closing the roadmap panel keeps the project sentinel alive for sidebar status refreshes', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const disposeStart = source.indexOf('activePanel.onDidDispose(');
+  assert.notEqual(disposeStart, -1);
+  const disposeEnd = source.indexOf('\n  );', disposeStart);
+  const disposeBody = source.slice(disposeStart, disposeEnd);
+
+  assert.match(disposeBody, /activePanel = null/);
+  assert.doesNotMatch(disposeBody, /watcher\.dispose|clearInterval\(statusPoller\)/);
+  assert.match(source, /const processingAgentStatusFiles = new Set<string>\(\)/);
+  assert.match(source, /processingAgentStatusFiles\.has\(normalizedStatusFilePath\)/);
+  assert.match(source, /finally \{\s*processingAgentStatusFiles\.delete\(normalizedStatusFilePath\)/);
+});
+
 test('sidebar local project refresh keeps reusable signal enrichment without external data loads', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
