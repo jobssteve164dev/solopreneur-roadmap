@@ -2886,6 +2886,16 @@ test('project panels open before project selection persistence completes', () =>
   assert.match(extensionSource, /selectedProjectPathInMemory = projectPath;[\s\S]*?const persistSelection = context\.globalState\.update/);
 });
 
+test('sidebar project switcher supports searching by project name or path', () => {
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  assert.match(sidebarSource, /data-project-search type="search"/);
+  assert.match(sidebarSource, /searchableText\.includes\(query\)/);
+  assert.match(sidebarSource, /projectSearchPlaceholder: '搜索项目名称'/);
+  assert.match(sidebarSource, /projectSearchEmpty: '没有匹配的项目'/);
+  assert.match(sidebarSource, /existingSearch[\s\S]*?searchValue[\s\S]*?dispatchEvent\(new Event\('input'/);
+  assert.match(sidebarSource, /bindSoloSelect\(projectSelect,[\s\S]*?command: 'project\.select'/);
+});
+
 test('conversation lifecycle reconciles stale running execution logs before presentation', async () => {
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-lifecycle-a-'));

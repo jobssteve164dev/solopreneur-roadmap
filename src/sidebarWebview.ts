@@ -879,6 +879,38 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       gap: 2px;
     }
 
+    .project-search-wrap {
+      position: sticky;
+      top: -4px;
+      z-index: 1;
+      padding: 4px 3px 6px;
+      background: #151a29;
+    }
+
+    .project-search-input {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid var(--border-glass);
+      border-radius: 5px;
+      padding: 6px 7px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-main);
+      font: inherit;
+      outline: none;
+    }
+
+    .project-search-input:focus {
+      border-color: rgba(0, 229, 255, 0.7);
+      box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.18);
+    }
+
+    .project-search-empty {
+      display: none;
+      padding: 8px 7px;
+      color: var(--text-muted);
+      text-align: center;
+    }
+
     .solo-select-group-header {
       padding: 6px 7px;
       font-size: 10px;
@@ -4187,6 +4219,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         continueSend: '发送',
         failures: '失败',
         selected: '当前项目',
+        projectSearchPlaceholder: '搜索项目名称',
+        projectSearchEmpty: '没有匹配的项目',
         settingsTitle: 'SoloMap 设置',
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
@@ -4545,6 +4579,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         continueSend: 'Send',
         failures: 'Failures',
         selected: 'Current project',
+        projectSearchPlaceholder: 'Search projects',
+        projectSearchEmpty: 'No matching projects',
         settingsTitle: 'SoloMap Settings',
         language: 'Language',
         cliPath: 'CLI Command or Path',
@@ -6140,12 +6176,42 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     });
 
     bindSoloSelect(projectSelect, (value) => {
+      const searchInput = projectSelect.querySelector('[data-project-search]');
+      if (searchInput && searchInput.value) {
+        searchInput.value = '';
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       activateProjectInSidebar(value);
       vscode.postMessage({
         command: 'project.select',
         projectPath: value
       });
     });
+
+    projectSelect.addEventListener('input', (event) => {
+      const input = event.target.closest('[data-project-search]');
+      if (!input) return;
+      const query = input.value.trim().toLocaleLowerCase();
+      let visibleCount = 0;
+      projectSelect.querySelectorAll('[data-solo-option-value]').forEach(option => {
+        const searchableText = ((option.textContent || '') + ' ' + (option.getAttribute('title') || '')).toLocaleLowerCase();
+        const visible = !query || searchableText.includes(query);
+        option.style.display = visible ? '' : 'none';
+        if (visible) visibleCount += 1;
+      });
+      const empty = projectSelect.querySelector('[data-project-search-empty]');
+      if (empty) empty.style.display = visibleCount === 0 ? 'block' : 'none';
+    });
+
+    const projectSelectTrigger = projectSelect.querySelector('[data-solo-trigger]');
+    if (projectSelectTrigger) {
+      projectSelectTrigger.addEventListener('click', () => {
+        setTimeout(() => {
+          const input = projectSelect.querySelector('[data-project-search]');
+          if (input && projectSelect.classList.contains('open')) input.focus();
+        }, 0);
+      });
+    }
 
     btnAddProject.addEventListener('click', () => {
       vscode.postMessage({ command: 'project.add' });
@@ -6660,7 +6726,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         label: project.name || project.path || t('project'),
         title: project.path || project.name || ''
       })).filter(option => option.value);
-      setSoloSelectOptions(projectSelect, options, selectedProjectPath || (options[0] ? options[0].value : ''));
+      const menu = projectSelect.querySelector('[data-solo-menu]');
+      const existingSearch = projectSelect.querySelector('[data-project-search]');
+      const searchValue = existingSearch ? existingSearch.value : '';
+      if (menu) {
+        menu.innerHTML =
+          '<div class="project-search-wrap"><input class="project-search-input" data-project-search type="search" autocomplete="off" aria-label="' + escapeHtml(t('projectSearchPlaceholder')) + '" placeholder="' + escapeHtml(t('projectSearchPlaceholder')) + '" value="' + escapeHtml(searchValue) + '"></div>' +
+          options.map(option => '<button type="button" class="solo-select-option" data-solo-option-value="' + escapeHtml(option.value) + '" title="' + escapeHtml(option.title || option.label) + '" aria-selected="false">' + escapeHtml(option.label) + '</button>').join('') +
+          '<div class="project-search-empty" data-project-search-empty>' + escapeHtml(t('projectSearchEmpty')) + '</div>';
+        setSoloSelectValue(projectSelect, selectedProjectPath || (options[0] ? options[0].value : ''));
+        const input = projectSelect.querySelector('[data-project-search]');
+        if (input && searchValue) input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       updateScheduledTasksTarget();
     }
 
