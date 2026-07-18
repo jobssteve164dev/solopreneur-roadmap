@@ -4087,6 +4087,75 @@ test('conversation presentation is the shared source for roadmap and sidebar act
   assert.deepEqual(selectLatestConversationRoots(conversations, 1).map(conversation => conversation.id), [20]);
 });
 
+test('conversation presentation keeps the complete final Agent conclusion and drops terminal noise', () => {
+  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const [conversation] = buildConversationPresentations('', '__solo__', [{
+    id: 30,
+    nodeId: '__solo__',
+    timestamp: '2026-07-18T00:00:00.000Z',
+    agentCli: 'codex',
+    command: 'codex exec',
+    status: 'Completed',
+    output: [
+      'Solo conversation state: Completed',
+      '',
+      'Agent output tail:',
+      'exec',
+      'npm test',
+      'codex',
+      '已完成任务哨兵修复。',
+      '',
+      '本轮实际改动：',
+      '- 完整提取最终答复。',
+      '- 忽略终端尾部噪音。',
+      '',
+      '验证：108 项测试通过。',
+      'tokens used',
+      '12,345',
+      'Script done on 2026-07-18 [COMMAND_EXIT_CODE="0"]'
+    ].join('\n')
+  }]);
+
+  assert.equal(conversation.conclusion, [
+    '已完成任务哨兵修复。',
+    '',
+    '本轮实际改动：',
+    '- 完整提取最终答复。',
+    '- 忽略终端尾部噪音。',
+    '',
+    '验证：108 项测试通过。'
+  ].join('\n'));
+});
+
+test('conversation presentation prefers a complete explicit conclusion section without a speaker marker', () => {
+  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const [conversation] = buildConversationPresentations('', '2', [{
+    id: 31,
+    nodeId: '2',
+    agentCli: 'agy',
+    command: 'agy run',
+    status: 'Completed',
+    output: [
+      'Agent output tail:',
+      'tool output that should not become the conclusion',
+      '',
+      '## 结论',
+      '识别逻辑已修复，并覆盖两个入口。',
+      '',
+      '- 编译通过',
+      '- 回归通过'
+    ].join('\n')
+  }]);
+
+  assert.equal(conversation.conclusion, [
+    '## 结论',
+    '识别逻辑已修复，并覆盖两个入口。',
+    '',
+    '- 编译通过',
+    '- 回归通过'
+  ].join('\n'));
+});
+
 test('sidebar latest solo conversation keeps the main conversation status when a continuation is newest', () => {
   const { buildConversationPresentations, selectLatestConversationRoots } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
   const conversations = buildConversationPresentations('', '__solo__', [

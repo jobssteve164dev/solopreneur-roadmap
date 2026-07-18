@@ -59,14 +59,44 @@ function extractConclusion(output: string): string {
   if (!match?.[1]) {
     return '';
   }
-  return match[1]
+
+  let tail = match[1]
+    .replace(/\r/g, '')
+    .replace(/^Script (?:started|done).*$/gim, '')
+    .replace(/^tokens used\s*\n[\d,]+\s*$/gim, '')
+    .trim();
+
+  // Codex and several compatible CLIs print the speaker before the final answer.
+  // The last speaker block is more reliable than the last few terminal lines, which
+  // often contain token counters or shell noise after the actual conclusion.
+  const speakerMatches = [...tail.matchAll(/^(?:codex|assistant|agent)\s*$/gim)];
+  const lastSpeaker = speakerMatches.at(-1);
+  if (lastSpeaker?.index !== undefined) {
+    tail = tail.slice(lastSpeaker.index + lastSpeaker[0].length).trim();
+  }
+
+  const lines = tail
     .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('SoloMap:'))
-    .slice(-3)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .slice(0, 240);
+    .map((line) => line.trimEnd())
+    .filter((line) => !line.trimStart().startsWith('SoloMap:'));
+  while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+
+  // When no speaker marker exists, prefer a closing conclusion/summary section over
+  // preceding tool output. Keep the complete section instead of an arbitrary 3-line tail.
+  if (!lastSpeaker) {
+    let headingIndex = -1;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (/^(?:#{1,6}\s*)?(?:结论|总结|本轮(?:结果|结论|完成情况)|最终(?:结果|结论)|完成情况|result|conclusion|summary|outcome)\s*[:：]?\s*$/i.test(lines[index].trim())) {
+        headingIndex = index;
+        break;
+      }
+    }
+    if (headingIndex >= 0) {
+      lines.splice(0, headingIndex);
+    }
+  }
+
+  return lines.join('\n').trim().slice(0, 4000);
 }
 
 function extractChangedFiles(output: string): ConversationChangedFile[] {
