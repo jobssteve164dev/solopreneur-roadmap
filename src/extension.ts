@@ -19,6 +19,7 @@ import { getAgentImpactStatusFromDatabase, buildAgentImpactSummary } from './age
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
+import { createPreSessionGitCommit } from './preSessionGit';
 import {
   closeProjectIssue,
   closeProjectPullRequest,
@@ -3267,7 +3268,8 @@ function buildAgentConversationPrompt(
   globalPrompt = '',
   githubIssueContext = '',
   globalDataPath = '',
-  enabledEnhancements: Record<string, boolean> = {}
+  enabledEnhancements: Record<string, boolean> = {},
+  includeLiveProjectSignals = true
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const normalizedGlobalPrompt = globalPrompt.trim();
@@ -3347,8 +3349,8 @@ function buildAgentConversationPrompt(
     startupContextText,
     enabledEnhancements
   );
-  const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
-  const githubSecurityContext = buildGithubSecurityContext(workspaceRoot);
+  const githubDeliveryContext = includeLiveProjectSignals ? buildGithubDeliveryContext(workspaceRoot) : '';
+  const githubSecurityContext = includeLiveProjectSignals ? buildGithubSecurityContext(workspaceRoot) : '';
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
@@ -3431,7 +3433,8 @@ function buildRoadmapRevisionPrompt(
   globalPrompt = '',
   supplementFiles: string[] = [],
   globalDataPath = '',
-  enabledEnhancements: Record<string, boolean> = {}
+  enabledEnhancements: Record<string, boolean> = {},
+  includeLiveProjectSignals = true
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -3453,8 +3456,8 @@ function buildRoadmapRevisionPrompt(
   const startupContextText = [normalizedUserMessage, attachedFiles.join('\n')].join('\n');
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, startupContextText);
   const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, startupContextText, enabledEnhancements);
-  const githubDeliveryContext = buildGithubDeliveryContext(workspaceRoot);
-  const githubSecurityContext = buildGithubSecurityContext(workspaceRoot);
+  const githubDeliveryContext = includeLiveProjectSignals ? buildGithubDeliveryContext(workspaceRoot) : '';
+  const githubSecurityContext = includeLiveProjectSignals ? buildGithubSecurityContext(workspaceRoot) : '';
   const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
@@ -5224,7 +5227,7 @@ async function handleContinueConversationTurn(
     }
   }
 
-  const preGitHash = createPreSessionGitCommit(activeProjectRoot);
+  const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
@@ -5335,7 +5338,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
       refreshSidebarProjectCards();
     }
   }
-  const preGitHash = createPreSessionGitCommit(activeProjectRoot);
+  const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Agent continuation started.',
@@ -5543,7 +5546,7 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   ensureRoadmapValidationScript(path.join(activeProjectRoot, '.solopreneur'));
   ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
+  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements, false);
   const launchSummary = [
     'Roadmap revision started.',
     `Run started at: ${new Date().toISOString()}`,
@@ -5646,7 +5649,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const preGitHash = createPreSessionGitCommit(activeProjectRoot);
+  const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Solo conversation started.',
@@ -5914,41 +5917,6 @@ function linkSoloConversationToNode(conversationId: number, nodeId: string): voi
   vscode.window.showInformationMessage(`Solo conversation associated with step: ${node.title}`);
 }
 
-function createPreSessionGitCommit(projectPath: string): string | null {
-  try {
-    const isRepo = childProcess.spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd: projectPath,
-      encoding: 'utf8'
-    });
-    if (isRepo.status !== 0) {
-      return null;
-    }
-    
-    const statusResult = childProcess.spawnSync('git', ['status', '--porcelain'], {
-      cwd: projectPath,
-      encoding: 'utf8'
-    });
-    const hasChanges = statusResult.status === 0 && statusResult.stdout.trim().length > 0;
-    
-    if (hasChanges) {
-      childProcess.spawnSync('git', ['add', '-A'], { cwd: projectPath });
-      const commitMsg = `SoloMap pre-session auto-backup [${new Date().toISOString()}]`;
-      childProcess.spawnSync('git', ['commit', '-m', commitMsg, '--no-verify'], { cwd: projectPath });
-    }
-    
-    const revResult = childProcess.spawnSync('git', ['rev-parse', 'HEAD'], {
-      cwd: projectPath,
-      encoding: 'utf8'
-    });
-    if (revResult.status === 0) {
-      return revResult.stdout.trim();
-    }
-  } catch (err) {
-    console.error('Failed to create pre-session git commit:', err);
-  }
-  return null;
-}
-
 function getGitCommandOutput(projectPath: string, args: string[]): string {
   const result = childProcess.spawnSync('git', args, {
     cwd: projectPath,
@@ -6189,7 +6157,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
-  const preGitHash = createPreSessionGitCommit(workspaceRoot);
+  const preGitHash = await createPreSessionGitCommit(workspaceRoot);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Agent conversation started.',
@@ -6211,7 +6179,9 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const statusFilePath = getAgentStatusFilePath(workspaceRoot, executionLogId);
   const completionDecisionFilePath = path.join(runDir, 'completion.json');
   const stepMemoryFilePath = getStepMemoryFilePath(workspaceRoot, nodeId);
-  const githubIssueContext = buildGithubIssueContext(workspaceRoot, node);
+  // Remote enrichment is optional context. Keep it out of the foreground send
+  // path so slow container networking cannot block every Webview action.
+  const githubIssueContext = '';
   ensureRoadmapValidationScript(path.join(workspaceRoot, '.solopreneur'));
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   const conversationPrompt = buildAgentConversationPrompt(
@@ -6226,7 +6196,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     settings.globalPrompt,
     githubIssueContext,
     settings.globalDataPath,
-    settings.enabledEnhancements
+    settings.enabledEnhancements,
+    false
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);

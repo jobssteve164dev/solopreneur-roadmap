@@ -176,6 +176,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './projectSignals') {
           return require(path.join(projectRoot, 'out/projectSignals.js'));
         }
+        if (id === './preSessionGit') {
+          return require(path.join(projectRoot, 'out/preSessionGit.js'));
+        }
         if (id === './projectExternalSignals') {
           return require(path.join(projectRoot, 'out/projectExternalSignals.js'));
         }
