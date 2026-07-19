@@ -1950,7 +1950,11 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /data-stop-sidebar-step-id/);
   assert.match(html, /conversation\.stop/);
   assert.match(html, /\.sidebar-conversation-card\s*\{[\s\S]*?flex-wrap:\s*wrap/);
+  assert.match(html, /\.sidebar-conversation-node-wrap\s*\{[\s\S]*?max-width:\s*100%/);
   assert.match(html, /\.sidebar-conversation-body\s*\{[\s\S]*?flex:\s*1 1 130px/);
+  assert.match(html, /\.sidebar-conversation-detail-panel\s*\{[\s\S]*?min-width:\s*0[\s\S]*?overflow:\s*hidden/);
+  assert.match(html, /\.conclusion-content\s*\{[\s\S]*?min-width:\s*0[\s\S]*?max-width:\s*100%/);
+  assert.match(html, /\.conclusion-content p\s*\{[\s\S]*?overflow-x:\s*hidden[\s\S]*?overflow-y:\s*auto[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.match(html, /@media \(max-width:\s*330px\)[\s\S]*?\.sidebar-conversation-right-col\s*\{[\s\S]*?width:\s*100%/);
   assert.match(html, /\.portfolio-compose-row\s*\{[\s\S]*?align-items:\s*stretch/);
   assert.match(html, /\.portfolio-compose-input\s*\{[\s\S]*?min-height:\s*44px/);

@@ -1430,6 +1430,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       display: flex;
       flex-direction: column;
       gap: 12px;
+      min-width: 0;
       max-width: 100%;
     }
 
@@ -1437,6 +1438,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       display: flex;
       flex-direction: column;
       position: relative;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .sidebar-conversation-card {
@@ -1453,6 +1456,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       user-select: none;
       gap: 8px;
       min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
     }
 
     .sidebar-conversation-card:hover {
@@ -1707,8 +1712,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       display: flex;
       flex-direction: column;
       gap: 8px;
+      min-width: 0;
       max-width: 100%;
       box-sizing: border-box;
+      overflow: hidden;
     }
 
     .detail-item-outcome {
@@ -1749,6 +1756,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       border-left: 2px solid rgba(255, 255, 255, 0.15);
       padding: 6px 8px;
       border-radius: 4px;
+      min-width: 0;
+      max-width: 100%;
+      box-sizing: border-box;
     }
 
     .detail-item-conclusion .codicon-quote {
@@ -1759,6 +1769,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     .conclusion-content {
+      min-width: 0;
+      max-width: 100%;
       font-size: 10px;
       line-height: 1.4;
       color: var(--text-muted);
@@ -1770,6 +1782,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     .conclusion-content p {
       margin: 2px 0 0 0;
+      max-height: min(36vh, 260px);
+      padding-right: 4px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      scrollbar-gutter: stable;
     }
 
     /* 详情中的大按钮 */
