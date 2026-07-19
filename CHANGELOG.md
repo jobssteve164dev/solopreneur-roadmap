@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.349 - 2026-07-19
+
+### Fixed
+- keep conversation actions responsive (61d0cec)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## Unreleased
 
 ### Fixed
