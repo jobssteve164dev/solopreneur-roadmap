@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.350 - 2026-07-19
+
+### Fixed
+- contain sidebar agent conclusions (f538519)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.349 - 2026-07-19
 
 ### Fixed
