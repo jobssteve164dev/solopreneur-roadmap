@@ -1,0 +1,117 @@
+name: Publish SoloSync Extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SoloSync version to publish
+        required: true
+        default: 0.0.1
+      ref:
+        description: SoloSync Git ref to publish
+        required: true
+        default: v0.0.1
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SoloSync
+        uses: actions/checkout@v5
+        with:
+          repository: jobssteve164dev/solosync
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Validate requested release
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          ACTUAL_VERSION=$(node -p "require('./package.json').version")
+          if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Requested version $EXPECTED_VERSION does not match package.json version $ACTUAL_VERSION."
+            exit 1
+          fi
+          if [ "$(node -p "require('./package.json').publisher")" != "SZLK" ]; then
+            echo "::error::SoloSync publisher must be SZLK."
+            exit 1
+          fi
+
+      - name: Install and verify
+        run: |
+          npm ci
+          npm test
+          npm audit --audit-level=high
+
+      - name: Validate publishing credentials
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          test -n "$VSCE_PAT" || { echo "::error::VSCE_PAT is empty."; exit 1; }
+          test -n "$OVSX_PAT" || { echo "::error::OVSX_PAT is empty."; exit 1; }
+          npx --yes ovsx -p "$OVSX_PAT" verify-pat SZLK
+
+      - name: Package extension
+        env:
+          VERSION: ${{ inputs.version }}
+        run: npx @vscode/vsce package --out "solosync-$VERSION.vsix"
+
+      - name: Publish to Visual Studio Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          VERSION: ${{ inputs.version }}
+        run: npx @vscode/vsce publish --packagePath "solosync-$VERSION.vsix" --skip-duplicate
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+          VERSION: ${{ inputs.version }}
+        run: npx --yes ovsx -p "$OVSX_PAT" publish "solosync-$VERSION.vsix" --skip-duplicate
+
+      - name: Verify Open VSX listing
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          for i in {1..30}; do
+            if curl -fsS "https://open-vsx.org/api/SZLK/solosync/$VERSION" >/tmp/solosync-openvsx.json; then
+              node -e "const d=require('/tmp/solosync-openvsx.json'); if(d.namespace!=='SZLK'||d.name!=='solosync'||d.version!==process.env.VERSION) process.exit(1); console.log('Verified Open VSX:', d.namespace+'.'+d.name+'@'+d.version)"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Open VSX did not expose SZLK.solosync@$VERSION in time."
+          exit 1
+
+      - name: Verify Visual Studio Marketplace listing
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          for i in {1..30}; do
+            curl -fsS -X POST \
+              -H 'Accept: application/json;api-version=7.1-preview.1' \
+              -H 'Content-Type: application/json' \
+              --data '{"filters":[{"criteria":[{"filterType":7,"value":"SZLK.solosync"}]}],"flags":914}' \
+              'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery' \
+              >/tmp/solosync-vsmarket.json
+            if node -e "const d=require('/tmp/solosync-vsmarket.json'); const e=d.results?.[0]?.extensions?.[0]; if(!e||e.publisher?.publisherName!=='SZLK'||e.extensionName!=='solosync'||!e.versions?.some(v=>v.version===process.env.VERSION)) process.exit(1); console.log('Verified VS Marketplace: SZLK.solosync@'+process.env.VERSION)"; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::Visual Studio Marketplace did not expose SZLK.solosync@$VERSION in time."
+          exit 1
+
+      - name: Upload published VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: solosync-${{ inputs.version }}
+          path: solosync-${{ inputs.version }}.vsix
