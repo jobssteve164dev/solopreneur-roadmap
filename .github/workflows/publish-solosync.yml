@@ -60,6 +60,17 @@ jobs:
           test -n "$OVSX_PAT" || { echo "::error::OVSX_PAT is empty."; exit 1; }
           npx --yes ovsx -p "$OVSX_PAT" verify-pat SZLK
 
+      - name: Copy publishing credentials to SoloSync
+        env:
+          GH_TOKEN: ${{ secrets.SOLOSYNC_SECRET_ADMIN_TOKEN }}
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          printf '%s' "$VSCE_PAT" | gh secret set VSCE_PAT --repo jobssteve164dev/solosync
+          printf '%s' "$OVSX_PAT" | gh secret set OVSX_PAT --repo jobssteve164dev/solosync
+          gh secret list --repo jobssteve164dev/solosync | grep -q '^VSCE_PAT'
+          gh secret list --repo jobssteve164dev/solosync | grep -q '^OVSX_PAT'
+
       - name: Package extension
         env:
           VERSION: ${{ inputs.version }}
