@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.359 - 2026-07-21
+
+### Added
+- close the memory write routing loop (fe10fe2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.358 - 2026-07-21
 
 ### Added
