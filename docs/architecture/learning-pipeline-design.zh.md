@@ -206,16 +206,18 @@
 
 ## 消费入口
 
-### Agent Prompt
+### Agent 上下文
 
-路线图推进、Solo、路线图调整和 Flow 都应注入相关学习候选。
+学习候选不应默认注入首次 Prompt。Prompt 只提供经验检索入口、适用条件和查询方式；Agent 在接续、复核、重复故障、历史调查或当前证据不足时按需查询。
 
-注入目标不是让 Agent 背诵历史，而是让它：
+按需召回的目标不是让 Agent 背诵历史，而是让它：
 
 - 避免重复失败。
 - 复用已验证的验证动作。
 - 遵守用户纠偏后的边界。
 - 在 Flow 中把风险提前放进计划和验证闸门。
+
+如果没有达到相关性和质量门槛的候选，应返回空结果，不得用弱相关历史记录填充上下文。具体架构见 `docs/architecture/on-demand-agent-context-design.zh.md`，执行方法见 `docs/methodology/context-retrieval-and-memory-classification.zh.md`。
 
 ### 项目卡片
 
