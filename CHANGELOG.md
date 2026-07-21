@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.352 - 2026-07-21
+
+### Changed
+- remove temporary SoloSync publisher bridge (f6be974)
+- seed SoloSync marketplace secrets (74b149e)
+- publish SoloSync with existing marketplace credentials (8e4149b)
+
+### Fixed
+- index Solo prompt context on demand (8c6d468)
+
+### Docs
+- add Codex Security application response (d5d8f3a)
+- add Codex for OSS application draft (909b9bd)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.351 - 2026-07-20
 
 ### Fixed
