@@ -3593,11 +3593,17 @@ function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, gl
     `- 用户偏好：${path.join(memoryRoot, 'profile.md')}；内容、UI、方案或高判断任务时读取。`,
     `- 跨任务执行规则：${path.join(memoryRoot, 'operating-rules.md')}；实现、修复、部署或复杂诊断时读取。`,
     `- 项目记忆：${path.join(memoryRoot, 'projects', `${projectSlug}.md`)}；判断已有产品、架构或历史决策时读取。`,
+    `- 已确认决策：${path.join(memoryRoot, 'decisions')}；涉及既有架构、产品边界、技术选型或不可随意改变的路径时查询。`,
+    `- 可复用模式：${path.join(memoryRoot, 'patterns')}；实现、调试、验证、部署或同类问题重复出现时查询。`,
+    `- 领域知识：${path.join(memoryRoot, 'domains')}；涉及特定业务、平台、协议或跨项目领域事实时查询。`,
+    `- 临时观察：${path.join(memoryRoot, 'inbox')}；仅在稳定记忆不足且需要调查历史线索时读取，未经验证不得作为事实。`,
     `- 当前会话：${path.join(memoryRoot, 'active', 'current-session.md')}；接续、复核或修复先前运行时读取。`,
     `- 项目文档目录：${path.join(workspaceRoot, '.solopreneur', 'documentation.json')}；需要方向、边界或正式文档位置时读取，不要默认展开全部文档。`,
     `- 技能目录：${getSolomapSkillRegistryPath(workspaceRoot, globalDataPath)}；任务明确命中某个领域时查询，决定使用后先读取对应 SKILL.md，不适用的技能不必列出。`,
     `- 执行经验账本：需要历史经验时运行 \`node ${path.join(workspaceRoot, 'resources', 'tools', 'solomap-experience.cjs')} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、文件、错误或目标>')} --limit 5\`；仅在接续、复核、重复故障、历史行为调查或当前证据不足时查询，普通首次任务不默认读取。`,
-    '- 账本、记忆和文档只是历史线索；不要使用 URL、项目名或运行类型等泛化词判断相关性。'
+    '- 账本、记忆和文档只是历史线索；不要使用 URL、项目名或运行类型等泛化词判断相关性。',
+    '- 记忆处置门禁：任务结束前先判断新信息属于用户偏好、通用规则、项目事实、已确认决策、可复用模式、领域知识、临时观察或当前交接；只写入经当前证据验证且未来会复用的内容。',
+    '- 不要默认把所有内容写入项目记忆；写入 projects/ 前先确认它不应进入 decisions/、patterns/ 或 domains/。一次性过程、命令输出、diff、提交记录和完成套话不写入稳定记忆。'
   ].filter(Boolean).join('\n');
 }
 

@@ -5724,6 +5724,13 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /普通首次任务不默认读取/);
   assert.match(soloPrompt, /solomap-experience\.cjs.*retrieve.*--query/);
   assert.match(soloPrompt, /技能目录/);
+  assert.match(soloPrompt, /已确认决策：.*memory[\\/]decisions/);
+  assert.match(soloPrompt, /可复用模式：.*memory[\\/]patterns/);
+  assert.match(soloPrompt, /领域知识：.*memory[\\/]domains/);
+  assert.match(soloPrompt, /临时观察：.*memory[\\/]inbox/);
+  assert.match(soloPrompt, /记忆处置门禁/);
+  assert.match(soloPrompt, /不要默认把所有内容写入项目记忆/);
+  assert.match(soloPrompt, /写入 projects\/ 前先确认它不应进入 decisions\/、patterns\/ 或 domains\//);
   assert.match(soloPrompt, /documentation\.json/);
   assert.doesNotMatch(soloPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
   assert.doesNotMatch(soloPrompt, /SoloMap 跨项目学习信号/);
