@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.356 - 2026-07-21
+
+### Fixed
+- unify Solo conversation entry paths (65666c7)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.355 - 2026-07-21
 
 ### Fixed
