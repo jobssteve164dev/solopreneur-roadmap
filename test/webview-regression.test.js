@@ -4334,12 +4334,19 @@ test('agent launch path uses one terminal-first startup component', () => {
     }
   };
 
-  assertLaunchComponent(
-    'solo launch',
-    'async function handleRunSoloConversation',
-    'function getCurrentFlowTrace',
-    'soloConversationId'
+  const soloStart = source.indexOf('async function handleRunSoloConversation');
+  const soloEnd = source.indexOf('function getCurrentFlowTrace', soloStart);
+  const soloBody = source.slice(soloStart, soloEnd);
+  assert.match(soloBody, /const terminal = createAgentTerminal\(activeProjectRoot, 'solo-preparing'\)/);
+  assert.ok(
+    soloBody.indexOf('terminal.show(true)') < soloBody.indexOf('await createPreSessionGitCommit(activeProjectRoot)'),
+    'Solo must show its terminal before waiting for the pre-session Git backup'
   );
+  assert.ok(
+    soloBody.indexOf('await createPreSessionGitCommit(activeProjectRoot)') < soloBody.indexOf('terminal.sendText(finalCommand)'),
+    'Solo must preserve the pre-session Git backup before command dispatch'
+  );
+  assert.match(soloBody, /postNodeConversations\(soloConversationId\)/);
   assertLaunchComponent(
     'roadmap revision launch',
     'async function handleRoadmapRevision',

@@ -5657,6 +5657,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     return;
   }
 
+  const terminal = createAgentTerminal(activeProjectRoot, 'solo-preparing');
+  terminal.show(true);
   recordLocalUsageEvent(context, 'soloConversation');
   ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
   const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
@@ -5680,6 +5682,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     launchSummary,
     'Running'
   );
+  agentTerminalNamesByConversationId.set(executionLogId, terminal.name);
+  agentTerminalProjectRootsByConversationId.set(executionLogId, activeProjectRoot);
   const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', soloConversationId, String(executionLogId));
   const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
   const roadmapBackupFilePath = path.join(runDir, 'roadmap-before.csv');
@@ -5718,13 +5722,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     runDir,
     getAgentStatusFilePath(activeProjectRoot, executionLogId)
   );
-  launchAgentConversationTerminal({
-    workspaceRoot: activeProjectRoot,
-    label: `solo-${executionLogId}`,
-    conversationId: executionLogId,
-    command: finalCommand,
-    refreshNodeId: soloConversationId
-  });
+  terminal.sendText(finalCommand);
+  postNodeConversations(soloConversationId);
 }
 
 function getCurrentFlowTrace(projectPath: string): FlowTrace | null {
