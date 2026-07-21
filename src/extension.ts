@@ -3583,6 +3583,7 @@ function writeSoloGlobalPromptIndex(workspaceRoot: string, globalDataPath: strin
 
 function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, globalPromptPath = ''): string {
   const memoryRoot = getSolomapMemoryRoot(workspaceRoot, globalDataPath);
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const projectSlug = path.basename(path.resolve(workspaceRoot)).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
   ensureDocumentationManifest(workspaceRoot);
   return [
@@ -3595,7 +3596,7 @@ function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, gl
     `- 当前会话：${path.join(memoryRoot, 'active', 'current-session.md')}；接续、复核或修复先前运行时读取。`,
     `- 项目文档目录：${path.join(workspaceRoot, '.solopreneur', 'documentation.json')}；需要方向、边界或正式文档位置时读取，不要默认展开全部文档。`,
     `- 技能目录：${getSolomapSkillRegistryPath(workspaceRoot, globalDataPath)}；任务明确命中某个领域时查询，决定使用后先读取对应 SKILL.md，不适用的技能不必列出。`,
-    `- 执行经验账本：${path.join(workspaceRoot, 'resources', 'tools', 'solomap-experience.cjs')}；仅在接续、复核、重复故障、历史行为调查或当前证据不足时按具体功能、文件或错误查询；普通首次任务不默认读取。`,
+    `- 执行经验账本：需要历史经验时运行 \`node ${path.join(workspaceRoot, 'resources', 'tools', 'solomap-experience.cjs')} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、文件、错误或目标>')} --limit 5\`；仅在接续、复核、重复故障、历史行为调查或当前证据不足时查询，普通首次任务不默认读取。`,
     '- 账本、记忆和文档只是历史线索；不要使用 URL、项目名或运行类型等泛化词判断相关性。'
   ].filter(Boolean).join('\n');
 }

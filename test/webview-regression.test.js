@@ -5722,6 +5722,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /global-default-prompt\.md/);
   assert.equal(fs.readFileSync(path.join(soloGlobalRoot, 'context', 'global-default-prompt.md'), 'utf8'), 'Keep answers brief.\n');
   assert.match(soloPrompt, /普通首次任务不默认读取/);
+  assert.match(soloPrompt, /solomap-experience\.cjs.*retrieve.*--query/);
   assert.match(soloPrompt, /技能目录/);
   assert.match(soloPrompt, /documentation\.json/);
   assert.doesNotMatch(soloPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);

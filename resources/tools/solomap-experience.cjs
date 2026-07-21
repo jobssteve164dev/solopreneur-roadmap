@@ -69,6 +69,15 @@ function readGraph(projectRoot) {
   return readJson(path.join(getSolomapRoot(projectRoot), 'execution-graph.json')) || null;
 }
 
+function readLearningCandidates(globalRoot) {
+  const root = path.join(globalRoot, 'learning', 'candidates');
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root)
+    .filter((file) => file.endsWith('.json'))
+    .map((file) => readJson(path.join(root, file)))
+    .filter((candidate) => candidate && candidate.schemaVersion === 1 && candidate.status !== 'rejected');
+}
+
 async function readExecutionLogs(projectRoot) {
   const dbPath = path.join(getSolomapRoot(projectRoot), 'project_journal.db');
   if (!fs.existsSync(dbPath)) return [];
@@ -134,6 +143,139 @@ function parseLogSignals(log, includeFull) {
 function normalizeLimit(value) {
   const limit = Number(value || 8);
   return Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 8;
+}
+
+const RETRIEVAL_STOP_WORDS = new Set([
+  'http', 'https', 'www', 'com', 'solo', 'flow', 'agent', 'codex', '项目', '任务', '当前', '本轮',
+  '完成', '验证', '修复', '实现', '问题', '相关', '运行', '对话', '使用', '进行', '一个', '这个'
+]);
+
+function retrievalTokens(value, projectRoot) {
+  const projectName = path.basename(projectRoot).toLowerCase();
+  const baseTokens = String(value || '').toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .split(/[^a-z0-9_./\-一-龥]+/i)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2 && token !== projectName && !RETRIEVAL_STOP_WORDS.has(token));
+  const expanded = [];
+  for (const token of baseTokens) {
+    expanded.push(token);
+    if (/^[一-龥]{5,}$/.test(token)) {
+      for (let index = 0; index <= token.length - 3; index += 1) {
+        expanded.push(token.slice(index, index + 3));
+      }
+    }
+  }
+  return unique(expanded, 40);
+}
+
+function scoreTextFields(tokens, fields) {
+  let score = 0;
+  let matches = 0;
+  for (const token of tokens) {
+    let tokenMatched = false;
+    fields.forEach(({ text, weight }) => {
+      if (String(text || '').toLowerCase().includes(token)) {
+        score += weight;
+        tokenMatched = true;
+      }
+    });
+    if (tokenMatched) matches += 1;
+  }
+  return { score, matches };
+}
+
+function isLowValueLesson(candidate) {
+  const summary = String(candidate.summary || '').toLowerCase();
+  if (!summary || /usage limit|solo conversation state|等待用户决定是否关联|run completed without explicit|diff --git|(^|\W)i will\s|\+\+\+ b\/|--- a\//.test(summary)) return true;
+  if (candidate.lessonType === 'verification_pattern' && (
+    summary.length > 320 ||
+    (summary.match(/\s\/\s/g) || []).length > 3 ||
+    /command:\s*cat|\bconst\s+[a-z_]|new request\(|dangerously-bypass/.test(summary)
+  )) return true;
+  const meaningful = summary
+    .split(/\s+\/\s+|\n/)
+    .filter((part) => !/^(diff --git|--- |\+\+\+ |@@ |[+-]?test\(|[+-]?[a-z0-9_./-]+\.(js|ts|json|md))/.test(part.trim()));
+  return meaningful.join(' ').replace(/[^a-z0-9一-龥]/gi, '').length < 18;
+}
+
+function retrieveLessons(candidates, records, query, projectRoot, limit) {
+  const tokens = retrievalTokens(query, projectRoot);
+  if (tokens.length === 0) {
+    return { query, tokens: [], lessons: [], evidenceLeads: [], message: '请使用具体功能、文件、错误或目标查询；URL、项目名和运行类型不会作为相关性依据。' };
+  }
+  const lessonKeys = new Set();
+  const lessons = candidates
+    .filter((candidate) => !isLowValueLesson(candidate))
+    .filter((candidate) => candidate.lessonType !== 'verification_pattern' || /测试|验证|命令|[a-z0-9_-]+\.[a-z0-9]+/i.test(query))
+    .filter((candidate) => candidate.lessonType !== 'risk_pattern' || /失败|错误|报错|故障|异常|error|failed/i.test(query))
+    .map((candidate) => {
+      const evidenceText = (candidate.evidenceRefs || []).map((ref) => `${ref.ref || ''} ${ref.summary || ''}`).join(' ');
+      const match = scoreTextFields(tokens, [
+        { text: candidate.summary, weight: 5 },
+        { text: candidate.appliesWhen, weight: 4 },
+        { text: candidate.doThis, weight: 3 },
+        { text: candidate.avoidThis, weight: 3 },
+        { text: evidenceText, weight: 5 }
+      ]);
+      const projectScore = path.resolve(String(candidate.projectPath || '')) === path.resolve(projectRoot) ? 3 : 0;
+      const statusScore = candidate.status === 'promoted' || candidate.status === 'approved' ? 5 : 0;
+      const confidenceScore = candidate.confidence === 'high' ? 2 : candidate.confidence === 'medium' ? 1 : 0;
+      return { candidate, score: match.score + projectScore + statusScore + confidenceScore, matches: match.matches };
+    })
+    .filter((entry) => entry.matches > 0 && entry.score >= 7)
+    .sort((a, b) => b.score - a.score || String(b.candidate.updatedAt || '').localeCompare(String(a.candidate.updatedAt || '')))
+    .filter((entry) => {
+      const key = compactLine(entry.candidate.summary, 260).toLowerCase();
+      if (lessonKeys.has(key)) return false;
+      lessonKeys.add(key);
+      return true;
+    })
+    .slice(0, limit)
+    .map(({ candidate, score }) => ({
+      id: candidate.id,
+      relevance: score,
+      lesson: compactLine(candidate.summary, 360),
+      appliesWhen: compactLine(candidate.appliesWhen, 240),
+      doThis: compactLine(candidate.doThis, 240),
+      avoidThis: compactLine(candidate.avoidThis, 240),
+      confidence: candidate.confidence || 'unknown',
+      status: candidate.status || 'candidate',
+      projectName: candidate.projectName || '',
+      evidence: (candidate.evidenceRefs || []).filter((ref) => ref.type === 'run_digest' || ref.type === 'command').slice(0, 3)
+    }));
+  const evidenceLeads = records
+    .map((record) => {
+      const match = scoreTextFields(tokens, [
+        { text: record.userIntent, weight: 4 },
+        { text: record.outcome, weight: 4 },
+        { text: (record.changedFiles || []).join(' '), weight: 5 },
+        { text: (record.failures || []).join(' '), weight: 5 },
+        { text: (record.verification || []).join(' '), weight: 3 }
+      ]);
+      return { record, score: match.score, matches: match.matches };
+    })
+    .filter((entry) => entry.matches > 0 && entry.score >= 4)
+    .sort((a, b) => b.score - a.score || String(b.record.finishedAt || '').localeCompare(String(a.record.finishedAt || '')))
+    .slice(0, Math.min(limit, 3))
+    .map(({ record, score }) => ({
+      relevance: score,
+      runId: record.runId,
+      executionLogId: record.executionLogId,
+      intent: compactLine(record.userIntent, 220),
+      outcome: /等待用户决定是否关联到路线图环节/.test(String(record.outcome || '')) ? '' : compactLine(record.outcome, 260),
+      files: unique([...(record.changedFiles || []), ...(record.touchedFiles || [])], 5),
+      digestFile: record.digestFile || ''
+    }));
+  return {
+    query,
+    tokens,
+    lessons,
+    evidenceLeads,
+    message: lessons.length || evidenceLeads.length
+      ? '只返回可复用判断和必要证据入口；需要原始记录时再使用 history、handoff 或 search。'
+      : '没有达到相关性与质量门槛的经验；请以当前代码、日志和测试继续调查。'
+  };
 }
 
 function filterRecords(records, args) {
@@ -245,6 +387,30 @@ function buildSummary(records, graph) {
 
 function renderMarkdown(title, payload) {
   const lines = [`# ${title}`, ''];
+  if (payload && Array.isArray(payload.lessons) && Array.isArray(payload.evidenceLeads)) {
+    lines.push(`- Query: ${payload.query || ''}`);
+    lines.push(`- Guidance: ${payload.message || ''}`, '');
+    lines.push('## Reusable lessons', '');
+    if (payload.lessons.length === 0) lines.push('No high-value lesson matched.', '');
+    payload.lessons.forEach((item, index) => {
+      lines.push(`### ${index + 1}. ${item.lesson}`);
+      lines.push(`- Applies when: ${item.appliesWhen}`);
+      lines.push(`- Do: ${item.doThis}`);
+      lines.push(`- Avoid: ${item.avoidThis}`);
+      lines.push(`- Confidence: ${item.confidence} · status: ${item.status} · relevance: ${item.relevance}`);
+      if (item.evidence.length) lines.push(`- Evidence: ${item.evidence.map((ref) => ref.ref).join(' / ')}`);
+      lines.push('');
+    });
+    lines.push('## Evidence leads', '');
+    if (payload.evidenceLeads.length === 0) lines.push('No strong run evidence matched.', '');
+    payload.evidenceLeads.forEach((item) => {
+      lines.push(`- ${item.intent || item.outcome} · relevance ${item.relevance}`);
+      if (item.intent && item.outcome) lines.push(`  Outcome: ${item.outcome}`);
+      if (item.files.length) lines.push(`  Files: ${item.files.join(', ')}`);
+      if (item.digestFile) lines.push(`  Digest: ${item.digestFile}`);
+    });
+    return lines.join('\n');
+  }
   if (Array.isArray(payload)) {
     if (payload.length === 0) {
       lines.push('No matching records.');
@@ -284,6 +450,7 @@ function printHelp() {
     'Usage: node resources/tools/solomap-experience.cjs <command> [options]',
     '',
     'Commands:',
+    '  retrieve         Find high-value lessons and evidence leads for a concrete task query.',
     '  handoff          Build a cross-agent handoff pack from run digests and SQLite logs.',
     '  summary          Show counts and latest execution signals.',
     '  history          Show recent execution records.',
@@ -294,6 +461,7 @@ function printHelp() {
     '',
     'Options:',
     '  --project <path> Workspace root. Defaults to current directory.',
+    '  --global <path>  SoloMap global root. Defaults to <project parent>/.solomap-global.',
     '  --node <id>      Filter by SoloMap node id.',
     '  --agent <cli>    Filter by Agent CLI.',
     '  --status <s>     Filter by run status.',
@@ -312,6 +480,7 @@ async function main() {
     return;
   }
   const projectRoot = path.resolve(args.project || process.cwd());
+  const globalRoot = path.resolve(args.global || path.join(path.dirname(projectRoot), '.solomap-global'));
   const limit = normalizeLimit(args.limit);
   const digests = readDigests(projectRoot);
   const graph = readGraph(projectRoot);
@@ -320,7 +489,10 @@ async function main() {
 
   let title = 'SoloMap Experience';
   let payload;
-  if (command === 'summary') {
+  if (command === 'retrieve') {
+    title = 'SoloMap Task Experience Retrieval';
+    payload = retrieveLessons(readLearningCandidates(globalRoot), records, String(args.query || ''), projectRoot, limit);
+  } else if (command === 'summary') {
     title = 'SoloMap Execution Summary';
     payload = buildSummary(records, graph);
   } else if (command === 'history') {
@@ -345,7 +517,7 @@ async function main() {
   }
 
   if (args.json) {
-    console.log(JSON.stringify({ command, projectRoot, generatedAt: new Date().toISOString(), payload }, null, 2));
+    console.log(JSON.stringify({ command, projectRoot, globalRoot, generatedAt: new Date().toISOString(), payload }, null, 2));
     return;
   }
   console.log(renderMarkdown(title, payload));
