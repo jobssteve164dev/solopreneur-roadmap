@@ -5739,6 +5739,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.doesNotMatch(soloPrompt, /领域知识：.*memory[\\/]domains/);
   assert.doesNotMatch(soloPrompt, /临时观察：.*memory[\\/]inbox/);
   assert.match(soloPrompt, /记忆处置门禁/);
+  assert.match(soloPrompt, /solomap-memory\.cjs.*route.*--kind.*--title/);
+  assert.match(soloPrompt, /先读取返回的目标文件/);
+  assert.match(soloPrompt, /不要盲目追加/);
   assert.match(soloPrompt, /不要默认把所有内容写入项目记忆/);
   assert.match(soloPrompt, /写入 projects\/ 前先确认它不应进入 decisions\/、patterns\/ 或 domains\//);
   assert.match(soloPrompt, /documentation\.json/);

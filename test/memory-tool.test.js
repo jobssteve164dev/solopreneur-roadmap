@@ -27,6 +27,20 @@ function runTool(workspace, globalRoot, query, extra = []) {
   return JSON.parse(result.stdout);
 }
 
+function runRoute(workspace, globalRoot, kind, title = '') {
+  const result = spawnSync(process.execPath, [
+    toolPath,
+    'route',
+    '--project', workspace,
+    '--global', globalRoot,
+    '--kind', kind,
+    ...(title ? ['--title', title] : []),
+    '--json'
+  ], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
 test('memory retrieve returns scoped high-value sections with precise locations', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-'));
   const workspace = path.join(root, 'demo-app');
@@ -67,4 +81,55 @@ test('memory retrieve supports source filters and rejects generic queries', () =
   const generic = runTool(workspace, globalRoot, 'https://example.com SoloMap 项目记忆系统');
   assert.deepEqual(generic.payload.results, []);
   assert.match(generic.payload.message, /具体功能/);
+});
+
+test('memory route returns exact write targets, structure, and guardrails without mutating files', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-route-'));
+  const workspace = path.join(root, 'demo-app');
+  const globalRoot = path.join(root, '.solomap-global');
+  const memoryRoot = path.join(globalRoot, 'memory');
+  fs.mkdirSync(memoryRoot, { recursive: true });
+
+  const projectRoute = runRoute(workspace, globalRoot, 'project');
+  assert.match(projectRoute.payload.targetFile, /memory[\\/]projects[\\/]demo-app\.md$/);
+  assert.match(projectRoute.payload.operation, /superseded|stable fact/i);
+  assert.ok(projectRoute.payload.guardrails.some((item) => /Read the target file/.test(item)));
+
+  const patternRoute = runRoute(workspace, globalRoot, 'pattern', 'Webview Startup');
+  assert.match(patternRoute.payload.targetFile, /memory[\\/]patterns[\\/]webview-startup\.md$/);
+  assert.deepEqual(patternRoute.payload.requiredStructure, ['Pattern', 'Evidence', 'Applies when', 'Do this', 'Avoid this']);
+  assert.equal(fs.existsSync(patternRoute.payload.targetFile), false);
+
+  const activeRoute = runRoute(workspace, globalRoot, 'handoff');
+  assert.match(activeRoute.payload.targetFile, /memory[\\/]active[\\/]current-session\.md$/);
+  assert.equal(activeRoute.payload.kind, 'active');
+
+  const routes = [
+    ['profile', '', /memory[\\/]profile\.md$/],
+    ['rules', '', /memory[\\/]operating-rules\.md$/],
+    ['decision', '', /memory[\\/]decisions[\\/]\d{4}-\d{2}\.md$/],
+    ['domain', 'OAuth Security', /memory[\\/]domains[\\/]oauth-security\.md$/],
+    ['inbox', '', /memory[\\/]inbox[\\/]capture\.md$/]
+  ];
+  routes.forEach(([kind, title, expected]) => {
+    const route = runRoute(workspace, globalRoot, kind, title);
+    assert.match(route.payload.targetFile, expected);
+    assert.ok(route.payload.requiredStructure.length >= 3);
+    assert.ok(route.payload.operation);
+  });
+});
+
+test('memory route rejects unknown kinds and missing topic titles', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-route-invalid-'));
+  const workspace = path.join(root, 'demo-app');
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(path.join(globalRoot, 'memory'), { recursive: true });
+
+  const unknown = spawnSync(process.execPath, [toolPath, 'route', '--project', workspace, '--global', globalRoot, '--kind', 'unknown'], { encoding: 'utf8' });
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /Unknown memory kind/);
+
+  const missingTitle = spawnSync(process.execPath, [toolPath, 'route', '--project', workspace, '--global', globalRoot, '--kind', 'pattern'], { encoding: 'utf8' });
+  assert.equal(missingTitle.status, 1);
+  assert.match(missingTitle.stderr, /--title is required/);
 });
