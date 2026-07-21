@@ -75,8 +75,11 @@ import {
   ensureSolomapSkillStore,
   getEnabledEnhancementMap,
   getBuiltinEnhancementDefinition,
+  getSolomapMemoryRoot,
   getSolomapMcpRoot,
+  getSolomapSkillRegistryPath,
   getSolomapSkillsRoot,
+  normalizeSolomapGlobalPath,
   readSolomapMcpRegistry,
   readSolomapSkillRegistry,
   recordSolomapLearningCycle,
@@ -3532,40 +3535,10 @@ function buildSoloConversationPrompt(
       '请先读取这些文件，并仅将它们作为本次问题的背景材料。'
     ].join('\n')
     : '';
-  const globalPromptInstructions = globalPrompt.trim()
-    ? [
-      '用户设置的全局默认要求：',
-      globalPrompt.trim(),
-      '如与本次用户要求冲突，始终以本次用户要求为准。'
-    ].join('\n')
-    : '';
-  const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot);
   const startupContextText = [normalizedUserMessage, attachedFiles.join('\n')].join('\n');
   const solomapMcpInstructions = buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, startupContextText);
   const solomapEnhancementInstructions = buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, startupContextText, enabledEnhancements);
-  const solomapLearningContext = buildSolomapLearningContext(workspaceRoot, globalDataPath);
-  const solomapLearningRetrievalContext = buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
-    projectPath: workspaceRoot,
-    runKind: 'solo',
-    contextText: startupContextText,
-    files: attachedFiles
-  });
-  const solomapExecutionExperienceContext = buildExecutionExperiencePrompt(workspaceRoot, {
-    nodeId: soloConversationId,
-    runKind: 'solo',
-    contextText: startupContextText,
-    supplementFiles: attachedFiles
-  });
-  const solomapStartupPackInstructions = buildSolomapStartupPackInstructions({
-    workspaceRoot,
-    globalDataPath,
-    runKind: 'solo',
-    contextText: startupContextText,
-    learningSummaryContext: solomapLearningContext,
-    learningRetrievalContext: solomapLearningRetrievalContext,
-    executionExperienceContext: solomapExecutionExperienceContext
-  });
-  const crossAgentHandoffInstructions = buildCrossAgentHandoffInstructions(workspaceRoot, soloConversationId, 'solo');
+  const globalPromptPath = writeSoloGlobalPromptIndex(workspaceRoot, globalDataPath, globalPrompt);
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -3576,14 +3549,15 @@ function buildSoloConversationPrompt(
     normalizedUserMessage,
     ...(supplementFileInstructions ? ['', supplementFileInstructions] : []),
     '',
-    solomapStartupPackInstructions,
+    '本轮执行内核：',
+    '- 优先直接解决当前问题，不要要求用户先选择路线图环节。',
+    '- 当前代码、日志、测试和用户本轮证据高于历史记忆。',
+    '- 不要自行修改路线图、环节状态、完成标准或环节交接记录。',
+    '- 实现或修复任务要交付改动并运行最窄验证；讨论或判断任务直接给出有用结论。',
     '',
-    solomapDocumentationInstructions,
-    '',
-    crossAgentHandoffInstructions,
+    buildSoloContextIndex(workspaceRoot, globalDataPath, globalPromptPath),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
     ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
-    ...(globalPromptInstructions ? ['', globalPromptInstructions] : []),
     '',
     '执行边界：',
     '1. 可以读取当前项目文件与 `.solopreneur/roadmap.csv` 了解背景，但不要自行修改路线图、环节状态、完成标准或环节交接记录。',
@@ -3592,6 +3566,38 @@ function buildSoloConversationPrompt(
     '4. 完成后在结论中用一句话说明本次对话更适合：仅保留在 Solo、关联某个已有环节（写明环节标题），或进入路线图调整。',
     '5. 完成后正常退出 CLI 进程；SoloMap 会保存本次 Solo 对话，由用户决定是否关联路线图环节。'
   ].join('\n');
+}
+
+function writeSoloGlobalPromptIndex(workspaceRoot: string, globalDataPath: string, globalPrompt: string): string {
+  const content = globalPrompt.trim();
+  if (!content) return '';
+  const filePath = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'context', 'global-default-prompt.md');
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${content}\n`, 'utf8');
+    return filePath;
+  } catch {
+    return '';
+  }
+}
+
+function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, globalPromptPath = ''): string {
+  const memoryRoot = getSolomapMemoryRoot(workspaceRoot, globalDataPath);
+  const projectSlug = path.basename(path.resolve(workspaceRoot)).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
+  ensureDocumentationManifest(workspaceRoot);
+  return [
+    'SoloMap 按需上下文索引：',
+    `- 项目规则：${path.join(workspaceRoot, 'agent.md')}；非闲聊任务先读取。`,
+    globalPromptPath ? `- 用户全局要求：${globalPromptPath}；本轮开始时读取，与用户本次要求冲突时以本次要求为准。` : '',
+    `- 用户偏好：${path.join(memoryRoot, 'profile.md')}；内容、UI、方案或高判断任务时读取。`,
+    `- 跨任务执行规则：${path.join(memoryRoot, 'operating-rules.md')}；实现、修复、部署或复杂诊断时读取。`,
+    `- 项目记忆：${path.join(memoryRoot, 'projects', `${projectSlug}.md`)}；判断已有产品、架构或历史决策时读取。`,
+    `- 当前会话：${path.join(memoryRoot, 'active', 'current-session.md')}；接续、复核或修复先前运行时读取。`,
+    `- 项目文档目录：${path.join(workspaceRoot, '.solopreneur', 'documentation.json')}；需要方向、边界或正式文档位置时读取，不要默认展开全部文档。`,
+    `- 技能目录：${getSolomapSkillRegistryPath(workspaceRoot, globalDataPath)}；任务明确命中某个领域时查询，决定使用后先读取对应 SKILL.md，不适用的技能不必列出。`,
+    `- 执行经验账本：${path.join(workspaceRoot, 'resources', 'tools', 'solomap-experience.cjs')}；仅在接续、复核、重复故障、历史行为调查或当前证据不足时按具体功能、文件或错误查询；普通首次任务不默认读取。`,
+    '- 账本、记忆和文档只是历史线索；不要使用 URL、项目名或运行类型等泛化词判断相关性。'
+  ].filter(Boolean).join('\n');
 }
 
 function buildFlowExecutionNodeId(flowId: string, loopId: string, role: FlowRole): string {

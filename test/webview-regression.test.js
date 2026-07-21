@@ -5703,24 +5703,33 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /运行类型：roadmap_revision/);
   assert.match(revisionPrompt, /\/workspace\/\.solomap-global\/memory/);
 
+  const soloPromptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-prompt-'));
+  const soloGlobalRoot = path.join(soloPromptRoot, '.solomap-global');
   const soloPrompt = extensionModule.__buildSoloConversationPrompt(
     '帮我判断这个文案方向。',
-    '/workspace/app',
+    soloPromptRoot,
     'Keep answers brief.',
     [],
-    '/workspace/.solomap-global'
+    soloGlobalRoot
   );
   assert.match(soloPrompt, /Solo 模式/);
   assert.match(soloPrompt, /尚未归属于任何路线图环节/);
   assert.match(soloPrompt, /不要求产生文件修改/);
   assert.match(soloPrompt, /关联某个已有环节/);
-  assert.match(soloPrompt, /Keep answers brief/);
-  assert.match(soloPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
-  assert.match(soloPrompt, /运行类型：solo/);
-  assert.match(soloPrompt, /\/workspace\/\.solomap-global\/memory/);
-  assert.match(soloPrompt, /SoloMap 项目文档 Harness/);
+  assert.doesNotMatch(soloPrompt, /Keep answers brief/);
+  assert.match(soloPrompt, /本轮执行内核/);
+  assert.match(soloPrompt, /SoloMap 按需上下文索引/);
+  assert.match(soloPrompt, /global-default-prompt\.md/);
+  assert.equal(fs.readFileSync(path.join(soloGlobalRoot, 'context', 'global-default-prompt.md'), 'utf8'), 'Keep answers brief.\n');
+  assert.match(soloPrompt, /普通首次任务不默认读取/);
+  assert.match(soloPrompt, /技能目录/);
   assert.match(soloPrompt, /documentation\.json/);
-  assert.match(soloPrompt, /不要新建 `docs\/summary\.md`/);
+  assert.doesNotMatch(soloPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
+  assert.doesNotMatch(soloPrompt, /SoloMap 跨项目学习信号/);
+  assert.doesNotMatch(soloPrompt, /SoloMap 相关执行经验/);
+  assert.doesNotMatch(soloPrompt, /SoloMap 项目文档 Harness/);
+  assert.doesNotMatch(soloPrompt, /下一位 Agent 交接/);
+  assert.doesNotMatch(soloPrompt, /skipped-not-applicable/);
   assert.doesNotMatch(soloPrompt, /本环节完成标准/);
 
   const soloAttachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-attached-files-'));

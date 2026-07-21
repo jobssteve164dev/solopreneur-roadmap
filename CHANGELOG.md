@@ -32,6 +32,7 @@
 ### Fixed
 - keep SoloMap responsive while pre-session Git backups run in slow containers
 - remove optional live GitHub enrichment from the foreground conversation send path
+- keep first Solo prompts focused with on-demand context indexes instead of injected ledger history
 
 ## 0.0.348 - 2026-07-18
 
