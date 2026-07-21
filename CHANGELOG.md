@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.358 - 2026-07-21
+
+### Added
+- route Solo memory through focused retrieval (4267f0a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.357 - 2026-07-21
 
 ### Added
