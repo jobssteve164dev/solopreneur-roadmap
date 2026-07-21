@@ -53,6 +53,16 @@ SoloMap 目前仍是早期开源项目，不应把申请建立在“已经被广
 
 Codex Security 可用于审查这个会启动本地 CLI、处理项目路径并保存执行记录的 VS Code 插件；API 额度则可支持公开仓库的日常维护自动化。
 
+### 你的项目为何需要 Codex Security？
+
+推荐填写以下英文版本：
+
+> SoloMap is a VS Code extension that launches local coding-agent CLIs and handles repository files, generated prompts, process execution, local paths, and persistent run history. These trust boundaries create risks such as command injection, path traversal, unsafe file writes, secret exposure, malicious repository content, and vulnerable dependencies. Codex Security would help us continuously identify, validate, and prioritize exploitable findings before they affect open-source users.
+
+中文参考：
+
+> SoloMap 是一个会启动本地编码 Agent CLI，并处理仓库文件、生成的提示词、进程执行、本地路径和持久运行历史的 VS Code 插件。这些信任边界可能带来命令注入、路径穿越、不安全文件写入、密钥泄露、恶意仓库内容和依赖漏洞等风险。Codex Security 可以帮助我们持续发现、验证并确定可利用安全问题的优先级，避免其影响开源用户。
+
 ### OpenAI 组织 ID
 
 `[登录 OpenAI Platform 后填写 org- 开头的组织 ID]`
