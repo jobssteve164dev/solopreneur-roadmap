@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.353 - 2026-07-21
+
+### Added
+- add task-focused experience retrieval (61b4d80)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.352 - 2026-07-21
 
 ### Changed
