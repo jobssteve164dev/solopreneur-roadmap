@@ -75,7 +75,6 @@ import {
   ensureSolomapSkillStore,
   getEnabledEnhancementMap,
   getBuiltinEnhancementDefinition,
-  getSolomapMemoryRoot,
   getSolomapMcpRoot,
   getSolomapSkillRegistryPath,
   getSolomapSkillsRoot,
@@ -3582,22 +3581,13 @@ function writeSoloGlobalPromptIndex(workspaceRoot: string, globalDataPath: strin
 }
 
 function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, globalPromptPath = ''): string {
-  const memoryRoot = getSolomapMemoryRoot(workspaceRoot, globalDataPath);
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-  const projectSlug = path.basename(path.resolve(workspaceRoot)).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
   ensureDocumentationManifest(workspaceRoot);
   return [
     'SoloMap 按需上下文索引：',
     `- 项目规则：${path.join(workspaceRoot, 'agent.md')}；非闲聊任务先读取。`,
     globalPromptPath ? `- 用户全局要求：${globalPromptPath}；本轮开始时读取，与用户本次要求冲突时以本次要求为准。` : '',
-    `- 用户偏好：${path.join(memoryRoot, 'profile.md')}；内容、UI、方案或高判断任务时读取。`,
-    `- 跨任务执行规则：${path.join(memoryRoot, 'operating-rules.md')}；实现、修复、部署或复杂诊断时读取。`,
-    `- 项目记忆：${path.join(memoryRoot, 'projects', `${projectSlug}.md`)}；判断已有产品、架构或历史决策时读取。`,
-    `- 已确认决策：${path.join(memoryRoot, 'decisions')}；涉及既有架构、产品边界、技术选型或不可随意改变的路径时查询。`,
-    `- 可复用模式：${path.join(memoryRoot, 'patterns')}；实现、调试、验证、部署或同类问题重复出现时查询。`,
-    `- 领域知识：${path.join(memoryRoot, 'domains')}；涉及特定业务、平台、协议或跨项目领域事实时查询。`,
-    `- 临时观察：${path.join(memoryRoot, 'inbox')}；仅在稳定记忆不足且需要调查历史线索时读取，未经验证不得作为事实。`,
-    `- 当前会话：${path.join(memoryRoot, 'active', 'current-session.md')}；接续、复核或修复先前运行时读取。`,
+    `- 记忆系统：需要用户偏好、执行规则、项目事实、既有决策、可复用模式、领域知识或当前交接时，运行 \`node ${path.join(workspaceRoot, 'resources', 'tools', 'solomap-memory.cjs')} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、边界、决策、错误或目标>')} --limit 5\`；按返回的精确文件与行号读取原文，普通简单任务不默认查询。`,
     `- 项目文档目录：${path.join(workspaceRoot, '.solopreneur', 'documentation.json')}；需要方向、边界或正式文档位置时读取，不要默认展开全部文档。`,
     `- 技能目录：${getSolomapSkillRegistryPath(workspaceRoot, globalDataPath)}；任务明确命中某个领域时查询，决定使用后先读取对应 SKILL.md，不适用的技能不必列出。`,
     `- 执行经验账本：需要历史经验时运行 \`node ${path.join(workspaceRoot, 'resources', 'tools', 'solomap-experience.cjs')} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、文件、错误或目标>')} --limit 5\`；仅在接续、复核、重复故障、历史行为调查或当前证据不足时查询，普通首次任务不默认读取。`,

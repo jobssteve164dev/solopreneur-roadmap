@@ -5730,10 +5730,14 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /普通首次任务不默认读取/);
   assert.match(soloPrompt, /solomap-experience\.cjs.*retrieve.*--query/);
   assert.match(soloPrompt, /技能目录/);
-  assert.match(soloPrompt, /已确认决策：.*memory[\\/]decisions/);
-  assert.match(soloPrompt, /可复用模式：.*memory[\\/]patterns/);
-  assert.match(soloPrompt, /领域知识：.*memory[\\/]domains/);
-  assert.match(soloPrompt, /临时观察：.*memory[\\/]inbox/);
+  assert.match(soloPrompt, /记忆系统：.*solomap-memory\.cjs.*retrieve.*--query.*--limit 5/);
+  assert.match(soloPrompt, /按返回的精确文件与行号读取原文/);
+  assert.match(soloPrompt, /普通简单任务不默认查询/);
+  assert.doesNotMatch(soloPrompt, /用户偏好：.*profile\.md/);
+  assert.doesNotMatch(soloPrompt, /已确认决策：.*memory[\\/]decisions/);
+  assert.doesNotMatch(soloPrompt, /可复用模式：.*memory[\\/]patterns/);
+  assert.doesNotMatch(soloPrompt, /领域知识：.*memory[\\/]domains/);
+  assert.doesNotMatch(soloPrompt, /临时观察：.*memory[\\/]inbox/);
   assert.match(soloPrompt, /记忆处置门禁/);
   assert.match(soloPrompt, /不要默认把所有内容写入项目记忆/);
   assert.match(soloPrompt, /写入 projects\/ 前先确认它不应进入 decisions\/、patterns\/ 或 domains\//);
