@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.354 - 2026-07-21
+
+### Fixed
+- classify Solo memory before writing (ea6b4c2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.353 - 2026-07-21
 
 ### Added
