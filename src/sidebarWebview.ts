@@ -6913,7 +6913,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (input) input.value = '';
             projectSoloDrafts[projectPath] = '';
             projectSoloFiles[targetId] = [];
-            requestSidebarSoloConversationHistory(projectPath, true);
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
           }
@@ -8305,7 +8304,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             model,
             supplementFiles: []
           });
-          requestSidebarSoloConversationHistory(projectPath, true);
         });
       });
       portfolioList.querySelectorAll('[data-close-pr]').forEach(button => {
@@ -8545,7 +8543,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             model,
             supplementFiles: []
           });
-          requestSidebarSoloConversationHistory(projectPath, true);
         });
       });
       bindProjectContinueComposer(portfolioList);

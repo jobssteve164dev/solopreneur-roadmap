@@ -3905,6 +3905,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (!request) return;
           vscode.postMessage({
             command: 'conversation.runSolo',
+            projectPath: activeProjectPath,
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
             model: getSoloSelectValue(modelSelect),
