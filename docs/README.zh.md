@@ -14,6 +14,11 @@
 8. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
 9. [中文品牌命名与定位分析](./product/chinese-naming-analysis.zh.md)：关于项目中文命名的多维度头脑风暴与品牌定位思考。
 
+## 官网工作台
+
+- [本地项目远程控制方法论](./methodology/remote-project-control-methodology.zh.md)：理解官网如何延伸用户的观察、补充与决策能力，同时保持项目事实和用户数据在本地。
+- [官网工作台本地优先架构设计](./architecture/web-workbench-local-first-design.zh.md)：固定本地权威、端到端加密、最小状态投影、远程命令和首版实现边界。
+
 ## 目录职责
 
 | 目录 | 职责 | 适合放入 |
