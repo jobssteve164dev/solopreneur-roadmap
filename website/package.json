@@ -10,5 +10,8 @@
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
+  },
+  "overrides": {
+    "sharp": "0.35.3"
   }
 }
