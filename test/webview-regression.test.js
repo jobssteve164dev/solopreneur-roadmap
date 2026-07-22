@@ -5026,6 +5026,18 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'reuse-rate.csv')));
   assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'priority-accuracy.csv')));
   assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'monthly-summary.md')));
+  const globalToolsRoot = path.join(ensuredMemory.globalRoot, 'tools');
+  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'solomap-memory.cjs')));
+  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'solomap-experience.cjs')));
+  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'node_modules', 'sql.js', 'package.json')));
+  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'node_modules', 'sql.js', 'dist', 'sql-wasm.js')));
+  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm')));
+  const globalExperienceHelp = childProcess.execFileSync(
+    process.execPath,
+    [path.join(globalToolsRoot, 'solomap-experience.cjs'), '--help'],
+    { encoding: 'utf8' }
+  );
+  assert.match(globalExperienceHelp, /solomap-experience/);
   extensionModule.__recordSolomapLearningCycle(
     '/workspace/app',
     memoryRoot,
@@ -5741,6 +5753,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /solomap-experience\.cjs.*retrieve.*--query/);
   assert.match(soloPrompt, /技能目录/);
   assert.match(soloPrompt, /记忆系统：.*solomap-memory\.cjs.*retrieve.*--query.*--limit 5/);
+  assert.match(soloPrompt, new RegExp(path.join(soloGlobalRoot, 'tools', 'solomap-memory.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(soloPrompt, new RegExp(path.join(soloGlobalRoot, 'tools', 'solomap-experience.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(soloPrompt, new RegExp(path.join(soloPromptRoot, 'resources', 'tools').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(soloPrompt, /按返回的精确文件与行号读取原文/);
   assert.match(soloPrompt, /普通简单任务不默认查询/);
   assert.doesNotMatch(soloPrompt, /用户偏好：.*profile\.md/);
@@ -5929,8 +5944,11 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(experiencePrompt, /建议先看/);
   assert.match(experiencePrompt, /npm test passed/);
   assert.doesNotMatch(experiencePrompt, /RAW_LOG_SHOULD_NOT_APPEAR/);
-  const crossAgentInstructions = extensionModule.__buildCrossAgentHandoffInstructions(digestRoot, '2', 'step');
+  const crossAgentGlobalRoot = path.join(digestRoot, 'shared-global');
+  const crossAgentInstructions = extensionModule.__buildCrossAgentHandoffInstructions(digestRoot, '2', 'step', crossAgentGlobalRoot);
   assert.match(crossAgentInstructions, /solomap-experience\.cjs handoff/);
+  assert.match(crossAgentInstructions, new RegExp(path.join(crossAgentGlobalRoot, '.solomap-global', 'tools', 'solomap-experience.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(crossAgentInstructions, /resources[\\/]tools[\\/]solomap-experience\.cjs/);
   assert.match(crossAgentInstructions, /solomap-cross-agent-handoff\/SKILL\.md/);
 
   const SQL = await require('sql.js')();

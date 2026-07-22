@@ -751,6 +751,7 @@ export function writeSolomapMemoryExamples(memoryRoot: string, learningCandidate
 
 export function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): { globalRoot: string; memoryRoot: string; projectMemoryFile: string } {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  ensureSolomapGlobalTools(globalRoot);
   const memoryRoot = path.join(globalRoot, 'memory');
   const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
   const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
@@ -806,6 +807,35 @@ export function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath =
   writeFileIfMissing(path.join(metricsDir, 'monthly-summary.md'), '# Monthly Learning Summary\n\nSoloMap uses this file to collect low-frequency cross-project learning signals.\n');
   writeSolomapMemoryExamples(memoryRoot, learningCandidatesDir);
   return { globalRoot, memoryRoot, projectMemoryFile };
+}
+
+function copyBundledFile(sourcePath: string, targetPath: string): void {
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(`Missing bundled SoloMap runtime file: ${sourcePath}`);
+  }
+  const source = fs.readFileSync(sourcePath);
+  const current = fs.existsSync(targetPath) ? fs.readFileSync(targetPath) : null;
+  if (current?.equals(source)) return;
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.writeFileSync(targetPath, source);
+}
+
+function ensureSolomapGlobalTools(globalRoot: string): void {
+  const extensionRoot = path.resolve(__dirname, '..');
+  const bundledToolsRoot = path.join(extensionRoot, 'resources', 'tools');
+  const bundledSqlJsRoot = path.join(extensionRoot, 'node_modules', 'sql.js');
+  const toolsRoot = path.join(globalRoot, 'tools');
+  ['solomap-memory.cjs', 'solomap-experience.cjs'].forEach((fileName) => {
+    const targetPath = path.join(toolsRoot, fileName);
+    copyBundledFile(path.join(bundledToolsRoot, fileName), targetPath);
+    fs.chmodSync(targetPath, 0o755);
+  });
+  ['package.json', path.join('dist', 'sql-wasm.js'), path.join('dist', 'sql-wasm.wasm')].forEach((relativePath) => {
+    copyBundledFile(
+      path.join(bundledSqlJsRoot, relativePath),
+      path.join(toolsRoot, 'node_modules', 'sql.js', relativePath)
+    );
+  });
 }
 
 export function solomapCsvEscape(value: string | number): string {

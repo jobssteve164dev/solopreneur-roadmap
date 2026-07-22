@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { normalizeSolomapGlobalPath } from './solomapGlobal';
 import * as crypto from 'crypto';
 
 
@@ -1070,14 +1071,14 @@ export function buildExecutionExperiencePrompt(workspaceRoot: string, query: Exe
   ].join('\n');
 }
 
-export function buildCrossAgentHandoffInstructions(workspaceRoot: string, nodeId: string, runKind: string): string {
-  const relativeTool = 'resources/tools/solomap-experience.cjs';
+export function buildCrossAgentHandoffInstructions(workspaceRoot: string, nodeId: string, runKind: string, globalDataPath = ''): string {
+  const experienceTool = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tools', 'solomap-experience.cjs');
   const skillPath = 'resources/skills/solomap-cross-agent-handoff/SKILL.md';
   const nodeFilter = nodeId ? ` --node ${JSON.stringify(nodeId)}` : '';
   return [
     'SoloMap 跨 Agent 协作入口：',
     `- 如果本轮是在接续、复核、修复失败运行、跨不同 Agent CLI 协作，或你不确定上一轮到底改了什么，先读取 ${skillPath}，再运行：`,
-    `  node ${relativeTool} handoff --project ${JSON.stringify(workspaceRoot)}${nodeFilter} --limit 3`,
+    `  node ${experienceTool} handoff --project ${JSON.stringify(workspaceRoot)}${nodeFilter} --limit 3`,
     `- 需要进一步查看 SQLite 中的结构化历史信号时，用同一工具的 \`summary\`、\`history\`、\`failures\`、\`latest-changes\` 或 \`search\` 子命令；当前运行类型：${runKind || 'unknown'}。`,
     '- 这些历史信号只能降低重复探索，不能覆盖本轮用户最新要求、当前文件、测试和命令输出。',
     '- 不要把原始 execution log 全文复制进最终回复；只提炼对用户有帮助的结论、改动、验证和风险。'
