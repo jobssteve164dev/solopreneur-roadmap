@@ -1596,10 +1596,6 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     watcher.dispose();
     watcher = null;
   }
-  if (statusPoller) {
-    clearInterval(statusPoller);
-    statusPoller = null;
-  }
   sendLocalProjectsToWebviews(context);
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
@@ -5555,7 +5551,9 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   agentTerminalNamesByConversationId.delete(Number(conversationId));
   sendNodesToWebview();
   postNodeConversations(nodeId);
-  vscode.window.showInformationMessage(isContinuationRun ? 'Continuation conversation was recorded.' : `Agent task [${nodeId}] was stopped.`);
+  if (!isContinuationRun) {
+    vscode.window.showInformationMessage(`Agent task [${nodeId}] was stopped.`);
+  }
   if (!isContinuationRun && extensionContextRef) {
     scheduleAutomationTasksAfterRun(extensionContextRef, {
       workspaceRoot: activeProjectRoot,
@@ -7120,16 +7118,28 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     const statusData = JSON.parse(fileContent);
     const statusWorkspaceRoot = String(inferWorkspaceRootFromStatusFilePath(normalizedStatusFilePath) || statusData.workspaceRoot || '').trim();
-    if (statusWorkspaceRoot && activeProjectRoot && statusWorkspaceRoot !== activeProjectRoot) {
-      return;
+    const workspaceRoot = statusWorkspaceRoot || activeProjectRoot || '';
+    const isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine);
+    let statusSyncEngine = isActiveProject ? syncEngine : null;
+    if (!statusSyncEngine && workspaceRoot && extensionContextRef) {
+      const solopreneurDir = path.join(workspaceRoot, '.solopreneur');
+      statusSyncEngine = new SyncEngine(
+        path.join(solopreneurDir, 'roadmap.csv'),
+        path.join(solopreneurDir, 'project_journal.db'),
+        extensionContextRef.extensionPath
+      );
+      await statusSyncEngine.initAndSync();
     }
     if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
+      if (!isActiveProject) {
+        return;
+      }
       await processFlowStatusFile(normalizedStatusFilePath, statusData);
       return;
     }
     const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
 
-    if (!nodeId || !status || status === 'Running' || status === 'Processed' || !syncEngine) {
+    if (!nodeId || !status || status === 'Running' || status === 'Processed' || !statusSyncEngine) {
       return;
     }
 
@@ -7140,11 +7150,11 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     let completionReason = '';
     let failureCode = String(statusData.failureCode || '').trim();
     let failureReason = String(statusData.failureReason || '').trim();
-    const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
+    const currentNode = statusSyncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
     const hasOtherRunningConversationForNode = !isSoloConversation
       && !isReviewRun
       && nodeId !== roadmapRevisionId
-      && syncEngine.getAgentExecutions(nodeId).some((conversation) => (
+      && statusSyncEngine.getAgentExecutions(nodeId).some((conversation) => (
         conversation.status === 'Running'
         && Number(conversation.id || 0) !== Number(executionLogId || 0)
       ));
@@ -7179,10 +7189,6 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const outputTail = getOutputTail(outputFilePath);
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
     const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
-    const workspaceRoot = statusWorkspaceRoot || activeProjectRoot || '';
-    if (workspaceRoot && activeProjectRoot && workspaceRoot !== activeProjectRoot) {
-      return;
-    }
     const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
     // User-confirmed completion remains authoritative over any in-flight Agent result.
     const preserveCompletedNode = currentNode?.status === 'Completed';
@@ -7295,7 +7301,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           : '该环节仍有其他 Agent 对话正在运行。';
       }
       const completedAt = nodeStatus === 'Completed' ? new Date().toISOString() : '';
-      syncEngine.updateNode(nodeId, {
+      statusSyncEngine.updateNode(nodeId, {
         status: nodeStatus as RoadmapNode['status'],
         completedAt,
       });
@@ -7410,7 +7416,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           .map((value) => ({ type: 'verification', value }));
         const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus)
           .map((value) => ({ type: 'failure', value }));
-        syncEngine.upsertRunIndex({
+        statusSyncEngine.upsertRunIndex({
           executionLogId: Number(executionLogId),
           nodeId,
           runKind: String(runKind || (isSoloConversation ? 'solo' : 'step')),
@@ -7498,10 +7504,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
     let preGitHash = '';
     let existingConversationOutput = '';
-    if (syncEngine && executionLogId) {
-      const existingLogs = (isSoloConversation && typeof syncEngine.getProjectAgentExecutions === 'function')
-        ? syncEngine.getProjectAgentExecutions()
-        : (typeof syncEngine.getAgentExecutions === 'function' ? syncEngine.getAgentExecutions(nodeId) : []);
+    if (executionLogId) {
+      const existingLogs = (isSoloConversation && typeof statusSyncEngine.getProjectAgentExecutions === 'function')
+        ? statusSyncEngine.getProjectAgentExecutions()
+        : (typeof statusSyncEngine.getAgentExecutions === 'function' ? statusSyncEngine.getAgentExecutions(nodeId) : []);
       const matched = existingLogs.find(log => Number(log.id) === Number(executionLogId));
       if (matched && matched.output) {
         existingConversationOutput = String(matched.output || '');
@@ -7560,7 +7566,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
     ].filter(Boolean).join('\n\n');
     const updatedExistingConversation = executionLogId
-      ? syncEngine.updateAgentExecution(
+      ? statusSyncEngine.updateAgentExecution(
         Number(executionLogId),
         agentCli || commandPreview || command || 'Unknown CLI',
         resolvedCommand,
@@ -7569,7 +7575,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       )
       : false;
     if (!updatedExistingConversation) {
-      syncEngine.logAgentExecution(
+      statusSyncEngine.logAgentExecution(
         nodeId,
         agentCli || commandPreview || command || 'Unknown CLI',
         resolvedCommand,
@@ -7601,7 +7607,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           taskPermissionMode: 'auto'
         });
       } else {
-        syncEngine.logAgentExecution(
+        statusSyncEngine.logAgentExecution(
           nodeId,
           requestedReviewerCli || reviewerCli,
           requestedReviewerCli || reviewerCli,
@@ -7613,23 +7619,27 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           ].join('\n\n'),
           'Failed'
         );
-        postNodeConversations(nodeId);
+        if (isActiveProject) {
+          postNodeConversations(nodeId);
+        }
       }
     }
 
     if (workspaceRoot && shouldRefreshRoadmap) {
-      await syncEngine.initAndSync();
-      if (preserveCompletedNode && nodeId !== roadmapRevisionId && syncEngine.getNodes().some((node) => node.id === nodeId)) {
-        syncEngine.updateNode(nodeId, {
+      await statusSyncEngine.initAndSync();
+      if (preserveCompletedNode && nodeId !== roadmapRevisionId && statusSyncEngine.getNodes().some((node) => node.id === nodeId)) {
+        statusSyncEngine.updateNode(nodeId, {
           status: 'Completed',
           completedAt: currentNode?.completedAt || new Date().toISOString()
         });
       }
     }
 
-    sendNodesToWebview();
+    if (isActiveProject) {
+      sendNodesToWebview();
+      postNodeConversations(nodeId);
+    }
     refreshSidebarProjectCards();
-    postNodeConversations(nodeId);
 
     // Send Telegram Notification
     if (extensionContextRef && !isContinuationRun) {
@@ -7666,8 +7676,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         isContinuationRun
       });
     }
-    if (isContinuationRun) {
-      vscode.window.showInformationMessage('Continuation conversation was recorded.');
+    if (!isActiveProject) {
+      // Background project status changes update their local records and sidebar silently.
+    } else if (isContinuationRun) {
+      // Recording a continuation is background bookkeeping and must never interrupt user input.
     } else if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
     } else if (isSoloConversation) {
@@ -7704,11 +7716,6 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
   if (watcher) {
     watcher.dispose();
   }
-  if (statusPoller) {
-    clearInterval(statusPoller);
-    statusPoller = null;
-  }
-
   watcher = vscode.workspace.createFileSystemWatcher(
     new vscode.RelativePattern(workspaceRoot, `{.agent_status.json,.solopreneur/${agentStatusDirName}/*.json}`)
   );
@@ -7720,7 +7727,18 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
   };
   watcher.onDidChange(handleSentinelChange);
   watcher.onDidCreate(handleSentinelChange);
-  statusPoller = setInterval(handleSentinelChange, 2000);
+  if (!statusPoller) {
+    statusPoller = setInterval(() => {
+      const projectPaths = extensionContextRef
+        ? getProjects(extensionContextRef).map((project) => project.path)
+        : [workspaceRoot];
+      for (const projectPath of new Set(projectPaths)) {
+        for (const statusFilePath of getAgentStatusFilePaths(projectPath)) {
+          void processAgentStatusFile(statusFilePath);
+        }
+      }
+    }, 2000);
+  }
   handleSentinelChange();
 }
 

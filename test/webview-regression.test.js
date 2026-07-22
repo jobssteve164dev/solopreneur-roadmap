@@ -2515,6 +2515,22 @@ test('closing the roadmap panel keeps the project sentinel alive for sidebar sta
   assert.match(source, /finally \{\s*processingAgentStatusFiles\.delete\(normalizedStatusFilePath\)/);
 });
 
+test('project sentinel records every registered project without continuation input interruptions', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const setupStart = source.indexOf('function setupFileSentinelWatcher(');
+  const setupEnd = source.indexOf('\nexport function deactivate()', setupStart);
+  const setupBody = source.slice(setupStart, setupEnd);
+  const processStart = source.indexOf('async function processAgentStatusFile(');
+  const processEnd = source.indexOf('\n/**\n * Sets up watcher plus polling fallback', processStart);
+  const processBody = source.slice(processStart, processEnd);
+
+  assert.match(setupBody, /getProjects\(extensionContextRef\)\.map\(\(project\) => project\.path\)/);
+  assert.match(setupBody, /for \(const projectPath of new Set\(projectPaths\)\)/);
+  assert.doesNotMatch(processBody, /statusWorkspaceRoot !== activeProjectRoot/);
+  assert.match(processBody, /statusSyncEngine = new SyncEngine/);
+  assert.doesNotMatch(source, /showInformationMessage\(['"]Continuation conversation was recorded\./);
+});
+
 test('sidebar local project refresh keeps reusable signal enrichment without external data loads', () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
