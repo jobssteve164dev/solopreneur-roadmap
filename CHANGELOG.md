@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.366 - 2026-07-22
+
+### Fixed
+- replace project status scan with active ledger (969060d)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.365 - 2026-07-22
 
 ### Fixed
