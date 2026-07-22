@@ -16,6 +16,7 @@ import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { getAgentImpactStatusFromDatabase, buildAgentImpactSummary } from './agentImpact';
+import { buildAgentCliUpgradePrompt } from './agentCliUpgrade';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
@@ -751,6 +752,7 @@ async function handleSharedWebviewAction(
       vscode.window.showInformationMessage('SoloMap settings saved successfully!');
       await broadcastSettings(context);
     },
+    'agent.upgradeAll': async () => handleUpgradeAllAgentClis(context),
     'entitlement.login': async () => {
       await handleManageProAuthorization(context, 'login');
       await broadcastSettings(context);
@@ -4772,6 +4774,69 @@ function postEnhancementInstallResult(context: vscode.ExtensionContext, success:
   activePanel?.webview.postMessage({ command: 'enhancementInstallResult', success, message, settings });
   sidebarProvider?.postEnhancementInstallResult(success, message);
   vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+}
+
+function postAgentCliUpgradeResult(success: boolean, message: string, pending = false): void {
+  activePanel?.webview.postMessage({ command: 'agentCliUpgradeResult', success, message, pending });
+  sidebarProvider?.postAgentCliUpgradeResult(success, message, pending);
+}
+
+async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Promise<void> {
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = (settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  if (!commandExists(agentCli)) {
+    const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
+    const message = `Agent CLI not found. Tried: ${candidates}.`;
+    vscode.window.showErrorMessage(message);
+    postAgentCliUpgradeResult(false, message);
+    return;
+  }
+
+  const runId = `agent-cli-upgrade-${Date.now()}`;
+  const runDir = path.join(normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath), 'runs', runId);
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const outputFilePath = path.join(runDir, 'output.log');
+  const resultFilePath = path.join(runDir, 'result.json');
+  const runScriptPath = path.join(runDir, 'run.sh');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(promptFilePath, buildAgentCliUpgradePrompt(resultFilePath), 'utf8');
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode);
+  const script = [
+    `cd ${shellQuote(workspaceRoot)}`,
+    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
+    'export DISABLE_TELEMETRY=1',
+    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`
+  ].join('; ');
+  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
+
+  const terminal = createAgentTerminal(workspaceRoot, `cli-upgrade-${runId.slice(-6)}`);
+  terminal.show(true);
+  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  postAgentCliUpgradeResult(true, 'Agent 已开始检查并升级所有已安装的 Agent CLI，进度可在终端中查看。', true);
+
+  const startedAt = Date.now();
+  const poller = setInterval(() => {
+    if (!fs.existsSync(resultFilePath)) {
+      if (Date.now() - startedAt > 30 * 60 * 1000) {
+        clearInterval(poller);
+        postAgentCliUpgradeResult(false, '升级仍未返回结果，请查看 Agent 终端中的执行信息。');
+      }
+      return;
+    }
+    clearInterval(poller);
+    try {
+      const result = JSON.parse(fs.readFileSync(resultFilePath, 'utf8')) as { success?: boolean; message?: string };
+      const success = result.success === true;
+      const message = String(result.message || (success ? '所有已安装的 Agent CLI 已完成检查和升级。' : '部分 Agent CLI 升级未完成，请查看终端。'));
+      postAgentCliUpgradeResult(success, message);
+      if (success) vscode.window.showInformationMessage(message);
+      else vscode.window.showWarningMessage(message);
+    } catch (error) {
+      postAgentCliUpgradeResult(false, `无法读取升级结果：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, 2000);
 }
 
 async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSkillInput: string): Promise<void> {

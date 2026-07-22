@@ -8,6 +8,16 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 
+test('Agent CLI upgrade action delegates every installed CLI to the Agent', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'agentCliUpgrade.ts'), 'utf8');
+  assert.match(source, /Upgrade every Agent CLI currently installed/);
+  assert.match(source, /Do not install CLIs that are not already installed/);
+  assert.match(source, /do it last/);
+  const webview = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarWebview.ts'), 'utf8');
+  assert.match(webview, /id="btn-upgrade-agent-clis"/);
+  assert.match(webview, /command: 'agent\.upgradeAll'/);
+});
+
 function createUri(value) {
   return {
     fsPath: value,

@@ -273,6 +273,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  public postAgentCliUpgradeResult(success: boolean, message: string, pending = false) {
+    this._view?.webview.postMessage({ command: 'agentCliUpgradeResult', success, message, pending });
+  }
+
   public sendProjects() {
     try {
       if (!this._view) {

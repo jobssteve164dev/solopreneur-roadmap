@@ -3664,6 +3664,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           <span class="dependency-status" id="dependency-github-status">Check</span>
         </div>
         <div class="dependency-actions">
+          <button class="dependency-action-btn" id="btn-upgrade-agent-clis"><span class="codicon codicon-arrow-circle-up"></span><span id="text-upgrade-agent-clis">Upgrade all</span></button>
           <button class="dependency-action-btn" id="btn-open-agent-install"><span class="codicon codicon-cloud-download"></span><span id="text-open-agent-install">Install</span></button>
           <button class="dependency-action-btn" id="btn-prepare-agent-automation"><span class="codicon codicon-shield"></span><span id="text-prepare-agent-automation">Prepare</span></button>
           <button class="dependency-action-btn" id="btn-open-agent-check"><span class="codicon codicon-terminal"></span><span id="text-open-agent-check">Agent</span></button>
@@ -3773,6 +3774,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnCheckDependencies = document.getElementById('btn-check-dependencies');
     const dependencyPanel = document.getElementById('dependency-panel');
     const btnOpenAgentInstall = document.getElementById('btn-open-agent-install');
+    const btnUpgradeAgentClis = document.getElementById('btn-upgrade-agent-clis');
     const btnPrepareAgentAutomation = document.getElementById('btn-prepare-agent-automation');
     const btnOpenAgentCheck = document.getElementById('btn-open-agent-check');
     const btnOpenGithubAuth = document.getElementById('btn-open-github-auth');
@@ -4024,6 +4026,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionInstructions: '默认指令',
         settingsSectionAbilities: '能力扩展',
         settingsSectionReadiness: '本地状态',
+        upgradeAgentClis: '升级全部 Agent CLI',
+        upgradingAgentClis: 'Agent 正在升级已安装的 Agent CLI...',
         settingsSectionAutomation: '自动化任务',
         focusTimerTitle: '专注提醒',
         focusTimerMinutes: '专注分钟',
@@ -4384,6 +4388,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionInstructions: 'Instructions',
         settingsSectionAbilities: 'Abilities',
         settingsSectionReadiness: 'Readiness',
+        upgradeAgentClis: 'Upgrade all Agent CLIs',
+        upgradingAgentClis: 'Agent is upgrading installed Agent CLIs...',
         settingsSectionAutomation: 'Automation Tasks',
         focusTimerTitle: 'Focus Timer',
         focusTimerMinutes: 'Focus minutes',
@@ -4843,6 +4849,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('dependency-github-name', t('dependencyGithub'));
       setText('text-check-dependencies', t('checkDependencies'));
       setText('text-open-agent-install', t('openAgentInstall'));
+      setText('text-upgrade-agent-clis', t('upgradeAgentClis'));
       setText('text-prepare-agent-automation', t('prepareAgentAutomation'));
       setText('text-open-agent-check', t('openAgentCheck'));
       setText('text-open-github-auth', t('openGithubAuth'));
@@ -5937,6 +5944,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderDependencyStatus(message.status || {});
           break;
 
+        case 'agentCliUpgradeResult':
+          cliTestBadge.style.display = 'block';
+          cliTestBadge.className = message.pending ? 'cli-badge' : (message.success ? 'cli-badge success' : 'cli-badge error');
+          cliTestBadge.textContent = message.message || '';
+          if (message.success && !message.pending) requestDependencyCheck();
+          break;
+
         case 'agentImpactLoaded':
           renderAgentImpact(message.status || {});
           break;
@@ -6173,6 +6187,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         cliPath: getEffectiveSettingCliPath()
       });
     });
+
+    if (btnUpgradeAgentClis) {
+      btnUpgradeAgentClis.addEventListener('click', () => {
+        cliTestBadge.style.display = 'block';
+        cliTestBadge.className = 'cli-badge';
+        cliTestBadge.textContent = t('upgradingAgentClis');
+        vscode.postMessage({ command: 'agent.upgradeAll' });
+      });
+    }
 
     if (btnPrepareAgentAutomation) {
       btnPrepareAgentAutomation.addEventListener('click', () => {
