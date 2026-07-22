@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.365 - 2026-07-22
+
+### Fixed
+- reduce sentinel fallback polling (558e58c)
+- bound sentinel polling resources (8140e6e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.364 - 2026-07-22
 
 ### Changed
