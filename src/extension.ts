@@ -7754,7 +7754,7 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
           }
         }
       }
-    }, 5000);
+    }, 30_000);
   }
   handleSentinelChange();
 }

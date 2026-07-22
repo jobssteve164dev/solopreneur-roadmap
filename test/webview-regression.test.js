@@ -2527,7 +2527,7 @@ test('project sentinel records every registered project without continuation inp
   assert.match(setupBody, /getProjects\(extensionContextRef\)\.map\(\(project\) => project\.path\)/);
   assert.match(setupBody, /for \(const projectPath of new Set\(projectPaths\)\)/);
   assert.match(setupBody, /isPendingAgentStatusFile\(statusFilePath\)/);
-  assert.match(setupBody, /}, 5000\)/);
+  assert.match(setupBody, /}, 30_000\)/);
   assert.doesNotMatch(processBody, /statusWorkspaceRoot !== activeProjectRoot/);
   assert.match(processBody, /transientStatusSyncEngine = new SyncEngine/);
   assert.match(processBody, /transientStatusSyncEngine\?\.close\(\)/);
