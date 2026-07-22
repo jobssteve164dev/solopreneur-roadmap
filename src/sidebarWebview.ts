@@ -209,7 +209,31 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     .focus-timer-card {
       display: flex;
       flex-direction: column;
+      gap: 12px;
+    }
+
+    .time-section-card {
+      display: flex;
+      flex-direction: column;
       gap: 10px;
+      padding: 11px;
+      border: 1px solid rgba(255, 255, 255, 0.11);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.035);
+    }
+
+    .time-section-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-main);
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1.3;
+    }
+
+    .time-section-title .codicon {
+      color: #00e5ff;
     }
 
     .focus-timer-status {
@@ -355,21 +379,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     .scheduled-task-panel {
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
-      margin-top: 10px;
-      padding-top: 10px;
       display: flex;
       flex-direction: column;
       gap: 8px;
     }
 
     .agent-time-planner {
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
-      margin-top: 10px;
-      padding-top: 10px;
       display: flex;
       flex-direction: column;
-      gap: 7px;
+      gap: 8px;
     }
 
     .agent-time-planner-label {
@@ -449,9 +467,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      font-size: 10.5px;
+      font-size: 11px;
       font-weight: 800;
       color: var(--text-main);
+    }
+
+    .scheduled-task-head > span:first-child {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
     }
 
     .scheduled-task-list {
@@ -521,6 +545,48 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       font-size: 10.5px;
       line-height: 1.35;
       min-width: 0;
+    }
+
+    @media (max-width: 360px) {
+      .focus-timer-overlay {
+        left: 6px;
+        right: 6px;
+        padding: 10px;
+      }
+
+      .focus-timer-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .focus-timer-row label {
+        grid-column: 1 / -1;
+      }
+
+      .focus-timer-row .settings-action-btn,
+      .agent-time-planner-compose .settings-action-btn {
+        width: 100%;
+        justify-content: center;
+      }
+
+      .scheduled-task-add {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .scheduled-task-top {
+        grid-template-columns: minmax(0, 1fr) auto auto;
+      }
+
+      .scheduled-task-top [data-scheduled-title] {
+        grid-column: 1 / -1;
+      }
+
+      .time-plan-draft-item {
+        grid-template-columns: 42px minmax(0, 1fr);
+      }
+
+      .time-plan-draft-owner {
+        grid-column: 2;
+      }
     }
 
     .enhancement-list {
@@ -3375,24 +3441,27 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
   <div class="focus-timer-overlay" id="focus-timer-panel">
     <div class="settings-header">
       <h3><span class="codicon codicon-clock"></span> <span id="focus-timer-title">Focus Timer</span></h3>
-      <button class="btn-close-settings" id="btn-close-focus-timer"><span class="codicon codicon-close"></span></button>
+      <button class="btn-close-settings" id="btn-close-focus-timer" aria-label="Close time plan"><span class="codicon codicon-close"></span></button>
     </div>
     <div class="focus-timer-card">
-      <div class="focus-timer-status">
-        <span class="focus-timer-countdown" id="focus-timer-countdown">--:--</span>
-        <span class="focus-timer-state" id="focus-timer-state">Not started</span>
-      </div>
-      <div class="focus-timer-row">
-        <label class="settings-lbl-title">
-          <span id="label-focus-timer-minutes">Focus minutes</span>
-          <input type="number" class="settings-input" id="focus-timer-minutes" min="1" max="240" value="25">
-        </label>
-        <button class="settings-action-btn save-btn" id="btn-start-focus-timer"><span class="codicon codicon-play"></span><span id="text-start-focus-timer">Start</span></button>
-        <button class="settings-action-btn test-btn" id="btn-stop-focus-timer"><span class="codicon codicon-debug-stop"></span><span id="text-stop-focus-timer">Stop</span></button>
-      </div>
-      <div class="scheduled-task-panel">
+      <section class="time-section-card" aria-labelledby="focus-section-title">
+        <div class="time-section-title"><span class="codicon codicon-target"></span><span id="focus-section-title">Focus</span></div>
+        <div class="focus-timer-status">
+          <span class="focus-timer-countdown" id="focus-timer-countdown">--:--</span>
+          <span class="focus-timer-state" id="focus-timer-state">Not started</span>
+        </div>
+        <div class="focus-timer-row">
+          <label class="settings-lbl-title">
+            <span id="label-focus-timer-minutes">Focus minutes</span>
+            <input type="number" class="settings-input" id="focus-timer-minutes" min="1" max="240" value="25">
+          </label>
+          <button class="settings-action-btn save-btn" id="btn-start-focus-timer"><span class="codicon codicon-play"></span><span id="text-start-focus-timer">Start</span></button>
+          <button class="settings-action-btn test-btn" id="btn-stop-focus-timer"><span class="codicon codicon-debug-stop"></span><span id="text-stop-focus-timer">Stop</span></button>
+        </div>
+      </section>
+      <section class="time-section-card scheduled-task-panel" aria-labelledby="scheduled-tasks-title">
         <div class="scheduled-task-head">
-          <span id="scheduled-tasks-title">Scheduled tasks</span>
+          <span><span class="codicon codicon-calendar"></span><span id="scheduled-tasks-title">Scheduled tasks</span></span>
           <span class="automation-summary-line" id="scheduled-tasks-next"></span>
         </div>
         <div class="scheduled-task-target" id="scheduled-tasks-target"></div>
@@ -3403,16 +3472,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         </div>
         <textarea class="settings-input settings-textarea" id="scheduled-task-prompt-input" rows="2" placeholder="Prompt to send at this time..."></textarea>
         <button class="settings-action-btn save-btn" id="btn-add-scheduled-task"><span class="codicon codicon-add"></span><span id="text-add-scheduled-task">Add scheduled task</span></button>
-      </div>
-      <div class="agent-time-planner">
+      </section>
+      <section class="time-section-card agent-time-planner" aria-labelledby="agent-time-planner-title">
+        <div class="time-section-title"><span class="codicon codicon-sparkle"></span><span id="agent-time-planner-title">Let Agent arrange it</span></div>
         <div class="time-plan-draft" id="time-plan-draft"></div>
-        <label class="agent-time-planner-label" id="agent-time-planner-label" for="agent-time-planner-input">Let Agent arrange it</label>
         <div class="agent-time-planner-compose">
-          <input type="text" class="settings-input" id="agent-time-planner-input" placeholder="For example: finish the login fix before 5 PM">
+          <input type="text" class="settings-input" id="agent-time-planner-input" aria-labelledby="agent-time-planner-title" placeholder="For example: finish the login fix before 5 PM">
           <button class="settings-action-btn save-btn" id="btn-agent-time-planner"><span class="codicon codicon-sparkle"></span><span id="text-agent-time-planner">Let Agent arrange it</span></button>
         </div>
         <div class="agent-time-planner-help" id="agent-time-planner-help">Agent will propose a plan for your confirmation first.</div>
-      </div>
+      </section>
     </div>
   </div>
 
@@ -4124,6 +4193,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         upgradingAgentClis: 'Agent 正在升级已安装的 Agent CLI...',
         settingsSectionAutomation: '自动化任务',
         focusTimerTitle: '时间安排',
+        focusSectionTitle: '专注时间',
+        closeTimePlan: '关闭时间安排',
         focusTimerMinutes: '专注分钟',
         focusTimerStart: '开始',
         focusTimerStop: '关闭',
@@ -4497,6 +4568,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         upgradingAgentClis: 'Agent is upgrading installed Agent CLIs...',
         settingsSectionAutomation: 'Automation Tasks',
         focusTimerTitle: 'Time plan',
+        focusSectionTitle: 'Focus time',
+        closeTimePlan: 'Close time plan',
         focusTimerMinutes: 'Focus minutes',
         focusTimerStart: 'Start',
         focusTimerStop: 'Stop',
@@ -4888,9 +4961,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('portfolio-title', t('portfolioTitle'));
       btnToggleSettings.title = t('settingsTitle');
       if (btnToggleFocusTimer) btnToggleFocusTimer.title = t('focusTimerTitle');
+      if (btnCloseFocusTimer) {
+        btnCloseFocusTimer.title = t('closeTimePlan');
+        btnCloseFocusTimer.setAttribute('aria-label', t('closeTimePlan'));
+      }
       if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
       btnAddProject.title = t('chooseProject');
       setText('focus-timer-title', t('focusTimerTitle'));
+      setText('focus-section-title', t('focusSectionTitle'));
       setText('label-focus-timer-minutes', t('focusTimerMinutes'));
       setText('text-start-focus-timer', t('focusTimerStart'));
       setText('text-stop-focus-timer', t('focusTimerStop'));
@@ -4898,7 +4976,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('text-add-scheduled-task', t('addScheduledTask'));
       if (scheduledTaskTitleInput) scheduledTaskTitleInput.placeholder = t('scheduledTaskNamePlaceholder');
       if (scheduledTaskPromptInput) scheduledTaskPromptInput.placeholder = t('scheduledTaskPromptPlaceholder');
-      setText('agent-time-planner-label', t('agentTimePlannerLabel'));
+      setText('agent-time-planner-title', t('agentTimePlannerLabel'));
       setText('agent-time-planner-help', t('agentTimePlannerHelp'));
       setText('text-agent-time-planner', t('agentTimePlannerAction'));
       if (agentTimePlannerInput) agentTimePlannerInput.placeholder = t('agentTimePlannerPlaceholder');

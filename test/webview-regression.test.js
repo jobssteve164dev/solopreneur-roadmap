@@ -29,6 +29,12 @@ test('time plan panel delegates an optional request through the structured time-
   assert.match(webview, /timePlanConfirm: '确认采用'/);
   assert.match(webview, /timePlanConfirm: 'Confirm plan'/);
   assert.match(webview, /agent-time-planner-compose/);
+  assert.equal((webview.match(/<section class="time-section-card/g) || []).length, 3);
+  assert.match(webview, /id="focus-section-title"/);
+  assert.match(webview, /class="time-section-card scheduled-task-panel"/);
+  assert.match(webview, /class="time-section-card agent-time-planner"/);
+  assert.match(webview, /@media \(max-width: 360px\)/);
+  assert.match(webview, /closeTimePlan: 'Close time plan'/);
 });
 
 test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
