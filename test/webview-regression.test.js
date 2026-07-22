@@ -2512,7 +2512,7 @@ test('closing the roadmap panel keeps the project sentinel alive for sidebar sta
   assert.doesNotMatch(disposeBody, /watcher\.dispose|clearInterval\(statusPoller\)/);
   assert.match(source, /const processingAgentStatusFiles = new Set<string>\(\)/);
   assert.match(source, /processingAgentStatusFiles\.has\(normalizedStatusFilePath\)/);
-  assert.match(source, /finally \{\s*processingAgentStatusFiles\.delete\(normalizedStatusFilePath\)/);
+  assert.match(source, /finally \{[\s\S]*processingAgentStatusFiles\.delete\(normalizedStatusFilePath\)/);
 });
 
 test('project sentinel records every registered project without continuation input interruptions', () => {
@@ -2526,8 +2526,15 @@ test('project sentinel records every registered project without continuation inp
 
   assert.match(setupBody, /getProjects\(extensionContextRef\)\.map\(\(project\) => project\.path\)/);
   assert.match(setupBody, /for \(const projectPath of new Set\(projectPaths\)\)/);
+  assert.match(setupBody, /isPendingAgentStatusFile\(statusFilePath\)/);
+  assert.match(setupBody, /}, 5000\)/);
   assert.doesNotMatch(processBody, /statusWorkspaceRoot !== activeProjectRoot/);
-  assert.match(processBody, /statusSyncEngine = new SyncEngine/);
+  assert.match(processBody, /transientStatusSyncEngine = new SyncEngine/);
+  assert.match(processBody, /transientStatusSyncEngine\?\.close\(\)/);
+  assert.ok(
+    processBody.indexOf("status === 'Running' || status === 'Processed'") < processBody.indexOf('new SyncEngine('),
+    'terminal status validation must happen before opening a background project database'
+  );
   assert.doesNotMatch(source, /showInformationMessage\(['"]Continuation conversation was recorded\./);
 });
 

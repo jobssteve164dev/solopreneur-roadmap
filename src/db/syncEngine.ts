@@ -50,6 +50,10 @@ export class SyncEngine {
     }
   }
 
+  public close(): void {
+    this.sqliteStore.close();
+  }
+
   /**
    * Retrieves nodes. Reads from SQLite (very fast).
    */

@@ -7110,6 +7110,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   }
 
   processingAgentStatusFiles.add(normalizedStatusFilePath);
+  let transientStatusSyncEngine: SyncEngine | null = null;
   try {
     const fileContent = fs.readFileSync(normalizedStatusFilePath, 'utf8').trim();
     if (!fileContent) {
@@ -7120,26 +7121,30 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const statusWorkspaceRoot = String(inferWorkspaceRootFromStatusFilePath(normalizedStatusFilePath) || statusData.workspaceRoot || '').trim();
     const workspaceRoot = statusWorkspaceRoot || activeProjectRoot || '';
     const isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine);
-    let statusSyncEngine = isActiveProject ? syncEngine : null;
-    if (!statusSyncEngine && workspaceRoot && extensionContextRef) {
-      const solopreneurDir = path.join(workspaceRoot, '.solopreneur');
-      statusSyncEngine = new SyncEngine(
-        path.join(solopreneurDir, 'roadmap.csv'),
-        path.join(solopreneurDir, 'project_journal.db'),
-        extensionContextRef.extensionPath
-      );
-      await statusSyncEngine.initAndSync();
-    }
     if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
-      if (!isActiveProject) {
-        return;
+      if (isActiveProject) {
+        await processFlowStatusFile(normalizedStatusFilePath, statusData);
       }
-      await processFlowStatusFile(normalizedStatusFilePath, statusData);
       return;
     }
     const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId } = statusData;
 
-    if (!nodeId || !status || status === 'Running' || status === 'Processed' || !statusSyncEngine) {
+    if (!nodeId || !status || status === 'Running' || status === 'Processed') {
+      return;
+    }
+    let statusSyncEngine = isActiveProject ? syncEngine : null;
+    if (!statusSyncEngine && workspaceRoot && extensionContextRef) {
+      const solopreneurDir = path.join(workspaceRoot, '.solopreneur');
+      transientStatusSyncEngine = new SyncEngine(
+        path.join(solopreneurDir, 'roadmap.csv'),
+        path.join(solopreneurDir, 'project_journal.db'),
+        extensionContextRef.extensionPath
+      );
+      statusSyncEngine = transientStatusSyncEngine;
+      await statusSyncEngine.initAndSync();
+    }
+
+    if (!statusSyncEngine) {
       return;
     }
 
@@ -7705,8 +7710,18 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   } catch (e) {
     // JSON might be partially written; watcher or poller will retry.
   } finally {
-    processingAgentStatusFiles.delete(normalizedStatusFilePath);
+    try {
+      transientStatusSyncEngine?.close();
+    } finally {
+      processingAgentStatusFiles.delete(normalizedStatusFilePath);
+    }
   }
+}
+
+function isPendingAgentStatusFile(statusFilePath: string): boolean {
+  const statusData = readAgentStatus(statusFilePath);
+  const status = String(statusData?.status || '');
+  return Boolean(statusData?.nodeId && status && status !== 'Running' && status !== 'Processed');
 }
 
 /**
@@ -7734,10 +7749,12 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
         : [workspaceRoot];
       for (const projectPath of new Set(projectPaths)) {
         for (const statusFilePath of getAgentStatusFilePaths(projectPath)) {
-          void processAgentStatusFile(statusFilePath);
+          if (isPendingAgentStatusFile(statusFilePath)) {
+            void processAgentStatusFile(statusFilePath);
+          }
         }
       }
-    }, 2000);
+    }, 5000);
   }
   handleSentinelChange();
 }
@@ -7751,5 +7768,6 @@ export function deactivate() {
   }
   if (statusPoller) {
     clearInterval(statusPoller);
+    statusPoller = null;
   }
 }
