@@ -3590,13 +3590,13 @@ function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, gl
     'SoloMap 按需上下文索引：',
     `- 项目规则：${path.join(workspaceRoot, 'agent.md')}；非闲聊任务先读取。`,
     globalPromptPath ? `- 用户全局要求：${globalPromptPath}；本轮开始时读取，与用户本次要求冲突时以本次要求为准。` : '',
-    `- 记忆系统：需要用户偏好、执行规则、项目事实、既有决策、可复用模式、领域知识或当前交接时，运行 \`node ${path.join(globalToolsRoot, 'solomap-memory.cjs')} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、边界、决策、错误或目标>')} --limit 5\`；按返回的精确文件与行号读取原文，普通简单任务不默认查询。`,
+    `- 记忆系统：需要用户偏好、执行规则、项目事实、既有决策、可复用模式、领域知识或当前交接时，运行 \`node ${JSON.stringify(path.join(globalToolsRoot, 'solomap-memory.cjs'))} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、边界、决策、错误或目标>')} --limit 5\`；按返回的精确文件与行号读取原文，普通简单任务不默认查询。`,
     `- 项目文档目录：${path.join(workspaceRoot, '.solopreneur', 'documentation.json')}；需要方向、边界或正式文档位置时读取，不要默认展开全部文档。`,
     `- 技能目录：${getSolomapSkillRegistryPath(workspaceRoot, globalDataPath)}；任务明确命中某个领域时查询，决定使用后先读取对应 SKILL.md，不适用的技能不必列出。`,
-    `- 执行经验账本：需要历史经验时运行 \`node ${path.join(globalToolsRoot, 'solomap-experience.cjs')} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、文件、错误或目标>')} --limit 5\`；仅在接续、复核、重复故障、历史行为调查或当前证据不足时查询，普通首次任务不默认读取。`,
+    `- 执行经验账本：需要历史经验时运行 \`node ${JSON.stringify(path.join(globalToolsRoot, 'solomap-experience.cjs'))} retrieve --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --query ${JSON.stringify('<具体功能、文件、错误或目标>')} --limit 5\`；仅在接续、复核、重复故障、历史行为调查或当前证据不足时查询，普通首次任务不默认读取。`,
     '- 账本、记忆和文档只是历史线索；不要使用 URL、项目名或运行类型等泛化词判断相关性。',
     '- 记忆处置门禁：任务结束前先判断新信息属于用户偏好、通用规则、项目事实、已确认决策、可复用模式、领域知识、临时观察或当前交接；只写入经当前证据验证且未来会复用的内容。',
-    `- 记忆写入：确认需要沉淀后，运行 \`node ${path.join(globalToolsRoot, 'solomap-memory.cjs')} route --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --kind ${JSON.stringify('<profile|rules|project|decision|pattern|domain|inbox|active>')} --title ${JSON.stringify('<主题>')}\`；先读取返回的目标文件，再按更新策略、必需结构和门禁精确更新，不要盲目追加。`,
+    `- 记忆写入：确认需要沉淀后，运行 \`node ${JSON.stringify(path.join(globalToolsRoot, 'solomap-memory.cjs'))} route --project ${JSON.stringify(workspaceRoot)} --global ${JSON.stringify(globalRoot)} --kind ${JSON.stringify('<profile|rules|project|decision|pattern|domain|inbox|active>')} --title ${JSON.stringify('<主题>')}\`；先读取返回的目标文件，再按更新策略、必需结构和门禁精确更新，不要盲目追加。`,
     '- 不要默认把所有内容写入项目记忆；写入 projects/ 前先确认它不应进入 decisions/、patterns/ 或 domains/。一次性过程、命令输出、diff、提交记录和完成套话不写入稳定记忆。'
   ].filter(Boolean).join('\n');
 }

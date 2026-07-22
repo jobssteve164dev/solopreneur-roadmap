@@ -828,7 +828,6 @@ function ensureSolomapGlobalTools(globalRoot: string): void {
   ['solomap-memory.cjs', 'solomap-experience.cjs'].forEach((fileName) => {
     const targetPath = path.join(toolsRoot, fileName);
     copyBundledFile(path.join(bundledToolsRoot, fileName), targetPath);
-    fs.chmodSync(targetPath, 0o755);
   });
   ['package.json', path.join('dist', 'sql-wasm.js'), path.join('dist', 'sql-wasm.wasm')].forEach((relativePath) => {
     copyBundledFile(

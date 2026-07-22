@@ -5732,7 +5732,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(revisionPrompt, /\/workspace\/\.solomap-global\/memory/);
 
   const soloPromptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-prompt-'));
-  const soloGlobalRoot = path.join(soloPromptRoot, '.solomap-global');
+  const soloGlobalRoot = path.join(soloPromptRoot, 'shared global', '.solomap-global');
   const soloPrompt = extensionModule.__buildSoloConversationPrompt(
     '帮我判断这个文案方向。',
     soloPromptRoot,
@@ -5755,6 +5755,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(soloPrompt, /记忆系统：.*solomap-memory\.cjs.*retrieve.*--query.*--limit 5/);
   assert.match(soloPrompt, new RegExp(path.join(soloGlobalRoot, 'tools', 'solomap-memory.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(soloPrompt, new RegExp(path.join(soloGlobalRoot, 'tools', 'solomap-experience.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(soloPrompt, /node "[^"]*shared global[^"]*solomap-memory\.cjs" retrieve/);
+  assert.match(soloPrompt, /node "[^"]*shared global[^"]*solomap-experience\.cjs" retrieve/);
   assert.doesNotMatch(soloPrompt, new RegExp(path.join(soloPromptRoot, 'resources', 'tools').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(soloPrompt, /按返回的精确文件与行号读取原文/);
   assert.match(soloPrompt, /普通简单任务不默认查询/);
@@ -5944,10 +5946,11 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(experiencePrompt, /建议先看/);
   assert.match(experiencePrompt, /npm test passed/);
   assert.doesNotMatch(experiencePrompt, /RAW_LOG_SHOULD_NOT_APPEAR/);
-  const crossAgentGlobalRoot = path.join(digestRoot, 'shared-global');
+  const crossAgentGlobalRoot = path.join(digestRoot, 'shared global');
   const crossAgentInstructions = extensionModule.__buildCrossAgentHandoffInstructions(digestRoot, '2', 'step', crossAgentGlobalRoot);
-  assert.match(crossAgentInstructions, /solomap-experience\.cjs handoff/);
+  assert.match(crossAgentInstructions, /solomap-experience\.cjs" handoff/);
   assert.match(crossAgentInstructions, new RegExp(path.join(crossAgentGlobalRoot, '.solomap-global', 'tools', 'solomap-experience.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(crossAgentInstructions, /node "[^"]*shared global[^"]*solomap-experience\.cjs" handoff/);
   assert.doesNotMatch(crossAgentInstructions, /resources[\\/]tools[\\/]solomap-experience\.cjs/);
   assert.match(crossAgentInstructions, /solomap-cross-agent-handoff\/SKILL\.md/);
 
