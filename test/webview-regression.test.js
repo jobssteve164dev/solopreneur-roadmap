@@ -25,12 +25,16 @@ test('time plan panel delegates an optional request through the structured time-
   assert.match(webview, /command: 'timePlan\.generate'/);
   assert.match(webview, /command: 'timePlan\.get'/);
   assert.match(webview, /case 'timePlansLoaded'/);
-  assert.match(webview, /projectName \+ ' · '/);
+  assert.match(webview, /command: 'timePlan\.confirm'/);
+  assert.match(webview, /timePlanConfirm: '确认采用'/);
+  assert.match(webview, /timePlanConfirm: 'Confirm plan'/);
+  assert.match(webview, /agent-time-planner-compose/);
 });
 
 test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'timePlan.ts'), 'utf8');
   assert.match(source, /validateTimePlanValue/);
+  assert.match(source, /confirmTimePlan/);
   assert.match(source, /validate-time-plan\.cjs/);
   assert.match(source, /assignee.*user.*agent/s);
   assert.match(source, /时间重叠/);

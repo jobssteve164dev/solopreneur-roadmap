@@ -14,8 +14,9 @@ export interface TimePlanItem {
 
 export interface TimePlanDraft {
   version: 1;
-  status: 'draft';
+  status: 'draft' | 'confirmed';
   generatedAt: string;
+  confirmedAt?: string;
   request: string;
   items: TimePlanItem[];
 }
@@ -35,8 +36,8 @@ export function validateTimePlanValue(value: unknown): TimePlanResult {
     return { valid: false, plan: null, reason: '时间安排必须是 JSON 对象。' };
   }
   const source = value as Record<string, unknown>;
-  if (source.version !== 1 || source.status !== 'draft') {
-    return { valid: false, plan: null, reason: 'version 必须为 1，status 必须为 draft。' };
+  if (source.version !== 1 || !['draft', 'confirmed'].includes(String(source.status || ''))) {
+    return { valid: false, plan: null, reason: 'version 必须为 1，status 必须为 draft 或 confirmed。' };
   }
   const generatedAt = String(source.generatedAt || '');
   if (!generatedAt || !Number.isFinite(Date.parse(generatedAt))) {
@@ -88,8 +89,9 @@ export function validateTimePlanValue(value: unknown): TimePlanResult {
     reason: '',
     plan: {
       version: 1,
-      status: 'draft',
+      status: source.status as 'draft' | 'confirmed',
       generatedAt,
+      confirmedAt: String(source.confirmedAt || '').trim() || undefined,
       request: String(source.request || '').trim(),
       items
     }
@@ -108,6 +110,21 @@ export function readTimePlan(projectPath: string): TimePlanResult {
   }
 }
 
+export function confirmTimePlan(projectPath: string): TimePlanResult {
+  const result = readTimePlan(projectPath);
+  if (!result.valid || !result.plan) return result;
+  const confirmed: TimePlanDraft = {
+    ...result.plan,
+    status: 'confirmed',
+    confirmedAt: new Date().toISOString()
+  };
+  const filePath = getTimePlanPath(projectPath);
+  const temporaryPath = `${filePath}.confirming`;
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(confirmed, null, 2)}\n`, 'utf8');
+  fs.renameSync(temporaryPath, filePath);
+  return validateTimePlanValue(confirmed);
+}
+
 export function buildTimePlanValidationScript(): string {
   return `#!/usr/bin/env node
 const fs = require('fs');
@@ -118,7 +135,7 @@ if (!fs.existsSync(filePath)) fail('未找到 .solopreneur/time-plan.json。');
 let plan;
 try { plan = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) { fail('JSON 无法解析：' + error.message); }
 if (!plan || Array.isArray(plan) || typeof plan !== 'object') fail('根节点必须是 JSON 对象。');
-if (plan.version !== 1 || plan.status !== 'draft') fail('version 必须为 1，status 必须为 draft。');
+if (plan.version !== 1 || plan.status !== 'draft') fail('Agent 生成时 version 必须为 1，status 必须为 draft。');
 if (!plan.generatedAt || !Number.isFinite(Date.parse(plan.generatedAt))) fail('generatedAt 必须是有效的 ISO 时间。');
 if (!Array.isArray(plan.items) || plan.items.length < 1 || plan.items.length > 12) fail('items 必须包含 1 到 12 项安排。');
 const ids = new Set();

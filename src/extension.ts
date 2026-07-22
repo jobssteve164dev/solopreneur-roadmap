@@ -15,7 +15,7 @@ import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
-import { ensureTimePlanValidationScript, readTimePlan } from './timePlan';
+import { confirmTimePlan, ensureTimePlanValidationScript, readTimePlan } from './timePlan';
 import { getAgentImpactStatusFromDatabase, buildAgentImpactSummary } from './agentImpact';
 import { buildAgentCliUpgradePrompt } from './agentCliUpgrade';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
@@ -576,10 +576,17 @@ async function handleSharedWebviewAction(
         context,
         String(request.requirements || ''),
         String(request.agentCli || ''),
-        String(request.model || '')
+        String(request.model || ''),
+        String(request.language || 'zh')
       );
     },
     'timePlan.get': async () => {
+      await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
+    },
+    'timePlan.confirm': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) return;
+      confirmTimePlan(projectPath);
       await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
     },
     'conversation.runRoadmapRevision': async (request) => {
@@ -5738,11 +5745,23 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   });
 }
 
-async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = ''): Promise<void> {
+async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = '', language = 'zh'): Promise<void> {
   if (!activeProjectRoot) return;
   ensureTimePlanValidationScript(activeProjectRoot);
-  const userRequirements = requirements.trim() || '优先安排今天最值得推进的工作。';
-  const prompt = [
+  const isEnglish = language === 'en';
+  const userRequirements = requirements.trim() || (isEnglish
+    ? 'Prioritize the most valuable work to move forward today.'
+    : '优先安排今天最值得推进的工作。');
+  const prompt = (isEnglish ? [
+    'Create an actionable time-plan draft from the current state of this project and the user requirements.',
+    `User requirements: ${userRequirements}`,
+    'The only deliverable is `.solopreneur/time-plan.json` in the project. Do not change the roadmap, project code, or other files, and do not start any planned task.',
+    'Use exactly this JSON structure:',
+    '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"user requirements","items":[{"id":"stable unique ID","title":"concise English user-facing task","startAt":"ISO-8601 with timezone","durationMinutes":25,"assignee":"user or agent","prompt":"required execution prompt only when assignee is agent"}]}',
+    'Write every user-facing field in English. Times must be concrete and non-overlapping. Respect task dependencies, reasonable working hours, and stated deadlines. Do not assume the user has a full free day; when information is missing, create a conservative short plan and state the assumptions in the final response.',
+    'After writing the file, run `node .solopreneur/validate-time-plan.cjs`. If validation fails, fix the JSON from the reported errors and rerun until it prints PASS.',
+    'The final response should only say that the draft was generated and validated and is waiting for confirmation in SoloMap.'
+  ] : [
     '请根据当前项目的真实进展和用户补充需求，生成一份可执行的时间安排草案。',
     `用户补充需求：${userRequirements}`,
     '唯一交付物是项目目录下的 `.solopreneur/time-plan.json`。不要修改路线图、项目代码或其他文件，也不要开始执行安排中的任务。',
@@ -5751,7 +5770,7 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
     '时间应具体、互不重叠，并结合当前日期、合理工作时段、任务依赖和用户截止时间；不要凭空假设用户有完整全天可用时间。信息不足时采用保守的短计划，并在最终回复中指出采用的假设。',
     '写入后必须运行 `node .solopreneur/validate-time-plan.cjs`。如果校验失败，按输出修正 JSON 并重新运行，直到出现 PASS 后才结束。',
     '最终回复只需说明草案已生成并通过校验，等待用户在 SoloMap 中确认。'
-  ].join('\n\n');
+  ]).join('\n\n');
   await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel);
 }
 

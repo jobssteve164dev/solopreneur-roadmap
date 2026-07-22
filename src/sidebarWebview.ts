@@ -384,6 +384,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       line-height: 1.35;
     }
 
+    .agent-time-planner-compose {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: center;
+    }
+
+    .agent-time-planner-compose .settings-action-btn {
+      white-space: nowrap;
+    }
+
     .time-plan-draft {
       display: none;
       flex-direction: column;
@@ -401,6 +412,31 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       align-items: baseline;
       font-size: 10px;
       line-height: 1.35;
+    }
+
+    .time-plan-project {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-top: 7px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .time-plan-project:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .time-plan-project-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .time-plan-confirmed {
+      color: var(--vscode-testing-iconPassed, #4caf50);
+      font-size: 9.5px;
     }
 
     .time-plan-draft-time,
@@ -3371,9 +3407,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       <div class="agent-time-planner">
         <div class="time-plan-draft" id="time-plan-draft"></div>
         <label class="agent-time-planner-label" id="agent-time-planner-label" for="agent-time-planner-input">Let Agent arrange it</label>
-        <input type="text" class="settings-input" id="agent-time-planner-input" placeholder="For example: finish the login fix before 5 PM">
+        <div class="agent-time-planner-compose">
+          <input type="text" class="settings-input" id="agent-time-planner-input" placeholder="For example: finish the login fix before 5 PM">
+          <button class="settings-action-btn save-btn" id="btn-agent-time-planner"><span class="codicon codicon-sparkle"></span><span id="text-agent-time-planner">Let Agent arrange it</span></button>
+        </div>
         <div class="agent-time-planner-help" id="agent-time-planner-help">Agent will propose a plan for your confirmation first.</div>
-        <button class="settings-action-btn save-btn" id="btn-agent-time-planner"><span class="codicon codicon-sparkle"></span><span id="text-agent-time-planner">Let Agent arrange it</span></button>
       </div>
     </div>
   </div>
@@ -3845,6 +3883,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const automationScheduledEntryCopy = document.getElementById('automation-scheduled-entry-copy');
     const btnOpenScheduledTasks = document.getElementById('btn-open-scheduled-tasks');
     let focusTimerTick = null;
+    let currentTimePlans = [];
     let currentLanguage = 'zh';
     let currentNodes = [];
     let activeProjectPath = '';
@@ -4111,6 +4150,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         timePlanDraftTitle: 'Agent 安排草案',
         timePlanOwnerUser: '我',
         timePlanOwnerAgent: 'Agent',
+        timePlanConfirm: '确认采用',
+        timePlanConfirmed: '已确认',
         automationTask: '触发点和动作',
         automationFocusMinutes: '专注分钟',
         automationTime: '每天时间',
@@ -4480,6 +4521,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         timePlanDraftTitle: 'Agent draft',
         timePlanOwnerUser: 'Me',
         timePlanOwnerAgent: 'Agent',
+        timePlanConfirm: 'Confirm plan',
+        timePlanConfirmed: 'Confirmed',
         automationTask: 'Trigger and action',
         automationFocusMinutes: 'Focus minutes',
         automationTime: 'Daily time',
@@ -4855,6 +4898,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('agent-time-planner-help', t('agentTimePlannerHelp'));
       setText('text-agent-time-planner', t('agentTimePlannerAction'));
       if (agentTimePlannerInput) agentTimePlannerInput.placeholder = t('agentTimePlannerPlaceholder');
+      renderTimePlanDrafts(currentTimePlans);
       updateScheduledTasksTarget();
       setText('feedback-title', t('feedbackPanelTitle'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
@@ -4994,7 +5038,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         command: 'timePlan.generate',
         projectPath,
         requirements: extraRequest,
-        agentCli: getEffectiveSettingCliPath()
+        agentCli: getEffectiveSettingCliPath(),
+        language: currentLanguage
       });
       if (agentTimePlannerInput) agentTimePlannerInput.value = '';
       focusTimerPanel.style.display = 'none';
@@ -5002,23 +5047,36 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderTimePlanDrafts(plans) {
       if (!timePlanDraft) return;
-      const items = (Array.isArray(plans) ? plans : []).flatMap(entry => {
-        const planItems = entry && entry.plan && Array.isArray(entry.plan.items) ? entry.plan.items : [];
-        return planItems.map(item => ({ ...item, projectName: entry.projectName || '' }));
-      }).sort((left, right) => Date.parse(left.startAt) - Date.parse(right.startAt));
-      if (!items.length) {
+      currentTimePlans = Array.isArray(plans) ? plans : [];
+      if (!currentTimePlans.length) {
         timePlanDraft.style.display = 'none';
         timePlanDraft.innerHTML = '';
         return;
       }
       const locale = currentLanguage === 'zh' ? 'zh-CN' : 'en-US';
-      timePlanDraft.innerHTML = '<div class="agent-time-planner-label">' + escapeHtml(t('timePlanDraftTitle')) + '</div>' + items.map(item => {
-        const start = new Date(item.startAt);
-        const time = Number.isFinite(start.getTime()) ? start.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) : '';
-        const owner = item.assignee === 'agent' ? t('timePlanOwnerAgent') : t('timePlanOwnerUser');
-        const itemLabel = item.projectName ? item.projectName + ' · ' + (item.title || '') : (item.title || '');
-        return '<div class="time-plan-draft-item"><span class="time-plan-draft-time">' + escapeHtml(time) + '</span><span>' + escapeHtml(itemLabel) + '</span><span class="time-plan-draft-owner">' + escapeHtml(owner) + '</span></div>';
+      const orderedPlans = [...currentTimePlans].sort((left, right) => Date.parse(left.plan && left.plan.items && left.plan.items[0] ? left.plan.items[0].startAt : '') - Date.parse(right.plan && right.plan.items && right.plan.items[0] ? right.plan.items[0].startAt : ''));
+      timePlanDraft.innerHTML = '<div class="agent-time-planner-label">' + escapeHtml(t('timePlanDraftTitle')) + '</div>' + orderedPlans.map(entry => {
+        const plan = entry.plan || {};
+        const items = Array.isArray(plan.items) ? [...plan.items].sort((left, right) => Date.parse(left.startAt) - Date.parse(right.startAt)) : [];
+        const stateControl = plan.status === 'confirmed'
+          ? '<span class="time-plan-confirmed"><span class="codicon codicon-check"></span> ' + escapeHtml(t('timePlanConfirmed')) + '</span>'
+          : '<button class="settings-action-btn save-btn" type="button" data-confirm-time-plan="' + escapeHtml(entry.projectPath || '') + '"><span class="codicon codicon-check"></span> ' + escapeHtml(t('timePlanConfirm')) + '</button>';
+        const rows = items.map(item => {
+          const start = new Date(item.startAt);
+          const time = Number.isFinite(start.getTime()) ? start.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) : '';
+          const owner = item.assignee === 'agent' ? t('timePlanOwnerAgent') : t('timePlanOwnerUser');
+          return '<div class="time-plan-draft-item"><span class="time-plan-draft-time">' + escapeHtml(time) + '</span><span>' + escapeHtml(item.title || '') + '</span><span class="time-plan-draft-owner">' + escapeHtml(owner) + '</span></div>';
+        }).join('');
+        return '<div class="time-plan-project"><div class="time-plan-project-head"><span class="agent-time-planner-label">' + escapeHtml(entry.projectName || '') + '</span>' + stateControl + '</div>' + rows + '</div>';
       }).join('');
+      timePlanDraft.querySelectorAll('[data-confirm-time-plan]').forEach(button => {
+        button.addEventListener('click', () => {
+          const projectPath = button.getAttribute('data-confirm-time-plan') || '';
+          if (!projectPath) return;
+          button.disabled = true;
+          vscode.postMessage({ command: 'timePlan.confirm', projectPath });
+        });
+      });
       timePlanDraft.style.display = 'flex';
     }
 
