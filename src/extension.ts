@@ -147,6 +147,15 @@ import {
 import { recordLocalDiagnosticError } from './localDiagnostics';
 import { clearProjectInvestmentCache } from './projectAnalytics';
 import {
+  claimActiveConversation,
+  getActiveConversationMigrationMarkerPath,
+  listActiveConversations,
+  markActiveConversationMigrationComplete,
+  registerActiveConversation,
+  releaseActiveConversationLease,
+  unregisterActiveConversation
+} from './activeConversationLedger';
+import {
   buildPassportProUrl,
   buildProAccountStatus,
   clearProEntitlements,
@@ -202,6 +211,7 @@ let selectedProjectPathInMemory = '';
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 const processingAgentStatusFiles = new Set<string>();
+const activeConversationOwnerInstanceId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
 let activeProjectRoot: string | null = null;
@@ -259,6 +269,8 @@ export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
   extensionContextRef = context;
   recordLocalUsageEvent(context, 'activation');
+  migrateLegacyActiveConversations(context);
+  ensureActiveConversationPoller(context);
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(SOLOMAP_GIT_DIFF_SCHEME, {
     provideTextDocumentContent(uri: vscode.Uri) {
       return solomapGitDiffContent.get(uri.toString()) || '';
@@ -2240,11 +2252,6 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
     watcher.dispose();
     watcher = null;
   }
-  if (statusPoller) {
-    clearInterval(statusPoller);
-    statusPoller = null;
-  }
-
   if (nextSelectedProjectPath) {
     await ensureSyncEngine(context);
   }
@@ -4364,7 +4371,6 @@ function startAgentReviewRun(input: {
   }
   const reviewRunId = `review-${input.mainExecutionLogId || Date.now()}`;
   const runDir = path.join(input.workspaceRoot, '.solopreneur', 'agent-runs', input.nodeId, reviewRunId);
-  const statusFilePath = path.join(input.workspaceRoot, '.agent_status.json');
   const outputFilePath = path.join(runDir, 'output.log');
   const commandFilePath = path.join(runDir, 'command.txt');
   const promptFilePath = path.join(runDir, 'prompt.txt');
@@ -4406,6 +4412,7 @@ function startAgentReviewRun(input: {
     ].filter(Boolean).join('\n\n'),
     'Running'
   );
+  const statusFilePath = getAgentStatusFilePath(input.workspaceRoot, executionLogId);
 
   const statusBase = {
     workspaceRoot: input.workspaceRoot,
@@ -4454,6 +4461,10 @@ function startAgentReviewRun(input: {
     workspaceRoot: input.workspaceRoot,
     label: `review-${input.nodeId}-${executionLogId}`,
     conversationId: executionLogId,
+    nodeId: input.nodeId,
+    statusFilePath,
+    runKind: 'agent_review',
+    globalDataPath: input.globalDataPath,
     command: `bash ${shellQuote(runScriptPath)}`,
     refreshNodeId: input.nodeId
   });
@@ -4685,11 +4696,26 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
 function launchAgentConversationTerminal(input: {
   workspaceRoot: string;
   label: string;
-  conversationId?: number;
+  conversationId: number;
+  nodeId: string;
+  statusFilePath: string;
+  runKind: string;
+  globalDataPath: string;
   command: string;
   refreshNodeId?: string;
 }): vscode.Terminal {
-  const terminal = createAgentTerminal(input.workspaceRoot, input.label, input.conversationId || 0);
+  registerActiveConversation({
+    workspaceRoot: input.workspaceRoot,
+    globalDataPath: input.globalDataPath,
+    conversationId: input.conversationId,
+    executionLogId: input.conversationId,
+    nodeId: input.nodeId,
+    statusFilePath: input.statusFilePath,
+    runKind: input.runKind,
+    ownerInstanceId: activeConversationOwnerInstanceId
+  });
+  if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
+  const terminal = createAgentTerminal(input.workspaceRoot, input.label, input.conversationId);
   terminal.show(true);
   terminal.sendText(input.command);
   if (input.refreshNodeId) {
@@ -4735,7 +4761,7 @@ async function handleAgentTerminalClosed(terminalName: string): Promise<boolean>
     }),
     finishedAt
   }), 'utf8');
-  await processAgentStatusFile(statusFilePath);
+  await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
   return true;
 }
 
@@ -5358,6 +5384,10 @@ async function handleContinueConversationTurn(
     workspaceRoot: activeProjectRoot,
     label: `continue-${nodeId}-${executionLogId}`,
     conversationId: executionLogId,
+    nodeId,
+    statusFilePath,
+    runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
+    globalDataPath: settings.globalDataPath,
     command: finalCommand,
     refreshNodeId: nodeId
   });
@@ -5450,6 +5480,10 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     workspaceRoot: activeProjectRoot,
     label: `continue-${nodeId}-${executionLogId}`,
     conversationId: executionLogId,
+    nodeId,
+    statusFilePath,
+    runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
+    globalDataPath: settings.globalDataPath,
     command: finalCommand,
     refreshNodeId: nodeId
   });
@@ -5531,7 +5565,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
       ...(isContinuationRun ? {} : { failureCode: 'stopped_by_user', failureReason }),
       finishedAt
     }), 'utf8');
-    await processAgentStatusFile(statusFilePath);
+    await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
     agentTerminalNamesByConversationId.delete(Number(conversationId));
     return;
   }
@@ -5664,6 +5698,10 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     workspaceRoot: activeProjectRoot,
     label: `revision-${executionLogId}`,
     conversationId: executionLogId,
+    nodeId: roadmapRevisionId,
+    statusFilePath: getAgentStatusFilePath(activeProjectRoot, executionLogId),
+    runKind: 'roadmap_revision',
+    globalDataPath: settings.globalDataPath,
     command: finalCommand,
     refreshNodeId: roadmapRevisionId
   });
@@ -5777,6 +5815,10 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     workspaceRoot: activeProjectRoot,
     label: `solo-${executionLogId}`,
     conversationId: executionLogId,
+    nodeId: soloConversationId,
+    statusFilePath: getAgentStatusFilePath(activeProjectRoot, executionLogId),
+    runKind: 'solo',
+    globalDataPath: settings.globalDataPath,
     command: finalCommand,
     refreshNodeId: soloConversationId
   });
@@ -5884,6 +5926,10 @@ async function startFlowRoleRun(
     workspaceRoot: input.projectPath,
     label: `flow-${input.flow.flowId}-${input.role}-${executionLogId}`,
     conversationId: executionLogId,
+    nodeId,
+    statusFilePath,
+    runKind: `flow_${input.role}`,
+    globalDataPath: settings.globalDataPath,
     command: finalCommand
   });
 }
@@ -6277,6 +6323,10 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     workspaceRoot,
     label: `step-${nodeId}-${executionLogId}`,
     conversationId: executionLogId,
+    nodeId,
+    statusFilePath,
+    runKind: 'step',
+    globalDataPath: settings.globalDataPath,
     command: finalCommand,
     refreshNodeId: nodeId
   });
@@ -7111,6 +7161,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
   processingAgentStatusFiles.add(normalizedStatusFilePath);
   let transientStatusSyncEngine: SyncEngine | null = null;
+  let processedSuccessfully = false;
+  let ledgerWorkspaceRoot = '';
+  let ledgerGlobalDataPath = '';
+  let ledgerExecutionLogId = 0;
   try {
     const fileContent = fs.readFileSync(normalizedStatusFilePath, 'utf8').trim();
     if (!fileContent) {
@@ -7120,10 +7174,13 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const statusData = JSON.parse(fileContent);
     const statusWorkspaceRoot = String(inferWorkspaceRootFromStatusFilePath(normalizedStatusFilePath) || statusData.workspaceRoot || '').trim();
     const workspaceRoot = statusWorkspaceRoot || activeProjectRoot || '';
+    ledgerWorkspaceRoot = workspaceRoot;
+    ledgerGlobalDataPath = String(statusData.globalDataPath || '');
+    ledgerExecutionLogId = Number(statusData.executionLogId || 0);
     const isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine);
     if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
       if (isActiveProject) {
-        await processFlowStatusFile(normalizedStatusFilePath, statusData);
+        processedSuccessfully = await processFlowStatusFile(normalizedStatusFilePath, statusData);
       }
       return;
     }
@@ -7707,12 +7764,21 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         }), 'utf8');
       }
     }, 1000);
+    processedSuccessfully = true;
   } catch (e) {
     // JSON might be partially written; watcher or poller will retry.
   } finally {
     try {
       transientStatusSyncEngine?.close();
     } finally {
+      if (processedSuccessfully && ledgerWorkspaceRoot && ledgerExecutionLogId) {
+        unregisterActiveConversation(
+          ledgerWorkspaceRoot,
+          ledgerGlobalDataPath,
+          ledgerExecutionLogId,
+          normalizedStatusFilePath
+        );
+      }
       processingAgentStatusFiles.delete(normalizedStatusFilePath);
     }
   }
@@ -7724,8 +7790,122 @@ function isPendingAgentStatusFile(statusFilePath: string): boolean {
   return Boolean(statusData?.nodeId && status && status !== 'Running' && status !== 'Processed');
 }
 
+function migrateLegacyActiveConversations(context: vscode.ExtensionContext): void {
+  const settings = getPersistedSettings(context);
+  const projects = getProjects(context);
+  const referenceRoot = projects[0]?.path || getWorkspaceRoot() || process.cwd();
+  const markerPath = getActiveConversationMigrationMarkerPath(referenceRoot, settings.globalDataPath);
+  if (fs.existsSync(markerPath)) return;
+  for (const project of projects) {
+    for (const statusFilePath of getAgentStatusFilePaths(project.path)) {
+      const statusData = readAgentStatus(statusFilePath);
+      const status = String(statusData?.status || '');
+      const executionLogId = Number(statusData?.executionLogId || 0);
+      if (!statusData?.nodeId || !status || status === 'Processed' || !executionLogId) continue;
+      registerActiveConversation({
+        workspaceRoot: project.path,
+        globalDataPath: settings.globalDataPath,
+        conversationId: executionLogId,
+        executionLogId,
+        nodeId: String(statusData.nodeId),
+        statusFilePath,
+        runKind: String(statusData.runKind || 'step'),
+        ownerInstanceId: activeConversationOwnerInstanceId
+      });
+    }
+  }
+  markActiveConversationMigrationComplete(referenceRoot, settings.globalDataPath);
+}
+
+async function pollActiveConversations(context: vscode.ExtensionContext): Promise<void> {
+  const settings = getPersistedSettings(context);
+  const referenceRoot = getSelectedProjectPath(context) || getWorkspaceRoot() || process.cwd();
+  const activeConversations = listActiveConversations(referenceRoot, settings.globalDataPath);
+  if (activeConversations.length === 0) {
+    if (statusPoller) {
+      clearInterval(statusPoller);
+      statusPoller = null;
+    }
+    return;
+  }
+  for (const record of activeConversations) {
+    const statusData = readAgentStatus(record.statusFilePath);
+    const registeredAtMs = Date.parse(record.registeredAt || '') || Date.now();
+    let lastSignalAtMs = registeredAtMs;
+    try {
+      if (fs.existsSync(record.statusFilePath)) lastSignalAtMs = fs.statSync(record.statusFilePath).mtimeMs;
+    } catch {
+      // A concurrent final status write will be observed on the next pass.
+    }
+    const status = String(statusData?.status || '');
+    const hasLostSupervisor = Date.now() - lastSignalAtMs > 2 * 60 * 1000
+      && (!statusData || status === 'Running');
+    if (!hasLostSupervisor && !isPendingAgentStatusFile(record.statusFilePath)) continue;
+    await processRegisteredStatusFile(context, record.statusFilePath, false, record, hasLostSupervisor);
+  }
+}
+
+async function processRegisteredStatusFile(
+  context: vscode.ExtensionContext | null,
+  statusFilePath: string,
+  allowUnregistered: boolean,
+  knownRecord?: ReturnType<typeof listActiveConversations>[number],
+  recoverLostSupervisor = false
+): Promise<void> {
+  if (!context) {
+    if (allowUnregistered) await processAgentStatusFile(statusFilePath);
+    return;
+  }
+  const settings = getPersistedSettings(context);
+  const referenceRoot = getSelectedProjectPath(context) || getWorkspaceRoot() || process.cwd();
+  const record = knownRecord || listActiveConversations(referenceRoot, settings.globalDataPath)
+    .find((candidate) => path.resolve(candidate.statusFilePath) === path.resolve(statusFilePath));
+  if (!record) {
+    if (allowUnregistered) await processAgentStatusFile(statusFilePath);
+    return;
+  }
+  const lease = claimActiveConversation(
+    referenceRoot,
+    settings.globalDataPath,
+    record,
+    activeConversationOwnerInstanceId
+  );
+  if (!lease) return;
+  try {
+    if (recoverLostSupervisor) {
+      const statusData = readAgentStatus(record.statusFilePath);
+      fs.mkdirSync(path.dirname(record.statusFilePath), { recursive: true });
+      fs.writeFileSync(record.statusFilePath, JSON.stringify({
+        ...(statusData || {}),
+        workspaceRoot: record.workspaceRoot,
+        nodeId: record.nodeId,
+        runKind: record.runKind,
+        globalDataPath: settings.globalDataPath,
+        executionLogId: record.executionLogId,
+        status: 'Failed',
+        failureCode: 'agent_supervisor_lost',
+        failureReason: 'The Agent supervisor stopped reporting before the conversation finished.',
+        startedAt: statusData?.startedAt || record.registeredAt,
+        finishedAt: new Date().toISOString()
+      }), 'utf8');
+    }
+    await processAgentStatusFile(record.statusFilePath);
+  } finally {
+    releaseActiveConversationLease(lease);
+  }
+}
+
+function ensureActiveConversationPoller(context: vscode.ExtensionContext): void {
+  if (statusPoller) return;
+  statusPoller = setInterval(() => {
+    void pollActiveConversations(context);
+  }, 5000);
+  void pollActiveConversations(context);
+}
+
 /**
- * Sets up watcher plus polling fallback for agent status changes.
+ * Watches the selected project for immediate status changes. Cross-project
+ * recovery is driven only by the active-conversation ledger.
  */
 function setupFileSentinelWatcher(workspaceRoot: string) {
   if (watcher) {
@@ -7735,28 +7915,11 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
     new vscode.RelativePattern(workspaceRoot, `{.agent_status.json,.solopreneur/${agentStatusDirName}/*.json}`)
   );
 
-  const handleSentinelChange = () => {
-    for (const statusFilePath of getAgentStatusFilePaths(workspaceRoot)) {
-      void processAgentStatusFile(statusFilePath);
-    }
+  const handleSentinelChange = (uri: vscode.Uri) => {
+    void processRegisteredStatusFile(extensionContextRef, uri.fsPath, false);
   };
   watcher.onDidChange(handleSentinelChange);
   watcher.onDidCreate(handleSentinelChange);
-  if (!statusPoller) {
-    statusPoller = setInterval(() => {
-      const projectPaths = extensionContextRef
-        ? getProjects(extensionContextRef).map((project) => project.path)
-        : [workspaceRoot];
-      for (const projectPath of new Set(projectPaths)) {
-        for (const statusFilePath of getAgentStatusFilePaths(projectPath)) {
-          if (isPendingAgentStatusFile(statusFilePath)) {
-            void processAgentStatusFile(statusFilePath);
-          }
-        }
-      }
-    }, 30_000);
-  }
-  handleSentinelChange();
 }
 
 /**

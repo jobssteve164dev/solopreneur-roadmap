@@ -198,6 +198,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './projectAnalytics') {
           return require(path.join(projectRoot, 'out/projectAnalytics.js'));
         }
+        if (id === './activeConversationLedger') {
+          return require(path.join(projectRoot, 'out/activeConversationLedger.js'));
+        }
         if (id === './projectRegistry') {
           return require(path.join(projectRoot, 'out/projectRegistry.js'));
         }
@@ -2515,19 +2518,23 @@ test('closing the roadmap panel keeps the project sentinel alive for sidebar sta
   assert.match(source, /finally \{[\s\S]*processingAgentStatusFiles\.delete\(normalizedStatusFilePath\)/);
 });
 
-test('project sentinel records every registered project without continuation input interruptions', () => {
+test('project sentinel processes exact changes while cross-project recovery only reads the active ledger', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const setupStart = source.indexOf('function setupFileSentinelWatcher(');
   const setupEnd = source.indexOf('\nexport function deactivate()', setupStart);
   const setupBody = source.slice(setupStart, setupEnd);
   const processStart = source.indexOf('async function processAgentStatusFile(');
-  const processEnd = source.indexOf('\n/**\n * Sets up watcher plus polling fallback', processStart);
+  const processEnd = source.indexOf('\nfunction isPendingAgentStatusFile', processStart);
   const processBody = source.slice(processStart, processEnd);
 
-  assert.match(setupBody, /getProjects\(extensionContextRef\)\.map\(\(project\) => project\.path\)/);
-  assert.match(setupBody, /for \(const projectPath of new Set\(projectPaths\)\)/);
-  assert.match(setupBody, /isPendingAgentStatusFile\(statusFilePath\)/);
-  assert.match(setupBody, /}, 30_000\)/);
+  assert.doesNotMatch(setupBody, /getProjects\(extensionContextRef\)/);
+  assert.doesNotMatch(setupBody, /getAgentStatusFilePaths\(workspaceRoot\)/);
+  assert.match(setupBody, /processRegisteredStatusFile\(extensionContextRef, uri\.fsPath, false\)/);
+  assert.match(source, /listActiveConversations\(referenceRoot, settings\.globalDataPath\)/);
+  assert.match(source, /claimActiveConversation\(/);
+  assert.match(source, /}, 5000\)/);
+  assert.match(source, /registerActiveConversation\(\{/);
+  assert.match(processBody, /unregisterActiveConversation\(/);
   assert.doesNotMatch(processBody, /statusWorkspaceRoot !== activeProjectRoot/);
   assert.match(processBody, /transientStatusSyncEngine = new SyncEngine/);
   assert.match(processBody, /transientStatusSyncEngine\?\.close\(\)/);
@@ -4350,7 +4357,11 @@ test('agent launch path uses one terminal-first startup component', () => {
     source.indexOf('function launchAgentConversationTerminal'),
     source.indexOf('async function handleAgentTerminalClosed')
   );
-  assert.match(launcherBody, /createAgentTerminal\(input\.workspaceRoot, input\.label, input\.conversationId \|\| 0\)/);
+  assert.match(launcherBody, /createAgentTerminal\(input\.workspaceRoot, input\.label, input\.conversationId\)/);
+  assert.ok(
+    launcherBody.indexOf('registerActiveConversation({') < launcherBody.indexOf('createAgentTerminal('),
+    'startup component must register the conversation before creating its terminal'
+  );
   assert.ok(
     launcherBody.indexOf('terminal.show(true)') < launcherBody.indexOf('terminal.sendText(input.command)'),
     'startup component must show the terminal before sending the command'
