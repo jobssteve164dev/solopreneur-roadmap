@@ -55,6 +55,11 @@ export interface SolomapScheduledAutomationTask {
   projectPath?: string;
   projectName?: string;
   timeOfDay?: string;
+  scheduleKind?: 'daily' | 'once';
+  scheduledAt?: string;
+  assignee?: 'user' | 'agent';
+  sourceTimePlanProjectPath?: string;
+  sourceTimePlanGeneratedAt?: string;
   prompt?: string;
 }
 

@@ -41,6 +41,9 @@ test('time plan JSON is validated by both the plugin reader and the Agent-facing
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   assert.match(extension, /node \.solopreneur\/validate-time-plan\.cjs/);
   assert.match(extension, /如果校验失败，按输出修正 JSON 并重新运行/);
+  assert.match(extension, /sourceTimePlanProjectPath/);
+  assert.match(extension, /scheduleKind: 'once'/);
+  assert.ok(extension.indexOf('await updatePersistedSettings(context') < extension.indexOf('confirmTimePlan(projectPath)'));
 });
 
 function createUri(value) {
@@ -8003,7 +8006,8 @@ test('scheduled automation computes the next daily trigger time', () => {
     [
       'module.exports.__getNextScheduledAutomationAt = getNextScheduledAutomationAt;',
       'module.exports.__getNextScheduledAutomationTask = getNextScheduledAutomationTask;',
-      'module.exports.__getScheduledAutomationProjectPath = getScheduledAutomationProjectPath;'
+      'module.exports.__getScheduledAutomationProjectPath = getScheduledAutomationProjectPath;',
+      'module.exports.__buildScheduledTasksFromTimePlan = buildScheduledTasksFromTimePlan;'
     ].join('\n')
   );
   const beforeTime = new Date('2026-06-30T08:00:00.000Z');
@@ -8029,6 +8033,31 @@ test('scheduled automation computes the next daily trigger time', () => {
   ], beforeTime);
   assert.equal(next.task.id, 'soon');
   assert.equal(next.nextAt.toISOString(), '2026-06-30T08:30:00.000Z');
+  const oneTime = extensionModule.__getNextScheduledAutomationTask([
+    { id: 'user-reminder', enabled: true, scheduleKind: 'once', scheduledAt: '2026-06-30T08:20:00.000Z', assignee: 'user', prompt: '' },
+    { id: 'daily-agent', enabled: true, timeOfDay: '08:30', assignee: 'agent', prompt: 'Start now' }
+  ], beforeTime);
+  assert.equal(oneTime.task.id, 'user-reminder');
+  assert.equal(oneTime.nextAt.toISOString(), '2026-06-30T08:20:00.000Z');
+  const plan = {
+    generatedAt: '2026-06-30T08:00:00.000Z',
+    items: [
+      { id: 'mine', title: 'Review', startAt: '2026-06-30T08:20:00.000Z', assignee: 'user', prompt: '' },
+      { id: 'agent', title: 'Build', startAt: '2026-06-30T09:00:00.000Z', assignee: 'agent', prompt: 'Build it' }
+    ]
+  };
+  const converted = extensionModule.__buildScheduledTasksFromTimePlan('/workspace/a', 'A', plan, [
+    { id: 'unrelated', projectPath: '/workspace/b', prompt: 'Keep' },
+    { id: 'old-plan', sourceTimePlanProjectPath: '/workspace/a', prompt: 'Replace' }
+  ]);
+  assert.equal(converted.length, 3);
+  assert.equal(converted.some(task => task.id === 'old-plan'), false);
+  assert.equal(converted.find(task => task.title === 'Review').assignee, 'user');
+  assert.equal(converted.find(task => task.title === 'Review').prompt, '');
+  assert.equal(converted.find(task => task.title === 'Build').scheduleKind, 'once');
+  assert.equal(converted.find(task => task.title === 'Build').prompt, 'Build it');
+  const reconverted = extensionModule.__buildScheduledTasksFromTimePlan('/workspace/a', 'A', plan, converted);
+  assert.deepEqual(reconverted, converted);
   assert.equal(
     extensionModule.__getScheduledAutomationProjectPath({ id: 'bound', projectPath: '/workspace/a' }, '/workspace/b'),
     '/workspace/a'

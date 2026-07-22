@@ -532,6 +532,33 @@ function buildTimePlansPayload(context: vscode.ExtensionContext): {
   return { plans };
 }
 
+function buildScheduledTasksFromTimePlan(
+  projectPath: string,
+  projectName: string,
+  plan: NonNullable<ReturnType<typeof readTimePlan>['plan']>,
+  currentTasks: SolomapScheduledAutomationTask[]
+): SolomapScheduledAutomationTask[] {
+  const retainedTasks = currentTasks.filter((task) => task.sourceTimePlanProjectPath !== projectPath);
+  const planTasks = plan.items.map((item) => {
+    const start = new Date(item.startAt);
+    return {
+      id: `time-plan:${projectPath}:${plan.generatedAt}:${item.id}`,
+      title: item.title,
+      enabled: true,
+      projectPath,
+      projectName,
+      timeOfDay: `${String(start.getHours()).padStart(2, '0')}:${String(start.getMinutes()).padStart(2, '0')}`,
+      scheduleKind: 'once' as const,
+      scheduledAt: item.startAt,
+      assignee: item.assignee,
+      sourceTimePlanProjectPath: projectPath,
+      sourceTimePlanGeneratedAt: plan.generatedAt,
+      prompt: item.assignee === 'agent' ? item.prompt : ''
+    };
+  });
+  return [...retainedTasks, ...planTasks];
+}
+
 async function handleSharedWebviewAction(
   context: vscode.ExtensionContext,
   message: PluginActionRequest,
@@ -586,7 +613,21 @@ async function handleSharedWebviewAction(
     'timePlan.confirm': async (request) => {
       const projectPath = String(request.projectPath || '');
       if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) return;
+      const result = readTimePlan(projectPath);
+      if (!result.valid || !result.plan) return;
+      const project = getProjects(context).find((candidate) => candidate.path === projectPath);
+      const currentAutomation = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
+      const scheduledTasks = buildScheduledTasksFromTimePlan(
+        projectPath,
+        project?.name || path.basename(projectPath),
+        result.plan,
+        currentAutomation.scheduledTasks || []
+      );
+      await updatePersistedSettings(context, {
+        automationTasks: { scheduledTasks }
+      });
       confirmTimePlan(projectPath);
+      sidebarProvider?.sendSettings();
       await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
     },
     'conversation.runRoadmapRevision': async (request) => {
@@ -1376,6 +1417,9 @@ function normalizeScheduledAutomationTask(value: unknown, index: number): Soloma
   const title = String(source.title || '').trim();
   const projectPath = String(source.projectPath || '').trim();
   const projectName = String(source.projectName || '').trim();
+  const scheduledAt = String(source.scheduledAt || '').trim();
+  const scheduleKind = source.scheduleKind === 'once' && Number.isFinite(Date.parse(scheduledAt)) ? 'once' : 'daily';
+  const assignee = source.assignee === 'user' ? 'user' : 'agent';
   const enabled = Object.prototype.hasOwnProperty.call(source, 'enabled') ? Boolean(source.enabled) : Boolean(prompt);
   return {
     id,
@@ -1384,6 +1428,11 @@ function normalizeScheduledAutomationTask(value: unknown, index: number): Soloma
     projectPath,
     projectName,
     timeOfDay: /^([01]\d|2[0-3]):[0-5]\d$/.test(rawTime) ? rawTime : '09:00',
+    scheduleKind,
+    scheduledAt: scheduleKind === 'once' ? scheduledAt : '',
+    assignee,
+    sourceTimePlanProjectPath: String(source.sourceTimePlanProjectPath || '').trim(),
+    sourceTimePlanGeneratedAt: String(source.sourceTimePlanGeneratedAt || '').trim(),
     prompt
   };
 }
@@ -1526,8 +1575,16 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('telegramEnabled', nextSettings.telegramEnabled, vscode.ConfigurationTarget.Global);
   await config.update('telegramBotToken', nextSettings.telegramBotToken, vscode.ConfigurationTarget.Global);
   await config.update('telegramChatId', nextSettings.telegramChatId, vscode.ConfigurationTarget.Global);
-  scheduleFocusReminder(context);
-  scheduleTimedAutomationTask(context);
+  if (hasSetting('automationTasks') && settings.automationTasks && typeof settings.automationTasks === 'object') {
+    const automationPatch = settings.automationTasks as SolomapAutomationSettings;
+    const triggerPatch = automationPatch.triggers || {};
+    if (Object.prototype.hasOwnProperty.call(automationPatch, 'focusMinutes') || Object.prototype.hasOwnProperty.call(triggerPatch, 'focus_time')) {
+      scheduleFocusReminder(context);
+    }
+    if (Object.prototype.hasOwnProperty.call(automationPatch, 'scheduledTasks') || Object.prototype.hasOwnProperty.call(triggerPatch, 'scheduled_time')) {
+      scheduleTimedAutomationTask(context);
+    }
+  }
 }
 
 function projectName(projectPath: string): string {
@@ -6545,10 +6602,12 @@ function getNextScheduledAutomationAt(timeOfDay: string, now = new Date()): Date
 
 function getNextScheduledAutomationTask(tasks: SolomapScheduledAutomationTask[], now = new Date()): { task: SolomapScheduledAutomationTask; nextAt: Date } | null {
   const candidates = tasks
-    .filter((task) => task && task.enabled !== false && String(task.prompt || '').trim())
+    .filter((task) => task && task.enabled !== false && (task.assignee === 'user' || String(task.prompt || '').trim()))
     .map((task) => ({
       task,
-      nextAt: getNextScheduledAutomationAt(task.timeOfDay || '09:00', now)
+      nextAt: task.scheduleKind === 'once' && Number.isFinite(Date.parse(String(task.scheduledAt || '')))
+        ? new Date(Math.max(Date.parse(String(task.scheduledAt)), now.getTime() + 1000))
+        : getNextScheduledAutomationAt(task.timeOfDay || '09:00', now)
     }))
     .sort((a, b) => a.nextAt.getTime() - b.nextAt.getTime());
   return candidates[0] || null;
@@ -6587,16 +6646,42 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
   const tasks = settings.scheduledTasks || [];
   const task = tasks.find((candidate) => candidate.id === taskId) || getNextScheduledAutomationTask(tasks)?.task;
   const prompt = String(task?.prompt || '').trim();
-  if (!task || task.enabled === false || !prompt) {
+  if (!task || task.enabled === false || (task.assignee !== 'user' && !prompt)) {
     return;
   }
   const targetProjectPath = getScheduledAutomationProjectPath(task, activeProjectRoot || getSelectedProjectPath(context) || '');
+  if (task.assignee === 'user') {
+    const projectLabel = task.projectName ? `（${task.projectName}）` : '';
+    const message = getPersistedSettings(context).language === 'en'
+      ? `SoloMap reminder${task.projectName ? ` (${task.projectName})` : ''}: ${task.title || 'Scheduled task'}`
+      : `SoloMap 提醒${projectLabel}：${task.title || '定时任务'}`;
+    vscode.window.showInformationMessage(message);
+    if (targetProjectPath) {
+      recordAutomationTaskEvent(targetProjectPath, {
+        trigger: 'scheduled_time',
+        action: 'reminder',
+        status: 'ok',
+        taskId: task.id,
+        title: task.title || ''
+      });
+    }
+    if (task.scheduleKind === 'once') {
+      await updatePersistedSettings(context, {
+        automationTasks: {
+          scheduledTasks: tasks.map((candidate) => candidate.id === task.id ? { ...candidate, enabled: false } : candidate)
+        }
+      });
+    }
+    return;
+  }
   const workspaceRoot = await ensureActionProject(context, targetProjectPath);
   if (!workspaceRoot) {
     return;
   }
   const timeOfDay = String(task.timeOfDay || '09:00');
-  const runKey = `${new Date().toISOString().slice(0, 10)}:${task.id}:${timeOfDay}:${workspaceRoot}`;
+  const runKey = task.scheduleKind === 'once'
+    ? `once:${task.id}:${task.scheduledAt || timeOfDay}:${workspaceRoot}`
+    : `${new Date().toISOString().slice(0, 10)}:${task.id}:${timeOfDay}:${workspaceRoot}`;
   if (scheduledAutomationRunKeys.has(runKey)) {
     recordAutomationTaskEvent(workspaceRoot, {
       trigger: 'scheduled_time',
@@ -6617,6 +6702,14 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
     timeOfDay
   });
   await handleRunSoloConversation(context, prompt, getPersistedSettings(context).cliPath || '');
+  if (task.scheduleKind === 'once') {
+    const latestTasks = getPersistedSettings(context).automationTasks?.scheduledTasks || [];
+    await updatePersistedSettings(context, {
+      automationTasks: {
+        scheduledTasks: latestTasks.map((candidate) => candidate.id === task.id ? { ...candidate, enabled: false } : candidate)
+      }
+    });
+  }
 }
 
 function scheduleAutomationTasksAfterRun(context: vscode.ExtensionContext, input: {

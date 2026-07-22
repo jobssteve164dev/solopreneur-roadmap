@@ -4143,6 +4143,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         scheduledTaskEnabled: '开启',
         scheduledTaskDisabled: '关闭',
         scheduledTaskDelete: '删除',
+        scheduledTaskOneTime: '一次性 · {time}',
+        scheduledTaskReminder: '到点提醒我',
         agentTimePlannerLabel: '交给 Agent 安排',
         agentTimePlannerPlaceholder: '例如：今天 17 点前完成登录修复',
         agentTimePlannerHelp: 'Agent 会先给出安排草案，确认后再执行。',
@@ -4514,6 +4516,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         scheduledTaskEnabled: 'On',
         scheduledTaskDisabled: 'Off',
         scheduledTaskDelete: 'Delete',
+        scheduledTaskOneTime: 'One-time · {time}',
+        scheduledTaskReminder: 'Remind me when due',
         agentTimePlannerLabel: 'Let Agent arrange it',
         agentTimePlannerPlaceholder: 'For example: finish the login fix before 5 PM',
         agentTimePlannerHelp: 'Agent will propose a plan for your confirmation first.',
@@ -5426,6 +5430,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         projectPath: String(source.projectPath || '').trim(),
         projectName: String(source.projectName || '').trim(),
         timeOfDay: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(source.timeOfDay || '')) ? String(source.timeOfDay) : '09:00',
+        scheduleKind: source.scheduleKind === 'once' && Number.isFinite(Date.parse(String(source.scheduledAt || ''))) ? 'once' : 'daily',
+        scheduledAt: String(source.scheduledAt || '').trim(),
+        assignee: source.assignee === 'user' ? 'user' : 'agent',
+        sourceTimePlanProjectPath: String(source.sourceTimePlanProjectPath || '').trim(),
+        sourceTimePlanGeneratedAt: String(source.sourceTimePlanGeneratedAt || '').trim(),
         prompt
       };
     }
@@ -5671,8 +5680,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function getNextScheduledTask(tasks) {
       const now = new Date();
       return (tasks || [])
-        .filter(task => task && task.enabled !== false && String(task.prompt || '').trim())
+        .filter(task => task && task.enabled !== false && (task.assignee === 'user' || String(task.prompt || '').trim()))
         .map(task => {
+          if (task.scheduleKind === 'once' && Number.isFinite(Date.parse(String(task.scheduledAt || '')))) {
+            return { task, next: new Date(Math.max(Date.parse(String(task.scheduledAt)), now.getTime() + 1000)) };
+          }
           const match = /^([01]\\d|2[0-3]):([0-5]\\d)$/.exec(String(task.timeOfDay || '09:00'));
           const next = new Date(now.getTime());
           next.setHours(match ? Number(match[1]) : 9, match ? Number(match[2]) : 0, 0, 0);
@@ -5759,16 +5771,22 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       scheduledTasksList.innerHTML = tasks.map((task) => {
         const enabled = task.enabled !== false;
         const taskProjectName = getScheduledTaskProjectName(task);
+        const oneTimeLabel = task.scheduleKind === 'once' && task.scheduledAt
+          ? t('scheduledTaskOneTime').replace('{time}', formatScheduledDate(new Date(task.scheduledAt)))
+          : '';
         return [
           '<div class="scheduled-task-card" data-scheduled-task-id="' + escapeHtml(task.id) + '">',
             '<div class="scheduled-task-top">',
               '<input type="text" class="settings-input" data-scheduled-title value="' + escapeHtml(task.title || '') + '" placeholder="' + escapeHtml(t('scheduledTaskNamePlaceholder')) + '">',
-              '<input type="time" class="settings-input" data-scheduled-time value="' + escapeHtml(task.timeOfDay || '09:00') + '">',
+              '<input type="time" class="settings-input" data-scheduled-time value="' + escapeHtml(task.timeOfDay || '09:00') + '" ' + (task.scheduleKind === 'once' ? 'disabled' : '') + '>',
               '<button type="button" class="settings-action-btn test-btn" data-scheduled-toggle>' + escapeHtml(enabled ? t('scheduledTaskEnabled') : t('scheduledTaskDisabled')) + '</button>',
               '<button type="button" class="settings-action-btn test-btn" data-scheduled-delete><span class="codicon codicon-trash"></span></button>',
             '</div>',
             taskProjectName ? '<div class="scheduled-task-card-target">' + escapeHtml(t('scheduledTaskTarget').replace('{project}', taskProjectName)) + '</div>' : '',
-            '<textarea class="settings-input settings-textarea" rows="2" data-scheduled-prompt placeholder="' + escapeHtml(t('scheduledTaskPromptPlaceholder')) + '">' + escapeHtml(task.prompt || '') + '</textarea>',
+            oneTimeLabel ? '<div class="scheduled-task-card-target">' + escapeHtml(oneTimeLabel) + '</div>' : '',
+            task.assignee === 'user'
+              ? '<div class="scheduled-task-card-target">' + escapeHtml(t('scheduledTaskReminder')) + '</div>'
+              : '<textarea class="settings-input settings-textarea" rows="2" data-scheduled-prompt placeholder="' + escapeHtml(t('scheduledTaskPromptPlaceholder')) + '">' + escapeHtml(task.prompt || '') + '</textarea>',
           '</div>'
         ].join('');
       }).join('');
