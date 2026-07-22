@@ -363,6 +363,51 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       gap: 8px;
     }
 
+    .agent-time-planner {
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      margin-top: 10px;
+      padding-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .agent-time-planner-label {
+      color: var(--text-main);
+      font-size: 10.5px;
+      font-weight: 800;
+    }
+
+    .agent-time-planner-help {
+      color: var(--text-muted);
+      font-size: 9.5px;
+      line-height: 1.35;
+    }
+
+    .time-plan-draft {
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px;
+      border: 1px solid rgba(124, 77, 255, 0.35);
+      border-radius: 7px;
+      background: rgba(124, 77, 255, 0.08);
+    }
+
+    .time-plan-draft-item {
+      display: grid;
+      grid-template-columns: 44px minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: baseline;
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
+    .time-plan-draft-time,
+    .time-plan-draft-owner {
+      color: var(--text-muted);
+    }
+
     .scheduled-task-head {
       display: flex;
       align-items: center;
@@ -3323,6 +3368,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         <textarea class="settings-input settings-textarea" id="scheduled-task-prompt-input" rows="2" placeholder="Prompt to send at this time..."></textarea>
         <button class="settings-action-btn save-btn" id="btn-add-scheduled-task"><span class="codicon codicon-add"></span><span id="text-add-scheduled-task">Add scheduled task</span></button>
       </div>
+      <div class="agent-time-planner">
+        <div class="time-plan-draft" id="time-plan-draft"></div>
+        <label class="agent-time-planner-label" id="agent-time-planner-label" for="agent-time-planner-input">Let Agent arrange it</label>
+        <input type="text" class="settings-input" id="agent-time-planner-input" placeholder="For example: finish the login fix before 5 PM">
+        <div class="agent-time-planner-help" id="agent-time-planner-help">Agent will propose a plan for your confirmation first.</div>
+        <button class="settings-action-btn save-btn" id="btn-agent-time-planner"><span class="codicon codicon-sparkle"></span><span id="text-agent-time-planner">Let Agent arrange it</span></button>
+      </div>
     </div>
   </div>
 
@@ -3733,6 +3785,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const scheduledTaskTimeInput = document.getElementById('scheduled-task-time-input');
     const scheduledTaskPromptInput = document.getElementById('scheduled-task-prompt-input');
     const btnAddScheduledTask = document.getElementById('btn-add-scheduled-task');
+    const agentTimePlannerInput = document.getElementById('agent-time-planner-input');
+    const btnAgentTimePlanner = document.getElementById('btn-agent-time-planner');
+    const timePlanDraft = document.getElementById('time-plan-draft');
     const btnToggleFeedback = document.getElementById('btn-toggle-feedback');
     const btnCloseFeedback = document.getElementById('btn-close-feedback');
     const feedbackPanel = document.getElementById('feedback-panel');
@@ -4029,7 +4084,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         upgradeAgentClis: '升级全部 Agent CLI',
         upgradingAgentClis: 'Agent 正在升级已安装的 Agent CLI...',
         settingsSectionAutomation: '自动化任务',
-        focusTimerTitle: '专注提醒',
+        focusTimerTitle: '时间安排',
         focusTimerMinutes: '专注分钟',
         focusTimerStart: '开始',
         focusTimerStop: '关闭',
@@ -4049,6 +4104,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         scheduledTaskEnabled: '开启',
         scheduledTaskDisabled: '关闭',
         scheduledTaskDelete: '删除',
+        agentTimePlannerLabel: '交给 Agent 安排',
+        agentTimePlannerPlaceholder: '例如：今天 17 点前完成登录修复',
+        agentTimePlannerHelp: 'Agent 会先给出安排草案，确认后再执行。',
+        agentTimePlannerAction: '交给 Agent 安排',
+        timePlanDraftTitle: 'Agent 安排草案',
+        timePlanOwnerUser: '我',
+        timePlanOwnerAgent: 'Agent',
         automationTask: '触发点和动作',
         automationFocusMinutes: '专注分钟',
         automationTime: '每天时间',
@@ -4391,7 +4453,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         upgradeAgentClis: 'Upgrade all Agent CLIs',
         upgradingAgentClis: 'Agent is upgrading installed Agent CLIs...',
         settingsSectionAutomation: 'Automation Tasks',
-        focusTimerTitle: 'Focus Timer',
+        focusTimerTitle: 'Time plan',
         focusTimerMinutes: 'Focus minutes',
         focusTimerStart: 'Start',
         focusTimerStop: 'Stop',
@@ -4411,6 +4473,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         scheduledTaskEnabled: 'On',
         scheduledTaskDisabled: 'Off',
         scheduledTaskDelete: 'Delete',
+        agentTimePlannerLabel: 'Let Agent arrange it',
+        agentTimePlannerPlaceholder: 'For example: finish the login fix before 5 PM',
+        agentTimePlannerHelp: 'Agent will propose a plan for your confirmation first.',
+        agentTimePlannerAction: 'Let Agent arrange it',
+        timePlanDraftTitle: 'Agent draft',
+        timePlanOwnerUser: 'Me',
+        timePlanOwnerAgent: 'Agent',
         automationTask: 'Trigger and action',
         automationFocusMinutes: 'Focus minutes',
         automationTime: 'Daily time',
@@ -4782,6 +4851,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('text-add-scheduled-task', t('addScheduledTask'));
       if (scheduledTaskTitleInput) scheduledTaskTitleInput.placeholder = t('scheduledTaskNamePlaceholder');
       if (scheduledTaskPromptInput) scheduledTaskPromptInput.placeholder = t('scheduledTaskPromptPlaceholder');
+      setText('agent-time-planner-label', t('agentTimePlannerLabel'));
+      setText('agent-time-planner-help', t('agentTimePlannerHelp'));
+      setText('text-agent-time-planner', t('agentTimePlannerAction'));
+      if (agentTimePlannerInput) agentTimePlannerInput.placeholder = t('agentTimePlannerPlaceholder');
       updateScheduledTasksTarget();
       setText('feedback-title', t('feedbackPanelTitle'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
@@ -4878,6 +4951,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           updateScheduledTasksTarget();
           renderScheduledTasksView();
           updateFocusTimerView();
+          vscode.postMessage({ command: 'timePlan.get', projectPath: currentProjects.selectedProjectPath || '' });
         }
       });
     }
@@ -4912,6 +4986,54 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       btnAddScheduledTask.addEventListener('click', addScheduledTaskFromPanel);
     }
 
+    function askAgentToArrangeTime() {
+      const projectPath = currentProjects.selectedProjectPath || '';
+      if (!projectPath) return;
+      const extraRequest = String(agentTimePlannerInput ? agentTimePlannerInput.value : '').trim();
+      vscode.postMessage({
+        command: 'timePlan.generate',
+        projectPath,
+        requirements: extraRequest,
+        agentCli: getEffectiveSettingCliPath()
+      });
+      if (agentTimePlannerInput) agentTimePlannerInput.value = '';
+      focusTimerPanel.style.display = 'none';
+    }
+
+    function renderTimePlanDrafts(plans) {
+      if (!timePlanDraft) return;
+      const items = (Array.isArray(plans) ? plans : []).flatMap(entry => {
+        const planItems = entry && entry.plan && Array.isArray(entry.plan.items) ? entry.plan.items : [];
+        return planItems.map(item => ({ ...item, projectName: entry.projectName || '' }));
+      }).sort((left, right) => Date.parse(left.startAt) - Date.parse(right.startAt));
+      if (!items.length) {
+        timePlanDraft.style.display = 'none';
+        timePlanDraft.innerHTML = '';
+        return;
+      }
+      const locale = currentLanguage === 'zh' ? 'zh-CN' : 'en-US';
+      timePlanDraft.innerHTML = '<div class="agent-time-planner-label">' + escapeHtml(t('timePlanDraftTitle')) + '</div>' + items.map(item => {
+        const start = new Date(item.startAt);
+        const time = Number.isFinite(start.getTime()) ? start.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' }) : '';
+        const owner = item.assignee === 'agent' ? t('timePlanOwnerAgent') : t('timePlanOwnerUser');
+        const itemLabel = item.projectName ? item.projectName + ' · ' + (item.title || '') : (item.title || '');
+        return '<div class="time-plan-draft-item"><span class="time-plan-draft-time">' + escapeHtml(time) + '</span><span>' + escapeHtml(itemLabel) + '</span><span class="time-plan-draft-owner">' + escapeHtml(owner) + '</span></div>';
+      }).join('');
+      timePlanDraft.style.display = 'flex';
+    }
+
+    if (btnAgentTimePlanner) {
+      btnAgentTimePlanner.addEventListener('click', askAgentToArrangeTime);
+    }
+
+    if (agentTimePlannerInput) {
+      agentTimePlannerInput.addEventListener('keydown', event => {
+        if (event.key !== 'Enter' || event.isComposing) return;
+        event.preventDefault();
+        askAgentToArrangeTime();
+      });
+    }
+
     if (btnOpenScheduledTasks) {
       btnOpenScheduledTasks.addEventListener('click', () => {
         settingsPanel.style.display = 'none';
@@ -4920,6 +5042,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         updateScheduledTasksTarget();
         renderScheduledTasksView();
         updateFocusTimerView();
+        vscode.postMessage({ command: 'timePlan.get', projectPath: currentProjects.selectedProjectPath || '' });
       });
     }
 
@@ -5844,6 +5967,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'automationPlaySound':
           playAutomationTone();
+          break;
+
+        case 'timePlansLoaded':
+          renderTimePlanDrafts(message.plans || []);
           break;
 
         case 'agentModelsLoaded': {

@@ -15,6 +15,7 @@ import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
+import { ensureTimePlanValidationScript, readTimePlan } from './timePlan';
 import { getAgentImpactStatusFromDatabase, buildAgentImpactSummary } from './agentImpact';
 import { buildAgentCliUpgradePrompt } from './agentCliUpgrade';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
@@ -514,6 +515,23 @@ async function ensureActionProject(context: vscode.ExtensionContext, projectPath
   return ready && activeProjectRoot === requestedPath ? requestedPath : '';
 }
 
+function buildTimePlansPayload(context: vscode.ExtensionContext): {
+  plans: Array<{ projectPath: string; projectName: string; plan: NonNullable<ReturnType<typeof readTimePlan>['plan']> }>;
+} {
+  const plans = getProjects(context).flatMap((project) => {
+    const result = readTimePlan(project.path);
+    return result.valid && result.plan
+      ? [{ projectPath: project.path, projectName: project.name || path.basename(project.path), plan: result.plan }]
+      : [];
+  });
+  plans.sort((left, right) => {
+    const leftStart = left.plan.items[0]?.startAt || '';
+    const rightStart = right.plan.items[0]?.startAt || '';
+    return Date.parse(leftStart) - Date.parse(rightStart);
+  });
+  return { plans };
+}
+
 async function handleSharedWebviewAction(
   context: vscode.ExtensionContext,
   message: PluginActionRequest,
@@ -550,6 +568,19 @@ async function handleSharedWebviewAction(
         String(request.model || ''),
         normalizeSupplementFiles(request.supplementFiles)
       );
+    },
+    'timePlan.generate': async (request) => {
+      const projectPath = await ensureActionProject(context, request.projectPath || '');
+      if (!projectPath) return;
+      await handleGenerateTimePlan(
+        context,
+        String(request.requirements || ''),
+        String(request.agentCli || ''),
+        String(request.model || '')
+      );
+    },
+    'timePlan.get': async () => {
+      await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
     },
     'conversation.runRoadmapRevision': async (request) => {
       const projectPath = await ensureActionProject(context, request.projectPath || '');
@@ -5707,6 +5738,23 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   });
 }
 
+async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = ''): Promise<void> {
+  if (!activeProjectRoot) return;
+  ensureTimePlanValidationScript(activeProjectRoot);
+  const userRequirements = requirements.trim() || '优先安排今天最值得推进的工作。';
+  const prompt = [
+    '请根据当前项目的真实进展和用户补充需求，生成一份可执行的时间安排草案。',
+    `用户补充需求：${userRequirements}`,
+    '唯一交付物是项目目录下的 `.solopreneur/time-plan.json`。不要修改路线图、项目代码或其他文件，也不要开始执行安排中的任务。',
+    'JSON 必须使用以下结构：',
+    '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"用户需求","items":[{"id":"稳定且唯一的 ID","title":"用户可读的事项","startAt":"带时区的 ISO-8601","durationMinutes":25,"assignee":"user 或 agent","prompt":"仅 assignee=agent 时必填的执行提示"}]}',
+    '时间应具体、互不重叠，并结合当前日期、合理工作时段、任务依赖和用户截止时间；不要凭空假设用户有完整全天可用时间。信息不足时采用保守的短计划，并在最终回复中指出采用的假设。',
+    '写入后必须运行 `node .solopreneur/validate-time-plan.cjs`。如果校验失败，按输出修正 JSON 并重新运行，直到出现 PASS 后才结束。',
+    '最终回复只需说明草案已生成并通过校验，等待用户在 SoloMap 中确认。'
+  ].join('\n\n');
+  await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel);
+}
+
 async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
   if (!syncEngine || !activeProjectRoot) {
     return;
@@ -7284,6 +7332,15 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       if (roadmapCsvChanged && restoreRoadmapBackup(roadmapBackupFilePath, workspaceRoot)) {
         const protectedRoadmapReason = 'Solo 对话不会直接调整路线图，已保留对话前路线图。';
         completionReason = completionReason ? `${completionReason} ${protectedRoadmapReason}` : protectedRoadmapReason;
+      }
+      if (workspaceRoot === activeProjectRoot && typeof readTimePlan === 'function') {
+        try {
+          if (extensionContextRef) {
+            sidebarProvider?.postMessage({ command: 'timePlansLoaded', ...buildTimePlansPayload(extensionContextRef) });
+          }
+        } catch (error) {
+          console.error('SoloMap failed to refresh the time plan draft:', error);
+        }
       }
     } else if (workspaceRoot && runKind === 'roadmap_revision') {
       shouldWriteNodeStatus = false;

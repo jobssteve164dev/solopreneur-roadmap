@@ -18,6 +18,27 @@ test('Agent CLI upgrade action delegates every installed CLI to the Agent', () =
   assert.match(webview, /command: 'agent\.upgradeAll'/);
 });
 
+test('time plan panel delegates an optional request through the structured time-plan contract', () => {
+  const webview = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarWebview.ts'), 'utf8');
+  assert.match(webview, /id="agent-time-planner-input"/);
+  assert.match(webview, /id="btn-agent-time-planner"/);
+  assert.match(webview, /command: 'timePlan\.generate'/);
+  assert.match(webview, /command: 'timePlan\.get'/);
+  assert.match(webview, /case 'timePlansLoaded'/);
+  assert.match(webview, /projectName \+ ' · '/);
+});
+
+test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'timePlan.ts'), 'utf8');
+  assert.match(source, /validateTimePlanValue/);
+  assert.match(source, /validate-time-plan\.cjs/);
+  assert.match(source, /assignee.*user.*agent/s);
+  assert.match(source, /时间重叠/);
+  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  assert.match(extension, /node \.solopreneur\/validate-time-plan\.cjs/);
+  assert.match(extension, /如果校验失败，按输出修正 JSON 并重新运行/);
+});
+
 function createUri(value) {
   return {
     fsPath: value,
