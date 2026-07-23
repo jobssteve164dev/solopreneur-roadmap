@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.373 - 2026-07-23
+
+### Fixed
+- restore local-first loading paths (63a546c)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.372 - 2026-07-23
 
 ### Fixed
