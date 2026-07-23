@@ -23,6 +23,8 @@ test('time plan panel delegates an optional request through the structured time-
   assert.match(webview, /id="agent-time-planner-input"/);
   assert.match(webview, /id="btn-agent-time-planner"/);
   assert.match(webview, /command: 'timePlan\.generate'/);
+  assert.match(webview, /timeZone: Intl\.DateTimeFormat\(\)\.resolvedOptions\(\)\.timeZone/);
+  assert.match(webview, /localTime: new Date\(\)\.toString\(\)/);
   assert.match(webview, /command: 'timePlan\.get'/);
   assert.match(webview, /case 'timePlansLoaded'/);
   assert.match(webview, /command: 'timePlan\.confirm'/);
@@ -52,6 +54,29 @@ test('scheduled tasks use the global file ledger and a one-minute on-demand poll
   assert.match(ledger, /status: 'pending' \| 'running'/);
   assert.match(ledger, /completeScheduledTaskOccurrence/);
   assert.match(validator, /occurrenceId is duplicated/);
+});
+
+test('durable automation configuration restores tasks when extension global state is stale', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getPersistedSettings = getPersistedSettings;'
+  );
+  extensionModule.__vscodeTestState.configurationValues.automationTasks = {
+    scheduledTasks: [{
+      id: 'confirmed-task', enabled: true, scheduleKind: 'once',
+      scheduledAt: '2026-07-23T01:00:00.000Z', assignee: 'agent', prompt: 'Run it.'
+    }]
+  };
+  const context = {
+    globalState: {
+      get() {
+        return { automationTasks: { scheduledTasks: [] } };
+      }
+    }
+  };
+  const settings = extensionModule.__getPersistedSettings(context);
+  assert.equal(settings.automationTasks.scheduledTasks.length, 1);
+  assert.equal(settings.automationTasks.scheduledTasks[0].id, 'confirmed-task');
 });
 
 test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
@@ -102,6 +127,7 @@ function loadCompiledModule(relativePath, exportPatch) {
     nextInformationChoice: undefined,
     nextInformationChoices: [],
     nextInputBoxValue: undefined,
+    configurationValues: {},
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) })
   };
   const context = {
@@ -184,10 +210,13 @@ function loadCompiledModule(relativePath, exportPatch) {
           workspace: {
             getConfiguration() {
               return {
-                get() {
-                  return '';
+                get(key) {
+                  return Object.prototype.hasOwnProperty.call(vscodeTestState.configurationValues, key)
+                    ? vscodeTestState.configurationValues[key]
+                    : '';
                 },
-                update() {
+                update(key, value) {
+                  vscodeTestState.configurationValues[key] = value;
                   return Promise.resolve();
                 }
               };

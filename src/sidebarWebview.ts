@@ -5156,7 +5156,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         projectPath,
         requirements: extraRequest,
         agentCli: getEffectiveSettingCliPath(),
-        language: currentLanguage
+        language: currentLanguage,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+        localTime: new Date().toString()
       });
       if (agentTimePlannerInput) agentTimePlannerInput.value = '';
       focusTimerPanel.style.display = 'none';

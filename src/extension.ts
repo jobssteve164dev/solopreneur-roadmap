@@ -610,7 +610,9 @@ async function handleSharedWebviewAction(
         String(request.requirements || ''),
         String(request.agentCli || ''),
         String(request.model || ''),
-        String(request.language || 'zh')
+        String(request.language || 'zh'),
+        String(request.timeZone || ''),
+        String(request.localTime || '')
       );
     },
     'timePlan.get': async () => {
@@ -1027,7 +1029,9 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     taskPermissionMode: 'auto',
     reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
     collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
-    automationTasks: normalizeAutomationSettings(saved.automationTasks ?? config.get('automationTasks') ?? {}),
+    // VS Code configuration is the durable, user-visible source for automation.
+    // globalState remains a fallback for installations created before the setting existed.
+    automationTasks: normalizeAutomationSettings(config.get('automationTasks') || saved.automationTasks || {}),
     proEntitlements: {
       ...(saved.proEntitlements || {}),
       ...readLocalProEntitlements()
@@ -5808,16 +5812,22 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   });
 }
 
-async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = '', language = 'zh'): Promise<void> {
+async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = '', language = 'zh', timeZone = '', localTime = ''): Promise<void> {
   if (!activeProjectRoot) return;
   ensureTimePlanValidationScript(activeProjectRoot);
   const isEnglish = language === 'en';
   const userRequirements = requirements.trim() || (isEnglish
     ? 'Prioritize the most valuable work to move forward today.'
     : '优先安排今天最值得推进的工作。');
+  const userTimeContext = timeZone || localTime
+    ? (isEnglish
+      ? `User time zone: ${timeZone || 'unknown'}. Current user-local time: ${localTime || 'unknown'}. Interpret today, tomorrow, morning, and all clock times in this user-local time zone. Every startAt must include the matching UTC offset.`
+      : `用户时区：${timeZone || '未知'}。用户当前本地时间：${localTime || '未知'}。今天、明天、早上和所有钟点都必须按这个用户本地时区理解；每个 startAt 必须携带与该时区一致的 UTC 偏移。`)
+    : '';
   const prompt = (isEnglish ? [
     'Create an actionable time-plan draft from the current state of this project and the user requirements.',
     `User requirements: ${userRequirements}`,
+    userTimeContext,
     'The only deliverable is `.solopreneur/time-plan.json` in the project. Do not change the roadmap, project code, or other files, and do not start any planned task.',
     'Use exactly this JSON structure:',
     '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"user requirements","items":[{"id":"stable unique ID","title":"concise English user-facing task","startAt":"ISO-8601 with timezone","durationMinutes":25,"assignee":"user or agent","prompt":"required execution prompt only when assignee is agent"}]}',
@@ -5827,6 +5837,7 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
   ] : [
     '请根据当前项目的真实进展和用户补充需求，生成一份可执行的时间安排草案。',
     `用户补充需求：${userRequirements}`,
+    userTimeContext,
     '唯一交付物是项目目录下的 `.solopreneur/time-plan.json`。不要修改路线图、项目代码或其他文件，也不要开始执行安排中的任务。',
     'JSON 必须使用以下结构：',
     '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"用户需求","items":[{"id":"稳定且唯一的 ID","title":"用户可读的事项","startAt":"带时区的 ISO-8601","durationMinutes":25,"assignee":"user 或 agent","prompt":"仅 assignee=agent 时必填的执行提示"}]}',
