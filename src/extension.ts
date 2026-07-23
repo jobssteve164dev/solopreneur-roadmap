@@ -229,6 +229,8 @@ let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
 let projectSelectionGeneration = 0;
 let syncEngineInitGeneration = 0;
+let persistedSettingsCache: SolopreneurSettings | null = null;
+let persistedSettingsCacheSource: Partial<SolopreneurSettings> | null = null;
 const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
 
@@ -277,6 +279,16 @@ const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
   extensionContextRef = context;
+  persistedSettingsCache = null;
+  persistedSettingsCacheSource = null;
+  if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('solopreneur')) {
+        persistedSettingsCache = null;
+        persistedSettingsCacheSource = null;
+      }
+    }));
+  }
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(SOLOMAP_GIT_DIFF_SCHEME, {
     provideTextDocumentContent(uri: vscode.Uri) {
       return solomapGitDiffContent.get(uri.toString()) || '';
@@ -1037,8 +1049,11 @@ async function handleSharedWebviewAction(
 }
 
 function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSettings {
-  const config = vscode.workspace.getConfiguration('solopreneur');
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  if (persistedSettingsCache && persistedSettingsCacheSource === saved) {
+    return persistedSettingsCache;
+  }
+  const config = vscode.workspace.getConfiguration('solopreneur');
   const settingsWorkspaceRoot = getSettingsEnhancementWorkspaceRoot();
   const baseSettings = {
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
@@ -1062,13 +1077,15 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     telegramBotToken: saved.telegramBotToken ?? config.get('telegramBotToken') ?? '',
     telegramChatId: saved.telegramChatId ?? config.get('telegramChatId') ?? ''
   };
-  return {
+  persistedSettingsCache = {
     ...baseSettings,
     enhancementStatuses: refreshSolomapEnhancementStatusSummaries(settingsWorkspaceRoot, baseSettings.globalDataPath),
     enabledEnhancements: getEnabledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
     skills: readSolomapSkillRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).skills || [],
     connectors: readSolomapMcpRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).connectors || []
   };
+  persistedSettingsCacheSource = saved;
+  return persistedSettingsCache;
 }
 
 function isSoloMapLanguageZh(context: vscode.ExtensionContext): boolean {
@@ -1605,6 +1622,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('telegramEnabled', nextSettings.telegramEnabled, vscode.ConfigurationTarget.Global);
   await config.update('telegramBotToken', nextSettings.telegramBotToken, vscode.ConfigurationTarget.Global);
   await config.update('telegramChatId', nextSettings.telegramChatId, vscode.ConfigurationTarget.Global);
+  persistedSettingsCache = null;
+  persistedSettingsCacheSource = null;
   if (hasSetting('automationTasks') && settings.automationTasks && typeof settings.automationTasks === 'object') {
     const automationPatch = settings.automationTasks as SolomapAutomationSettings;
     const triggerPatch = automationPatch.triggers || {};
@@ -2658,7 +2677,7 @@ async function openRoadmapPanel(
     roadmapPanel.webview.html = getWebviewHtml(roadmapPanel.webview, context);
     postWebviewMessage(roadmapPanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
     postWebviewMessage(roadmapPanel.webview, { command: 'setMainView', view: effectiveInitialView });
-  }, 0);
+  }, 80);
   setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
 
   // Handle messages from Webview

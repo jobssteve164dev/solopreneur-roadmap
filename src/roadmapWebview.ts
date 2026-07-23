@@ -2,6 +2,8 @@ import * as path from 'path';
 import type * as vscode from 'vscode';
 import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
 
+const roadmapHtmlCache = new Map<string, string>();
+
 function joinExtensionUri(context: vscode.ExtensionContext, ...segments: string[]): vscode.Uri {
   const base = context.extensionUri as any;
   if (typeof base?.with === 'function') {
@@ -25,7 +27,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
   // which uses modern styling guidelines (glassmorphism, glowing connections, inter font).
   const codiconsUri = webview.asWebviewUri(joinExtensionUri(context, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
   const wordmarkUri = webview.asWebviewUri(joinExtensionUri(context, 'resources', 'logo_with_text.svg'));
-  return `<!DOCTYPE html>
+  const cacheKey = `${String(codiconsUri)}|${String(wordmarkUri)}`;
+  const cachedHtml = roadmapHtmlCache.get(cacheKey);
+  if (cachedHtml) {
+    return cachedHtml;
+  }
+  const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -4759,4 +4766,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
   </script>
 </body>
 </html>`;
+  roadmapHtmlCache.set(cacheKey, html);
+  return html;
 }

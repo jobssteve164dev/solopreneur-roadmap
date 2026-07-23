@@ -296,13 +296,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const globalDataPath = this._getSettings().globalDataPath;
       const projectSignature = buildSidebarProjectSignature(projectState.projects);
       const cached = readSidebarCoreSnapshot(globalDataPath);
+      const cachedConversation = readCachedConversationSnapshot(globalDataPath, projectState.selectedProjectPath);
       if (cached?.projectSignature === projectSignature) {
-        this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, cached.portfolio, globalDataPath);
+        this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, cached.portfolio, globalDataPath, cachedConversation);
         this._projectLoader.scheduleAll(projectState.projects, projectState.selectedProjectPath, cached.portfolio);
       } else {
         this.scheduleCorePortfolio(projectState.projects, projectState.selectedProjectPath, globalDataPath, []);
       }
-      void this.sendProjectConversationSnapshot(projectState.selectedProjectPath);
+      if (!cachedConversation) {
+        void this.sendProjectConversationSnapshot(projectState.selectedProjectPath);
+      }
       this.sendDailyReview();
     } catch (error) {
       console.error('SoloMap sidebar failed to send projects:', error);
@@ -341,11 +344,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private postCorePortfolio(projects: SolopreneurProject[], selectedProjectPath: string, portfolio: ProjectPortfolioSummary[], globalDataPath: string): void {
+  private postCorePortfolio(
+    projects: SolopreneurProject[],
+    selectedProjectPath: string,
+    portfolio: ProjectPortfolioSummary[],
+    globalDataPath: string,
+    recentConversationSnapshot: { solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] } | null = null
+  ): void {
     const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, portfolio);
     this._view?.webview.postMessage({
       command: 'projectsLoaded',
-      projects: { projects, selectedProjectPath, portfolio, globalStore }
+      projects: { projects, selectedProjectPath, portfolio, globalStore, recentConversationSnapshot }
     });
   }
 

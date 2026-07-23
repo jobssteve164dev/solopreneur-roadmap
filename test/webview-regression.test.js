@@ -2178,6 +2178,7 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.soloConversations[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.flowConversations/);
+  assert.match(html, /case 'projectsLoaded':[\s\S]*?recentConversationSnapshot[\s\S]*?recentSnapshot\.solo[\s\S]*?recentSnapshot\.project[\s\S]*?recentSnapshot\.flow[\s\S]*?renderPortfolioFromAsyncUpdate/);
   const activationBody = html.slice(
     html.indexOf('function activateProjectInSidebar'),
     html.indexOf('function bindProjectSelect')
@@ -3082,6 +3083,13 @@ test('local-first loading paints and launches before optional or durable work', 
     roadmapOpenBody.indexOf('buildLocalDataStatusHtml') < roadmapOpenBody.indexOf('getWebviewHtml(roadmapPanel.webview, context)'),
     'a lightweight roadmap shell must paint before the complete Webview is built'
   );
+  assert.match(roadmapOpenBody, /getWebviewHtml\(roadmapPanel\.webview, context\)[\s\S]*?\}, 80\)/);
+  const roadmapWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
+  assert.match(roadmapWebviewSource, /const roadmapHtmlCache = new Map<string, string>\(\)/);
+  assert.match(roadmapWebviewSource, /const cachedHtml = roadmapHtmlCache\.get\(cacheKey\)[\s\S]*?return cachedHtml/);
+
+  assert.match(extensionSource, /let persistedSettingsCache: SolopreneurSettings \| null = null/);
+  assert.match(extensionSource, /function getPersistedSettings[\s\S]*?if \(persistedSettingsCache && persistedSettingsCacheSource === saved\)[\s\S]*?return persistedSettingsCache/);
 
   const dispatchBody = extensionSource.slice(
     extensionSource.indexOf('async function handleSharedWebviewAction'),

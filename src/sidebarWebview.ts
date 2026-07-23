@@ -6231,6 +6231,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           currentProjects.selectedProjectPath = selectedProjectPath || '';
           currentProjects.portfolio = normalizePortfolioDerivedSignals(message.projects.portfolio || []);
           currentProjects.globalStore = message.projects.globalStore || null;
+          if (message.projects.recentConversationSnapshot && currentProjects.selectedProjectPath) {
+            const recentSnapshot = message.projects.recentConversationSnapshot;
+            sidebarSoloConversationsByProject[currentProjects.selectedProjectPath] = recentSnapshot.solo || [];
+            sidebarSoloConversations = sidebarSoloConversationsByProject[currentProjects.selectedProjectPath];
+            sidebarProjectConversations[currentProjects.selectedProjectPath] = recentSnapshot.project || [];
+            sidebarFlowConversations[currentProjects.selectedProjectPath] = recentSnapshot.flow || [];
+            sidebarProjectConversationRequested[currentProjects.selectedProjectPath] = true;
+          }
           renderProjects(message.projects.projects, currentProjects.selectedProjectPath);
           updateScheduledTasksTarget();
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
