@@ -2453,9 +2453,13 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
     return [];
   }
   const excludeNodeIds = new Set([soloConversationId, roadmapRevisionId]);
+  const isStepConversation = (conversation: AgentConversation) => {
+    const nodeId = String(conversation.nodeId || '');
+    return !excludeNodeIds.has(nodeId) && !nodeId.startsWith('__flow__::');
+  };
   if (syncEngine && activeProjectRoot === projectPath) {
     return hydrateProjectConversationContinuations(projectPath, syncEngine.getProjectAgentExecutions())
-      .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
+      .filter(isStepConversation)
       .slice(0, sidebarProjectConversationHistoryLimit);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
@@ -2466,7 +2470,7 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
   await store.init();
   try {
     return hydrateProjectConversationContinuations(projectPath, store.getAllExecutionLogs())
-      .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
+      .filter(isStepConversation)
       .slice(0, sidebarProjectConversationHistoryLimit);
   } finally {
     store.close();
@@ -2476,23 +2480,32 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
 async function getProjectConversationSnapshotForProject(
   context: vscode.ExtensionContext,
   projectPath: string
-): Promise<{ solo: AgentConversation[]; project: AgentConversation[] }> {
+): Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }> {
   if (!getProjects(context).some((project) => project.path === projectPath)) {
-    return { solo: [], project: [] };
+    return { solo: [], project: [], flow: [] };
   }
   const excludeNodeIds = new Set([soloConversationId, roadmapRevisionId]);
-  const buildSnapshot = (soloLogs: AgentConversation[], projectLogs: AgentConversation[]) => ({
-    solo: selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, soloLogs), 1),
-    project: hydrateProjectConversationContinuations(projectPath, projectLogs)
-      .filter((conversation) => !excludeNodeIds.has(String(conversation.nodeId || '')))
-      .slice(0, sidebarProjectConversationHistoryLimit)
-  });
+  const buildSnapshot = (soloLogs: AgentConversation[], projectLogs: AgentConversation[]) => {
+    const hydratedProjectLogs = hydrateProjectConversationContinuations(projectPath, projectLogs);
+    return {
+      solo: selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, soloLogs), 1),
+      project: hydratedProjectLogs
+        .filter((conversation) => {
+          const nodeId = String(conversation.nodeId || '');
+          return !excludeNodeIds.has(nodeId) && !nodeId.startsWith('__flow__::');
+        })
+        .slice(0, sidebarProjectConversationHistoryLimit),
+      flow: hydratedProjectLogs
+        .filter((conversation) => String(conversation.nodeId || '').startsWith('__flow__::'))
+        .slice(0, sidebarProjectConversationHistoryLimit)
+    };
+  };
   if (syncEngine && activeProjectRoot === projectPath) {
     return buildSnapshot(syncEngine.getAgentExecutions(soloConversationId), syncEngine.getProjectAgentExecutions());
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
-    return { solo: [], project: [] };
+    return { solo: [], project: [], flow: [] };
   }
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
@@ -4759,7 +4772,7 @@ function postNodeConversations(nodeId: string, fallbackConversations: import('./
   } else if (sidebarProvider && activeProjectRoot) {
     void sidebarProvider.sendStepConversationHistory(activeProjectRoot, nodeId);
     if (nodeId !== roadmapRevisionId) {
-      void sidebarProvider.sendProjectConversationHistory(activeProjectRoot);
+      void sidebarProvider.sendProjectConversationSnapshot(activeProjectRoot);
     }
   }
 }

@@ -65,7 +65,8 @@ test('conversation snapshot cache is reused only while the local journal is unch
   try {
     const snapshot = {
       solo: [{ id: 1, nodeId: '__solo__', status: 'Completed' }],
-      project: [{ id: 2, nodeId: 'step-1', status: 'Completed' }]
+      project: [{ id: 2, nodeId: 'step-1', status: 'Completed' }],
+      flow: [{ id: 3, nodeId: '__flow__::flow-1::loop-1::builder', status: 'Completed' }]
     };
     writeCachedConversationSnapshot(fixture.cachePath, fixture.projectPath, snapshot);
     assert.deepEqual(readCachedConversationSnapshot(fixture.cachePath, fixture.projectPath), snapshot);

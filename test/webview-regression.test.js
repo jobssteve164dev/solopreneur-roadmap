@@ -2177,6 +2177,7 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.soloConversations[\s\S]*?renderPortfolioFromAsyncUpdate/);
+  assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.flowConversations/);
   const activationBody = html.slice(
     html.indexOf('function activateProjectInSidebar'),
     html.indexOf('function bindProjectSelect')
@@ -2185,6 +2186,8 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /const sidebarSoloConversationsByProject = \{\}/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?sidebarSoloConversationsByProject\[message\.projectPath\][\s\S]*?if \(message\.projectPath !== currentProjects\.selectedProjectPath\) return/);
   assert.match(html, /function activateProjectInSidebar[\s\S]*?sidebarSoloConversations = sidebarSoloConversationsByProject\[projectPath\] \|\| \[\]/);
+  assert.match(html, /const sidebarFlowConversations = \{\}/);
+  assert.match(html, /function renderSidebarStepHistoryContent[\s\S]*?sidebarFlowConversations\[key\]/);
   assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
@@ -7973,7 +7976,7 @@ test('project-level execution history returns latest roadmap run across nodes', 
   store.close();
 });
 
-test('posting a step conversation refreshes the sidebar project-level latest run card', () => {
+test('posting a step conversation refreshes the sidebar solo, step, and flow snapshot', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -7988,8 +7991,8 @@ test('posting a step conversation refreshes the sidebar project-level latest run
     sendStepConversationHistory(projectPath, nodeId) {
       calls.push(['step', projectPath, nodeId]);
     },
-    sendProjectConversationHistory(projectPath) {
-      calls.push(['project', projectPath]);
+    sendProjectConversationSnapshot(projectPath) {
+      calls.push(['snapshot', projectPath]);
     },
     sendSoloConversationHistory(projectPath) {
       calls.push(['solo', projectPath]);
@@ -8000,7 +8003,7 @@ test('posting a step conversation refreshes the sidebar project-level latest run
 
   assert.deepEqual(calls, [
     ['step', '/workspace/project', '3'],
-    ['project', '/workspace/project']
+    ['snapshot', '/workspace/project']
   ]);
 });
 

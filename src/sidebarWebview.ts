@@ -3972,6 +3972,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const sidebarLogsExpandedConversations = {};
     const sidebarStepConversations = {};
     const sidebarProjectConversations = {};
+    const sidebarFlowConversations = {};
     const sidebarStepConversationRequested = {};
     const sidebarProjectConversationRequested = {};
     const sidebarSoloConversationRequestedAt = {};
@@ -6423,12 +6424,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         case 'sidebarProjectConversationSnapshotLoaded':
           sidebarSoloConversationsByProject[message.projectPath] = message.soloConversations || [];
           sidebarProjectConversations[message.projectPath] = message.projectConversations || [];
+          sidebarFlowConversations[message.projectPath] = message.flowConversations || [];
           sidebarProjectConversationRequested[message.projectPath] = true;
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           sidebarSoloConversations = sidebarSoloConversationsByProject[message.projectPath];
           pruneSidebarConversationExpansionState([
             ...sidebarSoloConversations,
-            ...sidebarProjectConversations[message.projectPath]
+            ...sidebarProjectConversations[message.projectPath],
+            ...sidebarFlowConversations[message.projectPath]
           ]);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
@@ -6898,7 +6901,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderSidebarStepHistoryContent(projectPath, node) {
       const key = String(projectPath || '');
-      const conversations = sidebarProjectConversations[key] || [];
+      const conversations = [
+        ...(sidebarProjectConversations[key] || []),
+        ...(sidebarFlowConversations[key] || [])
+      ];
       if (!conversations || conversations.length === 0) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }

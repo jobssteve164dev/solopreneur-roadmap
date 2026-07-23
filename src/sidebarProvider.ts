@@ -45,7 +45,7 @@ interface SidebarProviderDependencies {
   getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
   getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
-  getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[] }>;
+  getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>;
   dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
 }
 
@@ -59,9 +59,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
   private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
-  private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[] }>;
+  private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>;
   private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
-  private readonly _conversationSnapshotLoads = new Map<string, Promise<{ solo: AgentConversation[]; project: AgentConversation[] }>>();
+  private readonly _conversationSnapshotLoads = new Map<string, Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>>();
   private _corePortfolioRequest = 0;
 
   constructor(
@@ -446,12 +446,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private postProjectConversationSnapshot(projectPath: string, snapshot: { solo: AgentConversation[]; project: AgentConversation[] }): void {
+  private postProjectConversationSnapshot(projectPath: string, snapshot: { solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }): void {
     this._view?.webview.postMessage({
       command: 'sidebarProjectConversationSnapshotLoaded',
       projectPath,
       soloConversations: snapshot.solo,
-      projectConversations: snapshot.project
+      projectConversations: snapshot.project,
+      flowConversations: snapshot.flow
     });
   }
 
