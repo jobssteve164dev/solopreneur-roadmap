@@ -20,6 +20,18 @@ import {
   normalizeAgentConversationLifecycle
 } from '../conversationLifecycle';
 
+let sharedSqlJsRuntime: Promise<initSqlJs.SqlJsStatic> | null = null;
+
+function getSqlJsRuntime(): Promise<initSqlJs.SqlJsStatic> {
+  if (!sharedSqlJsRuntime) {
+    sharedSqlJsRuntime = initSqlJs().catch((error) => {
+      sharedSqlJsRuntime = null;
+      throw error;
+    });
+  }
+  return sharedSqlJsRuntime;
+}
+
 export class SqliteStore {
   private db: initSqlJs.Database | null = null;
   private SQL: initSqlJs.SqlJsStatic | null = null;
@@ -47,7 +59,7 @@ export class SqliteStore {
     try {
       // 在 Node.js 环境下，可以直接无需任何参数地初始化 sql.js
       // 它会自动加载其同包目录下的 sql-wasm.wasm，避免绝对路径跨平台或解包导致定位失败的问题
-      this.SQL = await initSqlJs();
+      this.SQL = await getSqlJsRuntime();
 
       const existed = fs.existsSync(this.dbFilePath);
       if (existed) {

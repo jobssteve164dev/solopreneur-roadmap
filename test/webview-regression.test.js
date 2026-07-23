@@ -3013,6 +3013,61 @@ test('project panels open before project selection persistence completes', () =>
   assert.match(extensionSource, /selectedProjectPathInMemory = projectPath;[\s\S]*?const persistSelection = context\.globalState\.update/);
 });
 
+test('local-first loading paints and launches before optional or durable work', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const sqliteStoreSource = fs.readFileSync(path.join(projectRoot, 'src/db/sqliteStore.ts'), 'utf8');
+  const selectBody = extensionSource.slice(
+    extensionSource.indexOf('async function selectProject'),
+    extensionSource.indexOf('function scheduleProjectRunIndexBackfill')
+  );
+  assert.ok(
+    selectBody.indexOf('sendLocalProjectsToWebviews(context)') < selectBody.indexOf('await persistSelection'),
+    'project cards must switch before selection persistence'
+  );
+  assert.ok(
+    selectBody.indexOf('sendProjectConversationSnapshot(projectPath)') < selectBody.indexOf('await persistSelection'),
+    'the selected project conversation snapshot must start before selection persistence'
+  );
+
+  const syncBody = extensionSource.slice(
+    extensionSource.indexOf('async function ensureSyncEngine'),
+    extensionSource.indexOf('async function openRoadmapPanel')
+  );
+  assert.ok(
+    syncBody.indexOf('sendNodesToWebview()') < syncBody.indexOf('ensureDocumentationManifest(projectRoot)'),
+    'CSV roadmap nodes must paint before database/scaffolding initialization'
+  );
+  assert.ok(
+    syncBody.indexOf('sendNodesToWebview()') < syncBody.indexOf('await nextSyncEngine.initAndSync()'),
+    'CSV roadmap nodes must paint before SQLite initialization'
+  );
+  assert.match(sqliteStoreSource, /let sharedSqlJsRuntime: Promise<initSqlJs\.SqlJsStatic> \| null = null/);
+  assert.match(sqliteStoreSource, /this\.SQL = await getSqlJsRuntime\(\)/);
+
+  const dispatchBody = extensionSource.slice(
+    extensionSource.indexOf('async function handleSharedWebviewAction'),
+    extensionSource.indexOf('function getPersistedSettings')
+  );
+  for (const action of [
+    'conversation.runStep',
+    'conversation.runSolo',
+    'conversation.runRoadmapRevision',
+    'flow.run',
+    'conversation.continue',
+    'conversation.retry',
+    'conversation.continueTurn'
+  ]) {
+    const start = dispatchBody.indexOf(`'${action}': async`);
+    assert.notEqual(start, -1, `${action} handler missing`);
+    const next = dispatchBody.indexOf('\\n    },', start);
+    const actionBody = dispatchBody.slice(start, next === -1 ? undefined : next);
+    assert.ok(
+      actionBody.indexOf('revealAgentStartupTerminal(') < actionBody.indexOf('await ensureActionProject('),
+      `${action} must reveal a terminal before project/database preparation`
+    );
+  }
+});
+
 test('sidebar project switcher supports searching by project name or path', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
   assert.match(sidebarSource, /data-project-search type="search"/);

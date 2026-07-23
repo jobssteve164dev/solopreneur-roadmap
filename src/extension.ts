@@ -580,6 +580,7 @@ async function handleSharedWebviewAction(
   try {
     return await dispatchPluginAction(message, surface, {
     'conversation.runStep': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunAgent(
@@ -592,6 +593,7 @@ async function handleSharedWebviewAction(
       );
     },
     'conversation.runSolo': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunSoloConversation(
@@ -639,6 +641,7 @@ async function handleSharedWebviewAction(
       await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
     },
     'conversation.runRoadmapRevision': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRoadmapRevision(
@@ -650,6 +653,7 @@ async function handleSharedWebviewAction(
       );
     },
     'flow.run': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunFlow(
@@ -708,6 +712,7 @@ async function handleSharedWebviewAction(
       }
     },
     'conversation.continue': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       const nodeId = String(request.nodeId || '');
@@ -722,11 +727,13 @@ async function handleSharedWebviewAction(
       refreshConversation(nodeId);
     },
     'conversation.retry': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRetryConversation(context, String(request.nodeId || ''), Number(request.conversationId || 0));
     },
     'conversation.continueTurn': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleContinueConversationTurn(
@@ -1714,6 +1721,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     watcher = null;
   }
   sendLocalProjectsToWebviews(context);
+  void sidebarProvider?.sendProjectConversationSnapshot(projectPath);
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
   }
@@ -2520,25 +2528,28 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   if (!fs.existsSync(solopreneurDir)) {
     fs.mkdirSync(solopreneurDir, { recursive: true });
   }
-  ensureSolopreneurReadme(solopreneurDir);
-  ensureRoadmapMethodologyInstructions(solopreneurDir);
-  ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
-  ensureRoadmapValidationScript(solopreneurDir);
-  ensureDocumentationManifest(projectRoot);
 
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
+  const nextSyncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
+  syncEngine = nextSyncEngine;
+  activeProjectRoot = projectRoot;
+  syncEngineReady = false;
+  // CSV is the local source of truth. Paint its cached nodes before database
+  // initialization or project scaffolding can delay the visible project switch.
+  sendNodesToWebview();
 
   syncEngineInitProjectRoot = projectRoot;
   syncEngineInitPromise = (async () => {
-    const nextSyncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
-    syncEngine = nextSyncEngine;
-    activeProjectRoot = projectRoot;
-    syncEngineReady = false;
-    sendNodesToWebview();
     try {
+      ensureSolopreneurReadme(solopreneurDir);
+      ensureRoadmapMethodologyInstructions(solopreneurDir);
+      ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
+      ensureRoadmapValidationScript(solopreneurDir);
+      ensureDocumentationManifest(projectRoot);
       await nextSyncEngine.initAndSync();
       if (getSelectedProjectPath(context) !== projectRoot) {
+        nextSyncEngine.close();
         return false;
       }
       syncEngine = nextSyncEngine;
@@ -4778,6 +4789,16 @@ function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefine
 }
 
 function createAgentTerminal(workspaceRoot: string, label: string, conversationId = 0): vscode.Terminal {
+  const reservedTerminal = reservedAgentTerminalsByProject.get(workspaceRoot);
+  if (reservedTerminal) {
+    reservedAgentTerminalsByProject.delete(workspaceRoot);
+    activeAgentTerminalName = reservedTerminal.name;
+    if (conversationId) {
+      agentTerminalNamesByConversationId.set(Number(conversationId), reservedTerminal.name);
+      agentTerminalProjectRootsByConversationId.set(Number(conversationId), workspaceRoot);
+    }
+    return reservedTerminal;
+  }
   const terminalName = makeAgentTerminalName(workspaceRoot, label);
   activeAgentTerminalName = terminalName;
   if (conversationId) {
@@ -4796,6 +4817,27 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
   });
+}
+
+const reservedAgentTerminalsByProject = new Map<string, vscode.Terminal>();
+
+function revealAgentStartupTerminal(workspaceRoot: string): void {
+  if (!workspaceRoot || reservedAgentTerminalsByProject.has(workspaceRoot)) {
+    reservedAgentTerminalsByProject.get(workspaceRoot)?.show(true);
+    return;
+  }
+  const terminal = vscode.window.createTerminal({
+    name: makeAgentTerminalName(workspaceRoot, 'preparing'),
+    iconPath: extensionContextRef
+      ? vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.svg')
+      : new vscode.ThemeIcon('symbol-string'),
+    color: new vscode.ThemeColor('terminal.ansiCyan'),
+    cwd: workspaceRoot
+  });
+  reservedAgentTerminalsByProject.set(workspaceRoot, terminal);
+  activeAgentTerminalName = terminal.name;
+  terminal.show(true);
+  terminal.sendText(`printf '%s\\n' ${shellQuote('SoloMap 正在准备本地对话…')}`);
 }
 
 function launchAgentConversationTerminal(input: {
