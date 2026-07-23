@@ -48,6 +48,7 @@ import { buildStrategyPyramidSnapshotData, readCachedStrategyPyramidSnapshot, sa
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
+import { readCachedConversationSnapshot } from './sidebarSnapshotCache';
 import {
   buildCrossAgentHandoffInstructions,
   buildExecutionExperiencePrompt,
@@ -898,7 +899,22 @@ async function handleSharedWebviewAction(
       if (surface === 'sidebar' && sidebarProvider) {
         sidebarProvider.sendProjects();
       } else {
-        await postProjectsLoaded(target, getProjectState(context));
+        const projectState = getProjectState(context);
+        await postProjectsLoaded(target, projectState);
+        if (surface === 'roadmap' && target && projectState.selectedProjectPath) {
+          const recentSnapshot = readCachedConversationSnapshot(
+            getPersistedSettings(context).globalDataPath,
+            projectState.selectedProjectPath
+          );
+          if (recentSnapshot) {
+            await postWebviewMessage(target, {
+              command: 'nodeConversationsLoaded',
+              nodeId: soloConversationId,
+              conversations: recentSnapshot.solo,
+              projectPath: projectState.selectedProjectPath
+            });
+          }
+        }
       }
     },
     'project.select': async (request) => selectProject(context, String(request.projectPath || '')),

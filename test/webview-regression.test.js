@@ -3087,6 +3087,26 @@ test('local-first loading paints and launches before optional or durable work', 
   const roadmapWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
   assert.match(roadmapWebviewSource, /const roadmapHtmlCache = new Map<string, string>\(\)/);
   assert.match(roadmapWebviewSource, /const cachedHtml = roadmapHtmlCache\.get\(cacheKey\)[\s\S]*?return cachedHtml/);
+  const mainViewStart = roadmapWebviewSource.indexOf('function setMainView(view)');
+  const mainViewBody = roadmapWebviewSource.slice(
+    mainViewStart,
+    roadmapWebviewSource.indexOf("if (btnToggleFeedback)", mainViewStart)
+  );
+  assert.match(mainViewBody, /soloPanelDirty \|\| !soloBody \|\| !soloBody\.innerHTML/);
+  const soloRenderBody = roadmapWebviewSource.slice(
+    roadmapWebviewSource.indexOf('function renderSoloPanel(nodes)'),
+    roadmapWebviewSource.indexOf('function renderFlowPanel()')
+  );
+  assert.doesNotMatch(soloRenderBody, /if \(!soloExpanded\) \{\s*soloBody\.innerHTML = ''/);
+  assert.match(soloRenderBody, /soloPanelDirty = false/);
+  assert.match(roadmapWebviewSource, /case 'nodeConversationsLoaded':[\s\S]*?message\.nodeId === soloConversationId[\s\S]*?renderSoloPanel\(currentNodes\)[\s\S]*?else if \(message\.nodeId === roadmapRevisionId\)[\s\S]*?else \{\s*renderRoadmap\(currentNodes\)/);
+  assert.doesNotMatch(roadmapWebviewSource, /case 'projectsLoaded':[\s\S]*?vscode\.postMessage\(\{ command: 'getFlowState' \}\);\s*break/);
+
+  const projectGetAllBody = extensionSource.slice(
+    extensionSource.indexOf("'project.getAll': async"),
+    extensionSource.indexOf("'project.select': async")
+  );
+  assert.match(projectGetAllBody, /readCachedConversationSnapshot[\s\S]*?nodeId: soloConversationId[\s\S]*?conversations: recentSnapshot\.solo/);
 
   assert.match(extensionSource, /let persistedSettingsCache: SolopreneurSettings \| null = null/);
   assert.match(extensionSource, /function getPersistedSettings[\s\S]*?if \(persistedSettingsCache && persistedSettingsCacheSource === saved\)[\s\S]*?return persistedSettingsCache/);

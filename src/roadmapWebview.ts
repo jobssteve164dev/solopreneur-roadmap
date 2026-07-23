@@ -2182,6 +2182,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let roadmapRevisionExpanded = false;
     let soloExpanded = false;
     let flowExpanded = false;
+    let soloPanelDirty = true;
+    let flowPanelDirty = true;
     const nodeConversations = {};
     const nodeSupplementFiles = {};
     const conversationDrafts = {};
@@ -2717,6 +2719,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (btnToggleFlow) btnToggleFlow.classList.remove('active');
       if (soloBody) soloBody.innerHTML = '';
       if (flowBody) flowBody.innerHTML = '';
+      soloPanelDirty = true;
+      flowPanelDirty = true;
       if (roadmapRevisionPanel) roadmapRevisionPanel.classList.remove('open');
       if (btnToggleRoadmapRevision) btnToggleRoadmapRevision.classList.remove('active');
       if (roadmapRevisionBody) roadmapRevisionBody.innerHTML = '';
@@ -2816,7 +2820,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       activeMainView = view === 'solo' ? 'solo' : view === 'flow' ? 'flow' : 'roadmap';
       soloExpanded = activeMainView === 'solo';
       flowExpanded = activeMainView === 'flow';
-      activeConversationId = '';
       if (canvas) canvas.classList.toggle('active', activeMainView === 'roadmap');
       if (soloPanel) soloPanel.classList.toggle('active', activeMainView === 'solo');
       if (flowPanel) flowPanel.classList.toggle('active', activeMainView === 'flow');
@@ -2833,8 +2836,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         ensureAgentModelsLoaded(flowAgentSelection || currentCliPath || 'agy', 'flow');
         vscode.postMessage({ command: 'getFlowState' });
       }
-      renderSoloPanel(currentNodes);
-      renderFlowPanel();
+      if (activeMainView === 'solo' && (soloPanelDirty || !soloBody || !soloBody.innerHTML)) {
+        renderSoloPanel(currentNodes);
+      }
+      if (activeMainView === 'flow' && (flowPanelDirty || !flowBody || !flowBody.innerHTML)) {
+        renderFlowPanel();
+      }
     }
 
     if (btnToggleFeedback) {
@@ -3139,6 +3146,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           }
           currentNodes = message.nodes || [];
           renderRoadmap(message.nodes);
+          soloPanelDirty = true;
+          flowPanelDirty = true;
           renderSoloPanel(currentNodes);
           renderFlowPanel();
           renderRoadmapRevisionPanel(currentNodes);
@@ -3180,6 +3189,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         }
         case 'flowStateLoaded':
           currentFlowState = message.state || { hasProAccess: false, flow: null, history: [] };
+          flowPanelDirty = true;
           renderFlowPanel();
           break;
         case 'automationPlaySound':
@@ -3206,16 +3216,20 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
-          vscode.postMessage({ command: 'getFlowState' });
           break;
         case 'nodeConversationsLoaded':
           if (message.projectPath && message.projectPath !== activeProjectPath) {
             return;
           }
           nodeConversations[message.nodeId] = message.conversations || [];
-          renderRoadmap(currentNodes);
-          renderSoloPanel(currentNodes);
-          renderRoadmapRevisionPanel(currentNodes);
+          if (message.nodeId === soloConversationId) {
+            soloPanelDirty = true;
+            renderSoloPanel(currentNodes);
+          } else if (message.nodeId === roadmapRevisionId) {
+            renderRoadmapRevisionPanel(currentNodes);
+          } else {
+            renderRoadmap(currentNodes);
+          }
           break;
         case 'supplementFilesSelected':
           const soloDraft = message.nodeId === soloConversationId
@@ -3871,7 +3885,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       soloPanel.classList.toggle('active', soloExpanded);
       btnToggleSolo.classList.toggle('active', soloExpanded);
       if (!soloExpanded) {
-        soloBody.innerHTML = '';
+        soloPanelDirty = true;
         return;
       }
       soloBody.innerHTML = \`
@@ -3955,6 +3969,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       bindSoloSelects(soloBody);
       bindConversationActions(soloBody, soloConversationId);
       restoreComposerInputState(soloBody, '[data-solo-input]', preservedInputState);
+      soloPanelDirty = false;
     }
 
     function renderFlowPanel() {
@@ -3963,7 +3978,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       flowPanel.classList.toggle('active', flowExpanded);
       if (!flowExpanded) {
-        flowBody.innerHTML = '';
+        flowPanelDirty = true;
         return;
       }
       const flow = currentFlowState.flow || null;
@@ -4171,6 +4186,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
       bindSoloSelects(flowBody);
       bindConversationActions(flowBody, 'flow');
+      flowPanelDirty = false;
     }
     function renderRoadmapRevisionPanel(nodes) {
       if (!roadmapRevisionPanel || !roadmapRevisionBody) {
