@@ -14,6 +14,10 @@
 8. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
 9. [中文品牌命名与定位分析](./product/chinese-naming-analysis.zh.md)：关于项目中文命名的多维度头脑风暴与品牌定位思考。
 
+## UI 与交互基线
+
+- [本地优先加载交互体验基线](./ui/local-first-loading-interaction-baseline.zh.md)：统一冷启动、项目切换、对话终端和大图加载的硬时限、完成条件、状态保护与验收口径。
+
 ## 官网工作台
 
 - [本地项目远程控制方法论](./methodology/remote-project-control-methodology.zh.md)：理解官网如何延伸用户的观察、补充与决策能力，同时保持项目事实和用户数据在本地。
