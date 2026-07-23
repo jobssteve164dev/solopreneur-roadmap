@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.378 - 2026-07-23
+
+### Changed
+- Reduce recent conversation and roadmap startup work (032d4e0)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.377 - 2026-07-23
 
 ### Changed
