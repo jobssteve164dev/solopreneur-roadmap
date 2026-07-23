@@ -341,6 +341,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './sidebarProjectLoader') {
           return require(path.join(projectRoot, 'out/sidebarProjectLoader.js'));
         }
+        if (id === './sidebarSnapshotCache') {
+          return require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
+        }
         if (id === './sidebarWebview') {
           return require(path.join(projectRoot, 'out/sidebarWebview.js'));
         }
@@ -2632,7 +2635,7 @@ test('project sentinel processes exact changes while cross-project recovery only
   assert.doesNotMatch(source, /showInformationMessage\(['"]Continuation conversation was recorded\./);
 });
 
-test('sidebar local project refresh keeps reusable signal enrichment without external data loads', () => {
+test('sidebar local project refresh batches core cards before scheduling enrichment', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     ''
@@ -2653,6 +2656,8 @@ test('sidebar local project refresh keeps reusable signal enrichment without ext
   );
   let portfolioEnrichments = 0;
   let externalLoads = 0;
+  let resolvePortfolioBatch;
+  const portfolioBatchDone = new Promise((resolve) => { resolvePortfolioBatch = resolve; });
   provider._view = {
     webview: {
       postMessage(message) {
@@ -2662,9 +2667,13 @@ test('sidebar local project refresh keeps reusable signal enrichment without ext
     }
   };
   provider._projectLoader.cancelExternalLoads = () => { externalLoads += 1; };
-  provider._projectLoader.schedulePortfolioEnrichment = () => { portfolioEnrichments += 1; };
+  provider._projectLoader.scheduleAll = () => {
+    portfolioEnrichments += 1;
+    resolvePortfolioBatch();
+  };
 
   provider.sendLocalProjects();
+  await Promise.race([portfolioBatchDone, new Promise((resolve) => setTimeout(resolve, 200))]);
 
   assert.equal(portfolioEnrichments, 1);
   assert.equal(externalLoads, 1);
@@ -3027,15 +3036,25 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('async function selectProject'),
     extensionSource.indexOf('function scheduleProjectRunIndexBackfill')
   );
-  assert.ok(
-    selectBody.indexOf("{ command: 'roadmapLoading', projectPath }") < selectBody.indexOf('sendLocalProjectsToWebviews(context)'),
-    'the selected big view must enter loading state before portfolio enrichment starts'
+  assert.match(selectBody, /\{ command: 'roadmapLoading', projectPath \}/);
+  assert.doesNotMatch(
+    selectBody,
+    /sendLocalProjectsToWebviews\(context\)/,
+    'project switching must not rebuild every project card'
   );
   assert.ok(
-    selectBody.indexOf('selectionGeneration === projectSelectionGeneration') < selectBody.indexOf('sendProjectConversationSnapshot(projectPath)'),
-    'conversation snapshots must reject stale project-switch completions'
+    selectBody.indexOf('sendProjectConversationSnapshot(projectPath)') < selectBody.indexOf('ensureSyncEngine(context).then'),
+    'the recent conversation snapshot must load before project engine initialization'
   );
-  assert.match(selectBody, /ensureSyncEngine\(context\)\.then[\s\S]*?sendProjectConversationSnapshot\(projectPath\)/);
+
+  const sidebarProviderSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
+  const coreBatchBody = sidebarProviderSource.slice(
+    sidebarProviderSource.indexOf('private scheduleCorePortfolio'),
+    sidebarProviderSource.indexOf('public async sendSoloConversationHistory')
+  );
+  assert.match(coreBatchBody, /buildProjectPortfolioSummary\(project, \{ coreOnly: true \}\)/);
+  assert.match(coreBatchBody, /setTimeout\(\(\) => loadNext\(index \+ 1\), 0\)/);
+  assert.doesNotMatch(coreBatchBody, /buildProjectPortfolioSummaries\(projects/);
 
   const syncBody = extensionSource.slice(
     extensionSource.indexOf('async function ensureSyncEngine'),
@@ -3051,6 +3070,15 @@ test('local-first loading paints and launches before optional or durable work', 
   );
   assert.match(sqliteStoreSource, /let sharedSqlJsRuntime: Promise<initSqlJs\.SqlJsStatic> \| null = null/);
   assert.match(sqliteStoreSource, /this\.SQL = await getSqlJsRuntime\(\)/);
+
+  const roadmapOpenBody = extensionSource.slice(
+    extensionSource.indexOf('async function openRoadmapPanel'),
+    extensionSource.indexOf('async function handleOpenProjectGrowth')
+  );
+  assert.ok(
+    roadmapOpenBody.indexOf('buildLocalDataStatusHtml') < roadmapOpenBody.indexOf('getWebviewHtml(roadmapPanel.webview, context)'),
+    'a lightweight roadmap shell must paint before the complete Webview is built'
+  );
 
   const dispatchBody = extensionSource.slice(
     extensionSource.indexOf('async function handleSharedWebviewAction'),

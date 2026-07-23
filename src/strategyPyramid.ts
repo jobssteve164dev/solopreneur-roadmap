@@ -949,6 +949,56 @@ function writeStrategyPyramidSnapshot(globalDataPath: string, snapshot: Strategy
   }
 }
 
+function strategySourceSignature(projectEntries: StrategyPyramidProject[], globalDataPath: string): string {
+  const fileSignature = (filePath: string) => {
+    try {
+      const stat = fs.statSync(filePath);
+      return `${Math.trunc(stat.mtimeMs)}:${stat.size}`;
+    } catch {
+      return 'missing';
+    }
+  };
+  const projectFacts = projectEntries.filter((project) => project?.path).map((project) => [
+    project.path,
+    project.name,
+    project.type || '',
+    fileSignature(path.join(project.path, '.solopreneur', 'roadmap.csv')),
+    fileSignature(path.join(project.path, '.solopreneur', 'project_journal.db'))
+  ].join(':')).join('|');
+  return `${projectFacts}|${fileSignature(path.join(normalizeGlobalDataPath(globalDataPath), 'strategy', 'project-strategy.csv'))}`;
+}
+
+export function readCachedStrategyPyramidSnapshot(
+  projectEntries: StrategyPyramidProject[],
+  globalDataPath: string
+): StrategyPyramidSnapshot | null {
+  try {
+    const strategyRoot = path.join(normalizeGlobalDataPath(globalDataPath), 'strategy');
+    const metadata = JSON.parse(fs.readFileSync(path.join(strategyRoot, 'pyramid-snapshot-meta.json'), 'utf8'));
+    if (metadata.signature !== strategySourceSignature(projectEntries, globalDataPath)) return null;
+    return JSON.parse(fs.readFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), 'utf8')) as StrategyPyramidSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+function writeStrategyPyramidSnapshotMetadata(
+  projectEntries: StrategyPyramidProject[],
+  globalDataPath: string
+): void {
+  try {
+    const strategyRoot = path.join(normalizeGlobalDataPath(globalDataPath), 'strategy');
+    fs.mkdirSync(strategyRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(strategyRoot, 'pyramid-snapshot-meta.json'),
+      JSON.stringify({ version: 1, signature: strategySourceSignature(projectEntries, globalDataPath) }),
+      'utf8'
+    );
+  } catch (error) {
+    console.warn('Failed to write strategy pyramid snapshot metadata:', error);
+  }
+}
+
 export function buildStrategyPyramidSnapshotData(
   projectEntries: StrategyPyramidProject[],
   globalDataPath: string,
@@ -1104,5 +1154,6 @@ export function buildStrategyPyramidSnapshotData(
   };
 
   writeStrategyPyramidSnapshot(globalDataPath, snapshot);
+  writeStrategyPyramidSnapshotMetadata(projectEntries, globalDataPath);
   return snapshot;
 }

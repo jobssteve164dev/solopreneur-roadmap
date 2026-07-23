@@ -44,7 +44,7 @@ import { getWebviewHtml } from './roadmapWebview';
 import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
 import { backfillRunIndexFromDigests } from './runIndexMaintenance';
 import { getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
-import { buildStrategyPyramidSnapshotData, saveProjectStrategyData } from './strategyPyramid';
+import { buildStrategyPyramidSnapshotData, readCachedStrategyPyramidSnapshot, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
@@ -1734,6 +1734,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     watcher.dispose();
     watcher = null;
   }
+  void sidebarProvider?.sendProjectConversationSnapshot(projectPath);
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
     postProjectsLoaded(activePanel.webview, { projects, selectedProjectPath: projectPath });
@@ -1765,13 +1766,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   void ensureSyncEngine(context).then((ready) => {
     if (ready && selectionGeneration === projectSelectionGeneration && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
       sendNodesToWebview();
-      void sidebarProvider?.sendProjectConversationSnapshot(projectPath);
       void postFlowStateToWebview(context);
-      setTimeout(() => {
-        if (selectionGeneration === projectSelectionGeneration) {
-          sendLocalProjectsToWebviews(context);
-        }
-      }, 0);
     }
   });
   await persistSelection;
@@ -2638,10 +2633,19 @@ async function openRoadmapPanel(
     }
   );
 
-  // Load basic HTML into Webview
-  activePanel.webview.html = getWebviewHtml(activePanel.webview, context);
-  postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
-  postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
+  // Paint a tiny shell first. Building and parsing the complete roadmap Webview
+  // is intentionally deferred so opening a large view always has immediate feedback.
+  const roadmapPanel = activePanel;
+  roadmapPanel.webview.html = buildLocalDataStatusHtml(roadmapPanel.webview, context, {
+    title: isSoloMapLanguageZh(context) ? '正在打开项目路线图' : 'Opening project roadmap',
+    message: isSoloMapLanguageZh(context) ? '正在读取本地路线图数据。' : 'Loading local roadmap data.'
+  });
+  setTimeout(() => {
+    if (activePanel !== roadmapPanel) return;
+    roadmapPanel.webview.html = getWebviewHtml(roadmapPanel.webview, context);
+    postWebviewMessage(roadmapPanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
+    postWebviewMessage(roadmapPanel.webview, { command: 'setMainView', view: effectiveInitialView });
+  }, 0);
   setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
 
   // Handle messages from Webview
@@ -2918,7 +2922,7 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
               message: '正在重新读取本地项目组合数据。'
             }
           );
-          void refreshStrategyPyramidPanel(context);
+          void refreshStrategyPyramidPanel(context, true);
           break;
         case 'openProAuthorization':
           await beginPassportAuthorizationFlow(context);
@@ -2941,7 +2945,7 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
               message.strategicAction,
               message.abilities
             );
-            void refreshStrategyPyramidPanel(context);
+            void refreshStrategyPyramidPanel(context, true);
           }
           break;
       }
@@ -2959,7 +2963,7 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
   );
 }
 
-async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {
+async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext, forceRefresh = false): Promise<void> {
   const panel = activeStrategyPyramidPanel;
   if (!panel) {
     return;
@@ -2971,6 +2975,13 @@ async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext): Pr
       actionLabel: '登录 / 升级 Pro',
       actionCommand: 'openProAuthorization'
     });
+    return;
+  }
+  const strategyProjects = getProjects(context);
+  const strategyGlobalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const cachedSnapshot = forceRefresh ? null : readCachedStrategyPyramidSnapshot(strategyProjects, strategyGlobalDataPath);
+  if (cachedSnapshot) {
+    panel.webview.html = getStrategyPyramidWebviewHtml(panel.webview, context, cachedSnapshot);
     return;
   }
   await postLocalDataLoad(

@@ -22,9 +22,17 @@ import {
   getSupportedAgentStatuses
 } from './sidebarDependencies';
 import {
-  buildProjectPortfolioSummaries,
+  buildProjectPortfolioSummary,
+  ProjectPortfolioSummary,
   SolopreneurProject
 } from './projectPortfolio';
+import {
+  buildSidebarProjectSignature,
+  readCachedConversationSnapshot,
+  readSidebarCoreSnapshot,
+  writeCachedConversationSnapshot,
+  writeSidebarPortfolioSnapshot
+} from './sidebarSnapshotCache';
 import {
   resolveAgentCli,
   shellQuote
@@ -54,6 +62,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[] }>;
   private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
   private readonly _conversationSnapshotLoads = new Map<string, Promise<{ solo: AgentConversation[]; project: AgentConversation[] }>>();
+  private _corePortfolioRequest = 0;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -284,19 +293,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return;
       }
       const projectState = this._getProjects();
-      const portfolio = buildProjectPortfolioSummaries(projectState.projects, { coreOnly: true });
-      const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
-      this._view.webview.postMessage({
-        command: 'projectsLoaded',
-        projects: {
-          ...projectState,
-          portfolio,
-          globalStore
-        }
-      });
+      const globalDataPath = this._getSettings().globalDataPath;
+      const projectSignature = buildSidebarProjectSignature(projectState.projects);
+      const cached = readSidebarCoreSnapshot(globalDataPath);
+      if (cached?.projectSignature === projectSignature) {
+        this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, cached.portfolio, globalDataPath);
+        this._projectLoader.scheduleAll(projectState.projects, projectState.selectedProjectPath, cached.portfolio);
+      } else {
+        this.scheduleCorePortfolio(projectState.projects, projectState.selectedProjectPath, globalDataPath, []);
+      }
       void this.sendProjectConversationSnapshot(projectState.selectedProjectPath);
       this.sendDailyReview();
-      this._projectLoader.scheduleAll(projectState.projects, projectState.selectedProjectPath);
     } catch (error) {
       console.error('SoloMap sidebar failed to send projects:', error);
       this._view?.webview.postMessage({
@@ -323,20 +330,47 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       this._projectLoader.cancelExternalLoads();
       const projectState = this._getProjects();
-      const portfolio = buildProjectPortfolioSummaries(projectState.projects, { coreOnly: true });
-      const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
-      this._view.webview.postMessage({
-        command: 'projectsLoaded',
-        projects: {
-          ...projectState,
-          portfolio,
-          globalStore
-        }
-      });
-      this._projectLoader.schedulePortfolioEnrichment(projectState.projects, projectState.selectedProjectPath);
+      this.scheduleCorePortfolio(
+        projectState.projects,
+        projectState.selectedProjectPath,
+        this._getSettings().globalDataPath,
+        []
+      );
     } catch (error) {
       console.error('SoloMap sidebar failed to send local projects:', error);
     }
+  }
+
+  private postCorePortfolio(projects: SolopreneurProject[], selectedProjectPath: string, portfolio: ProjectPortfolioSummary[], globalDataPath: string): void {
+    const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, portfolio);
+    this._view?.webview.postMessage({
+      command: 'projectsLoaded',
+      projects: { projects, selectedProjectPath, portfolio, globalStore }
+    });
+  }
+
+  private scheduleCorePortfolio(projects: SolopreneurProject[], selectedProjectPath: string, globalDataPath: string, stalePortfolio: ProjectPortfolioSummary[]): void {
+    const requestId = ++this._corePortfolioRequest;
+    const ordered = [
+      ...projects.filter((project) => project.path === selectedProjectPath),
+      ...projects.filter((project) => project.path !== selectedProjectPath)
+    ];
+    const summaries = new Map(stalePortfolio.map((summary) => [summary.path, summary]));
+    const loadNext = (index: number) => {
+      if (!this._view || requestId !== this._corePortfolioRequest) return;
+      if (index >= ordered.length) {
+        const portfolio = projects.map((project) => summaries.get(project.path)).filter(Boolean) as ProjectPortfolioSummary[];
+        writeSidebarPortfolioSnapshot(globalDataPath, buildSidebarProjectSignature(projects), portfolio);
+        this._projectLoader.scheduleAll(projects, selectedProjectPath, portfolio);
+        return;
+      }
+      const project = ordered[index];
+      summaries.set(project.path, buildProjectPortfolioSummary(project, { coreOnly: true }));
+      const portfolio = projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[];
+      this.postCorePortfolio(projects, selectedProjectPath, portfolio, globalDataPath);
+      setTimeout(() => loadNext(index + 1), 0);
+    };
+    setTimeout(() => loadNext(0), 0);
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
@@ -391,23 +425,34 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public async sendProjectConversationSnapshot(projectPath: string) {
     try {
       if (!this._view || !this._getProjectConversationSnapshot || !projectPath) return;
+      const globalDataPath = this._getSettings().globalDataPath;
+      const cached = readCachedConversationSnapshot(globalDataPath, projectPath);
+      if (cached) {
+        this.postProjectConversationSnapshot(projectPath, cached);
+        return;
+      }
       let snapshotLoad = this._conversationSnapshotLoads.get(projectPath);
       if (!snapshotLoad) {
         snapshotLoad = this._getProjectConversationSnapshot(projectPath);
         this._conversationSnapshotLoads.set(projectPath, snapshotLoad);
       }
       const snapshot = await snapshotLoad;
-      this._view.webview.postMessage({
-        command: 'sidebarProjectConversationSnapshotLoaded',
-        projectPath,
-        soloConversations: snapshot.solo,
-        projectConversations: snapshot.project
-      });
+      writeCachedConversationSnapshot(globalDataPath, projectPath, snapshot);
+      this.postProjectConversationSnapshot(projectPath, snapshot);
     } catch (error) {
       console.error('SoloMap sidebar failed to send project conversation snapshot:', error);
     } finally {
       this._conversationSnapshotLoads.delete(projectPath);
     }
+  }
+
+  private postProjectConversationSnapshot(projectPath: string, snapshot: { solo: AgentConversation[]; project: AgentConversation[] }): void {
+    this._view?.webview.postMessage({
+      command: 'sidebarProjectConversationSnapshotLoaded',
+      projectPath,
+      soloConversations: snapshot.solo,
+      projectConversations: snapshot.project
+    });
   }
 
   public sendDailyReview() {
