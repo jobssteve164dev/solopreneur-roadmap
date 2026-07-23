@@ -12,6 +12,10 @@ import {
   ProjectIssueSummary,
   ProjectPullRequestSummary,
   ProjectSecuritySummary,
+  createEmptyDeliverySummary,
+  createEmptyIssueSummary,
+  createEmptyPullRequestSummary,
+  createEmptySecuritySummary,
   readCachedDeliverySummary,
   readCachedIssueSummary,
   readCachedPullRequestSummary,
@@ -94,6 +98,29 @@ export interface ProjectPortfolioBuildOptions {
   includeReusableSignals?: boolean;
   globalDataPath?: string;
   investmentStatsByProjectPath?: Map<string, ProjectInvestmentStats> | Record<string, ProjectInvestmentStats>;
+  coreOnly?: boolean;
+}
+
+function emptyFoundationAssessment(): ProjectFoundationAssessment {
+  return { complete: false, missingCount: 0, missing: [], items: [], message: '' };
+}
+
+function emptyInvestmentStats(): ProjectInvestmentStats {
+  return {
+    schemaVersion: 1,
+    generatedAt: '',
+    taskRunCount: 0,
+    soloConversationCount: 0,
+    completedRunCount: 0,
+    failedRunCount: 0,
+    totalDurationMs: 0,
+    recentDurationMs: 0,
+    averageRunDurationMs: 0,
+    latestRunAt: '',
+    investmentScore: 0,
+    momentumScore: 0,
+    focusScore: 0
+  };
 }
 
 type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
@@ -418,20 +445,20 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
     recommendedNodeTitle: recommendedNode?.title || '',
     recommendedStatus: recommendedNode?.status || '',
     overallStatus,
-    recentActivityAt: getProjectRecentActivityAt(project.path),
-    issues: readCachedIssueSummary(project.path),
-    pullRequests: readCachedPullRequestSummary(project.path),
-    delivery: readCachedDeliverySummary(project.path),
-    security: readCachedSecuritySummary(project.path),
-    foundation: assessProjectFoundation(project.path)
+    recentActivityAt: options.coreOnly ? '' : getProjectRecentActivityAt(project.path),
+    issues: options.coreOnly ? createEmptyIssueSummary() : readCachedIssueSummary(project.path),
+    pullRequests: options.coreOnly ? createEmptyPullRequestSummary() : readCachedPullRequestSummary(project.path),
+    delivery: options.coreOnly ? createEmptyDeliverySummary() : readCachedDeliverySummary(project.path),
+    security: options.coreOnly ? createEmptySecuritySummary() : readCachedSecuritySummary(project.path),
+    foundation: options.coreOnly ? emptyFoundationAssessment() : assessProjectFoundation(project.path)
   };
   const inferredPriority = inferGlobalPriority(baseSummary);
   const globalPriority = project.priority || inferredPriority;
   const deliverySignal = inferDeliverySignal(baseSummary.delivery);
   const securitySignal = inferSecuritySignal(baseSummary.security);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
-  const documentationSummary = summarizeDocumentationForReview(project.path);
-  const investment = getInvestmentOverride(project.path, options) || readProjectInvestmentStats(project.path);
+  const documentationSummary = options.coreOnly ? { documentCount: 0, pendingReviewCount: 0 } : summarizeDocumentationForReview(project.path);
+  const investment = options.coreOnly ? emptyInvestmentStats() : (getInvestmentOverride(project.path, options) || readProjectInvestmentStats(project.path));
   const loopSummary = buildProjectLoopSummary(nodes, recommendedNode, stageSummary);
   return {
     ...baseSummary,

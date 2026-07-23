@@ -8942,7 +8942,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, projectPath);
       renderPortfolio(currentProjects.portfolio, projectPath);
-      requestSidebarProjectConversationSnapshot(projectPath);
       setTimeout(() => {
         const selectedCard = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('.portfolio-card.is-selected') : null;
         if (selectedCard && typeof selectedCard.scrollIntoView === 'function') {

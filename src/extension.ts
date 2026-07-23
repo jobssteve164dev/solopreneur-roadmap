@@ -227,6 +227,8 @@ let syncEngineReady = false;
 let pendingPassportAuthNonce: string | null = null;
 let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
+let projectSelectionGeneration = 0;
+let syncEngineInitGeneration = 0;
 const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
 
@@ -275,9 +277,6 @@ const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
   extensionContextRef = context;
-  recordLocalUsageEvent(context, 'activation');
-  migrateLegacyActiveConversations(context);
-  ensureActiveConversationPoller(context);
   context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(SOLOMAP_GIT_DIFF_SCHEME, {
     provideTextDocumentContent(uri: vscode.Uri) {
       return solomapGitDiffContent.get(uri.toString()) || '';
@@ -429,6 +428,7 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRunAgent', async (nodeId: string) => {
+    revealAgentStartupTerminal(activeProjectRoot || getSelectedProjectPath(context) || '');
     await handleRunAgent(context, nodeId, '');
   }));
 
@@ -470,9 +470,6 @@ export async function activate(context: vscode.ExtensionContext) {
     return false;
   }));
 
-  // Start Telegram remote service
-  startTelegramRemoteService(context);
-
   // Setup wrapper for SyncEngine to allow safe initialization later
   const syncEngineWrapper = {
     getNodes: () => {
@@ -505,8 +502,14 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize storage in the background after the UI provider is registered.
   void ensureSyncEngine(context);
-  scheduleFocusReminder(context);
-  scheduleTimedAutomationTask(context);
+  setTimeout(() => {
+    recordLocalUsageEvent(context, 'activation');
+    migrateLegacyActiveConversations(context);
+    ensureActiveConversationPoller(context);
+    startTelegramRemoteService(context);
+    scheduleFocusReminder(context);
+    scheduleTimedAutomationTask(context);
+  }, 15_000);
 }
 
 async function ensureActionProject(context: vscode.ExtensionContext, projectPath: string): Promise<string> {
@@ -605,6 +608,7 @@ async function handleSharedWebviewAction(
       );
     },
     'timePlan.generate': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath) return;
       await handleGenerateTimePlan(
@@ -904,6 +908,7 @@ async function handleSharedWebviewAction(
       setTimeout(() => void selectProject(context, projectPath), 0);
     },
     'project.continue': async (request) => {
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
       const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
       if (!projectPath) return;
       if (request.nodeId) {
@@ -1709,6 +1714,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     return;
   }
 
+  const selectionGeneration = ++projectSelectionGeneration;
   selectedProjectPathInMemory = projectPath;
   const persistSelection = context.globalState.update(selectedProjectKey, projectPath);
   syncEngine = null;
@@ -1720,10 +1726,9 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     watcher.dispose();
     watcher = null;
   }
-  sendLocalProjectsToWebviews(context);
-  void sidebarProvider?.sendProjectConversationSnapshot(projectPath);
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
+    postProjectsLoaded(activePanel.webview, { projects, selectedProjectPath: projectPath });
   }
   if (activeProjectGrowthPanel) {
     const copy = getProjectGrowthPanelCopy(context);
@@ -1750,9 +1755,15 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   }
   scheduleProjectRunIndexBackfill(context, projectPath);
   void ensureSyncEngine(context).then((ready) => {
-    if (ready && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
+    if (ready && selectionGeneration === projectSelectionGeneration && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
       sendNodesToWebview();
+      void sidebarProvider?.sendProjectConversationSnapshot(projectPath);
       void postFlowStateToWebview(context);
+      setTimeout(() => {
+        if (selectionGeneration === projectSelectionGeneration) {
+          sendLocalProjectsToWebviews(context);
+        }
+      }, 0);
     }
   });
   await persistSelection;
@@ -2532,6 +2543,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
   const nextSyncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
+  const initGeneration = projectSelectionGeneration;
   syncEngine = nextSyncEngine;
   activeProjectRoot = projectRoot;
   syncEngineReady = false;
@@ -2540,29 +2552,36 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   sendNodesToWebview();
 
   syncEngineInitProjectRoot = projectRoot;
+  syncEngineInitGeneration = initGeneration;
   syncEngineInitPromise = (async () => {
     try {
-      ensureSolopreneurReadme(solopreneurDir);
-      ensureRoadmapMethodologyInstructions(solopreneurDir);
-      ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
-      ensureRoadmapValidationScript(solopreneurDir);
-      ensureDocumentationManifest(projectRoot);
       await nextSyncEngine.initAndSync();
-      if (getSelectedProjectPath(context) !== projectRoot) {
+      if (getSelectedProjectPath(context) !== projectRoot || projectSelectionGeneration !== initGeneration) {
         nextSyncEngine.close();
         return false;
       }
       syncEngine = nextSyncEngine;
       activeProjectRoot = projectRoot;
       syncEngineReady = true;
-      ensureCompletionCriteriaForNodes(projectRoot, syncEngine.getNodes());
       setupFileSentinelWatcher(projectRoot);
       // Project switching should stay local-first; avoid re-triggering
       // full external-card refreshes while short-lived caches are still warm.
       if (sidebarProvider) {
         sidebarProvider.sendNodesToWebview();
-        sidebarProvider.sendLocalProjects();
       }
+      setTimeout(() => {
+        if (getSelectedProjectPath(context) !== projectRoot || projectSelectionGeneration !== initGeneration) return;
+        try {
+          ensureSolopreneurReadme(solopreneurDir);
+          ensureRoadmapMethodologyInstructions(solopreneurDir);
+          ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
+          ensureRoadmapValidationScript(solopreneurDir);
+          ensureDocumentationManifest(projectRoot);
+          ensureCompletionCriteriaForNodes(projectRoot, nextSyncEngine.getNodes());
+        } catch (error) {
+          console.error('SoloMap deferred project scaffolding failed:', error);
+        }
+      }, 0);
       return true;
     } catch (error) {
       syncEngineReady = false;
@@ -2570,8 +2589,10 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
       vscode.window.showErrorMessage(`路线图本地数据加载失败：${formatLocalDataError(error)}`);
       return false;
     } finally {
-      syncEngineInitPromise = null;
-      syncEngineInitProjectRoot = '';
+      if (syncEngineInitGeneration === initGeneration && syncEngineInitProjectRoot === projectRoot) {
+        syncEngineInitPromise = null;
+        syncEngineInitProjectRoot = '';
+      }
     }
   })();
   return syncEngineInitPromise;
@@ -2585,11 +2606,10 @@ async function openRoadmapPanel(
   const effectiveInitialView = initialView;
   // If panel already exists, reveal it
   if (activePanel) {
-    recordLocalUsageEvent(context, 'roadmapOpened');
     activePanel.title = getRoadmapPanelTitle(context);
     activePanel.reveal(vscode.ViewColumn.One);
     postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
-    void postFlowStateToWebview(context);
+    setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
     return;
   }
 
@@ -2598,8 +2618,6 @@ async function openRoadmapPanel(
     vscode.window.showErrorMessage('Choose a project folder before launching the Roadmap.');
     return;
   }
-  recordLocalUsageEvent(context, 'roadmapOpened');
-
   // Create Webview Panel
   activePanel = vscode.window.createWebviewPanel(
     'solopreneurRoadmap',
@@ -2615,10 +2633,8 @@ async function openRoadmapPanel(
   // Load basic HTML into Webview
   activePanel.webview.html = getWebviewHtml(activePanel.webview, context);
   postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
-  postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
-  postProjectsLoaded(activePanel.webview, getProjectState(context));
   postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
-  void postFlowStateToWebview(context);
+  setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
 
   // Handle messages from Webview
   activePanel.webview.onDidReceiveMessage(
@@ -2788,7 +2804,7 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
   const copy = getProjectGrowthPanelCopy(context);
 
   await postLocalDataLoad(
-    () => getProjectGrowthView(projectPath, context.extensionPath, { refreshIfMissing: true }),
+    () => getProjectGrowthView(projectPath, context.extensionPath, { refreshIfMissing: false }),
     (growthView) => {
       if (!activeProjectGrowthPanel || activeProjectGrowthPanel !== panel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
       activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
@@ -2799,6 +2815,25 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
         isZh,
         getProjects(context)
       );
+      if (!growthView.snapshotId) {
+        setTimeout(() => {
+          if (!activeProjectGrowthPanel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
+          void refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+            scanReason: 'panel_open',
+            maxFiles: 4000
+          }).then((refreshedView) => {
+            if (!activeProjectGrowthPanel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
+            activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
+              activeProjectGrowthPanel.webview,
+              context,
+              refreshedView,
+              projectName,
+              isZh,
+              getProjects(context)
+            );
+          }).catch((error) => console.error('SoloMap project growth background refresh failed:', error));
+        }, 0);
+      }
     },
     (message) => {
       if (!activeProjectGrowthPanel || activeProjectGrowthPanel !== panel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
@@ -4789,9 +4824,12 @@ function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefine
 }
 
 function createAgentTerminal(workspaceRoot: string, label: string, conversationId = 0): vscode.Terminal {
-  const reservedTerminal = reservedAgentTerminalsByProject.get(workspaceRoot);
+  const reservedTerminals = reservedAgentTerminalsByProject.get(workspaceRoot);
+  const reservedTerminal = reservedTerminals?.shift();
   if (reservedTerminal) {
-    reservedAgentTerminalsByProject.delete(workspaceRoot);
+    if (!reservedTerminals?.length) {
+      reservedAgentTerminalsByProject.delete(workspaceRoot);
+    }
     activeAgentTerminalName = reservedTerminal.name;
     if (conversationId) {
       agentTerminalNamesByConversationId.set(Number(conversationId), reservedTerminal.name);
@@ -4819,11 +4857,10 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
   });
 }
 
-const reservedAgentTerminalsByProject = new Map<string, vscode.Terminal>();
+const reservedAgentTerminalsByProject = new Map<string, vscode.Terminal[]>();
 
 function revealAgentStartupTerminal(workspaceRoot: string): void {
-  if (!workspaceRoot || reservedAgentTerminalsByProject.has(workspaceRoot)) {
-    reservedAgentTerminalsByProject.get(workspaceRoot)?.show(true);
+  if (!workspaceRoot) {
     return;
   }
   const terminal = vscode.window.createTerminal({
@@ -4834,7 +4871,9 @@ function revealAgentStartupTerminal(workspaceRoot: string): void {
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot
   });
-  reservedAgentTerminalsByProject.set(workspaceRoot, terminal);
+  const reservations = reservedAgentTerminalsByProject.get(workspaceRoot) || [];
+  reservations.push(terminal);
+  reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   activeAgentTerminalName = terminal.name;
   terminal.show(true);
   terminal.sendText(`printf '%s\\n' ${shellQuote('SoloMap 正在准备本地对话…')}`);
@@ -6773,6 +6812,7 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
     deferOrFailScheduledOccurrence(context, occurrenceId, task.title || '');
     return;
   }
+  revealAgentStartupTerminal(workspaceRoot);
   const timeOfDay = String(task.timeOfDay || '09:00');
   recordAutomationTaskEvent(workspaceRoot, {
     trigger: 'scheduled_time',

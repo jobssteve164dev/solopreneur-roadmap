@@ -53,6 +53,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[] }>;
   private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
+  private readonly _conversationSnapshotLoads = new Map<string, Promise<{ solo: AgentConversation[]; project: AgentConversation[] }>>();
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -205,8 +206,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    // Request initial data push
-    this.sendInitialDataToWebview();
+    // The Webview owns the single cold-start request. Pushing the same payload
+    // here as well causes duplicate settings, portfolio and SQLite loads.
   }
 
   /**
@@ -283,7 +284,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return;
       }
       const projectState = this._getProjects();
-      const portfolio = buildProjectPortfolioSummaries(projectState.projects);
+      const portfolio = buildProjectPortfolioSummaries(projectState.projects, { coreOnly: true });
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
       this._view.webview.postMessage({
         command: 'projectsLoaded',
@@ -322,7 +323,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       this._projectLoader.cancelExternalLoads();
       const projectState = this._getProjects();
-      const portfolio = buildProjectPortfolioSummaries(projectState.projects);
+      const portfolio = buildProjectPortfolioSummaries(projectState.projects, { coreOnly: true });
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(this._getSettings().globalDataPath, portfolio);
       this._view.webview.postMessage({
         command: 'projectsLoaded',
@@ -390,7 +391,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public async sendProjectConversationSnapshot(projectPath: string) {
     try {
       if (!this._view || !this._getProjectConversationSnapshot || !projectPath) return;
-      const snapshot = await this._getProjectConversationSnapshot(projectPath);
+      let snapshotLoad = this._conversationSnapshotLoads.get(projectPath);
+      if (!snapshotLoad) {
+        snapshotLoad = this._getProjectConversationSnapshot(projectPath);
+        this._conversationSnapshotLoads.set(projectPath, snapshotLoad);
+      }
+      const snapshot = await snapshotLoad;
       this._view.webview.postMessage({
         command: 'sidebarProjectConversationSnapshotLoaded',
         projectPath,
@@ -399,6 +405,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send project conversation snapshot:', error);
+    } finally {
+      this._conversationSnapshotLoads.delete(projectPath);
     }
   }
 
@@ -415,12 +423,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       console.error('SoloMap sidebar failed to send daily review:', error);
     }
-  }
-
-  private sendInitialDataToWebview() {
-    this.sendNodesToWebview();
-    this.sendSettings();
-    this.sendProjects();
   }
 
   private openDependencyAction(action: string, cliPath: string) {

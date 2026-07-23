@@ -498,6 +498,7 @@ function readGitHead(projectPath: string): string {
     return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
       cwd: projectPath,
       encoding: 'utf8',
+      timeout: 2000,
       stdio: ['ignore', 'pipe', 'ignore']
     }).trim();
   } catch {
@@ -511,6 +512,7 @@ function readGitChurn(projectPath: string): Map<string, number> {
     const output = execFileSync('git', ['log', '--name-only', '--pretty=format:', '--since=90 days'], {
       cwd: projectPath,
       encoding: 'utf8',
+      timeout: 3000,
       maxBuffer: 4 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'ignore']
     });
@@ -1013,7 +1015,7 @@ async function loadDependencyCruiserAnalysis(
   try {
     const { stdout } = await execFileAsync(process.execPath, args, {
       cwd: projectPath,
-      timeout: 20000,
+      timeout: 8000,
       maxBuffer: 8 * 1024 * 1024
     });
     const result = JSON.parse(stdout || '{}') as DependencyCruiserResult;

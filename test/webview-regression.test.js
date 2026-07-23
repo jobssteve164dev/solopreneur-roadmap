@@ -1362,8 +1362,9 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   });
   assert.equal(
     postedMessages.filter((message) => message.command === 'conversation.getProjectSnapshot' && message.projectPath === '/workspace/second').length,
-    1
+    0
   );
+  assert.equal(postedMessages.filter((message) => message.command === 'project.select' && message.projectPath === '/workspace/second').length, 1);
   assert.equal(
     postedMessages.filter((message) => message.command === 'conversation.getHistory' || message.command === 'conversation.getProjectHistory').length,
     0
@@ -1508,6 +1509,8 @@ test('sidebar resolve survives persisted state and startup data failures', async
   try {
     assert.doesNotThrow(() => provider.resolveWebviewView(webviewView, {}, {}));
     assert.match(webviewView.webview.html, /SoloMap/);
+    assert.equal(postedMessages.length, 0, 'the provider must not duplicate the webview-owned cold-start request');
+    provider.sendProjects();
     assert.ok(postedMessages.some((message) => message.command === 'projectsLoaded'));
 
     await messageListener({ command: 'conversation.runStep', nodeId: '1' });
@@ -2171,7 +2174,11 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.soloConversations[\s\S]*?renderPortfolioFromAsyncUpdate/);
-  assert.match(html, /function activateProjectInSidebar[\s\S]*?requestSidebarProjectConversationSnapshot\(projectPath\)/);
+  const activationBody = html.slice(
+    html.indexOf('function activateProjectInSidebar'),
+    html.indexOf('function bindProjectSelect')
+  );
+  assert.doesNotMatch(activationBody, /requestSidebarProjectConversationSnapshot\(projectPath\)/);
   assert.match(html, /const sidebarSoloConversationsByProject = \{\}/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?sidebarSoloConversationsByProject\[message\.projectPath\][\s\S]*?if \(message\.projectPath !== currentProjects\.selectedProjectPath\) return/);
   assert.match(html, /function activateProjectInSidebar[\s\S]*?sidebarSoloConversations = sidebarSoloConversationsByProject\[projectPath\] \|\| \[\]/);
@@ -3021,13 +3028,14 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('function scheduleProjectRunIndexBackfill')
   );
   assert.ok(
-    selectBody.indexOf('sendLocalProjectsToWebviews(context)') < selectBody.indexOf('await persistSelection'),
-    'project cards must switch before selection persistence'
+    selectBody.indexOf("{ command: 'roadmapLoading', projectPath }") < selectBody.indexOf('sendLocalProjectsToWebviews(context)'),
+    'the selected big view must enter loading state before portfolio enrichment starts'
   );
   assert.ok(
-    selectBody.indexOf('sendProjectConversationSnapshot(projectPath)') < selectBody.indexOf('await persistSelection'),
-    'the selected project conversation snapshot must start before selection persistence'
+    selectBody.indexOf('selectionGeneration === projectSelectionGeneration') < selectBody.indexOf('sendProjectConversationSnapshot(projectPath)'),
+    'conversation snapshots must reject stale project-switch completions'
   );
+  assert.match(selectBody, /ensureSyncEngine\(context\)\.then[\s\S]*?sendProjectConversationSnapshot\(projectPath\)/);
 
   const syncBody = extensionSource.slice(
     extensionSource.indexOf('async function ensureSyncEngine'),
@@ -3051,11 +3059,13 @@ test('local-first loading paints and launches before optional or durable work', 
   for (const action of [
     'conversation.runStep',
     'conversation.runSolo',
+    'timePlan.generate',
     'conversation.runRoadmapRevision',
     'flow.run',
     'conversation.continue',
     'conversation.retry',
-    'conversation.continueTurn'
+    'conversation.continueTurn',
+    'project.continue'
   ]) {
     const start = dispatchBody.indexOf(`'${action}': async`);
     assert.notEqual(start, -1, `${action} handler missing`);
