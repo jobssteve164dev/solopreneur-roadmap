@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.374 - 2026-07-23
+
+### Changed
+- Optimize local-first interaction loading paths (ba6580a)
+
+### Docs
+- define local-first loading experience baseline (a67d0ee)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.373 - 2026-07-23
 
 ### Fixed
