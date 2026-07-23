@@ -503,14 +503,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     .scheduled-task-top {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 86px auto auto;
+      grid-template-columns: minmax(0, 1fr) 82px 86px auto auto;
       gap: 6px;
       align-items: center;
     }
 
     .scheduled-task-add {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 86px;
+      grid-template-columns: minmax(0, 1fr) 82px 86px;
       gap: 6px;
     }
 
@@ -578,6 +578,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
       .scheduled-task-top [data-scheduled-title] {
         grid-column: 1 / -1;
+      }
+
+      .scheduled-task-top [data-scheduled-kind],
+      .scheduled-task-top [data-scheduled-time] {
+        grid-column: auto;
       }
 
       .time-plan-draft-item {
@@ -3468,8 +3473,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         <div class="scheduled-task-list" id="scheduled-tasks-list"></div>
         <div class="scheduled-task-add">
           <input type="text" class="settings-input" id="scheduled-task-title-input" placeholder="Name">
+          <button type="button" class="settings-action-btn test-btn" id="scheduled-task-kind-input" data-value="daily" aria-label="Repeat">Daily</button>
           <input type="time" class="settings-input" id="scheduled-task-time-input" value="09:00">
         </div>
+        <input type="date" class="settings-input" id="scheduled-task-date-input" style="display:none">
         <textarea class="settings-input settings-textarea" id="scheduled-task-prompt-input" rows="2" placeholder="Prompt to send at this time..."></textarea>
         <button class="settings-action-btn save-btn" id="btn-add-scheduled-task"><span class="codicon codicon-add"></span><span id="text-add-scheduled-task">Add scheduled task</span></button>
       </section>
@@ -3889,7 +3896,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const scheduledTasksTarget = document.getElementById('scheduled-tasks-target');
     const scheduledTasksList = document.getElementById('scheduled-tasks-list');
     const scheduledTaskTitleInput = document.getElementById('scheduled-task-title-input');
+    const scheduledTaskKindInput = document.getElementById('scheduled-task-kind-input');
     const scheduledTaskTimeInput = document.getElementById('scheduled-task-time-input');
+    const scheduledTaskDateInput = document.getElementById('scheduled-task-date-input');
     const scheduledTaskPromptInput = document.getElementById('scheduled-task-prompt-input');
     const btnAddScheduledTask = document.getElementById('btn-add-scheduled-task');
     const agentTimePlannerInput = document.getElementById('agent-time-planner-input');
@@ -4210,6 +4219,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         scheduledTasksNext: '下次 {time}',
         scheduledTaskNamePlaceholder: '名称',
         scheduledTaskPromptPlaceholder: '到点发送的新任务提示词...',
+        scheduledTaskRepeatDaily: '每天',
+        scheduledTaskRepeatOnce: '一次',
+        scheduledTaskRepeatLabel: '重复方式',
+        scheduledTaskDateLabel: '执行日期',
         addScheduledTask: '新增定时',
         scheduledTaskEnabled: '开启',
         scheduledTaskDisabled: '关闭',
@@ -4585,6 +4598,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         scheduledTasksNext: 'Next {time}',
         scheduledTaskNamePlaceholder: 'Name',
         scheduledTaskPromptPlaceholder: 'Prompt to send at this time...',
+        scheduledTaskRepeatDaily: 'Daily',
+        scheduledTaskRepeatOnce: 'One-time',
+        scheduledTaskRepeatLabel: 'Repeat',
+        scheduledTaskDateLabel: 'Run date',
         addScheduledTask: 'Add scheduled task',
         scheduledTaskEnabled: 'On',
         scheduledTaskDisabled: 'Off',
@@ -4976,6 +4993,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('text-add-scheduled-task', t('addScheduledTask'));
       if (scheduledTaskTitleInput) scheduledTaskTitleInput.placeholder = t('scheduledTaskNamePlaceholder');
       if (scheduledTaskPromptInput) scheduledTaskPromptInput.placeholder = t('scheduledTaskPromptPlaceholder');
+      if (scheduledTaskKindInput) {
+        scheduledTaskKindInput.setAttribute('aria-label', t('scheduledTaskRepeatLabel'));
+        scheduledTaskKindInput.textContent = scheduledTaskKindInput.dataset.value === 'once' ? t('scheduledTaskRepeatOnce') : t('scheduledTaskRepeatDaily');
+      }
+      if (scheduledTaskDateInput) scheduledTaskDateInput.setAttribute('aria-label', t('scheduledTaskDateLabel'));
       setText('agent-time-planner-title', t('agentTimePlannerLabel'));
       setText('agent-time-planner-help', t('agentTimePlannerHelp'));
       setText('text-agent-time-planner', t('agentTimePlannerAction'));
@@ -5110,6 +5132,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     if (btnAddScheduledTask) {
       btnAddScheduledTask.addEventListener('click', addScheduledTaskFromPanel);
+    }
+
+    if (scheduledTaskKindInput) {
+      scheduledTaskKindInput.addEventListener('click', () => {
+        scheduledTaskKindInput.dataset.value = scheduledTaskKindInput.dataset.value === 'once' ? 'daily' : 'once';
+        scheduledTaskKindInput.textContent = scheduledTaskKindInput.dataset.value === 'once' ? t('scheduledTaskRepeatOnce') : t('scheduledTaskRepeatDaily');
+        if (scheduledTaskDateInput) {
+          scheduledTaskDateInput.style.display = scheduledTaskKindInput.dataset.value === 'once' ? 'block' : 'none';
+          if (scheduledTaskKindInput.dataset.value === 'once' && !scheduledTaskDateInput.value) {
+            scheduledTaskDateInput.value = new Date().toLocaleDateString('en-CA');
+          }
+        }
+      });
     }
 
     function askAgentToArrangeTime() {
@@ -5849,6 +5884,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       scheduledTasksList.innerHTML = tasks.map((task) => {
         const enabled = task.enabled !== false;
         const taskProjectName = getScheduledTaskProjectName(task);
+        const scheduledDate = task.scheduleKind === 'once' && Number.isFinite(Date.parse(String(task.scheduledAt || '')))
+          ? new Date(task.scheduledAt).toLocaleDateString('en-CA')
+          : '';
         const oneTimeLabel = task.scheduleKind === 'once' && task.scheduledAt
           ? t('scheduledTaskOneTime').replace('{time}', formatScheduledDate(new Date(task.scheduledAt)))
           : '';
@@ -5856,12 +5894,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           '<div class="scheduled-task-card" data-scheduled-task-id="' + escapeHtml(task.id) + '">',
             '<div class="scheduled-task-top">',
               '<input type="text" class="settings-input" data-scheduled-title value="' + escapeHtml(task.title || '') + '" placeholder="' + escapeHtml(t('scheduledTaskNamePlaceholder')) + '">',
-              '<input type="time" class="settings-input" data-scheduled-time value="' + escapeHtml(task.timeOfDay || '09:00') + '" ' + (task.scheduleKind === 'once' ? 'disabled' : '') + '>',
+              '<button type="button" class="settings-action-btn test-btn" data-scheduled-kind data-value="' + (task.scheduleKind === 'once' ? 'once' : 'daily') + '" aria-label="' + escapeHtml(t('scheduledTaskRepeatLabel')) + '">' + escapeHtml(task.scheduleKind === 'once' ? t('scheduledTaskRepeatOnce') : t('scheduledTaskRepeatDaily')) + '</button>',
+              '<input type="time" class="settings-input" data-scheduled-time value="' + escapeHtml(task.timeOfDay || '09:00') + '">',
               '<button type="button" class="settings-action-btn test-btn" data-scheduled-toggle>' + escapeHtml(enabled ? t('scheduledTaskEnabled') : t('scheduledTaskDisabled')) + '</button>',
               '<button type="button" class="settings-action-btn test-btn" data-scheduled-delete><span class="codicon codicon-trash"></span></button>',
             '</div>',
             taskProjectName ? '<div class="scheduled-task-card-target">' + escapeHtml(t('scheduledTaskTarget').replace('{project}', taskProjectName)) + '</div>' : '',
             oneTimeLabel ? '<div class="scheduled-task-card-target">' + escapeHtml(oneTimeLabel) + '</div>' : '',
+            task.scheduleKind === 'once' ? '<input type="date" class="settings-input" data-scheduled-date aria-label="' + escapeHtml(t('scheduledTaskDateLabel')) + '" value="' + escapeHtml(scheduledDate) + '">' : '',
             task.assignee === 'user'
               ? '<div class="scheduled-task-card-target">' + escapeHtml(t('scheduledTaskReminder')) + '</div>'
               : '<textarea class="settings-input settings-textarea" rows="2" data-scheduled-prompt placeholder="' + escapeHtml(t('scheduledTaskPromptPlaceholder')) + '">' + escapeHtml(task.prompt || '') + '</textarea>',
@@ -5893,7 +5933,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       scheduledTasksList.querySelectorAll('[data-scheduled-task-id]').forEach(card => {
         const taskId = card.getAttribute('data-scheduled-task-id') || '';
         const titleInput = card.querySelector('[data-scheduled-title]');
+        const kindInput = card.querySelector('[data-scheduled-kind]');
         const timeInput = card.querySelector('[data-scheduled-time]');
+        const dateInput = card.querySelector('[data-scheduled-date]');
         const promptInput = card.querySelector('[data-scheduled-prompt]');
         const toggleButton = card.querySelector('[data-scheduled-toggle]');
         const deleteButton = card.querySelector('[data-scheduled-delete]');
@@ -5902,11 +5944,36 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           titleInput.addEventListener('change', () => updateScheduledTask(taskId, { title: String(titleInput.value || '').trim() }, false, true));
         }
         if (timeInput) {
-          const updateTime = (persist) => updateScheduledTask(taskId, {
-            timeOfDay: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(timeInput.value || '')) ? String(timeInput.value) : '09:00'
-          }, false, persist);
+          const updateTime = (persist) => {
+            const timeOfDay = /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(timeInput.value || '')) ? String(timeInput.value) : '09:00';
+            const task = (automationDraftSettings.scheduledTasks || []).find(item => item.id === taskId);
+            const updates = { timeOfDay };
+            if (task && task.scheduleKind === 'once') {
+              const date = dateInput && dateInput.value ? String(dateInput.value) : new Date().toLocaleDateString('en-CA');
+              updates.scheduledAt = new Date(date + 'T' + timeOfDay + ':00').toISOString();
+            }
+            updateScheduledTask(taskId, updates, false, persist);
+          };
           timeInput.addEventListener('input', () => updateTime(false));
           timeInput.addEventListener('change', () => updateTime(true));
+        }
+        if (kindInput) {
+          kindInput.addEventListener('click', () => {
+            const scheduleKind = kindInput.dataset.value === 'once' ? 'daily' : 'once';
+            const timeOfDay = timeInput && timeInput.value ? String(timeInput.value) : '09:00';
+            const date = new Date().toLocaleDateString('en-CA');
+            updateScheduledTask(taskId, {
+              scheduleKind,
+              scheduledAt: scheduleKind === 'once' ? new Date(date + 'T' + timeOfDay + ':00').toISOString() : ''
+            }, true, true);
+          });
+        }
+        if (dateInput) {
+          dateInput.addEventListener('change', () => {
+            const timeOfDay = timeInput && timeInput.value ? String(timeInput.value) : '09:00';
+            if (!dateInput.value) return;
+            updateScheduledTask(taskId, { scheduledAt: new Date(String(dateInput.value) + 'T' + timeOfDay + ':00').toISOString() }, true, true);
+          });
         }
         if (promptInput) {
           promptInput.addEventListener('input', () => updateScheduledTask(taskId, { prompt: String(promptInput.value || '').trim() }, false, false));
@@ -5939,6 +6006,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         ? String(scheduledTaskTimeInput.value)
         : '09:00';
       const projectPath = currentProjects.selectedProjectPath || activeProjectPath || '';
+      const scheduleKind = scheduledTaskKindInput && scheduledTaskKindInput.dataset.value === 'once' ? 'once' : 'daily';
+      const scheduledDate = scheduledTaskDateInput && scheduledTaskDateInput.value
+        ? String(scheduledTaskDateInput.value)
+        : new Date().toLocaleDateString('en-CA');
       automationDraftSettings.scheduledTasks = [
         ...(automationDraftSettings.scheduledTasks || []),
         {
@@ -5948,6 +6019,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           projectPath,
           projectName: getSelectedProjectDisplayName(),
           timeOfDay,
+          scheduleKind,
+          scheduledAt: scheduleKind === 'once' ? new Date(scheduledDate + 'T' + timeOfDay + ':00').toISOString() : '',
           prompt
         }
       ];

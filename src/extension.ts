@@ -16,6 +16,13 @@ import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { confirmTimePlan, ensureTimePlanValidationScript, readTimePlan } from './timePlan';
+import {
+  claimDueScheduledTasks,
+  completeScheduledTaskOccurrence,
+  failScheduledTaskOccurrence,
+  readScheduledTaskLedger,
+  syncScheduledTaskLedger
+} from './scheduledTaskLedger';
 import { getAgentImpactStatusFromDatabase, buildAgentImpactSummary } from './agentImpact';
 import { buildAgentCliUpgradePrompt } from './agentCliUpgrade';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
@@ -260,9 +267,8 @@ let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
 let focusReminderTimer: NodeJS.Timeout | null = null;
 let focusReminderNextAt = '';
-let scheduledAutomationTimer: NodeJS.Timeout | null = null;
+let scheduledAutomationPoller: NodeJS.Timeout | null = null;
 let scheduledAutomationNextAt = '';
-const scheduledAutomationRunKeys = new Set<string>();
 const agentTerminalNamesByConversationId = new Map<number, string>();
 const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 
@@ -5831,17 +5837,24 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
   await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel);
 }
 
-async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
+async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = ''): Promise<number> {
   if (!syncEngine || !activeProjectRoot) {
-    return;
+    return 0;
   }
   const request = userMessage.trim();
   if (!request) {
     vscode.window.showWarningMessage('Describe what you want to handle before starting a Solo conversation.');
-    return;
+    return 0;
   }
 
   await syncEngine.initAndSync();
+
+  const occurrenceMarker = occurrenceId ? `Scheduled occurrence: ${occurrenceId}` : '';
+  if (occurrenceMarker) {
+    const existing = syncEngine.getAgentExecutions(soloConversationId)
+      .find((entry) => String(entry.output || '').includes(occurrenceMarker));
+    if (existing) return Number(existing.id || 0);
+  }
 
   const settings = getPersistedSettings(context);
   const requestedAgentCli = (selectedAgentCli || settings.cliPath || 'agy').trim();
@@ -5858,7 +5871,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     );
     postNodeConversations(soloConversationId);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
-    return;
+    return 0;
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
@@ -5871,7 +5884,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     );
     postNodeConversations(soloConversationId);
     vscode.window.showErrorMessage(automation.message);
-    return;
+    return 0;
   }
 
   recordLocalUsageEvent(context, 'soloConversation');
@@ -5884,6 +5897,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Solo conversation started.',
     `Run started at: ${new Date().toISOString()}`,
+    occurrenceMarker,
     nativeSessionId
       ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
       : `Starting a new native ${getAgentProvider(agentCli)} session.`,
@@ -5946,6 +5960,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     command: finalCommand,
     refreshNodeId: soloConversationId
   });
+  return executionLogId;
 }
 
 function getCurrentFlowTrace(projectPath: string): FlowTrace | null {
@@ -6588,71 +6603,95 @@ function scheduleFocusReminder(context: vscode.ExtensionContext): void {
   void broadcastSettings(context);
 }
 
+function getScheduledAutomationProjectPath(task: SolomapScheduledAutomationTask, fallbackProjectPath: string): string {
+  return String(task.projectPath || '').trim() || String(fallbackProjectPath || '').trim();
+}
+
+// Kept as the shared presentation helper for settings and compatibility tests;
+// runtime triggering is ledger-driven rather than timer-driven.
 function getNextScheduledAutomationAt(timeOfDay: string, now = new Date()): Date {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(timeOfDay || '').trim());
-  const hours = match ? Number(match[1]) : 9;
-  const minutes = match ? Number(match[2]) : 0;
   const next = new Date(now.getTime());
-  next.setHours(hours, minutes, 0, 0);
-  if (next.getTime() <= now.getTime()) {
-    next.setDate(next.getDate() + 1);
-  }
+  next.setHours(match ? Number(match[1]) : 9, match ? Number(match[2]) : 0, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
   return next;
 }
 
 function getNextScheduledAutomationTask(tasks: SolomapScheduledAutomationTask[], now = new Date()): { task: SolomapScheduledAutomationTask; nextAt: Date } | null {
-  const candidates = tasks
-    .filter((task) => task && task.enabled !== false && (task.assignee === 'user' || String(task.prompt || '').trim()))
+  return tasks
+    .filter((task) => task.enabled !== false && (task.assignee === 'user' || String(task.prompt || '').trim()))
     .map((task) => ({
       task,
       nextAt: task.scheduleKind === 'once' && Number.isFinite(Date.parse(String(task.scheduledAt || '')))
         ? new Date(Math.max(Date.parse(String(task.scheduledAt)), now.getTime() + 1000))
         : getNextScheduledAutomationAt(task.timeOfDay || '09:00', now)
     }))
-    .sort((a, b) => a.nextAt.getTime() - b.nextAt.getTime());
-  return candidates[0] || null;
+    .sort((left, right) => left.nextAt.getTime() - right.nextAt.getTime())[0] || null;
 }
 
-function getScheduledAutomationProjectPath(task: SolomapScheduledAutomationTask, fallbackProjectPath: string): string {
-  return String(task.projectPath || '').trim() || String(fallbackProjectPath || '').trim();
+function getScheduledAutomationLedgerReferenceRoot(context: vscode.ExtensionContext): string {
+  return getProjects(context)[0]?.path || getWorkspaceRoot() || process.cwd();
+}
+
+function deferOrFailScheduledOccurrence(context: vscode.ExtensionContext, occurrenceId: string, taskTitle = ''): void {
+  const settings = getPersistedSettings(context);
+  const result = failScheduledTaskOccurrence(getScheduledAutomationLedgerReferenceRoot(context), settings.globalDataPath, occurrenceId);
+  if (result === 'failed') {
+    const label = taskTitle || (settings.language === 'en' ? 'Scheduled task' : '定时任务');
+    vscode.window.showWarningMessage(settings.language === 'en'
+      ? `${label} could not be started after three attempts.`
+      : `${label} 连续三次未能启动，请在时间安排中检查。`);
+  }
 }
 
 function scheduleTimedAutomationTask(context: vscode.ExtensionContext): void {
-  if (scheduledAutomationTimer) {
-    clearTimeout(scheduledAutomationTimer);
-    scheduledAutomationTimer = null;
+  const settings = getPersistedSettings(context);
+  const referenceRoot = getScheduledAutomationLedgerReferenceRoot(context);
+  const ledger = syncScheduledTaskLedger(referenceRoot, settings.globalDataPath, settings.automationTasks?.scheduledTasks || []);
+  scheduledAutomationNextAt = ledger.tasks[0]?.dueAt || '';
+  if (ledger.tasks.length > 0 && !scheduledAutomationPoller) {
+    scheduledAutomationPoller = setInterval(() => void pollScheduledAutomationTasks(context), 60 * 1000);
+  } else if (ledger.tasks.length === 0 && scheduledAutomationPoller) {
+    clearInterval(scheduledAutomationPoller);
+    scheduledAutomationPoller = null;
   }
-  const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
-  const next = getNextScheduledAutomationTask(settings.scheduledTasks || []);
-  if (!next) {
-    scheduledAutomationNextAt = '';
-    return;
+  void pollScheduledAutomationTasks(context);
+  void broadcastSettings(context);
+}
+
+async function pollScheduledAutomationTasks(context: vscode.ExtensionContext): Promise<void> {
+  const settings = getPersistedSettings(context);
+  const referenceRoot = getScheduledAutomationLedgerReferenceRoot(context);
+  const claimed = claimDueScheduledTasks(referenceRoot, settings.globalDataPath, activeConversationOwnerInstanceId);
+  for (const occurrence of claimed) {
+    try {
+      await runScheduledAutomationTask(context, occurrence.task, occurrence.occurrenceId);
+    } catch (error: any) {
+      deferOrFailScheduledOccurrence(context, occurrence.occurrenceId, occurrence.task.title || '');
+      console.error(`Scheduled task ${occurrence.taskId} failed to launch:`, error?.message || error);
+    }
   }
-  scheduledAutomationNextAt = next.nextAt.toISOString();
-  const delayMs = Math.max(1000, next.nextAt.getTime() - Date.now());
-  scheduledAutomationTimer = setTimeout(() => {
-    void runScheduledAutomationTask(context, next.task.id).finally(() => {
-      scheduleTimedAutomationTask(context);
-    });
-  }, delayMs);
-  if (scheduledAutomationTimer && typeof scheduledAutomationTimer.unref === 'function') {
-    scheduledAutomationTimer.unref();
+  const ledger = readScheduledTaskLedger(referenceRoot, settings.globalDataPath);
+  scheduledAutomationNextAt = ledger.tasks[0]?.dueAt || '';
+  if (ledger.tasks.length === 0 && scheduledAutomationPoller) {
+    clearInterval(scheduledAutomationPoller);
+    scheduledAutomationPoller = null;
   }
   void broadcastSettings(context);
 }
 
-async function runScheduledAutomationTask(context: vscode.ExtensionContext, taskId = ''): Promise<void> {
-  const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
-  const tasks = settings.scheduledTasks || [];
-  const task = tasks.find((candidate) => candidate.id === taskId) || getNextScheduledAutomationTask(tasks)?.task;
+async function runScheduledAutomationTask(context: vscode.ExtensionContext, task: SolomapScheduledAutomationTask, occurrenceId: string): Promise<void> {
+  const persisted = getPersistedSettings(context);
+  const referenceRoot = getScheduledAutomationLedgerReferenceRoot(context);
   const prompt = String(task?.prompt || '').trim();
   if (!task || task.enabled === false || (task.assignee !== 'user' && !prompt)) {
+    deferOrFailScheduledOccurrence(context, occurrenceId, task?.title || '');
     return;
   }
   const targetProjectPath = getScheduledAutomationProjectPath(task, activeProjectRoot || getSelectedProjectPath(context) || '');
   if (task.assignee === 'user') {
     const projectLabel = task.projectName ? `（${task.projectName}）` : '';
-    const message = getPersistedSettings(context).language === 'en'
+    const message = persisted.language === 'en'
       ? `SoloMap reminder${task.projectName ? ` (${task.projectName})` : ''}: ${task.title || 'Scheduled task'}`
       : `SoloMap 提醒${projectLabel}：${task.title || '定时任务'}`;
     vscode.window.showInformationMessage(message);
@@ -6665,7 +6704,9 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
         title: task.title || ''
       });
     }
+    completeScheduledTaskOccurrence(referenceRoot, persisted.globalDataPath, occurrenceId);
     if (task.scheduleKind === 'once') {
+      const tasks = persisted.automationTasks?.scheduledTasks || [];
       await updatePersistedSettings(context, {
         automationTasks: {
           scheduledTasks: tasks.map((candidate) => candidate.id === task.id ? { ...candidate, enabled: false } : candidate)
@@ -6676,23 +6717,10 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
   }
   const workspaceRoot = await ensureActionProject(context, targetProjectPath);
   if (!workspaceRoot) {
+    deferOrFailScheduledOccurrence(context, occurrenceId, task.title || '');
     return;
   }
   const timeOfDay = String(task.timeOfDay || '09:00');
-  const runKey = task.scheduleKind === 'once'
-    ? `once:${task.id}:${task.scheduledAt || timeOfDay}:${workspaceRoot}`
-    : `${new Date().toISOString().slice(0, 10)}:${task.id}:${timeOfDay}:${workspaceRoot}`;
-  if (scheduledAutomationRunKeys.has(runKey)) {
-    recordAutomationTaskEvent(workspaceRoot, {
-      trigger: 'scheduled_time',
-      action: 'prompt',
-      status: 'skipped',
-      taskId: task.id,
-      message: 'Already launched this scheduled automation task today.'
-    });
-    return;
-  }
-  scheduledAutomationRunKeys.add(runKey);
   recordAutomationTaskEvent(workspaceRoot, {
     trigger: 'scheduled_time',
     action: 'prompt',
@@ -6701,7 +6729,12 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
     title: task.title || '',
     timeOfDay
   });
-  await handleRunSoloConversation(context, prompt, getPersistedSettings(context).cliPath || '');
+  const executionLogId = await handleRunSoloConversation(context, prompt, persisted.cliPath || '', '', [], occurrenceId);
+  if (!executionLogId) {
+    deferOrFailScheduledOccurrence(context, occurrenceId, task.title || '');
+    return;
+  }
+  completeScheduledTaskOccurrence(referenceRoot, persisted.globalDataPath, occurrenceId);
   if (task.scheduleKind === 'once') {
     const latestTasks = getPersistedSettings(context).automationTasks?.scheduledTasks || [];
     await updatePersistedSettings(context, {
@@ -8101,5 +8134,9 @@ export function deactivate() {
   if (statusPoller) {
     clearInterval(statusPoller);
     statusPoller = null;
+  }
+  if (scheduledAutomationPoller) {
+    clearInterval(scheduledAutomationPoller);
+    scheduledAutomationPoller = null;
   }
 }

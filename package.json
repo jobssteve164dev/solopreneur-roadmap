@@ -188,6 +188,7 @@
     "pretest": "npm run compile",
     "test": "node --test test/*.test.js",
     "solomap:experience": "node resources/tools/solomap-experience.cjs",
+    "validate:scheduled-tasks": "node resources/tools/validate-scheduled-tasks.cjs",
     "openvsx:rank": "node scripts/open-vsx-rank.cjs",
     "install:local-dev": "node scripts/install-local-dev.js",
     "build-webview": "echo 'No webview build configured yet'"

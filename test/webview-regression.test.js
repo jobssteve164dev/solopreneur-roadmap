@@ -29,12 +29,29 @@ test('time plan panel delegates an optional request through the structured time-
   assert.match(webview, /timePlanConfirm: '确认采用'/);
   assert.match(webview, /timePlanConfirm: 'Confirm plan'/);
   assert.match(webview, /agent-time-planner-compose/);
+  assert.match(webview, /id="scheduled-task-kind-input"/);
+  assert.match(webview, /scheduledTaskRepeatDaily: '每天'/);
+  assert.match(webview, /scheduledTaskRepeatDaily: 'Daily'/);
+  assert.match(webview, /data-scheduled-kind/);
   assert.equal((webview.match(/<section class="time-section-card/g) || []).length, 3);
   assert.match(webview, /id="focus-section-title"/);
   assert.match(webview, /class="time-section-card scheduled-task-panel"/);
   assert.match(webview, /class="time-section-card agent-time-planner"/);
   assert.match(webview, /@media \(max-width: 360px\)/);
   assert.match(webview, /closeTimePlan: 'Close time plan'/);
+});
+
+test('scheduled tasks use the global file ledger and a one-minute on-demand poller', () => {
+  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const ledger = fs.readFileSync(path.join(projectRoot, 'src', 'scheduledTaskLedger.ts'), 'utf8');
+  const validator = fs.readFileSync(path.join(projectRoot, 'resources', 'tools', 'validate-scheduled-tasks.cjs'), 'utf8');
+  assert.match(extension, /syncScheduledTaskLedger/);
+  assert.match(extension, /setInterval\(\(\) => void pollScheduledAutomationTasks\(context\), 60 \* 1000\)/);
+  assert.match(extension, /if \(ledger\.tasks\.length > 0 && !scheduledAutomationPoller\)/);
+  assert.match(ledger, /scheduled-tasks\.json/);
+  assert.match(ledger, /status: 'pending' \| 'running'/);
+  assert.match(ledger, /completeScheduledTaskOccurrence/);
+  assert.match(validator, /occurrenceId is duplicated/);
 });
 
 test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
