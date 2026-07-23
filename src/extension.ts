@@ -428,7 +428,7 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRunAgent', async (nodeId: string) => {
-    revealAgentStartupTerminal(activeProjectRoot || getSelectedProjectPath(context) || '');
+    revealAgentStartupTerminal(activeProjectRoot || getSelectedProjectPath(context) || '', `step-${nodeId || 'conversation'}`);
     await handleRunAgent(context, nodeId, '');
   }));
 
@@ -583,7 +583,10 @@ async function handleSharedWebviewAction(
   try {
     return await dispatchPluginAction(message, surface, {
     'conversation.runStep': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(
+        String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
+        `step-${String(request.nodeId || 'conversation')}`
+      );
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunAgent(
@@ -596,7 +599,7 @@ async function handleSharedWebviewAction(
       );
     },
     'conversation.runSolo': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'solo');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunSoloConversation(
@@ -608,7 +611,7 @@ async function handleSharedWebviewAction(
       );
     },
     'timePlan.generate': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'solo-time-plan');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath) return;
       await handleGenerateTimePlan(
@@ -645,7 +648,7 @@ async function handleSharedWebviewAction(
       await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
     },
     'conversation.runRoadmapRevision': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'roadmap-revision');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRoadmapRevision(
@@ -657,7 +660,7 @@ async function handleSharedWebviewAction(
       );
     },
     'flow.run': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'flow');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunFlow(
@@ -716,7 +719,7 @@ async function handleSharedWebviewAction(
       }
     },
     'conversation.continue': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       const nodeId = String(request.nodeId || '');
@@ -731,13 +734,13 @@ async function handleSharedWebviewAction(
       refreshConversation(nodeId);
     },
     'conversation.retry': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'retry');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRetryConversation(context, String(request.nodeId || ''), Number(request.conversationId || 0));
     },
     'conversation.continueTurn': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleContinueConversationTurn(
@@ -908,7 +911,12 @@ async function handleSharedWebviewAction(
       setTimeout(() => void selectProject(context, projectPath), 0);
     },
     'project.continue': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''));
+      if (request.nodeId) {
+        revealAgentStartupTerminal(
+          String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
+          `step-${String(request.nodeId)}`
+        );
+      }
       const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
       if (!projectPath) return;
       if (request.nodeId) {
@@ -4859,12 +4867,12 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
 
 const reservedAgentTerminalsByProject = new Map<string, vscode.Terminal[]>();
 
-function revealAgentStartupTerminal(workspaceRoot: string): void {
+function revealAgentStartupTerminal(workspaceRoot: string, label: string): void {
   if (!workspaceRoot) {
     return;
   }
   const terminal = vscode.window.createTerminal({
-    name: makeAgentTerminalName(workspaceRoot, 'preparing'),
+    name: makeAgentTerminalName(workspaceRoot, label),
     iconPath: extensionContextRef
       ? vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.svg')
       : new vscode.ThemeIcon('symbol-string'),
@@ -6812,7 +6820,7 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
     deferOrFailScheduledOccurrence(context, occurrenceId, task.title || '');
     return;
   }
-  revealAgentStartupTerminal(workspaceRoot);
+  revealAgentStartupTerminal(workspaceRoot, 'solo-scheduled');
   const timeOfDay = String(task.timeOfDay || '09:00');
   recordAutomationTaskEvent(workspaceRoot, {
     trigger: 'scheduled_time',

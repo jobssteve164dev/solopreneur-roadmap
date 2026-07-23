@@ -3076,6 +3076,14 @@ test('local-first loading paints and launches before optional or durable work', 
       `${action} must reveal a terminal before project/database preparation`
     );
   }
+  const revealBody = extensionSource.slice(
+    extensionSource.indexOf('function revealAgentStartupTerminal'),
+    extensionSource.indexOf('function launchAgentConversationTerminal')
+  );
+  assert.match(revealBody, /makeAgentTerminalName\(workspaceRoot, label\)/);
+  assert.doesNotMatch(revealBody, /makeAgentTerminalName\(workspaceRoot, 'preparing'\)/);
+  assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'\)/);
+  assert.match(dispatchBody, /'conversation\.runStep': async[\s\S]*?`step-\$\{String\(request\.nodeId \|\| 'conversation'\)\}`/);
 });
 
 test('sidebar project switcher supports searching by project name or path', () => {
