@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.377 - 2026-07-23
+
+### Changed
+- Cache recent solo step and flow conversations (c0a7dbf)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.376 - 2026-07-23
 
 ### Changed
