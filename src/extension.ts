@@ -231,7 +231,8 @@ let syncEngineInitProjectRoot = '';
 let projectSelectionGeneration = 0;
 let syncEngineInitGeneration = 0;
 let persistedSettingsCache: SolopreneurSettings | null = null;
-let persistedSettingsCacheSource: Partial<SolopreneurSettings> | null = null;
+let persistedSettingsCacheSource = '';
+let persistedSettingsCacheWorkspaceRoot = '';
 const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
 
@@ -281,12 +282,14 @@ export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
   extensionContextRef = context;
   persistedSettingsCache = null;
-  persistedSettingsCacheSource = null;
+  persistedSettingsCacheSource = '';
+  persistedSettingsCacheWorkspaceRoot = '';
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('solopreneur')) {
         persistedSettingsCache = null;
-        persistedSettingsCacheSource = null;
+        persistedSettingsCacheSource = '';
+        persistedSettingsCacheWorkspaceRoot = '';
       }
     }));
   }
@@ -717,8 +720,22 @@ async function handleSharedWebviewAction(
         return;
       }
       if (syncEngine && target && nodeId) {
-        const conversations = buildConversationPresentations(activeProjectRoot || '', nodeId, syncEngine.getAgentExecutions(nodeId));
-        await respond({ command: 'nodeConversationsLoaded', nodeId, conversations, projectPath: activeProjectRoot || '' });
+        const requestedPage = Number.isFinite(Number(request.page)) ? Math.max(0, Math.floor(Number(request.page))) : null;
+        const pageSize = Math.max(1, Math.min(50, Math.floor(Number(request.pageSize) || 20)));
+        if (nodeId === soloConversationId && requestedPage !== null) {
+          const page = syncEngine.getAgentExecutionPage(nodeId, pageSize, requestedPage * pageSize);
+          const conversations = buildConversationPresentations(activeProjectRoot || '', nodeId, page.logs);
+          await respond({
+            command: 'nodeConversationsLoaded',
+            nodeId,
+            conversations,
+            projectPath: activeProjectRoot || '',
+            pagination: { page: requestedPage, pageSize, hasMore: page.hasMore, append: requestedPage > 0 }
+          });
+        } else {
+          const conversations = buildConversationPresentations(activeProjectRoot || '', nodeId, syncEngine.getAgentExecutions(nodeId));
+          await respond({ command: 'nodeConversationsLoaded', nodeId, conversations, projectPath: activeProjectRoot || '' });
+        }
       }
     },
     'conversation.getProjectHistory': async (request) => {
@@ -859,6 +876,7 @@ async function handleSharedWebviewAction(
       }
     },
     'settings.get': async () => {
+      invalidatePersistedSettingsCache();
       await postSettingsLoaded(target, getSettingsWithRuntimeState(context));
       void refreshProAccountStatus(context).catch((error) => {
         console.warn('SoloMap Pro status refresh failed after settings loaded:', error);
@@ -1066,11 +1084,16 @@ async function handleSharedWebviewAction(
 
 function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSettings {
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
-  if (persistedSettingsCache && persistedSettingsCacheSource === saved) {
-    return persistedSettingsCache;
-  }
+  const savedSource = JSON.stringify(saved);
   const config = vscode.workspace.getConfiguration('solopreneur');
   const settingsWorkspaceRoot = getSettingsEnhancementWorkspaceRoot();
+  if (
+    persistedSettingsCache
+    && persistedSettingsCacheSource === savedSource
+    && persistedSettingsCacheWorkspaceRoot === settingsWorkspaceRoot
+  ) {
+    return persistedSettingsCache;
+  }
   const baseSettings = {
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
     agentModelPreferences: normalizeAgentModelPreferences(saved.agentModelPreferences),
@@ -1100,8 +1123,15 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     skills: readSolomapSkillRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).skills || [],
     connectors: readSolomapMcpRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).connectors || []
   };
-  persistedSettingsCacheSource = saved;
+  persistedSettingsCacheSource = savedSource;
+  persistedSettingsCacheWorkspaceRoot = settingsWorkspaceRoot;
   return persistedSettingsCache;
+}
+
+function invalidatePersistedSettingsCache(): void {
+  persistedSettingsCache = null;
+  persistedSettingsCacheSource = '';
+  persistedSettingsCacheWorkspaceRoot = '';
 }
 
 function isSoloMapLanguageZh(context: vscode.ExtensionContext): boolean {
@@ -1639,7 +1669,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('telegramBotToken', nextSettings.telegramBotToken, vscode.ConfigurationTarget.Global);
   await config.update('telegramChatId', nextSettings.telegramChatId, vscode.ConfigurationTarget.Global);
   persistedSettingsCache = null;
-  persistedSettingsCacheSource = null;
+  persistedSettingsCacheSource = '';
   if (hasSetting('automationTasks') && settings.automationTasks && typeof settings.automationTasks === 'object') {
     const automationPatch = settings.automationTasks as SolomapAutomationSettings;
     const triggerPatch = automationPatch.triggers || {};
@@ -4793,13 +4823,23 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
 
 function postNodeConversations(nodeId: string, fallbackConversations: import('./db/types').AgentConversation[] = []): void {
   if (syncEngine && activePanel) {
-    const conversations = syncEngine.getAgentExecutions(nodeId);
-    const payloadConversations = conversations.length > 0 ? conversations : fallbackConversations;
+    const pageSize = 20;
+    const page = nodeId === soloConversationId
+      ? (typeof syncEngine.getAgentExecutionPage === 'function'
+        ? syncEngine.getAgentExecutionPage(nodeId, pageSize, 0)
+        : (() => {
+          const logs = syncEngine.getAgentExecutions(nodeId);
+          return { logs: logs.slice(0, pageSize), hasMore: logs.length > pageSize };
+        })())
+      : null;
+    const conversations = page ? page.logs : syncEngine.getAgentExecutions(nodeId);
+    const payloadConversations = conversations.length > 0 ? conversations : fallbackConversations.slice(0, pageSize);
     activePanel.webview.postMessage({
       command: 'nodeConversationsLoaded',
       nodeId,
       conversations: buildConversationPresentations(activeProjectRoot || '', nodeId, payloadConversations),
-      projectPath: activeProjectRoot || ''
+      projectPath: activeProjectRoot || '',
+      ...(page ? { pagination: { page: 0, pageSize, hasMore: page.hasMore, append: false } } : {})
     });
   }
   if (nodeId === soloConversationId && sidebarProvider && activeProjectRoot) {
@@ -5032,6 +5072,7 @@ function getSkillInstallWorkspaceRoot(context: vscode.ExtensionContext): string 
 }
 
 function postMcpInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
+  invalidatePersistedSettingsCache();
   const settings = getPersistedSettings(context);
   activePanel?.webview.postMessage({ command: 'mcpInstallResult', success, message, settings });
   sidebarProvider?.postMcpInstallResult(success, message);
@@ -5039,6 +5080,7 @@ function postMcpInstallResult(context: vscode.ExtensionContext, success: boolean
 }
 
 function postSkillInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
+  invalidatePersistedSettingsCache();
   const settings = getPersistedSettings(context);
   activePanel?.webview.postMessage({ command: 'skillInstallResult', success, message, settings });
   sidebarProvider?.postSkillInstallResult(success, message);
@@ -5046,6 +5088,7 @@ function postSkillInstallResult(context: vscode.ExtensionContext, success: boole
 }
 
 function postEnhancementInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
+  invalidatePersistedSettingsCache();
   const settings = getPersistedSettings(context);
   activePanel?.webview.postMessage({ command: 'enhancementInstallResult', success, message, settings });
   sidebarProvider?.postEnhancementInstallResult(success, message);

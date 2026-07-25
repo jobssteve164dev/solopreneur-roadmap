@@ -865,6 +865,26 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       overflow: hidden;
     }
 
+    .conversation-pagination {
+      display: flex;
+      justify-content: center;
+      padding-top: 10px;
+    }
+
+    .conversation-load-more {
+      border: 1px solid var(--border-glass);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-main);
+      padding: 6px 14px;
+      cursor: pointer;
+    }
+
+    .conversation-load-more:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
     .conversation-composer {
       background: rgba(0, 0, 0, 0.20);
       border: 1px solid var(--border-glass);
@@ -2185,6 +2205,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let soloPanelDirty = true;
     let flowPanelDirty = true;
     const nodeConversations = {};
+    const nodeConversationPaging = {};
     const nodeSupplementFiles = {};
     const conversationDrafts = {};
     let conversationChildrenMap = {};
@@ -2367,6 +2388,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         soloPlaceholder: '描述你现在想处理的问题或想法...',
         soloHistory: 'Solo 对话历史',
         noSoloConversations: '还没有 Solo 对话。',
+        loadMoreConversations: '加载更多对话',
+        loadingMoreConversations: '正在加载…',
         sendSolo: '发送',
         soloCompleted: '本次 Solo 对话已结束。',
         soloClosure: '这次对话是否需要进入路线图？',
@@ -2572,6 +2595,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         soloPlaceholder: 'Describe the issue or idea you want to handle...',
         soloHistory: 'Solo conversation history',
         noSoloConversations: 'No Solo conversations yet.',
+        loadMoreConversations: 'Load more conversations',
+        loadingMoreConversations: 'Loading…',
         sendSolo: 'Send',
         soloCompleted: 'This Solo conversation has finished.',
         soloClosure: 'Should this conversation be connected to the roadmap?',
@@ -2725,6 +2750,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (btnToggleRoadmapRevision) btnToggleRoadmapRevision.classList.remove('active');
       if (roadmapRevisionBody) roadmapRevisionBody.innerHTML = '';
       Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
+      Object.keys(nodeConversationPaging).forEach(key => delete nodeConversationPaging[key]);
       Object.keys(nodeSupplementFiles).forEach(key => delete nodeSupplementFiles[key]);
       Object.keys(conversationDrafts).forEach(key => delete conversationDrafts[key]);
       Object.keys(nodeAgentSelections).forEach(key => delete nodeAgentSelections[key]);
@@ -2816,6 +2842,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     const currentProjects = { projects: [], selectedProjectPath: '' };
 
+    function requestSoloConversationPage(page) {
+      const current = nodeConversationPaging[soloConversationId] || { page: -1, hasMore: true, loading: false, initialized: false };
+      if (current.loading || (page > 0 && !current.hasMore)) return;
+      nodeConversationPaging[soloConversationId] = { ...current, loading: true };
+      vscode.postMessage({ command: 'conversation.getHistory', nodeId: soloConversationId, page, pageSize: 20 });
+    }
+
     function setMainView(view) {
       activeMainView = view === 'solo' ? 'solo' : view === 'flow' ? 'flow' : 'roadmap';
       soloExpanded = activeMainView === 'solo';
@@ -2826,8 +2859,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (btnToggleRoadmapView) btnToggleRoadmapView.classList.toggle('active', activeMainView === 'roadmap');
       if (btnToggleSolo) btnToggleSolo.classList.toggle('active', activeMainView === 'solo');
       if (btnToggleFlow) btnToggleFlow.classList.toggle('active', activeMainView === 'flow');
-      if (activeMainView === 'solo' && !nodeConversations[soloConversationId]) {
-        vscode.postMessage({ command: 'conversation.getHistory', nodeId: soloConversationId });
+      const soloPaging = nodeConversationPaging[soloConversationId];
+      if (activeMainView === 'solo' && (!soloPaging || !soloPaging.initialized)) {
+        requestSoloConversationPage(0);
       }
       if (activeMainView === 'solo') {
         ensureAgentModelsLoaded(soloAgentSelection || currentCliPath || 'agy', soloConversationId);
@@ -3221,7 +3255,26 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (message.projectPath && message.projectPath !== activeProjectPath) {
             return;
           }
-          nodeConversations[message.nodeId] = message.conversations || [];
+          if (message.nodeId === soloConversationId && message.pagination) {
+            const incoming = message.conversations || [];
+            const previous = message.pagination.append ? (nodeConversations[message.nodeId] || []) : [];
+            const seen = new Set();
+            nodeConversations[message.nodeId] = [...previous, ...incoming].filter((conversation) => {
+              const id = String(conversation && conversation.id || '');
+              if (!id || seen.has(id)) return false;
+              seen.add(id);
+              return true;
+            });
+            nodeConversationPaging[message.nodeId] = {
+              page: Number(message.pagination.page || 0),
+              pageSize: Number(message.pagination.pageSize || 20),
+              hasMore: Boolean(message.pagination.hasMore),
+              loading: false,
+              initialized: true
+            };
+          } else {
+            nodeConversations[message.nodeId] = message.conversations || [];
+          }
           if (message.nodeId === soloConversationId) {
             soloPanelDirty = true;
             renderSoloPanel(currentNodes);
@@ -3879,6 +3932,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         soloDraft = preservedInputState.value;
       }
       const conversations = nodeConversations[soloConversationId] || [];
+      const conversationPaging = nodeConversationPaging[soloConversationId] || { page: -1, hasMore: false, loading: false, initialized: false };
       const supplementFiles = nodeSupplementFiles[soloConversationId] || [];
       const disabled = '';
       const selectedAgentCli = soloAgentSelection || currentCliPath || 'agy';
@@ -3908,10 +3962,25 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         <div class="conversation-panel">
           <div class="conversation-title">\${escapeHtml(t('soloHistory'))}</div>
           \${renderConversations(soloConversationId, conversations, t('noSoloConversations'))}
+          \${conversationPaging.hasMore ? \`
+            <div class="conversation-pagination">
+              <button type="button" class="conversation-load-more" data-load-more-solo \${conversationPaging.loading ? 'disabled' : ''}>
+                \${escapeHtml(t(conversationPaging.loading ? 'loadingMoreConversations' : 'loadMoreConversations'))}
+              </button>
+            </div>
+          \` : ''}
         </div>
       \`;
       const sendButton = soloBody.querySelector('[data-send-solo]');
       const attachButton = soloBody.querySelector('[data-attach-solo]');
+      const loadMoreButton = soloBody.querySelector('[data-load-more-solo]');
+      if (loadMoreButton) {
+        loadMoreButton.addEventListener('click', () => {
+          loadMoreButton.setAttribute('disabled', 'true');
+          loadMoreButton.textContent = t('loadingMoreConversations');
+          requestSoloConversationPage(Number(conversationPaging.page || 0) + 1);
+        });
+      }
       if (attachButton) {
         attachButton.addEventListener('click', () => {
           vscode.postMessage({ command: 'attachment.choose', nodeId: soloConversationId });

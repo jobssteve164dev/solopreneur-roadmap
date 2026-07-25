@@ -4012,6 +4012,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let projectDataLoaded = false;
     let hoveredConversationCard = null;
     let focusedConversationCard = null;
+    let projectComposerComposing = false;
     let pendingAsyncPortfolioRender = null;
 
     function conversationsSignature(conversations) {
@@ -4026,8 +4027,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return Boolean(hoveredConversationCard || focusedConversationCard);
     }
 
+    function isProjectComposerInteractionActive() {
+      if (projectComposerComposing) return true;
+      const active = document.activeElement;
+      return Boolean(active && active.closest && active.closest('[data-project-continue-composer]'));
+    }
+
     function renderPortfolioFromAsyncUpdate(portfolio, selectedProjectPath) {
-      if (isConversationCardInteractionActive()) {
+      if (isConversationCardInteractionActive() || isProjectComposerInteractionActive()) {
         pendingAsyncPortfolioRender = { portfolio, selectedProjectPath };
         return;
       }
@@ -4036,7 +4043,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function flushPendingAsyncPortfolioRender() {
-      if (isConversationCardInteractionActive() || !pendingAsyncPortfolioRender) return;
+      if (isConversationCardInteractionActive() || isProjectComposerInteractionActive() || !pendingAsyncPortfolioRender) return;
       const pending = pendingAsyncPortfolioRender;
       pendingAsyncPortfolioRender = null;
       renderPortfolio(pending.portfolio, pending.selectedProjectPath);
@@ -4063,6 +4070,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           focusedConversationCard = active && active.closest ? active.closest('[data-card-trigger-id]') : null;
           flushPendingAsyncPortfolioRender();
         }, 0);
+      });
+      portfolioList.addEventListener('compositionstart', (event) => {
+        if (event.target && event.target.closest && event.target.closest('[data-project-conversation-input]')) {
+          projectComposerComposing = true;
+        }
+      });
+      portfolioList.addEventListener('compositionend', () => {
+        projectComposerComposing = false;
       });
     }
 
@@ -5082,7 +5097,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-      renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+      renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderProAccount(currentSettings);
       renderAutomationSettings(currentSettings);
       renderSidebar(currentNodes);

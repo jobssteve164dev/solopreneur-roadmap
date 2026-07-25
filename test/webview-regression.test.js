@@ -79,6 +79,32 @@ test('durable automation configuration restores tasks when extension global stat
   assert.equal(settings.automationTasks.scheduledTasks[0].id, 'confirmed-task');
 });
 
+test('settings capability refresh reads skills installed after the first cached settings load', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__getPersistedSettings = getPersistedSettings;',
+      'module.exports.__invalidatePersistedSettingsCache = invalidatePersistedSettingsCache;'
+    ].join('\n')
+  );
+  const { writeSolomapSkillRegistry } = require(path.join(projectRoot, 'out/solomapGlobal.js'));
+  const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-skills-'));
+  extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalRoot;
+  const saved = {};
+  const context = { globalState: { get: () => saved } };
+
+  const initial = extensionModule.__getPersistedSettings(context);
+  assert.ok(Array.isArray(initial.skills));
+  writeSolomapSkillRegistry(projectRoot, globalRoot, {
+    version: 1,
+    updatedAt: '',
+    skills: [{ id: 'installed-after-load', title: 'Installed After Load', status: 'installed' }]
+  });
+  extensionModule.__invalidatePersistedSettingsCache();
+  const refreshed = extensionModule.__getPersistedSettings(context);
+  assert.ok(refreshed.skills.some((skill) => skill.id === 'installed-after-load'));
+});
+
 test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'timePlan.ts'), 'utf8');
   assert.match(source, /validateTimePlanValue/);
@@ -3093,13 +3119,17 @@ test('local-first loading paints and launches before optional or durable work', 
     roadmapWebviewSource.indexOf("if (btnToggleFeedback)", mainViewStart)
   );
   assert.match(mainViewBody, /soloPanelDirty \|\| !soloBody \|\| !soloBody\.innerHTML/);
+  assert.match(mainViewBody, /requestSoloConversationPage\(0\)/);
   const soloRenderBody = roadmapWebviewSource.slice(
     roadmapWebviewSource.indexOf('function renderSoloPanel(nodes)'),
     roadmapWebviewSource.indexOf('function renderFlowPanel()')
   );
   assert.doesNotMatch(soloRenderBody, /if \(!soloExpanded\) \{\s*soloBody\.innerHTML = ''/);
   assert.match(soloRenderBody, /soloPanelDirty = false/);
+  assert.match(soloRenderBody, /data-load-more-solo/);
+  assert.match(soloRenderBody, /requestSoloConversationPage\(Number\(conversationPaging\.page \|\| 0\) \+ 1\)/);
   assert.match(roadmapWebviewSource, /case 'nodeConversationsLoaded':[\s\S]*?message\.nodeId === soloConversationId[\s\S]*?renderSoloPanel\(currentNodes\)[\s\S]*?else if \(message\.nodeId === roadmapRevisionId\)[\s\S]*?else \{\s*renderRoadmap\(currentNodes\)/);
+  assert.match(roadmapWebviewSource, /message\.pagination\.append[\s\S]*?\.\.\.previous, \.\.\.incoming/);
   assert.doesNotMatch(roadmapWebviewSource, /case 'projectsLoaded':[\s\S]*?vscode\.postMessage\(\{ command: 'getFlowState' \}\);\s*break/);
 
   const projectGetAllBody = extensionSource.slice(
@@ -3109,7 +3139,14 @@ test('local-first loading paints and launches before optional or durable work', 
   assert.match(projectGetAllBody, /readCachedConversationSnapshot[\s\S]*?nodeId: soloConversationId[\s\S]*?conversations: recentSnapshot\.solo/);
 
   assert.match(extensionSource, /let persistedSettingsCache: SolopreneurSettings \| null = null/);
-  assert.match(extensionSource, /function getPersistedSettings[\s\S]*?if \(persistedSettingsCache && persistedSettingsCacheSource === saved\)[\s\S]*?return persistedSettingsCache/);
+  assert.match(extensionSource, /persistedSettingsCacheWorkspaceRoot === settingsWorkspaceRoot[\s\S]*?return persistedSettingsCache/);
+  assert.match(extensionSource, /'settings\.get': async[\s\S]*?invalidatePersistedSettingsCache\(\)[\s\S]*?postSettingsLoaded/);
+  assert.match(extensionSource, /getAgentExecutionPage\(nodeId, pageSize, requestedPage \* pageSize\)/);
+
+  const sidebarWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  assert.match(sidebarWebviewSource, /function isProjectComposerInteractionActive\(\)[\s\S]*?data-project-continue-composer/);
+  assert.match(sidebarWebviewSource, /isConversationCardInteractionActive\(\) \|\| isProjectComposerInteractionActive\(\)/);
+  assert.match(sidebarWebviewSource, /compositionstart[\s\S]*?projectComposerComposing = true/);
 
   const dispatchBody = extensionSource.slice(
     extensionSource.indexOf('async function handleSharedWebviewAction'),
@@ -3183,6 +3220,26 @@ test('conversation lifecycle reconciles stale running execution logs before pres
   const persisted = reopened.getExecutionLogs('1');
   assert.equal(persisted[0].status, 'Failed');
   reopened.close();
+});
+
+test('Solo conversation history reads bounded SQLite pages newest first', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-pages-'));
+  const store = new SqliteStore(path.join(projectRootA, 'project_journal.db'), projectRoot);
+  await store.init();
+  for (let index = 1; index <= 25; index += 1) {
+    store.logExecution('__solo__', 'codex', 'codex exec', `Conversation ${index}`, 'Completed');
+  }
+
+  const first = store.getExecutionLogPage('__solo__', 20, 0);
+  const second = store.getExecutionLogPage('__solo__', 20, 20);
+  assert.equal(first.logs.length, 20);
+  assert.equal(first.hasMore, true);
+  assert.equal(first.logs[0].output, 'Conversation 25');
+  assert.equal(second.logs.length, 5);
+  assert.equal(second.hasMore, false);
+  assert.equal(second.logs[0].output, 'Conversation 5');
+  store.close();
 });
 
 test('conversation lifecycle records stale continuation runs instead of showing them as running', async () => {

@@ -130,6 +130,10 @@ export class SyncEngine {
     return this.sqliteStore.getExecutionLogs(nodeId);
   }
 
+  public getAgentExecutionPage(nodeId: string, limit = 20, offset = 0): { logs: AgentConversation[]; hasMore: boolean } {
+    return this.sqliteStore.getExecutionLogPage(nodeId, limit, offset);
+  }
+
   /**
    * Reads agent conversation history across the whole project.
    */

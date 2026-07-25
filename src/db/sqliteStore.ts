@@ -1180,6 +1180,41 @@ export class SqliteStore {
   }
 
   /**
+   * Retrieves one bounded page of execution history for a roadmap node, newest first.
+   */
+  public getExecutionLogPage(nodeId: string, limit = 20, offset = 0): { logs: AgentConversation[]; hasMore: boolean } {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
+    const safeOffset = Math.max(0, Math.floor(Number(offset) || 0));
+    const stmt = this.db.prepare(`
+      SELECT id, nodeId, timestamp, agentCli, command, output, status
+      FROM execution_logs
+      WHERE nodeId = ?
+      ORDER BY id DESC
+      LIMIT ? OFFSET ?
+    `);
+    const logs: AgentConversation[] = [];
+    try {
+      stmt.bind([nodeId, safeLimit + 1, safeOffset]);
+      while (stmt.step()) {
+        logs.push(stmt.getAsObject() as unknown as AgentConversation);
+      }
+    } finally {
+      stmt.free();
+    }
+    const hasMore = logs.length > safeLimit;
+    const page = logs.slice(0, safeLimit);
+    return {
+      logs: this.filterSupersededRunningLogs(page.map((log) => this.normalizeConversationStatus(log)))
+        .map((log) => this.normalizeConversationStatus(log)),
+      hasMore
+    };
+  }
+
+  /**
    * Retrieves execution history across all roadmap nodes, newest first.
    */
   public getAllExecutionLogs(): AgentConversation[] {
