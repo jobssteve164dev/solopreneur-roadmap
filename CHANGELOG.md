@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.380 - 2026-07-25
+
+### Changed
+- Paginate Solo history and preserve active input (5e32ea8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.379 - 2026-07-23
 
 ### Changed
