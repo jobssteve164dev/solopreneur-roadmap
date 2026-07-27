@@ -828,7 +828,11 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /security\.alerts\.filter\(alert => \(!alert\.state \|\| alert\.state === 'open'\) && \['critical', 'high'\]\.includes/);
   assert.match(script, /'https:\/\/github\.com\/' \+ securityRepo \+ '\/security'/);
   assert.match(script, /project\.togglePinned/);
-  assert.match(script, /conversation\.getProjectHistory/);
+  assert.match(script, /conversation\.getProjectSnapshot/);
+  assert.doesNotMatch(script, /conversation\.getProjectHistory/);
+  assert.match(script, /function mergePortfolioUpdate\(/);
+  assert.match(script, /pendingConversationContinuations\.add\(conversationId\)[\s\S]*?renderPortfolio\([\s\S]*?conversation\.continue/);
+  assert.match(script, /case 'conversationActionSettled':[\s\S]*?pendingConversationContinuations\.delete/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
   assert.match(html, /id="dependency-panel" style="display: none;/);
@@ -1303,6 +1307,23 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   const afterDeliveryRecovery = elements['global-focus-panel'].innerHTML;
   assert.deepEqual(extractTodayProjectOrder(afterDeliveryRecovery), initialTodayProjectOrder);
   assert.match(elements['portfolio-list'].innerHTML, /下一步: 推进 Beta/);
+  const beforePartialUpdate = JSON.parse(JSON.stringify(context.__getCurrentPortfolio()));
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'Alpha', path: '/workspace/alpha' }, { name: 'Beta', path: '/workspace/beta' }],
+      selectedProjectPath: '/workspace/beta',
+      portfolio: [{
+        ...beforePartialUpdate.find((project) => project.path === '/workspace/beta'),
+        recommendedNodeTitle: 'Beta 局部更新'
+      }],
+      updatedProjectPaths: ['/workspace/beta']
+    }
+  });
+  const afterPartialUpdate = JSON.parse(JSON.stringify(context.__getCurrentPortfolio()));
+  assert.equal(afterPartialUpdate.length, 2);
+  assert.equal(afterPartialUpdate.find((project) => project.path === '/workspace/alpha').recommendedNodeTitle, '推进 Alpha');
+  assert.equal(afterPartialUpdate.find((project) => project.path === '/workspace/beta').recommendedNodeTitle, 'Beta 局部更新');
   context.__resetActiveProjectPath();
 
   dispatchMessage({
@@ -2043,8 +2064,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /conversation\.runSolo/);
   assert.match(html, /attachment\.choose/);
   assert.match(html, /soloSupplementFilesSelected/);
-  assert.match(html, /conversation\.getHistory/);
-  assert.match(html, /conversation\.getProjectHistory/);
+  assert.doesNotMatch(html, /conversation\.getHistory/);
+  assert.doesNotMatch(html, /conversation\.getProjectHistory/);
+  assert.match(html, /conversation\.getProjectSnapshot/);
   assert.match(html, /sidebarSoloConversationLoaded/);
   assert.match(html, /sidebarProjectConversationLoaded/);
   assert.match(html, /renderSidebarSoloHistoryContent/);
@@ -2063,8 +2085,8 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(sidebarSource, /void this\.sendSoloConversationHistory\(projectState\.selectedProjectPath\)[\s\S]*?void this\.sendProjectConversationHistory/);
   assert.match(html, /latestSidebarProjectConversation/);
   assert.match(html, /sidebarConversationRefreshTtlMs\s*=\s*30000/);
-  assert.match(html, /requestSidebarSoloConversationHistory/);
-  assert.match(html, /requestSidebarProjectConversationHistory/);
+  assert.doesNotMatch(html, /requestSidebarSoloConversationHistory/);
+  assert.doesNotMatch(html, /requestSidebarProjectConversationHistory/);
   assert.match(html, /requestSidebarProjectConversationSnapshot/);
   assert.match(html, /shouldRefreshSidebarProjectData/);
   assert.match(html, /projectPath === currentProjects\.selectedProjectPath\) return/);
@@ -2684,7 +2706,10 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
     () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
     async () => {},
     () => ({
-      projects: [{ name: 'app', path: '/workspace/app', pinnedAt: '2026-01-01T00:00:00.000Z' }],
+      projects: [
+        { name: 'app', path: '/workspace/app', pinnedAt: '2026-01-01T00:00:00.000Z' },
+        { name: 'other', path: '/workspace/other' }
+      ],
       selectedProjectPath: '/workspace/app'
     }),
     async () => {},
@@ -2702,20 +2727,88 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
       }
     }
   };
+  provider._latestPortfolio = [{
+    name: 'app',
+    path: '/workspace/app',
+    pinnedAt: '2026-01-01T00:00:00.000Z',
+    recommendedNodeTitle: 'Old app'
+  }, {
+    name: 'other',
+    path: '/workspace/other',
+    recommendedNodeTitle: 'Keep other'
+  }];
   provider._projectLoader.cancelExternalLoads = () => { externalLoads += 1; };
   provider._projectLoader.scheduleAll = () => {
+    throw new Error('local refresh must not restart external loads');
+  };
+  provider._projectLoader.schedulePortfolioEnrichment = () => {
     portfolioEnrichments += 1;
     resolvePortfolioBatch();
   };
 
-  provider.sendLocalProjects();
+  provider.sendLocalProjects('/workspace/app');
+  provider.sendLocalProjects('/workspace/app');
   await Promise.race([portfolioBatchDone, new Promise((resolve) => setTimeout(resolve, 200))]);
 
   assert.equal(portfolioEnrichments, 1);
   assert.equal(externalLoads, 1);
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].command, 'projectsLoaded');
+  assert.equal(postedMessages[0].projects.portfolio.length, 2);
+  assert.equal(JSON.stringify(postedMessages[0].projects.updatedProjectPaths), JSON.stringify(['/workspace/app']));
   assert.equal(postedMessages[0].projects.portfolio[0].pinnedAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(postedMessages[0].projects.portfolio[1].recommendedNodeTitle, 'Keep other');
+});
+
+test('sidebar conversation snapshots share one in-flight database read and only the latest request commits', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const postedMessages = [];
+  let snapshotLoads = 0;
+  let resolveSnapshot;
+  const snapshotPromise = new Promise((resolve) => {
+    resolveSnapshot = resolve;
+  });
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'app', path: '/workspace/app' }],
+        selectedProjectPath: '/workspace/app'
+      }),
+      getProjectConversationSnapshot: async () => {
+        snapshotLoads += 1;
+        return snapshotPromise;
+      }
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+
+  const first = provider.sendProjectConversationSnapshot('/workspace/app', true);
+  const second = provider.sendProjectConversationSnapshot('/workspace/app', true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(snapshotLoads, 1);
+
+  resolveSnapshot({ solo: [], project: [], flow: [] });
+  await Promise.all([first, second]);
+
+  assert.equal(snapshotLoads, 1);
+  assert.equal(
+    postedMessages.filter((message) => message.command === 'sidebarProjectConversationSnapshotLoaded').length,
+    1
+  );
 });
 
 test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
@@ -8145,7 +8238,7 @@ test('project-level execution history returns latest roadmap run across nodes', 
   store.close();
 });
 
-test('posting a step conversation refreshes the sidebar solo, step, and flow snapshot', () => {
+test('posting a step conversation refreshes one sidebar project snapshot without a duplicate step read', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -8171,7 +8264,6 @@ test('posting a step conversation refreshes the sidebar solo, step, and flow sna
   extensionModule.__postNodeConversations('3');
 
   assert.deepEqual(calls, [
-    ['step', '/workspace/project', '3'],
     ['snapshot', '/workspace/project']
   ]);
 });

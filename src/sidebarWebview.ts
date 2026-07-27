@@ -4012,6 +4012,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectSoloFiles = {};
     const projectSoloDrafts = {};
     const projectRefreshPaths = new Set();
+    const pendingConversationContinuations = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
     let projectDataLoaded = false;
     let hoveredConversationCard = null;
@@ -4025,6 +4026,23 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function sameConversations(left, right) {
       return conversationsSignature(left) === conversationsSignature(right);
+    }
+
+    function mergePortfolioUpdate(existingPortfolio, incomingPortfolio, registeredProjects, updatedProjectPaths) {
+      const existing = new Map((existingPortfolio || []).map(project => [project.path, project]));
+      const incoming = new Map((incomingPortfolio || []).map(project => [project.path, project]));
+      const registeredPaths = (registeredProjects || []).map(project => project.path).filter(Boolean);
+      if (!Array.isArray(updatedProjectPaths)) {
+        return registeredPaths
+          .map(projectPath => incoming.get(projectPath))
+          .filter(Boolean);
+      }
+      const updated = new Set(updatedProjectPaths);
+      return registeredPaths
+        .map(projectPath => updated.has(projectPath)
+          ? (incoming.get(projectPath) || existing.get(projectPath))
+          : (existing.get(projectPath) || incoming.get(projectPath)))
+        .filter(Boolean);
     }
 
     function isConversationCardInteractionActive() {
@@ -4373,6 +4391,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         duration: '耗时',
         changedCount: '本轮修改文件数',
         continueNative: '继续',
+        continuingNative: '正在续聊…',
         filterAll: '全部',
         filterActive: '进行中',
         filterFailed: '有失败',
@@ -4754,6 +4773,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         duration: 'Duration',
         changedCount: 'Files changed in this run',
         continueNative: 'Continue',
+        continuingNative: 'Continuing…',
         filterAll: 'All',
         filterActive: 'Active',
         filterFailed: 'Failed',
@@ -4966,25 +4986,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return !lastRequestedAt || Date.now() - lastRequestedAt > sidebarConversationRefreshTtlMs;
     }
 
-    function requestSidebarSoloConversationHistory(projectPath, force = false) {
-      const key = String(projectPath || '');
-      if (!shouldRefreshSidebarProjectData(key, sidebarSoloConversationRequestedAt, force)) {
-        return;
-      }
-      sidebarSoloConversationRequestedAt[key] = Date.now();
-      vscode.postMessage({ command: 'conversation.getHistory', projectPath: key, nodeId: '__solo__' });
-    }
-
-    function requestSidebarProjectConversationHistory(projectPath, force = false) {
-      const key = String(projectPath || '');
-      if (!shouldRefreshSidebarProjectData(key, sidebarProjectConversationRequestedAt, force)) {
-        return;
-      }
-      sidebarProjectConversationRequested[key] = true;
-      sidebarProjectConversationRequestedAt[key] = Date.now();
-      vscode.postMessage({ command: 'conversation.getProjectHistory', projectPath: key });
-    }
-
     function requestSidebarProjectConversationSnapshot(projectPath, force = false) {
       const key = String(projectPath || '');
       const refreshSolo = shouldRefreshSidebarProjectData(key, sidebarSoloConversationRequestedAt, force);
@@ -4994,7 +4995,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       sidebarSoloConversationRequestedAt[key] = requestedAt;
       sidebarProjectConversationRequestedAt[key] = requestedAt;
       sidebarProjectConversationRequested[key] = true;
-      vscode.postMessage({ command: 'conversation.getProjectSnapshot', projectPath: key });
+      vscode.postMessage({ command: 'conversation.getProjectSnapshot', projectPath: key, force });
     }
 
     function applyLanguage() {
@@ -6253,8 +6254,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = selectedProjectPath || '';
-          currentProjects.portfolio = normalizePortfolioDerivedSignals(message.projects.portfolio || []);
-          currentProjects.globalStore = message.projects.globalStore || null;
+          currentProjects.portfolio = normalizePortfolioDerivedSignals(mergePortfolioUpdate(
+            currentProjects.portfolio,
+            message.projects.portfolio || [],
+            currentProjects.projects,
+            message.projects.updatedProjectPaths
+          ));
+          if (message.projects.globalStore) {
+            currentProjects.globalStore = message.projects.globalStore;
+          }
           if (message.projects.recentConversationSnapshot && currentProjects.selectedProjectPath) {
             const recentSnapshot = message.projects.recentConversationSnapshot;
             sidebarSoloConversationsByProject[currentProjects.selectedProjectPath] = recentSnapshot.solo || [];
@@ -6345,6 +6353,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'sidebarActionFailed':
+          pendingConversationContinuations.clear();
           deliveryActionMessage = message.message || '';
           if (cliTestBadge && settingsPanel && settingsPanel.style.display === 'block') {
             cliTestBadge.style.display = 'block';
@@ -6352,6 +6361,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             cliTestBadge.textContent = message.message || '';
           }
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'conversationActionSettled':
+          if (message.action === 'continue') {
+            pendingConversationContinuations.delete(String(message.conversationId || ''));
+            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          }
           break;
 
         case 'dailyReviewLoaded':
@@ -6814,8 +6830,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         ? '<button class="sidebar-conv-action-btn rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-rollback-sidebar-solo-hash="' + escapeHtml(preGitHash) + '" data-rollback-sidebar-step-hash="' + escapeHtml(preGitHash) + '" title="撤销本次修改"><span class="codicon codicon-discard"></span> 撤销修改</button>'
         : '';
         
+      const continuationPending = pendingConversationContinuations.has(convId);
       const continueBtn = conversation.capabilities && conversation.capabilities.canContinue
-        ? '<button class="sidebar-conv-action-btn continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(t('continueNative')) + '"><span class="codicon codicon-play"></span> ' + escapeHtml(t('continueNative')) + '</button>'
+        ? '<button class="sidebar-conv-action-btn continue' + (continuationPending ? ' is-pending' : '') + '" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(continuationPending ? t('continuingNative') : t('continueNative')) + '"' + (continuationPending ? ' disabled' : '') + '><span class="codicon ' + (continuationPending ? 'codicon-loading loading-spin' : 'codicon-play') + '"></span> ' + escapeHtml(continuationPending ? t('continuingNative') : t('continueNative')) + '</button>'
         : '';
         
       const stopBtn = conversation.capabilities && conversation.capabilities.canStop
@@ -6839,7 +6856,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         miniActions += '<span class="mini-btn-rollback" data-rollback-hash="' + escapeHtml(preGitHash) + '" data-rollback-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" title="撤销修改"><span class="codicon codicon-discard"></span></span>';
       }
       if (!detailExpanded && continueBtn) {
-        miniActions += '<span class="mini-btn-continue" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="继续对话"><span class="codicon codicon-play"></span></span>';
+        miniActions += '<span class="mini-btn-continue' + (continuationPending ? ' is-pending' : '') + '" data-continue-id="' + escapeHtml(convId) + '" data-continue-node-id="' + escapeHtml(conversationNodeId) + '" data-is-solo="' + isSolo + '" data-continue-sidebar-solo-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-id="' + escapeHtml(convId) + '" data-continue-sidebar-step-node-id="' + escapeHtml(conversationNodeId) + '" title="' + escapeHtml(continuationPending ? t('continuingNative') : t('continueNative')) + '"><span class="codicon ' + (continuationPending ? 'codicon-loading loading-spin' : 'codicon-play') + '"></span></span>';
       }
       miniActions += '</div>';
 
@@ -6995,10 +7012,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function bindConversationsTree(container, projectPath, nodeId, isSolo) {
-      if (!isSolo && projectPath) {
-        requestSidebarProjectConversationHistory(projectPath);
-      }
-
       function isConversationActionForTree(item) {
         return String(item.getAttribute('data-is-solo') || 'false') === String(!!isSolo);
       }
@@ -7040,7 +7053,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         item.addEventListener('click', (event) => {
           event.stopPropagation();
           const conversationId = item.getAttribute('data-continue-id');
+          if (!conversationId || pendingConversationContinuations.has(conversationId)) return;
           const targetNodeId = item.getAttribute('data-continue-node-id') || nodeId;
+          pendingConversationContinuations.add(conversationId);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           if (isSolo) {
             vscode.postMessage({
               command: 'conversation.continue',
@@ -7368,9 +7384,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         projectContinueDrafts[nodeId] = '';
         projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = '';
         projectContinueFiles[nodeId] = [];
-          if (projectPath && nodeId) {
-            requestSidebarProjectConversationHistory(projectPath, true);
-          }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
@@ -8619,8 +8632,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             command: 'project.refreshExternalData',
             projectPath
           });
-          requestSidebarSoloConversationHistory(projectPath, true);
-          requestSidebarProjectConversationHistory(projectPath, true);
+          requestSidebarProjectConversationSnapshot(projectPath, true);
         });
       });
       portfolioList.querySelectorAll('[data-toggle-delivery-panel]').forEach(button => {
@@ -8663,7 +8675,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           deliveryActionMessage = '';
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({ command: 'project.refreshExternalData', projectPath });
-          requestSidebarProjectConversationHistory(projectPath, true);
+          requestSidebarProjectConversationSnapshot(projectPath, true);
         });
       });
       portfolioList.querySelectorAll('[data-agent-fix-delivery-project-path]').forEach(button => {

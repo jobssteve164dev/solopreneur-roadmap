@@ -41,14 +41,21 @@ export class SidebarProjectLoader {
     this.scheduleSecurityLoads(projects, selectedProjectPath);
   }
 
-  public schedulePortfolioEnrichment(projects: SolopreneurProject[], selectedProjectPath: string, basePortfolio: ProjectPortfolioSummary[] = []): void {
+  public schedulePortfolioEnrichment(
+    projects: SolopreneurProject[],
+    selectedProjectPath: string,
+    basePortfolio: ProjectPortfolioSummary[] = [],
+    projectPaths: string[] = []
+  ): void {
     const requestId = ++this.portfolioRequest;
     setTimeout(() => {
       void (async () => {
         try {
           const globalDataPath = this.options.getGlobalDataPath();
           const summaries = new Map<string, ProjectPortfolioSummary>(basePortfolio.map((summary) => [summary.path, summary]));
-          const ordered = this.orderedProjects(projects, selectedProjectPath);
+          const requestedPaths = new Set(projectPaths.filter(Boolean));
+          const ordered = this.orderedProjects(projects, selectedProjectPath)
+            .filter((project) => requestedPaths.size === 0 || requestedPaths.has(project.path));
           for (const project of ordered) {
             if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
             const investment = await readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath());
@@ -65,7 +72,8 @@ export class SidebarProjectLoader {
                 projects,
                 selectedProjectPath,
                 portfolio,
-                globalStore: this.options.buildGlobalStorePlaceholder(globalDataPath, portfolio)
+                globalStore: this.options.buildGlobalStorePlaceholder(globalDataPath, portfolio),
+                updatedProjectPaths: [project.path]
               }
             });
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -78,7 +86,16 @@ export class SidebarProjectLoader {
           } catch {
             globalStore = this.options.buildGlobalStorePlaceholder(globalDataPath, portfolio);
           }
-          this.options.postMessage({ command: 'projectsLoaded', projects: { projects, selectedProjectPath, portfolio, globalStore } });
+          this.options.postMessage({
+            command: 'projectsLoaded',
+            projects: {
+              projects,
+              selectedProjectPath,
+              portfolio,
+              globalStore,
+              updatedProjectPaths: []
+            }
+          });
         } catch (error) {
           console.error('SoloMap sidebar failed to enrich portfolio:', error);
         }

@@ -746,16 +746,29 @@ async function handleSharedWebviewAction(
     },
     'conversation.getProjectSnapshot': async (request) => {
       if (sidebarProvider) {
-        await sidebarProvider.sendProjectConversationSnapshot(String(request.projectPath || getSelectedProjectPath(context) || ''));
+        await sidebarProvider.sendProjectConversationSnapshot(
+          String(request.projectPath || getSelectedProjectPath(context) || ''),
+          Boolean(request.force)
+        );
       }
     },
     'conversation.continue': async (request) => {
       revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue');
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
-      const nodeId = String(request.nodeId || '');
-      await handleContinueNativeConversation(context, nodeId, Number(request.conversationId || 0));
-      refreshConversation(nodeId);
+      const conversationId = Number(request.conversationId || 0);
+      try {
+        const projectPath = await ensureActionProject(context, request.projectPath || '');
+        if (!projectPath && request.projectPath) return;
+        const nodeId = String(request.nodeId || '');
+        await handleContinueNativeConversation(context, nodeId, conversationId);
+        refreshConversation(nodeId);
+      } finally {
+        await respond({
+          command: 'conversationActionSettled',
+          action: 'continue',
+          projectPath: String(request.projectPath || getSelectedProjectPath(context) || ''),
+          conversationId
+        });
+      }
     },
     'conversation.stop': async (request) => {
       const projectPath = await ensureActionProject(context, request.projectPath || '');
@@ -3199,7 +3212,7 @@ function postRoadmapLoadFailed(projectPath: string, error: unknown): void {
 
 function refreshSidebarProjectCards(): void {
   if (sidebarProvider) {
-    sidebarProvider.sendLocalProjects();
+    sidebarProvider.sendLocalProjects(activeProjectRoot || '');
   }
 }
 
@@ -4846,7 +4859,6 @@ function postNodeConversations(nodeId: string, fallbackConversations: import('./
   if (nodeId === soloConversationId && sidebarProvider && activeProjectRoot) {
     void sidebarProvider.sendSoloConversationHistory(activeProjectRoot);
   } else if (sidebarProvider && activeProjectRoot) {
-    void sidebarProvider.sendStepConversationHistory(activeProjectRoot, nodeId);
     if (nodeId !== roadmapRevisionId) {
       void sidebarProvider.sendProjectConversationSnapshot(activeProjectRoot);
     }
