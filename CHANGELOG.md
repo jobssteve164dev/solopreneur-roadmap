@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.383 - 2026-07-27
+
+### Changed
+- fix sidebar loading coordination (10e33b8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.382 - 2026-07-27
 
 ### Fixed
