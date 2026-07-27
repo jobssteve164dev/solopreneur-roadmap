@@ -349,6 +349,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './continuation') {
           return require(path.join(projectRoot, 'out/continuation.js'));
         }
+        if (id === './tokenUsage') {
+          return require(path.join(projectRoot, 'out/tokenUsage.js'));
+        }
         if (id === './conversationPresentation') {
           return require(path.join(projectRoot, 'out/conversationPresentation.js'));
         }
@@ -2125,6 +2128,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /本周推进|Weekly Focus/);
   assert.match(html, /id="setting-global-data-path"/);
   assert.match(html, /id="agent-impact-panel"/);
+  assert.match(html, /id="impact-tokens"/);
+  assert.match(html, /Token 消耗/);
+  assert.match(html, /tokenRuns/);
   assert.match(html, /id="btn-refresh-agent-impact"/);
   assert.match(html, /agentImpact\.get/);
   assert.match(html, /agentImpactLoaded/);
@@ -6703,7 +6709,7 @@ test('agent impact summary counts local SoloMap contribution by agent', () => {
   ].join('\n'));
   fs.writeFileSync(path.join(runToday, 'started_at'), '2026-06-01T10:00:00.000Z', 'utf8');
   fs.writeFileSync(path.join(runToday, 'command.txt'), "cat prompt.txt | codex exec -", 'utf8');
-  fs.writeFileSync(path.join(runToday, 'output.log'), 'Run duration ms: 120000', 'utf8');
+  fs.writeFileSync(path.join(runToday, 'output.log'), 'Run duration ms: 120000\ntokens used\n12,345', 'utf8');
   fs.writeFileSync(path.join(runToday, 'touched-files.txt'), 'M src/view.ts\nA docs/result.md\n', 'utf8');
   fs.writeFileSync(path.join(runToday, 'completion.json'), JSON.stringify({ markCompleted: true }), 'utf8');
   fs.writeFileSync(path.join(runWeek, 'started_at'), '2026-05-30T10:00:00.000Z', 'utf8');
@@ -6722,6 +6728,8 @@ test('agent impact summary counts local SoloMap contribution by agent', () => {
   assert.equal(summary.completedRuns, 1);
   assert.equal(summary.failedRuns, 1);
   assert.equal(summary.totalMinutes, 3);
+  assert.equal(summary.totalTokens, 12345);
+  assert.equal(summary.tokenRuns, 1);
   assert.equal(summary.changedFiles, 3);
   assert.equal(summary.projectProgressPercent, 50);
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 2, 2], ['claude', 1, 1, 2]]);

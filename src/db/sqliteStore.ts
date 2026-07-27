@@ -113,7 +113,7 @@ export class SqliteStore {
       'idx_growth_signals_node',
       'idx_growth_module_labels_snapshot'
     ];
-    const schemaChanged = requiredTables.some((name) => !this.sqliteObjectExists('table', name))
+    let schemaChanged = requiredTables.some((name) => !this.sqliteObjectExists('table', name))
       || requiredIndexes.some((name) => !this.sqliteObjectExists('index', name));
 
     // Nodes Table
@@ -161,6 +161,11 @@ export class SqliteStore {
         startedAt TEXT,
         finishedAt TEXT,
         durationMs INTEGER,
+        inputTokens INTEGER DEFAULT 0,
+        cachedInputTokens INTEGER DEFAULT 0,
+        outputTokens INTEGER DEFAULT 0,
+        reasoningOutputTokens INTEGER DEFAULT 0,
+        totalTokens INTEGER DEFAULT 0,
         outputPath TEXT,
         outputBytes INTEGER,
         outputTail TEXT,
@@ -171,6 +176,18 @@ export class SqliteStore {
         updatedAt TEXT
       )
     `);
+    for (const [column, definition] of [
+      ['inputTokens', 'INTEGER DEFAULT 0'],
+      ['cachedInputTokens', 'INTEGER DEFAULT 0'],
+      ['outputTokens', 'INTEGER DEFAULT 0'],
+      ['reasoningOutputTokens', 'INTEGER DEFAULT 0'],
+      ['totalTokens', 'INTEGER DEFAULT 0']
+    ]) {
+      if (!this.sqliteColumnExists('run_records', column)) {
+        this.db.run(`ALTER TABLE run_records ADD COLUMN ${column} ${definition}`);
+        schemaChanged = true;
+      }
+    }
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS run_files (
@@ -327,6 +344,23 @@ export class SqliteStore {
     try {
       stmt.bind([type, name]);
       return stmt.step();
+    } finally {
+      stmt.free();
+    }
+  }
+
+  private sqliteColumnExists(table: string, column: string): boolean {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const stmt = this.db.prepare(`PRAGMA table_info(${table})`);
+    try {
+      while (stmt.step()) {
+        if (String((stmt.getAsObject() as any).name || '') === column) {
+          return true;
+        }
+      }
+      return false;
     } finally {
       stmt.free();
     }
@@ -557,6 +591,11 @@ export class SqliteStore {
         startedAt,
         finishedAt,
         durationMs,
+        inputTokens,
+        cachedInputTokens,
+        outputTokens,
+        reasoningOutputTokens,
+        totalTokens,
         outputPath,
         outputBytes,
         outputTail,
@@ -565,7 +604,7 @@ export class SqliteStore {
         changesPath,
         touchedFilesPath,
         updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         executionLogId,
         record.nodeId || '',
@@ -575,6 +614,11 @@ export class SqliteStore {
         record.startedAt || '',
         record.finishedAt || '',
         Math.max(0, Number(record.durationMs || 0)),
+        Math.max(0, Number(record.inputTokens || 0)),
+        Math.max(0, Number(record.cachedInputTokens || 0)),
+        Math.max(0, Number(record.outputTokens || 0)),
+        Math.max(0, Number(record.reasoningOutputTokens || 0)),
+        Math.max(0, Number(record.totalTokens || 0)),
         record.outputPath || '',
         Math.max(0, Number(record.outputBytes || 0)),
         record.outputTail || '',
@@ -631,6 +675,11 @@ export class SqliteStore {
         startedAt,
         finishedAt,
         durationMs,
+        inputTokens,
+        cachedInputTokens,
+        outputTokens,
+        reasoningOutputTokens,
+        totalTokens,
         outputPath,
         outputBytes,
         outputTail,
@@ -655,6 +704,11 @@ export class SqliteStore {
           startedAt: String(row.startedAt || ''),
           finishedAt: String(row.finishedAt || ''),
           durationMs: Math.max(0, Number(row.durationMs || 0)),
+          inputTokens: Math.max(0, Number(row.inputTokens || 0)),
+          cachedInputTokens: Math.max(0, Number(row.cachedInputTokens || 0)),
+          outputTokens: Math.max(0, Number(row.outputTokens || 0)),
+          reasoningOutputTokens: Math.max(0, Number(row.reasoningOutputTokens || 0)),
+          totalTokens: Math.max(0, Number(row.totalTokens || 0)),
           outputPath: String(row.outputPath || ''),
           outputBytes: Math.max(0, Number(row.outputBytes || 0)),
           outputTail: String(row.outputTail || ''),

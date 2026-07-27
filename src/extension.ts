@@ -209,6 +209,7 @@ import {
   stripAnsiControlCodes,
   updateStoredAgentSession
 } from './continuation';
+import { extractRunTokenUsage } from './tokenUsage';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
@@ -7645,6 +7646,24 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const outputTail = getOutputTail(outputFilePath);
+    const outputText = readTextFileSafe(String(outputFilePath || ''));
+    let capturedSessionId = String(nativeSessionId || '').trim();
+    if (!capturedSessionId && sessionFilePath && fs.existsSync(String(sessionFilePath))) {
+      try {
+        capturedSessionId = String(JSON.parse(fs.readFileSync(String(sessionFilePath), 'utf8'))?.sessionId || '').trim();
+      } catch {}
+    }
+    const recordedCodexHome = codexHomeFilePath && fs.existsSync(String(codexHomeFilePath))
+      ? fs.readFileSync(String(codexHomeFilePath), 'utf8').trim()
+      : '';
+    const tokenUsage = extractRunTokenUsage({
+      agentCli: String(agentCli || commandPreview || command || ''),
+      outputText,
+      workspaceRoot,
+      startedAt: String(startedAt || ''),
+      sessionId: capturedSessionId,
+      codexHome: recordedCodexHome
+    });
     const changedFilesSummary = getChangedFilesSummary(changesFilePath);
     const touchedFilesSummary = getTouchedFilesSummary(touchedFilesPath);
     const roadmapCsvChanged = didRoadmapCsvChange(changedFilesSummary, touchedFilesSummary);
@@ -7848,6 +7867,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           startedAt: String(startedAt || ''),
           finishedAt,
           durationMs: runDurationMs,
+          tokenUsage,
           changedFilesSummary,
           touchedFilesSummary,
           outputTail,
@@ -7892,6 +7912,11 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           startedAt: String(startedAt || ''),
           finishedAt,
           durationMs: runDurationMs,
+          inputTokens: tokenUsage.inputTokens,
+          cachedInputTokens: tokenUsage.cachedInputTokens,
+          outputTokens: tokenUsage.outputTokens,
+          reasoningOutputTokens: tokenUsage.reasoningOutputTokens,
+          totalTokens: tokenUsage.totalTokens,
           outputPath: toRuntimePath(outputFilePath),
           outputBytes,
           outputTail: compactLine(outputTail, 4000),
@@ -8172,6 +8197,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     processedSuccessfully = true;
   } catch (e) {
     // JSON might be partially written; watcher or poller will retry.
+    console.error('Failed to process Agent status file:', normalizedStatusFilePath, e);
   } finally {
     try {
       transientStatusSyncEngine?.close();

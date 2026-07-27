@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { AgentTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { normalizeSolomapGlobalPath } from './solomapGlobal';
 import * as crypto from 'crypto';
 
@@ -168,6 +169,7 @@ export interface RunDigest {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
+  tokenUsage: AgentTokenUsage;
   changedFiles: string[];
   touchedFiles: string[];
   commandSignals: string[];
@@ -279,6 +281,7 @@ export interface RunDigestInput {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
+  tokenUsage?: Partial<AgentTokenUsage>;
   changedFilesSummary: string;
   touchedFilesSummary: string;
   outputTail: string;
@@ -565,6 +568,7 @@ export function buildRunDigest(input: RunDigestInput): RunDigest {
     startedAt: String(input.startedAt || ''),
     finishedAt: String(input.finishedAt || new Date().toISOString()),
     durationMs: Number(input.durationMs || 0),
+    tokenUsage: normalizeTokenUsage(input.tokenUsage),
     changedFiles,
     touchedFiles,
     commandSignals,

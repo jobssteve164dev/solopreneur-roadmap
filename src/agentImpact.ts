@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as Papa from 'papaparse';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexEntry } from './db/types';
+import { AgentTokenUsage, extractRunTokenUsage, extractTokenUsageFromOutput, normalizeTokenUsage } from './tokenUsage';
 
 export interface AgentImpactProject {
   name: string;
@@ -15,6 +16,8 @@ export interface AgentImpactSummary {
   completedRuns: number;
   failedRuns: number;
   totalMinutes: number;
+  totalTokens: number;
+  tokenRuns: number;
   changedFiles: number;
   projectProgressPercent: number;
   completedNodes: number;
@@ -24,6 +27,8 @@ export interface AgentImpactSummary {
     agent: string;
     runs: number;
     minutes: number;
+    tokens: number;
+    tokenRuns: number;
     changedFiles: number;
     latestRunAt: string;
   }>;
@@ -43,6 +48,7 @@ interface AgentImpactRun {
   status: 'completed' | 'failed' | 'unknown';
   timestamp: number;
   minutes: number;
+  tokenUsage: AgentTokenUsage;
   changedFiles: string[];
 }
 
@@ -236,18 +242,42 @@ function inferAgentFromDigest(digest: any): string {
   return inferAgentFromCommand(commandSignal);
 }
 
-function readRunsFromRunIndexEntries(entries: RunIndexEntry[]): AgentImpactRun[] {
+function readRunsFromRunIndexEntries(entries: RunIndexEntry[], projectPath: string): AgentImpactRun[] {
   return entries.map((entry) => {
     const runKind = normalizeRunKind(entry.runKind);
     if (!isImpactRunKind(runKind)) {
       return null;
     }
     const timestamp = Date.parse(String(entry.finishedAt || entry.startedAt || ''));
+    let tokenUsage = normalizeTokenUsage({
+      inputTokens: entry.inputTokens,
+      cachedInputTokens: entry.cachedInputTokens,
+      outputTokens: entry.outputTokens,
+      reasoningOutputTokens: entry.reasoningOutputTokens,
+      totalTokens: entry.totalTokens
+    });
+    if (tokenUsage.totalTokens <= 0 && entry.outputPath) {
+      const outputPath = path.isAbsolute(entry.outputPath) ? entry.outputPath : path.join(projectPath, entry.outputPath);
+      const runDir = path.dirname(outputPath);
+      let sessionId = '';
+      try {
+        sessionId = String(JSON.parse(readFileIfExists(path.join(runDir, 'session.json')))?.sessionId || '').trim();
+      } catch {}
+      tokenUsage = extractRunTokenUsage({
+        agentCli: entry.agentCli,
+        outputText: readFileTailIfExists(outputPath),
+        workspaceRoot: projectPath,
+        startedAt: entry.startedAt,
+        sessionId,
+        codexHome: readFileIfExists(path.join(runDir, 'codex-home.txt')).trim()
+      });
+    }
     return {
       agent: inferAgentFromCommand(entry.agentCli),
       status: statusFromDigest(entry.status),
       timestamp: Number.isFinite(timestamp) ? timestamp : 0,
       minutes: Number(entry.durationMs || 0) > 0 ? Math.max(1, Math.round(Number(entry.durationMs || 0) / 60000)) : 0,
+      tokenUsage,
       changedFiles: entry.files
         .filter((file) => file.role === 'changed' || file.role === 'touched')
         .map((file) => String(file.filePath || '').trim())
@@ -264,7 +294,7 @@ async function readRunsFromRunIndex(projectPath: string, extensionPath: string):
   const store = new SqliteStore(dbPath, extensionPath);
   try {
     await store.init();
-    return readRunsFromRunIndexEntries(store.getRunIndexEntries());
+    return readRunsFromRunIndexEntries(store.getRunIndexEntries(), projectPath);
   } catch {
     return [];
   } finally {
@@ -308,6 +338,7 @@ function readRunsFromDigests(projectPath: string): AgentImpactRun[] {
       status: statusFromDigest(digest.status),
       timestamp: Number.isFinite(timestamp) ? timestamp : 0,
       minutes: durationMs > 0 ? Math.max(1, Math.round(durationMs / 60000)) : 0,
+      tokenUsage: normalizeTokenUsage(digest.tokenUsage),
       changedFiles
     };
   }).filter((run): run is AgentImpactRun => Boolean(run));
@@ -318,11 +349,13 @@ function readRunsFromAgentDirs(projectPath: string): AgentImpactRun[] {
   return listAgentRunDirs(runsRoot).map((runDir) => {
     const timestamp = getRunTimestamp(runDir);
     const command = readFileIfExists(path.join(runDir, 'command.txt'));
+    const output = readFileTailIfExists(path.join(runDir, 'output.log'));
     return {
       agent: inferAgentFromCommand(command),
       status: inferRunStatus(runDir),
       timestamp,
       minutes: getRunDurationMinutes(runDir, timestamp),
+      tokenUsage: extractTokenUsageFromOutput(output, command),
       changedFiles: readRunChangedFiles(runDir)
     };
   });
@@ -356,13 +389,15 @@ function buildAgentImpactSummaryFromProjectRuns(
   now = new Date()
 ): AgentImpactSummary {
   const weekStartMs = now.getTime() - 7 * 24 * 60 * 60 * 1000;
-  const byAgent = new Map<string, { agent: string; runs: number; minutes: number; files: Set<string>; latestRunAtMs: number }>();
+  const byAgent = new Map<string, { agent: string; runs: number; minutes: number; tokens: number; tokenRuns: number; files: Set<string>; latestRunAtMs: number }>();
   const allChangedFiles = new Set<string>();
   let weekRuns = 0;
   let totalRuns = 0;
   let completedRuns = 0;
   let failedRuns = 0;
   let totalMinutes = 0;
+  let totalTokens = 0;
+  let tokenRuns = 0;
   let latestRunAt = 0;
   let totalNodes = 0;
   let completedNodes = 0;
@@ -378,7 +413,7 @@ function buildAgentImpactSummaryFromProjectRuns(
       const timestamp = run.timestamp;
       const minutes = run.minutes;
       const changedFiles = run.changedFiles.map((file) => `${project.path}:${file}`);
-      const agentStats = byAgent.get(agent) || { agent, runs: 0, minutes: 0, files: new Set<string>(), latestRunAtMs: 0 };
+      const agentStats = byAgent.get(agent) || { agent, runs: 0, minutes: 0, tokens: 0, tokenRuns: 0, files: new Set<string>(), latestRunAtMs: 0 };
 
       totalRuns += 1;
       agentStats.runs += 1;
@@ -389,6 +424,12 @@ function buildAgentImpactSummaryFromProjectRuns(
       agentStats.latestRunAtMs = Math.max(agentStats.latestRunAtMs, timestamp);
       totalMinutes += minutes;
       agentStats.minutes += minutes;
+      if (run.tokenUsage.totalTokens > 0) {
+        totalTokens += run.tokenUsage.totalTokens;
+        tokenRuns += 1;
+        agentStats.tokens += run.tokenUsage.totalTokens;
+        agentStats.tokenRuns += 1;
+      }
       changedFiles.forEach((file) => {
         allChangedFiles.add(file);
         agentStats.files.add(file);
@@ -410,6 +451,8 @@ function buildAgentImpactSummaryFromProjectRuns(
     completedRuns,
     failedRuns,
     totalMinutes,
+    totalTokens,
+    tokenRuns,
     changedFiles: allChangedFiles.size,
     projectProgressPercent: totalNodes > 0 ? Math.round((completedNodes / totalNodes) * 100) : 0,
     completedNodes,
@@ -420,6 +463,8 @@ function buildAgentImpactSummaryFromProjectRuns(
         agent: item.agent,
         runs: item.runs,
         minutes: item.minutes,
+        tokens: item.tokens,
+        tokenRuns: item.tokenRuns,
         changedFiles: item.files.size,
         latestRunAt: item.latestRunAtMs ? new Date(item.latestRunAtMs).toISOString() : ''
       }))

@@ -37,6 +37,11 @@ export interface RunIndexRecord {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningOutputTokens?: number;
+  totalTokens?: number;
   outputPath: string;
   outputBytes: number;
   outputTail: string;

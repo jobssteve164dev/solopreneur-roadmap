@@ -859,7 +859,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     .impact-summary {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 6px;
     }
 
@@ -3693,6 +3693,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="impact-metric-label" id="impact-minutes-label">Minutes</div>
           </div>
           <div class="impact-metric">
+            <div class="impact-metric-value" id="impact-tokens">0</div>
+            <div class="impact-metric-label" id="impact-tokens-label">Tokens</div>
+          </div>
+          <div class="impact-metric">
             <div class="impact-metric-value" id="impact-files">0</div>
             <div class="impact-metric-label" id="impact-files-label">Files changed</div>
           </div>
@@ -4478,6 +4482,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         agentLoginAction: '登录 / 试跑',
         agentImpact: 'Agent 贡献',
         impactMinutes: '工作分钟',
+        impactTokens: 'Token 消耗',
         impactFiles: '改动文件',
         impactProgress: '项目推进',
         refreshAgentImpact: '刷新贡献',
@@ -4486,6 +4491,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         impactRunUnit: '次',
         impactMinuteUnit: '分钟',
         impactFileUnit: '个文件',
+        impactTokenUnit: 'tokens',
         openAgentInstall: '安装 Agent',
         openAgentCheck: 'Agent',
         openGithubAuth: 'GitHub',
@@ -4857,6 +4863,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         agentLoginAction: 'Sign in / test',
         agentImpact: 'Agent Impact',
         impactMinutes: 'Minutes',
+        impactTokens: 'Tokens used',
         impactFiles: 'Files changed',
         impactProgress: 'Project progress',
         refreshAgentImpact: 'Refresh Impact',
@@ -4865,6 +4872,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         impactRunUnit: 'runs',
         impactMinuteUnit: 'min',
         impactFileUnit: 'files',
+        impactTokenUnit: 'tokens',
         openAgentInstall: 'Install Agent',
         openAgentCheck: 'Agent',
         openGithubAuth: 'GitHub',
@@ -5068,6 +5076,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, getSoloSelectValue(settingCollaborationReviewMode) || 'high_risk');
       setText('label-agent-impact', t('agentImpact'));
       setText('impact-minutes-label', t('impactMinutes'));
+      setText('impact-tokens-label', t('impactTokens'));
       setText('impact-files-label', t('impactFiles'));
       setText('impact-progress-label', t('impactProgress'));
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
@@ -6674,6 +6683,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function setAgentImpactPending() {
       setText('impact-minutes', '...');
+      setText('impact-tokens', '...');
       setText('impact-files', '...');
       setText('impact-progress', '...');
       if (agentImpactList) {
@@ -6717,6 +6727,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return SoloMapWebview.formatDurationMs(durationMs, { minimumOneSecond: true });
     }
 
+    function formatTokenCount(value) {
+      const tokens = Math.max(0, Number(value || 0));
+      if (tokens >= 1000000) return (tokens / 1000000).toFixed(tokens >= 10000000 ? 0 : 1).replace(/\\.0$/, '') + 'M';
+      if (tokens >= 1000) return (tokens / 1000).toFixed(tokens >= 100000 ? 0 : 1).replace(/\\.0$/, '') + 'K';
+      return String(Math.round(tokens));
+    }
+
     function formatSoloDuration(conversation) {
       if (Number.isFinite(conversation && conversation.durationMs)) {
         return formatDurationMs(Number(conversation.durationMs));
@@ -6742,6 +6759,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function renderAgentImpact(status) {
       const impact = status.impact || {};
       setText('impact-minutes', String(impact.totalMinutes || 0));
+      const totalRuns = Number(impact.totalRuns || 0);
+      const tokenRuns = Number(impact.tokenRuns || 0);
+      setText('impact-tokens', formatTokenCount(impact.totalTokens || 0));
+      setText('impact-tokens-label', t('impactTokens') + (totalRuns > 0 ? ' · ' + tokenRuns + '/' + totalRuns + ' ' + t('impactRunUnit') : ''));
       setText('impact-files', String(impact.changedFiles || 0));
       setText('impact-progress', String(impact.projectProgressPercent || 0) + '%');
       if (!agentImpactList) return;
@@ -6754,8 +6775,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const detail = [
           (agent.runs || 0) + ' ' + t('impactRunUnit'),
           (agent.minutes || 0) + ' ' + t('impactMinuteUnit'),
-          (agent.changedFiles || 0) + ' ' + t('impactFileUnit')
-        ].join(' · ');
+          (agent.changedFiles || 0) + ' ' + t('impactFileUnit'),
+          agent.tokenRuns > 0 ? formatTokenCount(agent.tokens || 0) + ' ' + t('impactTokenUnit') : ''
+        ].filter(Boolean).join(' · ');
         return \`
           <div class="impact-agent-row">
             <div class="impact-agent-main">

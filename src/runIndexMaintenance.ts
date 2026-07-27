@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexFile, RunIndexRecord, RunIndexSignal } from './db/types';
+import { AgentTokenUsage, normalizeTokenUsage } from './tokenUsage';
 
 export interface RunIndexHealth {
   digestCount: number;
@@ -21,6 +22,7 @@ interface DigestRun {
   startedAt: string;
   finishedAt: string;
   durationMs: number;
+  tokenUsage: AgentTokenUsage;
   changedFiles: string[];
   touchedFiles: string[];
   verification: string[];
@@ -55,6 +57,7 @@ function readDigestObjects(projectPath: string): DigestRun[] {
         startedAt: String(digest.startedAt || ''),
         finishedAt: String(digest.finishedAt || digest.startedAt || ''),
         durationMs: Math.max(0, Number(digest.durationMs || 0)),
+        tokenUsage: normalizeTokenUsage(digest.tokenUsage),
         changedFiles: Array.isArray(digest.changedFiles) ? digest.changedFiles.map(String).filter(Boolean) : [],
         touchedFiles: Array.isArray(digest.touchedFiles) ? digest.touchedFiles.map(String).filter(Boolean) : [],
         verification: Array.isArray(digest.verification) ? digest.verification.map(String).filter(Boolean) : [],
@@ -87,6 +90,11 @@ function digestToRunIndex(digest: DigestRun): { record: RunIndexRecord; files: R
       startedAt: digest.startedAt,
       finishedAt: digest.finishedAt,
       durationMs: digest.durationMs,
+      inputTokens: digest.tokenUsage.inputTokens,
+      cachedInputTokens: digest.tokenUsage.cachedInputTokens,
+      outputTokens: digest.tokenUsage.outputTokens,
+      reasoningOutputTokens: digest.tokenUsage.reasoningOutputTokens,
+      totalTokens: digest.tokenUsage.totalTokens,
       outputPath: '',
       outputBytes: 0,
       outputTail: '',
