@@ -4249,6 +4249,78 @@ test('agent model discovery parsers normalize current CLI outputs', () => {
     })),
     [{ value: 'gpt-5.5', label: 'GPT-5.5', title: 'gpt-5.5' }]
   );
+  assert.deepEqual(
+    agentModels.parseCopilotModelCatalog(JSON.stringify({
+      models: [
+        { id: 'auto', name: 'Auto' },
+        { id: 'gpt-5.4', name: 'GPT-5.4' }
+      ]
+    })),
+    [{ value: 'gpt-5.4', label: 'GPT-5.4', title: 'gpt-5.4' }]
+  );
+  assert.deepEqual(
+    agentModels.parseModelChoicesFromHelp('--model <model> Model to use (choices: "sonnet", "opus", "auto")'),
+    [
+      { value: 'sonnet', label: 'sonnet', title: undefined },
+      { value: 'opus', label: 'opus', title: undefined }
+    ]
+  );
+  assert.deepEqual(
+    agentModels.parseModelChoicesFromHelp('--model <model> Model to use\n--mode <mode> Execution mode (choices: "plan", "ask")'),
+    []
+  );
+});
+
+test('agent model discovery keeps one adapter table for every supported CLI family', () => {
+  const agentModels = require(path.join(projectRoot, 'out/agentModels.js'));
+  const summarize = family => agentModels.getAgentModelDiscoveryStrategies(family)
+    .map(strategy => `${strategy.kind}:${strategy.args.join(' ')}`);
+
+  assert.deepEqual(summarize('codex'), [
+    'command:debug models',
+    'command:debug models --bundled'
+  ]);
+  assert.deepEqual(summarize('cursor'), [
+    'command:models',
+    'command:--list-models'
+  ]);
+  assert.deepEqual(summarize('antigravity'), ['command:models']);
+  assert.deepEqual(summarize('opencode'), ['command:models']);
+  assert.deepEqual(summarize('copilot'), [
+    'json-rpc:--headless --no-auto-update --stdio',
+    'command:help'
+  ]);
+  assert.deepEqual(summarize('claude'), ['command:--help']);
+});
+
+test('agent model lookup never falls through to another CLI family', () => {
+  const agentCli = require(path.join(projectRoot, 'out/agentCli.js'));
+  const candidates = agentCli.getAgentCliFamilyCandidates('claude', '/usr/local/bin/codex');
+
+  assert.deepEqual(candidates.slice(0, 3), ['claude', 'claude-code', 'claude-code-cli']);
+  assert.equal(candidates.some(candidate => candidate.includes('codex')), false);
+});
+
+test('agent model discovery completes when a CLI helper keeps inherited pipes open', async () => {
+  const agentModels = require(path.join(projectRoot, 'out/agentModels.js'));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-model-cli-'));
+  const cliPath = path.join(tempDir, 'agy');
+  fs.writeFileSync(cliPath, [
+    '#!/usr/bin/env bash',
+    '(sleep 5) &',
+    'printf "model-from-wrapper\\n"'
+  ].join('\n'));
+  fs.chmodSync(cliPath, 0o755);
+  const startedAt = Date.now();
+  try {
+    const catalog = await agentModels.loadDiscoveredAgentModels(cliPath);
+    assert.equal(catalog.family, 'antigravity');
+    assert.deepEqual(catalog.models.map(model => model.value), ['auto', 'model-from-wrapper']);
+    assert.ok(Date.now() - startedAt < 2000);
+  } finally {
+    fs.unlinkSync(cliPath);
+    fs.rmdirSync(tempDir);
+  }
 });
 
 test('external data loader deduplicates in-flight loads and reuses fresh results', async () => {
@@ -4599,6 +4671,10 @@ test('roadmap and sidebar keep one shared application action boundary', () => {
   assert.doesNotMatch(roadmapSource, /function getAgentModelOptions/);
   assert.doesNotMatch(sidebarWebviewSource, /function bindSoloSelect\(/);
   assert.doesNotMatch(roadmapSource, /function bindSoloSelect\(/);
+  assert.doesNotMatch(
+    roadmapSource,
+    /function syncSettingAgentModelSelect\(\)[\s\S]{0,400}?setTargetModelValue\('settings'/
+  );
   assert.doesNotMatch(sidebarWebviewSource, /command: 'ability\.installSkill'/);
   assert.doesNotMatch(roadmapSource, /command: 'ability\.installSkill'/);
 });

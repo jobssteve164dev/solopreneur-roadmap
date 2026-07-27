@@ -3064,7 +3064,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (!settingAgentModelSelect) return;
       const agentCli = getEffectiveSettingCliPath();
       setSoloSelectOptions(settingAgentModelSelect, getAgentModelOptions(agentCli), getStoredModelPreference(agentCli));
-      setTargetModelValue('settings', agentCli, getSoloSelectValue(settingAgentModelSelect), true);
     }
 
     function getEffectiveSettingCliPath() {

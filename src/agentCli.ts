@@ -264,6 +264,32 @@ export function getKnownAgentCliCandidates(family: string): string[] {
   return family ? [family] : [];
 }
 
+export function getAgentCliFamilyCandidates(agentCli: string, configuredCliPath = ''): string[] {
+  const requestedCli = (agentCli || '').trim();
+  const configuredCli = (configuredCliPath || '').trim();
+  const requestedFamily = getAgentCliFamily(requestedCli || configuredCli || 'agy');
+  const requestedCandidate = path.basename(requestedCli).toLowerCase() === 'cursor' ? '' : requestedCli;
+  const configuredCandidate = getAgentCliFamily(configuredCli) === requestedFamily
+    && path.basename(configuredCli).toLowerCase() !== 'cursor'
+    ? configuredCli
+    : '';
+  return [
+    requestedCandidate,
+    configuredCandidate,
+    ...getKnownAgentCliCandidates(requestedFamily)
+  ].filter(Boolean).filter((candidate, index, all) => all.indexOf(candidate) === index);
+}
+
+export function resolveAgentCliWithinFamily(agentCli: string, configuredCliPath = ''): string {
+  const candidates = getAgentCliFamilyCandidates(agentCli, configuredCliPath);
+  for (const candidate of candidates) {
+    if (commandExists(candidate)) {
+      return resolveExecutablePath(candidate);
+    }
+  }
+  return candidates[0] || (agentCli || configuredCliPath || 'agy').trim();
+}
+
 export function getAgentCliCandidates(agentCli: string, configuredCliPath: string): string[] {
   const requestedCli = (agentCli || '').trim();
   const configuredCli = (configuredCliPath || '').trim();

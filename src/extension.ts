@@ -822,7 +822,7 @@ async function handleSharedWebviewAction(
       }
     },
     'agentModels.get': async (request) => {
-      await postAgentModelsLoaded(target, buildAgentModelsLoadedMessage({
+      await postAgentModelsLoaded(target, await buildAgentModelsLoadedMessage({
         requestId: request.requestId,
         targetId: request.targetId,
         agentCli: request.agentCli || '',

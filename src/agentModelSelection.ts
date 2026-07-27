@@ -1,5 +1,5 @@
 import { AgentModelCatalog, loadDiscoveredAgentModels } from './agentModels';
-import { resolveAgentCli } from './agentCli';
+import { resolveAgentCliWithinFamily } from './agentCli';
 
 export function normalizeAgentModelPreferences(value: unknown): Record<string, string> {
   if (!value || typeof value !== 'object') {
@@ -22,21 +22,21 @@ export function mergeAgentModelPreferences(...values: unknown[]): Record<string,
   }), {});
 }
 
-export function resolveAgentModelCatalog(agentCli: string, configuredCliPath = 'agy'): { agentCli: string; catalog: AgentModelCatalog } {
-  const resolvedAgentCli = resolveAgentCli(agentCli || '', configuredCliPath || 'agy');
+export async function resolveAgentModelCatalog(agentCli: string, configuredCliPath = 'agy'): Promise<{ agentCli: string; catalog: AgentModelCatalog }> {
+  const resolvedAgentCli = resolveAgentCliWithinFamily(agentCli || configuredCliPath || 'agy', configuredCliPath || 'agy');
   return {
     agentCli: resolvedAgentCli,
-    catalog: loadDiscoveredAgentModels(resolvedAgentCli)
+    catalog: await loadDiscoveredAgentModels(resolvedAgentCli)
   };
 }
 
-export function buildAgentModelsLoadedMessage(input: {
+export async function buildAgentModelsLoadedMessage(input: {
   requestId?: unknown;
   targetId?: unknown;
   agentCli?: string;
   configuredCliPath?: string;
-}): { command: 'agentModelsLoaded'; requestId: string; targetId: string; agentCli: string; catalog: AgentModelCatalog } {
-  const resolved = resolveAgentModelCatalog(input.agentCli || '', input.configuredCliPath || 'agy');
+}): Promise<{ command: 'agentModelsLoaded'; requestId: string; targetId: string; agentCli: string; catalog: AgentModelCatalog }> {
+  const resolved = await resolveAgentModelCatalog(input.agentCli || '', input.configuredCliPath || 'agy');
   return {
     command: 'agentModelsLoaded',
     requestId: String(input.requestId || ''),
@@ -45,4 +45,3 @@ export function buildAgentModelsLoadedMessage(input: {
     catalog: resolved.catalog
   };
 }
-
