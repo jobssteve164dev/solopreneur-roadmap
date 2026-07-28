@@ -161,6 +161,7 @@ export interface ProjectGrowthRecommendedAction {
   title: string;
   detail: string;
   target: string;
+  targetId: string;
   level: string;
   source: string;
 }
@@ -1776,6 +1777,7 @@ function buildRecommendedActions(
           : `${capability.label} 需要处理`,
         detail: capability.summary,
         target: capability.stage || '路线图能力',
+        targetId: capability.nodeId,
         level: capability.status,
         source: 'roadmap'
       });
@@ -1787,6 +1789,7 @@ function buildRecommendedActions(
         title: `${module.label} 缺少验证证据`,
         detail: `${module.files} 个文件、${module.loc.toLocaleString()} 行代码，但没有识别到测试项。`,
         target: module.label,
+        targetId: module.nodeId,
         level: 'needs_verification',
         source: 'growth_rules'
       });
@@ -1801,6 +1804,7 @@ function buildRecommendedActions(
       title: `${shortenNodeLabel(gap.nodeId, nodeLabelById)} 需要关注`,
       detail: gap.value,
       target: gap.label,
+      targetId: gap.nodeId,
       level: gap.level,
       source: gap.source
     });

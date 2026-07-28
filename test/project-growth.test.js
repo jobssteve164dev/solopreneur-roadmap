@@ -250,6 +250,7 @@ test('project growth webview uses locale labels for roadmap and history metadata
       title: '补强项目数据链路：补验证证据',
       detail: '关联 1 个生长区域、2 个文件，还缺少测试证据。',
       target: '交付与验证',
+      targetId: 'capability:roadmap:roadmap-data',
       level: 'needs_verification',
       source: 'roadmap'
     }],
@@ -262,7 +263,7 @@ test('project growth webview uses locale labels for roadmap and history metadata
       source: 'run_index'
     }],
     modules: [{
-      id: 'module:data-layer',
+      nodeId: 'module:data-layer',
       label: 'src/db',
       role: 'data',
       signal: 'watch',
@@ -289,6 +290,11 @@ test('project growth webview uses locale labels for roadmap and history metadata
       targetId: 'capability:roadmap:roadmap-data',
       kind: 'implements',
       weight: 1
+    }, {
+      sourceId: 'module:data-layer',
+      targetId: 'module:test-layer',
+      kind: 'tested_by',
+      weight: 2
     }],
     history: [{
       snapshotId: 'growth-test',
@@ -312,12 +318,7 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.doesNotMatch(zhHtml, /当前项目 · Demo/);
   assert.doesNotMatch(zhHtml, /项目路径: \/workspace\/demo/);
   assert.match(zhHtml, /class="growth-canvas"/);
-  assert.match(zhHtml, /class="architecture-graph-canvas" data-graph-mode="primary"/);
-  assert.match(zhHtml, /产品能力/);
-  assert.match(zhHtml, /data-graph-view="primary"/);
-  assert.match(zhHtml, /data-graph-node="module:data-layer"/);
-  assert.match(zhHtml, /data-graph-edge="0"/);
-  assert.match(zhHtml, /data-graph-node="capability:roadmap:roadmap-data"/);
+  assert.match(zhHtml, /项目能力全貌/);
   assert.match(zhHtml, /项目概览/);
   assert.match(zhHtml, /帮助独立开发者把零散 AI 对话变成可推进、可验证的项目路线/);
   assert.match(zhHtml, /3\/5/);
@@ -325,14 +326,20 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(zhHtml, /接下来最值得做/);
   assert.match(zhHtml, /模块与生长信号矩阵/);
   assert.match(zhHtml, /真实模块协同关系/);
+  assert.match(zhHtml, /协同判断/);
+  assert.match(zhHtml, /架构与验证盲区/);
+  assert.match(zhHtml, /直接测试关系/);
+  assert.match(zhHtml, /有直接覆盖/);
+  assert.match(zhHtml, /data-roadmap-target="roadmap-data"/);
+  assert.match(zhHtml, /打开路线图环节/);
+  assert.match(zhHtml, /relationship-matrix/);
+  assert.match(zhHtml, /verification-grid/);
   assert.match(zhHtml, /module-space-panel/);
   assert.match(zhHtml, /tile-dominant/);
   assert.match(zhHtml, /待验证/);
   assert.match(zhHtml, /补验证证据/);
   assert.match(zhHtml, /关注/);
-  assert.match(zhHtml, />src\/db<\/div>/);
-  assert.match(zhHtml, /来源: 运行索引/);
-  assert.match(zhHtml, /阶段: 交付与验证/);
+  assert.match(zhHtml, /<strong>src\/db<\/strong>/);
   assert.match(zhHtml, /文件: <strong>4<\/strong>/);
   assert.match(zhHtml, /快照原因: <strong>图内刷新<\/strong>/);
   assert.match(zhHtml, /依赖/);
@@ -356,14 +363,13 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(enHtml, /Most Useful Next Moves/);
   assert.match(enHtml, /Modules &amp; Signal Matrix/);
   assert.match(enHtml, /Real Module Relationships/);
+  assert.match(enHtml, /Architecture &amp; Verification Blind Spots/);
+  assert.match(enHtml, /Open roadmap step/);
   assert.match(enHtml, /Needs Verification/);
   assert.match(enHtml, /Add verification evidence/);
   assert.match(enHtml, /Watch/);
-  assert.match(enHtml, />src\/db<\/div>/);
-  assert.match(enHtml, /Source: Run Index/);
-  assert.match(enHtml, /Stage: 交付与验证/);
+  assert.match(enHtml, /<strong>src\/db<\/strong>/);
   assert.match(enHtml, /Files: <strong>4<\/strong>/);
   assert.match(enHtml, /Reason: <strong>View Refresh<\/strong>/);
-  assert.match(enHtml, /Module collaboration/);
-  assert.match(enHtml, /data-graph-node="capability:roadmap:roadmap-data"/);
+  assert.match(enHtml, /modules are outside the current key collaboration chain/);
 });

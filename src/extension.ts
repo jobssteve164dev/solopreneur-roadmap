@@ -2696,7 +2696,8 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
 async function openRoadmapPanel(
   context: vscode.ExtensionContext,
   initialView: 'roadmap' | 'solo' | 'flow' = 'roadmap',
-  requestedProjectPath = ''
+  requestedProjectPath = '',
+  requestedNodeId = ''
 ) {
   const effectiveInitialView = initialView;
   // If panel already exists, reveal it
@@ -2704,6 +2705,9 @@ async function openRoadmapPanel(
     activePanel.title = getRoadmapPanelTitle(context);
     activePanel.reveal(vscode.ViewColumn.One);
     postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
+    if (requestedNodeId) {
+      postWebviewMessage(activePanel.webview, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
+    }
     setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
     return;
   }
@@ -2737,6 +2741,9 @@ async function openRoadmapPanel(
     roadmapPanel.webview.html = getWebviewHtml(roadmapPanel.webview, context);
     postWebviewMessage(roadmapPanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
     postWebviewMessage(roadmapPanel.webview, { command: 'setMainView', view: effectiveInitialView });
+    if (requestedNodeId) {
+      postWebviewMessage(roadmapPanel.webview, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
+    }
   }, 80);
   setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
 
@@ -2859,6 +2866,12 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           activeProjectGrowthPath = nextProjectPath;
           void refreshProjectGrowthPanel(context, nextProjectPath);
           setTimeout(() => void selectProject(context, nextProjectPath), 0);
+          break;
+        }
+        case 'growth.openRoadmapStep': {
+          const roadmapProjectPath = activeProjectGrowthPath || getSelectedProjectPath(context) || projectPath;
+          const roadmapNodeId = String(message.nodeId || '');
+          void openRoadmapPanel(context, 'roadmap', roadmapProjectPath, roadmapNodeId);
           break;
         }
         case 'refreshGrowth':

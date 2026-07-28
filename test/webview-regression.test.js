@@ -3180,6 +3180,19 @@ test('selected project changes refresh an already open project growth panel', ()
   assert.match(extensionSource, /getCachedProjectGrowthView\(projectPath\)/);
   assert.match(extensionSource, /activeProjectGrowthPath !== projectPath \|\| loadSequence !== projectGrowthLoadSequence/);
   assert.match(extensionSource, /activeProjectGrowthPath = '';/);
+  assert.match(extensionSource, /case 'growth\.openRoadmapStep'/);
+  assert.match(extensionSource, /openRoadmapPanel\(context, 'roadmap', roadmapProjectPath, roadmapNodeId\)/);
+});
+
+test('project growth recommendations focus their existing roadmap step', () => {
+  const roadmapSource = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
+  const growthSource = fs.readFileSync(path.join(projectRoot, 'src/projectGrowthWebview.ts'), 'utf8');
+
+  assert.match(growthSource, /data-roadmap-target=/);
+  assert.match(growthSource, /command: 'growth\.openRoadmapStep'/);
+  assert.match(roadmapSource, /case 'focusRoadmapNode'/);
+  assert.match(roadmapSource, /expandedNodeId = pendingFocusedNodeId/);
+  assert.match(roadmapSource, /scrollIntoView\(\{ behavior: 'smooth', block: 'center' \}\)/);
 });
 
 test('sidebar roadmap action uses the concise roadmap label', () => {

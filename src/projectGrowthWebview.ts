@@ -49,7 +49,16 @@ const locales = {
     modulesSignalMatrix: "模块与生长信号矩阵",
     architectureEdges: "真实模块与依赖关系",
     architectureGraph: "真实模块协同关系",
-    architectureGraphHint: "从产品能力出发，查看它由哪些模块实现、模块如何协作，以及验证落在哪里。",
+    architectureGraphHint: "行调用列；数字表示真实依赖强度。选择模块即可同时突出上下游协作关系。",
+    architectureJudgement: "协同判断",
+    verificationMatrix: "架构与验证盲区",
+    verificationMatrixHint: "逐个真实模块核对代码体量、直接测试关系与验证覆盖，优先处理核心但无证据的区域。",
+    covered: "有直接覆盖",
+    partialCoverage: "部分覆盖",
+    blindSpot: "验证盲区",
+    coverage: "覆盖状态",
+    directTests: "直接测试关系",
+    openRoadmapStep: "打开路线图环节",
     graphPrimary: "完整构成",
     graphDependencies: "模块协作",
     graphVerification: "验证覆盖",
@@ -202,7 +211,16 @@ const locales = {
     modulesSignalMatrix: "Modules & Signal Matrix",
     architectureEdges: "Real Modules & Dependencies",
     architectureGraph: "Real Module Relationships",
-    architectureGraphHint: "Start with product capabilities, then see which modules implement them, how modules collaborate, and where verification lands.",
+    architectureGraphHint: "Rows call columns; values show real dependency strength. Select a module to highlight both upstream and downstream collaborators.",
+    architectureJudgement: "Collaboration judgement",
+    verificationMatrix: "Architecture & Verification Blind Spots",
+    verificationMatrixHint: "Review each real module's code weight, direct test relationships, and verification coverage. Prioritize core areas without evidence.",
+    covered: "Directly covered",
+    partialCoverage: "Partially covered",
+    blindSpot: "Blind spot",
+    coverage: "Coverage",
+    directTests: "Direct test links",
+    openRoadmapStep: "Open roadmap step",
     graphPrimary: "Full structure",
     graphDependencies: "Module collaboration",
     graphVerification: "Verification",
@@ -434,6 +452,7 @@ export function getProjectGrowthWebviewHtml(
           <div class="action-title">${escapeHtml(actionTitle)}</div>
           <div class="action-detail">${escapeHtml(actionDetail)}</div>
           <div class="action-target">${escapeHtml(action.target)}</div>
+          ${action.source === 'roadmap' && action.targetId ? `<button type="button" class="action-open-roadmap" data-roadmap-target="${escapeHtml(action.targetId.replace(/^capability:roadmap:/, ''))}">${escapeHtml(t.openRoadmapStep)} <span class="codicon codicon-arrow-right"></span></button>` : ''}
         </div>
       `;
     }).join('')
@@ -626,76 +645,128 @@ export function getProjectGrowthWebviewHtml(
     `;
   }
 
-  const graphEdges = (viewModel.keyEdges || []).slice(0, 40);
-  const moduleLabels = new Map((viewModel.modules || []).map((module) => [module.nodeId || (module as any).id, module.label]));
-  const capabilityLabels = new Map((viewModel.capabilities || []).map((capability) => [capability.nodeId, capability.label]));
-  const graphNodeIds = [...new Set(graphEdges.flatMap((edge) => [edge.sourceId, edge.targetId]))];
-  const graphLabel = (nodeId: string) => capabilityLabels.get(nodeId)
-    || moduleLabels.get(nodeId)
-    || nodeId.replace(/^(file:|module:|package:|capability:roadmap:)/, '');
-  const graphFacts = new Map(graphNodeIds.map((nodeId) => [nodeId, {
-    nodeId,
-    isCapability: nodeId.startsWith('capability:'),
-    isPackage: nodeId.startsWith('package:'),
-    isModule: nodeId.startsWith('module:'),
-    hasVerification: false
-  }]));
-  for (const edge of graphEdges) {
-    if (edge.kind === 'tested_by') {
-      graphFacts.get(edge.sourceId) && (graphFacts.get(edge.sourceId)!.hasVerification = true);
-      graphFacts.get(edge.targetId) && (graphFacts.get(edge.targetId)!.hasVerification = true);
-    }
+  const matrixModules = displayModules.slice(0, 12);
+  const matrixModuleIds = new Set(matrixModules.map((module) => module.nodeId));
+  const collaborationEdges = (viewModel.keyEdges || []).filter((edge) => (
+    matrixModuleIds.has(edge.sourceId)
+    && matrixModuleIds.has(edge.targetId)
+    && ['imports', 'depends_on'].includes(edge.kind)
+  ));
+  const collaborationWeight = new Map<string, number>();
+  const collaborationDegree = new Map(matrixModules.map((module) => [module.nodeId, { incoming: 0, outgoing: 0 }]));
+  for (const edge of collaborationEdges) {
+    const key = `${edge.sourceId}\u001f${edge.targetId}`;
+    collaborationWeight.set(key, (collaborationWeight.get(key) || 0) + edge.weight);
+    collaborationDegree.get(edge.sourceId)!.outgoing += edge.weight;
+    collaborationDegree.get(edge.targetId)!.incoming += edge.weight;
   }
-  const graphLane = (nodeId: string) => {
-    const fact = graphFacts.get(nodeId);
-    if (fact?.isCapability) return 'capability';
-    if (fact?.isPackage) return 'data';
-    if (fact?.hasVerification && /(^module:path:test|test|spec)/i.test(nodeId)) return 'evidence';
-    if (!fact?.isModule) return 'data';
-    return 'core';
-  };
-  const graphLanes = [
-    { id: 'capability', label: t.graphCapability },
-    { id: 'core', label: t.graphCore },
-    { id: 'data', label: t.graphData },
-    { id: 'evidence', label: t.graphEvidence }
-  ];
-  const graphNodesHtml = graphLanes.map((lane) => {
-    const nodes = graphNodeIds.filter((nodeId) => graphLane(nodeId) === lane.id);
-    return `
-      <div class="graph-lane" data-graph-lane="${lane.id}">
-        <div class="graph-lane-title">${escapeHtml(lane.label)}</div>
-        <div class="graph-lane-nodes">${nodes.map((nodeId) => `
-          <button class="graph-node" type="button" data-graph-node="${escapeHtml(nodeId)}" aria-pressed="false" title="${escapeHtml(nodeId)}">
-            ${escapeHtml(graphLabel(nodeId))}
-          </button>
-        `).join('')}</div>
+  const rankedCollaboration = [...matrixModules].sort((a, b) => {
+    const aDegree = collaborationDegree.get(a.nodeId)!;
+    const bDegree = collaborationDegree.get(b.nodeId)!;
+    return (bDegree.incoming + bDegree.outgoing) - (aDegree.incoming + aDegree.outgoing);
+  });
+  const hubModule = rankedCollaboration[0];
+  const isolatedModules = matrixModules.filter((module) => {
+    const degree = collaborationDegree.get(module.nodeId)!;
+    return degree.incoming + degree.outgoing === 0;
+  });
+  const strongestPair = [...collaborationEdges].sort((a, b) => b.weight - a.weight)[0];
+  const matrixLabel = (nodeId: string) => matrixModules.find((module) => module.nodeId === nodeId)?.label || nodeId;
+  const collaborationJudgements = [
+    hubModule && (collaborationDegree.get(hubModule.nodeId)!.incoming + collaborationDegree.get(hubModule.nodeId)!.outgoing) > 0
+      ? (isZh
+        ? `${hubModule.label} 是当前协同枢纽，连接强度 ${collaborationDegree.get(hubModule.nodeId)!.incoming + collaborationDegree.get(hubModule.nodeId)!.outgoing}`
+        : `${hubModule.label} is the collaboration hub with strength ${collaborationDegree.get(hubModule.nodeId)!.incoming + collaborationDegree.get(hubModule.nodeId)!.outgoing}`)
+      : '',
+    strongestPair
+      ? (isZh
+        ? `${matrixLabel(strongestPair.sourceId)} → ${matrixLabel(strongestPair.targetId)} 是最强调用链`
+        : `${matrixLabel(strongestPair.sourceId)} → ${matrixLabel(strongestPair.targetId)} is the strongest dependency`)
+      : '',
+    isolatedModules.length > 0
+      ? (isZh
+        ? `${isolatedModules.length} 个模块未进入当前关键协同链`
+        : `${isolatedModules.length} modules are outside the current key collaboration chain`)
+      : ''
+  ].filter(Boolean);
+  const collaborationMatrixHtml = matrixModules.length > 0 ? `
+    <div class="matrix-scroll">
+      <table class="relationship-matrix" aria-label="${escapeHtml(t.architectureGraph)}">
+        <thead><tr><th class="matrix-corner">${escapeHtml(isZh ? '调用方 \\ 被调用方' : 'Caller \\ Target')}</th>${matrixModules.map((module) => `<th title="${escapeHtml(module.label)}"><span>${escapeHtml(module.label)}</span></th>`).join('')}</tr></thead>
+        <tbody>${matrixModules.map((source) => `
+          <tr data-matrix-row="${escapeHtml(source.nodeId)}">
+            <th scope="row"><span>${escapeHtml(source.label)}</span><small>${escapeHtml(formatMappedLabel(t.roleLabels, source.role))}</small></th>
+            ${matrixModules.map((target) => {
+              if (source.nodeId === target.nodeId) return `<td class="matrix-self" aria-label="${escapeHtml(source.label)}">—</td>`;
+              const weight = collaborationWeight.get(`${source.nodeId}\u001f${target.nodeId}`) || 0;
+              return `<td class="matrix-cell ${weight > 0 ? 'has-relation' : ''}" data-matrix-source="${escapeHtml(source.nodeId)}" data-matrix-target="${escapeHtml(target.nodeId)}" style="--relation-strength:${Math.min(1, weight / 6)}" title="${escapeHtml(weight > 0 ? `${source.label} → ${target.label}: ${weight}` : '')}">${weight || ''}</td>`;
+            }).join('')}
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  ` : `<div class="empty-state">${escapeHtml(t.emptyEdges)}</div>`;
+
+  const verificationEdges = (viewModel.keyEdges || []).filter((edge) => edge.kind === 'tested_by');
+  const verificationRows = [...displayModules].sort((a, b) => b.loc - a.loc).map((module) => {
+    const directLinks = verificationEdges
+      .filter((edge) => edge.sourceId === module.nodeId)
+      .reduce((sum, edge) => sum + edge.weight, 0);
+    const coverageState = directLinks > 0 ? 'covered' : module.tests > 0 ? 'partial' : 'blind';
+    const coverageLabel = coverageState === 'covered' ? t.covered : coverageState === 'partial' ? t.partialCoverage : t.blindSpot;
+    return { ...module, directLinks, coverageState, coverageLabel };
+  });
+  const coveredCount = verificationRows.filter((row) => row.coverageState === 'covered').length;
+  const blindCount = verificationRows.filter((row) => row.coverageState === 'blind').length;
+  const verificationMatrixHtml = verificationRows.length > 0 ? `
+    <div class="verification-summary">
+      <strong>${coveredCount}/${verificationRows.length}</strong>
+      <span>${escapeHtml(t.covered)}</span>
+      <strong class="${blindCount > 0 ? 'danger-text' : ''}">${blindCount}</strong>
+      <span>${escapeHtml(t.blindSpot)}</span>
+    </div>
+    <div class="verification-grid" role="table" aria-label="${escapeHtml(t.verificationMatrix)}">
+      <div class="verification-row verification-head" role="row">
+        <span role="columnheader">${escapeHtml(isZh ? '真实模块' : 'Real module')}</span>
+        <span role="columnheader">${escapeHtml(t.files)}</span>
+        <span role="columnheader">${escapeHtml(t.lines)}</span>
+        <span role="columnheader">${escapeHtml(t.directTests)}</span>
+        <span role="columnheader">${escapeHtml(t.coverage)}</span>
       </div>
-    `;
-  }).join('');
-  const graphEdgeKind = (kind: string) => kind === 'tested_by' ? 'verification' : kind === 'depends_on' || kind === 'imports' ? 'dependency' : 'primary';
-  const graphEdgesHtml = graphEdges.map((edge, index) => `
-    <path class="graph-edge edge-${graphEdgeKind(edge.kind)}" data-graph-edge="${index}" data-source="${escapeHtml(edge.sourceId)}" data-target="${escapeHtml(edge.targetId)}" />
-  `).join('');
-  const architectureHtml = graphEdges.length > 0 ? `
-    <section class="architecture-graph" aria-label="${escapeHtml(t.architectureGraph)}">
-      <div class="architecture-graph-head">
+      ${verificationRows.map((row) => `
+        <div class="verification-row coverage-${row.coverageState}" role="row">
+          <span role="cell"><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(formatMappedLabel(t.roleLabels, row.role))}</small></span>
+          <span role="cell">${row.files}</span>
+          <span role="cell">${row.loc.toLocaleString()}</span>
+          <span role="cell">${row.directLinks}</span>
+          <span role="cell"><i></i>${escapeHtml(row.coverageLabel)}</span>
+        </div>`).join('')}
+    </div>
+  ` : `<div class="empty-state">${escapeHtml(t.emptyModules)}</div>`;
+
+  const architectureHtml = `
+    <section class="matrix-panel collaboration-panel">
+      <div class="matrix-panel-head">
         <div>
-          <h2 class="panel-title"><span class="codicon codicon-git-merge"></span> ${escapeHtml(t.architectureGraph)}</h2>
+          <h2 class="panel-title"><span class="codicon codicon-type-hierarchy-sub"></span> ${escapeHtml(t.architectureGraph)}</h2>
           <p>${escapeHtml(t.architectureGraphHint)}</p>
         </div>
-        <div class="graph-view-switch" role="tablist" aria-label="${escapeHtml(t.architectureGraph)}">
-          <button type="button" class="graph-view active" data-graph-view="primary">${escapeHtml(t.graphPrimary)}</button>
-          <button type="button" class="graph-view" data-graph-view="dependency">${escapeHtml(t.graphDependencies)}</button>
-          <button type="button" class="graph-view" data-graph-view="verification">${escapeHtml(t.graphVerification)}</button>
+      </div>
+      <div class="collaboration-judgements" aria-label="${escapeHtml(t.architectureJudgement)}">
+        ${collaborationJudgements.map((judgement) => `<span><i></i>${escapeHtml(judgement)}</span>`).join('')}
+      </div>
+      ${collaborationMatrixHtml}
+    </section>
+    <section class="matrix-panel verification-panel">
+      <div class="matrix-panel-head">
+        <div>
+          <h2 class="panel-title"><span class="codicon codicon-shield"></span> ${escapeHtml(t.verificationMatrix)}</h2>
+          <p>${escapeHtml(t.verificationMatrixHint)}</p>
         </div>
       </div>
-      <div class="architecture-graph-canvas" data-graph-mode="primary">
-        <svg class="graph-lines" aria-hidden="true" preserveAspectRatio="none" viewBox="0 0 100 100">${graphEdgesHtml}</svg>
-        ${graphNodesHtml}
-      </div>
+      ${verificationMatrixHtml}
     </section>
-  ` : `<div class="empty-state">${escapeHtml(t.emptyEdges)}</div>`;
+  `;
 
   return `<!DOCTYPE html>
 <html lang="${isZh ? 'zh-CN' : 'en'}">
@@ -1148,6 +1219,22 @@ export function getProjectGrowthWebviewHtml(
       font-size: 10px;
     }
 
+    .action-open-roadmap {
+      min-height: 36px;
+      margin-top: 12px;
+      padding: 7px 11px;
+      border: 1px solid rgba(0, 229, 255, 0.32);
+      border-radius: 7px;
+      background: rgba(0, 229, 255, 0.1);
+      color: var(--accent);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 750;
+      cursor: pointer;
+    }
+    .action-open-roadmap:hover { background: rgba(0, 229, 255, 0.17); }
+    .action-open-roadmap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
     .capability-action {
       display: flex;
       gap: 8px;
@@ -1182,6 +1269,67 @@ export function getProjectGrowthWebviewHtml(
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 10px;
     }
+
+    .matrix-panel {
+      margin-bottom: 24px;
+      padding: 20px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--glass-panel);
+    }
+    .matrix-panel-head { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+    .matrix-panel-head .panel-title { margin: 0 0 5px; padding: 0; border: 0; }
+    .matrix-panel-head p { max-width: 760px; margin: 0; color: var(--muted); font-size: 12px; }
+    .collaboration-judgements { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .collaboration-judgements span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 9px;
+      border: 1px solid rgba(0, 229, 255, 0.16);
+      border-radius: 999px;
+      background: rgba(0, 229, 255, 0.05);
+      color: var(--fg);
+      font-size: 11px;
+    }
+    .collaboration-judgements i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+    .matrix-scroll { overflow: auto; border: 1px solid var(--border); border-radius: 9px; }
+    .relationship-matrix { width: 100%; min-width: 820px; border-collapse: collapse; table-layout: fixed; }
+    .relationship-matrix th, .relationship-matrix td { height: 48px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .relationship-matrix thead th { width: 64px; padding: 5px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 9px; font-weight: 700; }
+    .relationship-matrix thead th span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .relationship-matrix .matrix-corner { width: 180px; padding: 10px; text-align: left; }
+    .relationship-matrix tbody th { width: 180px; padding: 8px 10px; background: rgba(255,255,255,.025); text-align: left; }
+    .relationship-matrix tbody th span, .relationship-matrix tbody th small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .relationship-matrix tbody th span { color: var(--fg); font-size: 11px; }
+    .relationship-matrix tbody th small { margin-top: 2px; color: var(--muted); font-size: 9px; font-weight: 500; }
+    .matrix-cell { text-align: center; color: transparent; font-size: 11px; font-weight: 800; transition: background 150ms ease, color 150ms ease, opacity 150ms ease; }
+    .matrix-cell.has-relation { background: rgba(0,229,255,calc(.08 + var(--relation-strength) * .32)); color: var(--fg); cursor: pointer; }
+    .matrix-cell.has-relation:hover, .matrix-cell.has-relation.is-active { background: rgba(0,229,255,.5); color: #fff; }
+    .matrix-self { text-align: center; color: rgba(148,163,184,.35); background: rgba(255,255,255,.015); }
+    .relationship-matrix tr.is-muted, .relationship-matrix .matrix-cell.is-muted { opacity: .28; }
+
+    .verification-summary { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; color: var(--muted); font-size: 11px; }
+    .verification-summary strong { color: var(--success); font-size: 21px; }
+    .verification-summary .danger-text { margin-left: 18px; color: var(--danger); }
+    .verification-grid { overflow: auto; border: 1px solid var(--border); border-radius: 9px; }
+    .verification-row { display: grid; grid-template-columns: minmax(200px, 1.5fr) 80px 100px 120px minmax(130px, .8fr); min-width: 720px; min-height: 48px; align-items: center; border-bottom: 1px solid var(--border); }
+    .verification-row:last-child { border-bottom: 0; }
+    .verification-row > span { min-width: 0; padding: 9px 12px; font-size: 11px; }
+    .verification-row > span + span { border-left: 1px solid var(--border); }
+    .verification-row strong, .verification-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .verification-row small { margin-top: 2px; color: var(--muted); }
+    .verification-head { min-height: 36px; background: rgba(255,255,255,.035); color: var(--muted); font-weight: 700; }
+    .verification-row > span:last-child { display: flex; align-items: center; gap: 7px; font-weight: 700; }
+    .verification-row > span:last-child i { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; }
+    .coverage-covered > span:last-child { color: var(--success); }
+    .coverage-covered > span:last-child i { background: var(--success); }
+    .coverage-partial > span:last-child { color: var(--warn); }
+    .coverage-partial > span:last-child i { background: var(--warn); }
+    .coverage-blind { background: rgba(255,23,68,.025); }
+    .coverage-blind > span:last-child { color: var(--danger); }
+    .coverage-blind > span:last-child i { background: var(--danger); }
 
     .primary-understanding-grid {
       grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.7fr);
@@ -1378,9 +1526,6 @@ export function getProjectGrowthWebviewHtml(
       .journey-stage:not(:last-child)::after { display: none; }
       .timeline-stats,
       .diff-stats { flex-wrap: wrap; }
-      .architecture-graph-head { flex-direction: column; }
-      .architecture-graph-canvas { grid-template-columns: 1fr 1fr; min-height: 420px; }
-      .graph-lane:nth-child(3) { border-left: 0; }
     }
 
     .panel {
@@ -1785,88 +1930,6 @@ export function getProjectGrowthWebviewHtml(
     .pos { color: var(--success); }
     .neg { color: var(--danger); }
 
-    /* Architecture graph */
-    .architecture-graph {
-      position: relative;
-      min-width: 0;
-      padding: 20px;
-      margin-bottom: 24px;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: var(--glass-bg);
-      backdrop-filter: blur(10px);
-    }
-
-    .architecture-graph-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      align-items: flex-start;
-      margin-bottom: 18px;
-    }
-
-    .architecture-graph-head .panel-title { margin-bottom: 5px; border: 0; padding: 0; }
-    .architecture-graph-head p { margin: 0; color: var(--muted); font-size: 12px; }
-
-    .graph-view-switch { display: flex; flex-wrap: wrap; gap: 6px; }
-    .graph-view {
-      padding: 6px 10px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--muted);
-      font: inherit;
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
-    }
-    .graph-view:hover, .graph-view.active { color: #d8fbff; background: rgba(0, 229, 255, 0.12); border-color: rgba(0, 229, 255, 0.32); }
-
-    .architecture-graph-canvas {
-      position: relative;
-      display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 16px;
-      min-height: 270px;
-      padding: 16px 0;
-    }
-
-    .graph-lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-    .graph-edge { fill: none; stroke: rgba(0, 229, 255, 0.34); stroke-width: 1.6; vector-effect: non-scaling-stroke; transition: opacity 160ms ease, stroke 160ms ease; }
-    .graph-edge.edge-dependency { stroke: rgba(167, 139, 250, 0.52); }
-    .graph-edge.edge-verification { stroke: rgba(0, 230, 118, 0.54); stroke-dasharray: 5 4; }
-    .graph-edge.is-muted { opacity: 0.08; }
-    .graph-edge.is-active { opacity: 1; stroke-width: 2.4; }
-    .architecture-graph-canvas[data-graph-mode="dependency"] .graph-edge:not(.edge-dependency):not(.edge-primary) { opacity: 0.12; }
-    .architecture-graph-canvas[data-graph-mode="verification"] .graph-edge:not(.edge-verification) { opacity: 0.12; }
-
-    .graph-lane { position: relative; z-index: 1; min-width: 0; padding: 0 8px; }
-    .graph-lane + .graph-lane { border-left: 1px solid rgba(255, 255, 255, 0.06); }
-    .graph-lane-title { margin-bottom: 12px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
-    .graph-lane-nodes { display: flex; flex-direction: column; gap: 10px; }
-    .graph-node {
-      position: relative;
-      z-index: 2;
-      width: 100%;
-      min-height: 52px;
-      padding: 10px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 8px;
-      background: rgba(15, 17, 26, 0.82);
-      color: var(--fg);
-      font: inherit;
-      font-size: 12px;
-      font-weight: 700;
-      line-height: 1.35;
-      text-align: left;
-      overflow-wrap: anywhere;
-      cursor: pointer;
-      transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
-    }
-    .graph-node:hover, .graph-node.is-active { border-color: rgba(0, 229, 255, 0.62); background: rgba(0, 229, 255, 0.12); box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.12), 0 10px 24px rgba(0, 0, 0, 0.26); }
-    .graph-node.is-muted { opacity: 0.35; }
-    .graph-node:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
     .empty-state {
       text-align: center;
       padding: 16px;
@@ -1874,6 +1937,14 @@ export function getProjectGrowthWebviewHtml(
       font-size: 12px;
       border: 1px dashed var(--border);
       border-radius: 8px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+      }
     }
   </style>
 </head>
@@ -1921,6 +1992,28 @@ export function getProjectGrowthWebviewHtml(
           <div class="journey-track">${journeyHtml}</div>
         </section>
 
+        <div class="understanding-shell">
+          <section class="understanding-main">
+            <div class="section-kicker">${escapeHtml(isZh ? '项目现在怎样' : 'Where the project stands')}</div>
+            <h2>${escapeHtml(insightHeadline)}</h2>
+            <p>${escapeHtml(insightBody)}</p>
+            <div class="understanding-chips">
+              <span>${escapeHtml(insightHealthLabel)}</span>
+              <span>${escapeHtml(insightFocusLabel)}</span>
+              <span>${escapeHtml(insightEvidenceLabel)}</span>
+            </div>
+          </section>
+          <section class="priority-actions">
+            <div class="priority-title"><span class="codicon codicon-checklist"></span> ${escapeHtml(t.priorityActions)}</div>
+            <div class="priority-list">${actionCardsHtml}</div>
+          </section>
+        </div>
+
+        <section class="growth-v2-panel">
+          <h2 class="panel-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(t.capabilityMap)}</h2>
+          <div class="capability-health-grid">${capabilityHealthHtml}</div>
+        </section>
+
         <section class="panel module-space-panel">
           <h2 class="panel-title"><span class="codicon codicon-layout"></span> ${escapeHtml(t.modulesSignalMatrix)}</h2>
           <div class="module-space-legend" aria-label="${escapeHtml(t.modulesSignalMatrix)}">
@@ -1933,10 +2026,7 @@ export function getProjectGrowthWebviewHtml(
           <div class="module-matrix">${moduleCardsHtml}</div>
         </section>
 
-        <section class="growth-v2-panel priority-actions code-footprint-panel">
-          <div class="priority-title"><span class="codicon codicon-checklist"></span> ${escapeHtml(t.priorityActions)}</div>
-          <div class="priority-list">${actionCardsHtml}</div>
-        </section>
+        ${architectureHtml}
 
         <div class="detail-section-title">${escapeHtml(t.detailData)}</div>
 
@@ -1969,23 +2059,7 @@ export function getProjectGrowthWebviewHtml(
 
     ${diffHtml}
 
-    ${architectureHtml}
-
     <div class="detail-grid">
-        <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-warning"></span> ${escapeHtml(t.structuralGaps)}</h2>
-          <div class="gaps-list">
-            ${gapsHtml}
-          </div>
-        </div>
-
-        <div class="panel">
-          <h2 class="panel-title"><span class="codicon codicon-milestone"></span> ${escapeHtml(t.linkedCapabilities)}</h2>
-          <div class="capabilities-list">
-            ${capabilitiesHtml}
-          </div>
-        </div>
-
         <div class="panel">
           <h2 class="panel-title"><span class="codicon codicon-history"></span> ${escapeHtml(t.snapshotHistory)}</h2>
           <div class="timeline">
@@ -2005,72 +2079,26 @@ export function getProjectGrowthWebviewHtml(
     document.getElementById('project-select').addEventListener('change', (event) => {
       vscode.postMessage({ command: 'project.select', projectPath: event.target.value });
     });
+    document.querySelectorAll('[data-roadmap-target]').forEach((button) => button.addEventListener('click', () => {
+      vscode.postMessage({ command: 'growth.openRoadmapStep', nodeId: button.dataset.roadmapTarget });
+    }));
 
-    const graphCanvas = document.querySelector('.architecture-graph-canvas');
-    if (graphCanvas) {
-      const graphNodes = Array.from(graphCanvas.querySelectorAll('.graph-node'));
-      const graphEdges = Array.from(graphCanvas.querySelectorAll('.graph-edge'));
-      const graphSvg = graphCanvas.querySelector('.graph-lines');
-      const nodeById = new Map(graphNodes.map((node) => [node.dataset.graphNode, node]));
+    document.querySelectorAll('.matrix-cell.has-relation').forEach((cell) => cell.addEventListener('click', () => {
+      const source = cell.dataset.matrixSource;
+      const target = cell.dataset.matrixTarget;
+      document.querySelectorAll('[data-matrix-row]').forEach((row) => {
+        row.classList.toggle('is-muted', row.dataset.matrixRow !== source && row.dataset.matrixRow !== target);
+      });
+      document.querySelectorAll('.matrix-cell').forEach((item) => {
+        const connected = item.dataset.matrixSource === source
+          || item.dataset.matrixTarget === source
+          || item.dataset.matrixSource === target
+          || item.dataset.matrixTarget === target;
+        item.classList.toggle('is-muted', !connected);
+        item.classList.toggle('is-active', item === cell);
+      });
+    }));
 
-      function drawGraphLines() {
-        const canvasRect = graphCanvas.getBoundingClientRect();
-        graphSvg.setAttribute('viewBox', '0 0 ' + canvasRect.width + ' ' + canvasRect.height);
-        graphEdges.forEach((edge) => {
-          const source = nodeById.get(edge.dataset.source);
-          const target = nodeById.get(edge.dataset.target);
-          if (!source || !target) return;
-          const sourceRect = source.getBoundingClientRect();
-          const targetRect = target.getBoundingClientRect();
-          const sourceIsLeft = sourceRect.left <= targetRect.left;
-          const startX = (sourceIsLeft ? sourceRect.right : sourceRect.left) - canvasRect.left;
-          const endX = (sourceIsLeft ? targetRect.left : targetRect.right) - canvasRect.left;
-          const startY = sourceRect.top - canvasRect.top + sourceRect.height / 2;
-          const endY = targetRect.top - canvasRect.top + targetRect.height / 2;
-          const bend = Math.max(28, Math.abs(endX - startX) * 0.42);
-          edge.setAttribute('d', 'M ' + startX + ' ' + startY + ' C ' + (startX + (sourceIsLeft ? bend : -bend)) + ' ' + startY + ', ' + (endX + (sourceIsLeft ? -bend : bend)) + ' ' + endY + ', ' + endX + ' ' + endY);
-        });
-      }
-
-      function clearGraphSelection() {
-        graphNodes.forEach((node) => {
-          node.classList.remove('is-active', 'is-muted');
-          node.setAttribute('aria-pressed', 'false');
-        });
-        graphEdges.forEach((edge) => edge.classList.remove('is-active', 'is-muted'));
-      }
-
-      graphNodes.forEach((node) => node.addEventListener('click', () => {
-        clearGraphSelection();
-        const selected = node.dataset.graphNode;
-        const connected = new Set([selected]);
-        graphEdges.forEach((edge) => {
-          if (edge.dataset.source === selected || edge.dataset.target === selected) {
-            connected.add(edge.dataset.source);
-            connected.add(edge.dataset.target);
-            edge.classList.add('is-active');
-          } else {
-            edge.classList.add('is-muted');
-          }
-        });
-        graphNodes.forEach((item) => {
-          const active = connected.has(item.dataset.graphNode);
-          item.classList.toggle('is-active', active);
-          item.classList.toggle('is-muted', !active);
-          item.setAttribute('aria-pressed', String(item.dataset.graphNode === selected));
-        });
-      }));
-
-      document.querySelectorAll('.graph-view').forEach((button) => button.addEventListener('click', () => {
-        document.querySelectorAll('.graph-view').forEach((item) => item.classList.toggle('active', item === button));
-        graphCanvas.dataset.graphMode = button.dataset.graphView;
-        clearGraphSelection();
-      }));
-
-      drawGraphLines();
-      window.addEventListener('resize', drawGraphLines);
-      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(drawGraphLines).observe(graphCanvas);
-    }
   </script>
 </body>
 </html>

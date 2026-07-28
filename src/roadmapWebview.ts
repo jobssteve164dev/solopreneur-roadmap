@@ -2187,6 +2187,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let currentLanguage = 'zh';
     let currentNodes = [];
     let expandedNodeId = '';
+    let pendingFocusedNodeId = '';
     let activeMethodologyStage = '';
     let activeConversationId = '';
     let activeProjectPath = '';
@@ -3178,7 +3179,18 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             resetProjectScopedState(message.projectPath, false);
           }
           currentNodes = message.nodes || [];
+          if (pendingFocusedNodeId && currentNodes.some(node => node.id === pendingFocusedNodeId)) {
+            expandedNodeId = pendingFocusedNodeId;
+          }
           renderRoadmap(message.nodes);
+          if (pendingFocusedNodeId) {
+            const focusedCard = document.querySelector('[data-node-card-id="' + cssEscape(pendingFocusedNodeId) + '"]');
+            if (focusedCard) {
+              focusedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              focusedCard.focus({ preventScroll: true });
+              pendingFocusedNodeId = '';
+            }
+          }
           soloPanelDirty = true;
           flowPanelDirty = true;
           renderSoloPanel(currentNodes);
@@ -3234,6 +3246,20 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             break;
           }
           setMainView(message.view || 'roadmap');
+          break;
+        case 'focusRoadmapNode':
+          pendingFocusedNodeId = String(message.nodeId || '');
+          setMainView('roadmap');
+          if (pendingFocusedNodeId && currentNodes.some(node => node.id === pendingFocusedNodeId)) {
+            expandedNodeId = pendingFocusedNodeId;
+            renderRoadmap(currentNodes);
+            const focusedCard = document.querySelector('[data-node-card-id="' + cssEscape(pendingFocusedNodeId) + '"]');
+            if (focusedCard) {
+              focusedCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              focusedCard.focus({ preventScroll: true });
+              pendingFocusedNodeId = '';
+            }
+          }
           break;
         case 'projectsLoaded':
           if (
@@ -3747,7 +3773,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         \` : '';
 
         row.innerHTML = \`
-          <div class="node-card status-\${statusClass(node.status)} \${expanded ? 'expanded' : 'collapsed'}" data-node-card-id="\${escapeHtml(node.id)}">
+          <div class="node-card status-\${statusClass(node.status)} \${expanded ? 'expanded' : 'collapsed'}" data-node-card-id="\${escapeHtml(node.id)}" tabindex="-1">
             <div class="node-summary">
               <div class="node-content">
                 <div class="node-headline">
