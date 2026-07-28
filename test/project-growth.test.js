@@ -168,6 +168,37 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   const persistedView = buildProjectGrowthViewModel(latest);
   assert.equal(persistedView.totals.capabilities, 1);
   assert.ok(persistedView.gaps.length > 0);
+  writeFile(path.join(solopreneurDir, 'coverage', 'project-growth-coverage.json'), JSON.stringify({
+    version: 1,
+    provider: 'c8-istanbul',
+    status: 'ready',
+    generatedAt: '2026-01-03T00:05:00.000Z',
+    lastAttemptAt: '2026-01-03T00:04:00.000Z',
+    durationMs: 900,
+    testPassed: true,
+    files: [{
+      path: 'src/db/store.ts',
+      lines: { covered: 8, total: 10, percent: 80 },
+      branches: { covered: 2, total: 4, percent: 50 },
+      functions: { covered: 3, total: 4, percent: 75 },
+      statements: { covered: 8, total: 10, percent: 80 }
+    }, {
+      path: 'src/db/cache.ts',
+      lines: { covered: 0, total: 1, percent: 0 },
+      branches: { covered: 0, total: 0, percent: 100 },
+      functions: { covered: 0, total: 0, percent: 100 },
+      statements: { covered: 0, total: 1, percent: 0 }
+    }],
+    error: ''
+  }));
+  const coveredView = buildProjectGrowthViewModel(latest);
+  const coveredDataModule = coveredView.modules.find((module) => module.label === 'src/db');
+  assert.equal(coveredDataModule.runtimeCoveredFiles, 1);
+  assert.equal(coveredDataModule.lineCoveragePercent, 72.7);
+  assert.equal(coveredDataModule.branchCoveragePercent, 50);
+  assert.equal(coveredDataModule.functionCoveragePercent, 75);
+  assert.equal(coveredView.coverage.available, true);
+  assert.equal(coveredView.coverage.testPassed, true);
 
   writeFile(path.join(tempRoot, 'src', 'db', 'queue.ts'), [
     'export const queueReady = true;'
@@ -287,6 +318,10 @@ test('project growth webview uses locale labels for roadmap and history metadata
       directTestFiles: 1,
       directTestCases: 2,
       directCoveragePercent: 50,
+      runtimeCoveredFiles: 1,
+      lineCoveragePercent: 72.5,
+      branchCoveragePercent: 50,
+      functionCoveragePercent: 80,
       confidence: 0.82,
       paths: ['src/data.js']
     }],
@@ -321,7 +356,18 @@ test('project growth webview uses locale labels for roadmap and history metadata
       totals: { files: 4, modules: 3, capabilities: 1, packages: 1, loc: 42, signals: 1 }
     }],
     diff: null,
-    totals: { files: 4, modules: 3, capabilities: 1, packages: 1, loc: 42, signals: 1 }
+    totals: { files: 4, modules: 3, capabilities: 1, packages: 1, loc: 42, signals: 1 },
+    coverage: {
+      available: true,
+      provider: 'c8-istanbul',
+      status: 'ready',
+      generatedAt: '2026-01-03T00:05:00.000Z',
+      lastAttemptAt: '2026-01-03T00:04:00.000Z',
+      durationMs: 900,
+      testPassed: true,
+      files: 1,
+      error: ''
+    }
   };
 
   const zhHtml = getProjectGrowthWebviewHtml(fakeWebview, fakeContext, viewModel, 'Demo', true);
@@ -345,10 +391,14 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(zhHtml, /真实模块协同关系/);
   assert.match(zhHtml, /协同判断/);
   assert.match(zhHtml, /架构与验证盲区/);
-  assert.match(zhHtml, /直接文件覆盖率/);
-  assert.match(zhHtml, /部分生产文件有直接测试/);
-  assert.match(zhHtml, /关联测试文件/);
-  assert.match(zhHtml, /测试项/);
+  assert.match(zhHtml, /运行验证分析/);
+  assert.match(zhHtml, /真实覆盖数据/);
+  assert.match(zhHtml, /实际执行文件/);
+  assert.match(zhHtml, /行覆盖/);
+  assert.match(zhHtml, /分支覆盖/);
+  assert.match(zhHtml, /函数覆盖/);
+  assert.match(zhHtml, /部分生产文件已验证/);
+  assert.match(zhHtml, />72\.5%<\/span>/);
   assert.match(zhHtml, />50%<\/strong>/);
   assert.match(zhHtml, /data-roadmap-target="roadmap-data"/);
   assert.match(zhHtml, /打开路线图环节/);

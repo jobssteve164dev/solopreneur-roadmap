@@ -3198,11 +3198,19 @@ test('project growth recommendations focus their existing roadmap step', () => {
 test('project growth history is full width and coverage comes from complete snapshot evidence', () => {
   const growthSource = fs.readFileSync(path.join(projectRoot, 'src/projectGrowth.ts'), 'utf8');
   const growthWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/projectGrowthWebview.ts'), 'utf8');
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const coverageSource = fs.readFileSync(path.join(projectRoot, 'src/projectCoverage.ts'), 'utf8');
 
   assert.match(growthWebviewSource, /\.detail-grid \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(growthSource, /directCoveragePercent: productionFiles\.size > 0/);
   assert.match(growthSource, /for \(const edge of data\.edges\) \{[\s\S]*?edge\.kind !== 'tested_by'/);
   assert.doesNotMatch(growthWebviewSource, /const verificationEdges = \(viewModel\.keyEdges/);
+  assert.match(growthWebviewSource, /id="btn-coverage"/);
+  assert.match(growthWebviewSource, /command: 'runCoverageAnalysis'/);
+  assert.match(extensionSource, /case 'runCoverageAnalysis':[\s\S]*?runProjectCoverageAnalysis/);
+  assert.doesNotMatch(extensionSource, /scanReason: 'panel_open'[\s\S]{0,500}runProjectCoverageAnalysis/);
+  assert.match(coverageSource, /const coverageRuns = new Map/);
+  assert.match(growthSource, /loadProjectCoverageSnapshot\(data\.snapshot\.projectPath\)/);
 });
 
 test('sidebar roadmap action uses the concise roadmap label', () => {

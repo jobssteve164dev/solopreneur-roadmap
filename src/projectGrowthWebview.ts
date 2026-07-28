@@ -53,14 +53,25 @@ const locales = {
     architectureJudgement: "协同判断",
     verificationMatrix: "架构与验证盲区",
     verificationMatrixHint: "逐个真实模块核对代码体量、直接测试关系与验证覆盖，优先处理核心但无证据的区域。",
-    covered: "生产文件全部有直接测试",
-    partialCoverage: "部分生产文件有直接测试",
+    covered: "生产文件已全部验证",
+    partialCoverage: "部分生产文件已验证",
     blindSpot: "验证盲区",
     coverage: "直接文件覆盖率",
     productionFiles: "生产文件",
     directlyTestedFiles: "已直接覆盖",
     directTestFiles: "关联测试文件",
     directTestCases: "测试项",
+    runtimeCoveredFiles: "实际执行文件",
+    lineCoverage: "行覆盖",
+    branchCoverage: "分支覆盖",
+    functionCoverage: "函数覆盖",
+    runCoverage: "运行验证分析",
+    runningCoverage: "正在运行测试…",
+    coverageNotRun: "尚未运行真实覆盖分析；当前仅显示静态测试引用。",
+    coverageReady: "真实覆盖数据",
+    coverageTestFailed: "测试未全部通过，覆盖数据仅供定位问题。",
+    coverageStale: "本次分析失败，继续显示上一次覆盖结果。",
+    staticEvidence: "静态引用",
     noProductionFiles: "无生产文件",
     openRoadmapStep: "打开路线图环节",
     graphPrimary: "完整构成",
@@ -219,14 +230,25 @@ const locales = {
     architectureJudgement: "Collaboration judgement",
     verificationMatrix: "Architecture & Verification Blind Spots",
     verificationMatrixHint: "Review each real module's code weight, direct test relationships, and verification coverage. Prioritize core areas without evidence.",
-    covered: "All production files directly tested",
-    partialCoverage: "Some production files directly tested",
+    covered: "All production files verified",
+    partialCoverage: "Some production files verified",
     blindSpot: "Blind spot",
     coverage: "Direct file coverage",
     productionFiles: "Production files",
     directlyTestedFiles: "Directly tested",
     directTestFiles: "Test files",
     directTestCases: "Test cases",
+    runtimeCoveredFiles: "Executed files",
+    lineCoverage: "Line coverage",
+    branchCoverage: "Branch coverage",
+    functionCoverage: "Function coverage",
+    runCoverage: "Run verification analysis",
+    runningCoverage: "Running tests…",
+    coverageNotRun: "Runtime coverage has not been run; static test references are shown.",
+    coverageReady: "Runtime coverage",
+    coverageTestFailed: "Some tests failed; coverage is shown for diagnosis only.",
+    coverageStale: "This run failed; the previous coverage result remains visible.",
+    staticEvidence: "Static references",
     noProductionFiles: "No production files",
     openRoadmapStep: "Open roadmap step",
     graphPrimary: "Full structure",
@@ -715,11 +737,13 @@ export function getProjectGrowthWebviewHtml(
     </div>
   ` : `<div class="empty-state">${escapeHtml(t.emptyEdges)}</div>`;
 
+  const runtimeCoverageAvailable = Boolean(viewModel.coverage?.available);
   const verificationRows = [...displayModules].sort((a, b) => b.loc - a.loc).map((module) => {
     const productionFiles = Number(module.productionFiles || 0);
     const directlyTestedFiles = Number(module.directlyTestedFiles || 0);
-    const directCoveragePercent = Number(module.directCoveragePercent || 0);
-    const coverageState = productionFiles === 0 ? 'not-applicable' : directCoveragePercent >= 100 ? 'covered' : directCoveragePercent > 0 ? 'partial' : 'blind';
+    const coveredFiles = runtimeCoverageAvailable ? Number(module.runtimeCoveredFiles || 0) : directlyTestedFiles;
+    const fileCoveragePercent = productionFiles > 0 ? Math.round((coveredFiles / productionFiles) * 100) : 0;
+    const coverageState = productionFiles === 0 ? 'not-applicable' : fileCoveragePercent >= 100 ? 'covered' : fileCoveragePercent > 0 ? 'partial' : 'blind';
     const coverageLabel = coverageState === 'covered'
       ? t.covered
       : coverageState === 'partial'
@@ -727,38 +751,59 @@ export function getProjectGrowthWebviewHtml(
         : coverageState === 'not-applicable'
           ? t.noProductionFiles
           : t.blindSpot;
-    return { ...module, productionFiles, directlyTestedFiles, directCoveragePercent, coverageState, coverageLabel };
+    return { ...module, productionFiles, directlyTestedFiles, coveredFiles, fileCoveragePercent, coverageState, coverageLabel };
   });
   const coveredCount = verificationRows.filter((row) => row.coverageState === 'covered').length;
   const partialCount = verificationRows.filter((row) => row.coverageState === 'partial').length;
   const blindCount = verificationRows.filter((row) => row.coverageState === 'blind').length;
   const coverableCount = verificationRows.filter((row) => row.coverageState !== 'not-applicable').length;
+  const coverageStateCopy = viewModel.coverage?.status === 'stale_failed'
+    ? t.coverageStale
+    : viewModel.coverage?.status === 'test_failed'
+      ? t.coverageTestFailed
+      : runtimeCoverageAvailable
+        ? t.coverageReady
+        : t.coverageNotRun;
+  const coverageGeneratedAt = viewModel.coverage?.generatedAt
+    ? new Date(viewModel.coverage.generatedAt).toLocaleString(localeCode)
+    : '';
   const verificationMatrixHtml = verificationRows.length > 0 ? `
-    <div class="verification-summary">
-      <strong>${coveredCount}/${coverableCount}</strong>
-      <span>${escapeHtml(t.covered)}</span>
-      <strong class="${partialCount > 0 ? 'warn-text' : ''}">${partialCount}</strong>
-      <span>${escapeHtml(t.partialCoverage)}</span>
-      <strong class="${blindCount > 0 ? 'danger-text' : ''}">${blindCount}</strong>
-      <span>${escapeHtml(t.blindSpot)}</span>
+    <div class="verification-toolbar">
+      <div>
+        <div class="verification-summary">
+          <strong>${coveredCount}/${coverableCount}</strong>
+          <span>${escapeHtml(t.covered)}</span>
+          <strong class="${partialCount > 0 ? 'warn-text' : ''}">${partialCount}</strong>
+          <span>${escapeHtml(t.partialCoverage)}</span>
+          <strong class="${blindCount > 0 ? 'danger-text' : ''}">${blindCount}</strong>
+          <span>${escapeHtml(t.blindSpot)}</span>
+        </div>
+        <div class="coverage-source ${runtimeCoverageAvailable ? 'is-runtime' : ''}">
+          <span>${escapeHtml(coverageStateCopy)}</span>
+          ${coverageGeneratedAt ? `<time>${escapeHtml(coverageGeneratedAt)}</time>` : ''}
+        </div>
+      </div>
+      <button type="button" class="btn-coverage" id="btn-coverage"><span class="codicon codicon-run-all"></span><span>${escapeHtml(t.runCoverage)}</span></button>
     </div>
     <div class="verification-grid" role="table" aria-label="${escapeHtml(t.verificationMatrix)}">
       <div class="verification-row verification-head" role="row">
         <span role="columnheader">${escapeHtml(isZh ? '真实模块' : 'Real module')}</span>
         <span role="columnheader">${escapeHtml(t.productionFiles)}</span>
-        <span role="columnheader">${escapeHtml(t.directlyTestedFiles)}</span>
-        <span role="columnheader">${escapeHtml(t.directTestFiles)}</span>
-        <span role="columnheader">${escapeHtml(t.directTestCases)}</span>
-        <span role="columnheader">${escapeHtml(t.coverage)}</span>
+        <span role="columnheader">${escapeHtml(runtimeCoverageAvailable ? t.runtimeCoveredFiles : t.directlyTestedFiles)}</span>
+        <span role="columnheader">${escapeHtml(t.lineCoverage)}</span>
+        <span role="columnheader">${escapeHtml(t.branchCoverage)}</span>
+        <span role="columnheader">${escapeHtml(t.functionCoverage)}</span>
+        <span role="columnheader">${escapeHtml(runtimeCoverageAvailable ? t.coverageReady : t.staticEvidence)}</span>
       </div>
       ${verificationRows.map((row) => `
         <div class="verification-row coverage-${row.coverageState}" role="row">
           <span role="cell"><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(formatMappedLabel(t.roleLabels, row.role))}</small></span>
           <span role="cell">${row.productionFiles}</span>
-          <span role="cell">${row.directlyTestedFiles}</span>
-          <span role="cell">${row.directTestFiles}</span>
-          <span role="cell">${row.directTestCases}</span>
-          <span role="cell"><i></i><strong>${row.directCoveragePercent}%</strong><small>${escapeHtml(row.coverageLabel)}</small></span>
+          <span role="cell">${row.coveredFiles}</span>
+          <span role="cell">${runtimeCoverageAvailable ? `${row.lineCoveragePercent}%` : '—'}</span>
+          <span role="cell">${runtimeCoverageAvailable ? `${row.branchCoveragePercent}%` : '—'}</span>
+          <span role="cell">${runtimeCoverageAvailable ? `${row.functionCoveragePercent}%` : '—'}</span>
+          <span role="cell"><i></i><strong>${row.fileCoveragePercent}%</strong><small>${escapeHtml(row.coverageLabel)}</small></span>
         </div>`).join('')}
     </div>
   ` : `<div class="empty-state">${escapeHtml(t.emptyModules)}</div>`;
@@ -1329,12 +1374,20 @@ export function getProjectGrowthWebviewHtml(
     .matrix-self { text-align: center; color: rgba(148,163,184,.35); background: rgba(255,255,255,.015); }
     .relationship-matrix tr.is-muted, .relationship-matrix .matrix-cell.is-muted { opacity: .28; }
 
-    .verification-summary { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; color: var(--muted); font-size: 11px; }
+    .verification-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 14px; }
+    .verification-summary { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: 11px; }
     .verification-summary strong { color: var(--success); font-size: 21px; }
     .verification-summary .warn-text { margin-left: 18px; color: var(--warn); }
     .verification-summary .danger-text { margin-left: 18px; color: var(--danger); }
+    .coverage-source { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .coverage-source.is-runtime span { color: var(--success); }
+    .coverage-source time { opacity: .8; }
+    .btn-coverage { min-height: 38px; padding: 8px 13px; border: 1px solid rgba(0,229,255,.3); border-radius: 7px; background: rgba(0,229,255,.08); color: var(--fg); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; }
+    .btn-coverage:hover { background: rgba(0,229,255,.16); border-color: var(--accent); }
+    .btn-coverage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .btn-coverage:disabled { cursor: wait; opacity: .68; }
     .verification-grid { overflow: auto; border: 1px solid var(--border); border-radius: 9px; }
-    .verification-row { display: grid; grid-template-columns: minmax(210px, 1.5fr) 92px 100px 110px 90px minmax(220px, 1fr); min-width: 900px; min-height: 52px; align-items: center; border-bottom: 1px solid var(--border); }
+    .verification-row { display: grid; grid-template-columns: minmax(210px, 1.5fr) 92px 100px 90px 90px 90px minmax(210px, 1fr); min-width: 980px; min-height: 52px; align-items: center; border-bottom: 1px solid var(--border); }
     .verification-row:last-child { border-bottom: 0; }
     .verification-row > span { min-width: 0; padding: 9px 12px; font-size: 11px; }
     .verification-row > span + span { border-left: 1px solid var(--border); }
@@ -1546,6 +1599,9 @@ export function getProjectGrowthWebviewHtml(
         min-height: 44px;
         justify-content: center;
       }
+      .verification-toolbar { align-items: stretch; flex-direction: column; }
+      .verification-summary { flex-wrap: wrap; }
+      .btn-coverage { width: 100%; min-height: 44px; justify-content: center; }
       .journey-track { grid-template-columns: 1fr; gap: 10px; }
       .journey-stage:not(:last-child)::after { display: none; }
       .timeline-stats,
@@ -2099,6 +2155,17 @@ export function getProjectGrowthWebviewHtml(
     const vscode = acquireVsCodeApi();
     document.getElementById('btn-refresh').addEventListener('click', () => {
       vscode.postMessage({ command: 'refreshGrowth' });
+    });
+    const coverageButton = document.getElementById('btn-coverage');
+    coverageButton?.addEventListener('click', () => {
+      coverageButton.disabled = true;
+      coverageButton.querySelector('span:last-child').textContent = ${JSON.stringify(t.runningCoverage)};
+      vscode.postMessage({ command: 'runCoverageAnalysis' });
+    });
+    window.addEventListener('message', (event) => {
+      if (event.data?.command !== 'coverageAnalysisStarted' || !coverageButton) return;
+      coverageButton.disabled = true;
+      coverageButton.querySelector('span:last-child').textContent = ${JSON.stringify(t.runningCoverage)};
     });
     document.getElementById('project-select').addEventListener('change', (event) => {
       vscode.postMessage({ command: 'project.select', projectPath: event.target.value });

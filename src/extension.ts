@@ -43,7 +43,8 @@ import {
 import { getWebviewHtml } from './roadmapWebview';
 import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
 import { backfillRunIndexFromDigests } from './runIndexMaintenance';
-import { getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
+import { clearProjectGrowthViewCache, getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
+import { runProjectCoverageAnalysis } from './projectCoverage';
 import { buildStrategyPyramidSnapshotData, readCachedStrategyPyramidSnapshot, saveProjectStrategyData } from './strategyPyramid';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -2893,6 +2894,14 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           } catch (e) {}
           void refreshProjectGrowthPanel(context, projectPathToRefresh);
           break;
+        case 'runCoverageAnalysis': {
+          const coverageProjectPath = activeProjectGrowthPath || getSelectedProjectPath(context) || projectPath;
+          activeProjectGrowthPanel?.webview.postMessage({ command: 'coverageAnalysisStarted' });
+          await runProjectCoverageAnalysis(coverageProjectPath, context.extensionPath);
+          clearProjectGrowthViewCache(coverageProjectPath);
+          void refreshProjectGrowthPanel(context, coverageProjectPath);
+          break;
+        }
       }
     }
   );

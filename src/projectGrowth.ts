@@ -3,6 +3,7 @@ import * as path from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { SqliteStore } from './db/sqliteStore';
+import { loadProjectCoverageSnapshot, ProjectCoverageMetric } from './projectCoverage';
 import {
   GrowthEdgeRecord,
   GrowthModuleLabelRecord,
@@ -78,8 +79,24 @@ export interface ProjectGrowthModuleSummary {
   directTestFiles: number;
   directTestCases: number;
   directCoveragePercent: number;
+  runtimeCoveredFiles: number;
+  lineCoveragePercent: number;
+  branchCoveragePercent: number;
+  functionCoveragePercent: number;
   signal: ProjectGrowthSummaryNode['colorSignal'];
   confidence: number;
+}
+
+export interface ProjectGrowthCoverageSummary {
+  available: boolean;
+  provider: string;
+  status: string;
+  generatedAt: string;
+  lastAttemptAt: string;
+  durationMs: number;
+  testPassed: boolean;
+  files: number;
+  error: string;
 }
 
 export interface ProjectGrowthCapabilitySummary {
@@ -188,6 +205,7 @@ export interface ProjectGrowthViewModel {
   history: ProjectGrowthTimelineItem[];
   diff: ProjectGrowthDiff | null;
   totals: ProjectGrowthTotals;
+  coverage: ProjectGrowthCoverageSummary;
 }
 
 interface FileFact {
@@ -1557,7 +1575,18 @@ function emptyProjectGrowthViewModel(): ProjectGrowthViewModel {
     keyEdges: [],
     history: [],
     diff: null,
-    totals: { files: 0, modules: 0, capabilities: 0, packages: 0, loc: 0, signals: 0 }
+    totals: { files: 0, modules: 0, capabilities: 0, packages: 0, loc: 0, signals: 0 },
+    coverage: {
+      available: false,
+      provider: '',
+      status: 'unavailable',
+      generatedAt: '',
+      lastAttemptAt: '',
+      durationMs: 0,
+      testPassed: false,
+      files: 0,
+      error: ''
+    }
   };
 }
 
@@ -1992,6 +2021,12 @@ export function buildProjectGrowthViewModel(
   const productionFilesByModule = new Map<string, Set<string>>();
   const testedProductionFilesByModule = new Map<string, Set<string>>();
   const directTestFilesByModule = new Map<string, Set<string>>();
+  const runtimeFilesByModule = new Map<string, Set<string>>();
+  const runtimeMetricsByModule = new Map<string, {
+    lines: ProjectCoverageMetric;
+    branches: ProjectCoverageMetric;
+    functions: ProjectCoverageMetric;
+  }>();
   for (const [fileId, moduleId] of moduleByFile.entries()) {
     const file = fileById.get(fileId);
     if (!file || file.excluded || file.primaryRole === 'verification' || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(file.path)) continue;
@@ -2013,6 +2048,34 @@ export function buildProjectGrowthViewModel(
     testFiles.add(edge.targetId);
     directTestFilesByModule.set(moduleId, testFiles);
   }
+  const coverageSnapshot = loadProjectCoverageSnapshot(data.snapshot.projectPath);
+  const scannedFilePaths = new Set([...fileById.values()].map((file) => file.path));
+  for (const coverageFile of coverageSnapshot?.files || []) {
+    const sourcePath = resolveTestReferenceToSource(coverageFile.path, scannedFilePaths);
+    if (!sourcePath) continue;
+    const fileId = nodeIdForPath('file', sourcePath);
+    const moduleId = moduleByFile.get(fileId);
+    const file = fileById.get(fileId);
+    if (!moduleId || !file || file.excluded || file.primaryRole === 'verification') continue;
+    if (coverageFile.lines.covered > 0 || coverageFile.statements.covered > 0) {
+      const runtimeFiles = runtimeFilesByModule.get(moduleId) || new Set<string>();
+      runtimeFiles.add(fileId);
+      runtimeFilesByModule.set(moduleId, runtimeFiles);
+    }
+    const metrics = runtimeMetricsByModule.get(moduleId) || {
+      lines: { covered: 0, total: 0, percent: 0 },
+      branches: { covered: 0, total: 0, percent: 0 },
+      functions: { covered: 0, total: 0, percent: 0 }
+    };
+    for (const key of ['lines', 'branches', 'functions'] as const) {
+      metrics[key].covered += coverageFile[key].covered;
+      metrics[key].total += coverageFile[key].total;
+      metrics[key].percent = metrics[key].total > 0
+        ? Math.round((metrics[key].covered / metrics[key].total) * 1000) / 10
+        : 0;
+    }
+    runtimeMetricsByModule.set(moduleId, metrics);
+  }
   const modules = data.nodes
     .filter((node) => node.kind === 'module')
     .sort((a, b) => b.loc - a.loc)
@@ -2020,6 +2083,8 @@ export function buildProjectGrowthViewModel(
       const productionFiles = productionFilesByModule.get(node.nodeId) || new Set<string>();
       const testedProductionFiles = testedProductionFilesByModule.get(node.nodeId) || new Set<string>();
       const directTestFiles = directTestFilesByModule.get(node.nodeId) || new Set<string>();
+      const runtimeFiles = runtimeFilesByModule.get(node.nodeId) || new Set<string>();
+      const runtimeMetrics = runtimeMetricsByModule.get(node.nodeId);
       const directTestCases = [...directTestFiles].reduce((sum, fileId) => sum + Math.max(1, fileById.get(fileId)?.testFileCount || 0), 0);
       return {
         nodeId: node.nodeId,
@@ -2034,6 +2099,10 @@ export function buildProjectGrowthViewModel(
         directTestFiles: directTestFiles.size,
         directTestCases,
         directCoveragePercent: productionFiles.size > 0 ? Math.round((testedProductionFiles.size / productionFiles.size) * 100) : 0,
+        runtimeCoveredFiles: runtimeFiles.size,
+        lineCoveragePercent: runtimeMetrics?.lines.percent || 0,
+        branchCoveragePercent: runtimeMetrics?.branches.percent || 0,
+        functionCoveragePercent: runtimeMetrics?.functions.percent || 0,
         signal: summarizeDirectoryStatus(node, data.signals),
         confidence: node.confidence
       };
@@ -2097,7 +2166,18 @@ export function buildProjectGrowthViewModel(
     keyEdges,
     history,
     diff: buildProjectGrowthDiff(options.previous || null, data),
-    totals
+    totals,
+    coverage: {
+      available: Boolean(coverageSnapshot?.generatedAt && coverageSnapshot.files.length > 0),
+      provider: coverageSnapshot?.provider || '',
+      status: coverageSnapshot?.status || 'unavailable',
+      generatedAt: coverageSnapshot?.generatedAt || '',
+      lastAttemptAt: coverageSnapshot?.lastAttemptAt || '',
+      durationMs: coverageSnapshot?.durationMs || 0,
+      testPassed: Boolean(coverageSnapshot?.testPassed),
+      files: coverageSnapshot?.files.length || 0,
+      error: coverageSnapshot?.error || ''
+    }
   };
 }
 
