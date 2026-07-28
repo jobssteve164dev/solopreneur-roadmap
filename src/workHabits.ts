@@ -41,7 +41,17 @@ export function getTrustedWorkDurationMs(session: WorkSession): number | null {
 }
 
 function dayKey(timestampMs: number): string {
-  return new Date(timestampMs).toISOString().slice(0, 10);
+  const date = new Date(timestampMs);
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0')
+  ].join('-');
+}
+
+function localDayNumber(key: string): number {
+  const [year, month, day] = key.split('-').map(Number);
+  return Math.round(Date.UTC(year, month - 1, day) / (24 * 60 * 60 * 1000));
 }
 
 function streakLengths(sortedDayKeys: string[], todayKey: string): { current: number; longest: number } {
@@ -49,15 +59,13 @@ function streakLengths(sortedDayKeys: string[], todayKey: string): { current: nu
   let longest = 1;
   let running = 1;
   for (let index = 1; index < sortedDayKeys.length; index += 1) {
-    const previous = Date.parse(`${sortedDayKeys[index - 1]}T00:00:00.000Z`);
-    const current = Date.parse(`${sortedDayKeys[index]}T00:00:00.000Z`);
-    running = current - previous === 24 * 60 * 60 * 1000 ? running + 1 : 1;
+    const previous = localDayNumber(sortedDayKeys[index - 1]);
+    const current = localDayNumber(sortedDayKeys[index]);
+    running = current - previous === 1 ? running + 1 : 1;
     longest = Math.max(longest, running);
   }
   const latest = sortedDayKeys[sortedDayKeys.length - 1];
-  const todayMs = Date.parse(`${todayKey}T00:00:00.000Z`);
-  const latestMs = Date.parse(`${latest}T00:00:00.000Z`);
-  const current = todayMs - latestMs <= 24 * 60 * 60 * 1000 ? running : 0;
+  const current = localDayNumber(todayKey) - localDayNumber(latest) <= 1 ? running : 0;
   return { current, longest };
 }
 
@@ -79,8 +87,8 @@ export function buildWorkHabitStats(sessions: WorkSession[], now = new Date()): 
     durations.push(durationMs);
     const key = dayKey(startedAtMs);
     durationByDay.set(key, (durationByDay.get(key) || 0) + durationMs);
-    sessionsByStartHour[start.getUTCHours()] += 1;
-    sessionsByWeekday[start.getUTCDay()] += 1;
+    sessionsByStartHour[start.getHours()] += 1;
+    sessionsByWeekday[start.getDay()] += 1;
   }
 
   const sortedDurations = durations.slice().sort((a, b) => a - b);
