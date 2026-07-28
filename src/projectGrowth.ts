@@ -73,6 +73,11 @@ export interface ProjectGrowthModuleSummary {
   loc: number;
   files: number;
   tests: number;
+  productionFiles: number;
+  directlyTestedFiles: number;
+  directTestFiles: number;
+  directTestCases: number;
+  directCoveragePercent: number;
   signal: ProjectGrowthSummaryNode['colorSignal'];
   confidence: number;
 }
@@ -749,6 +754,44 @@ function resolveImportTarget(projectPath: string, sourceRelativePath: string, sp
   return '';
 }
 
+function resolveTestReferenceToSource(reference: string, fileSet: Set<string>): string {
+  const normalized = toPosixPath(reference).replace(/^\.?\//, '');
+  const candidates = [normalized];
+  if (normalized.startsWith('out/')) {
+    const sourceBase = `src/${normalized.slice(4).replace(/\.[cm]?js$/i, '')}`;
+    candidates.push(
+      `${sourceBase}.ts`,
+      `${sourceBase}.tsx`,
+      `${sourceBase}.js`,
+      `${sourceBase}.jsx`
+    );
+  }
+  return candidates.find((candidate) => fileSet.has(candidate)) || '';
+}
+
+function collectExplicitTestSourceReferences(content: string, fileSet: Set<string>): Set<string> {
+  const references = new Set<string>();
+  const addReference = (reference: string) => {
+    const resolved = resolveTestReferenceToSource(reference, fileSet);
+    if (resolved) references.add(resolved);
+  };
+  const directPathPattern = /['"]((?:src|out)\/[^'"]+\.[cm]?[jt]sx?)['"]/g;
+  let directMatch: RegExpExecArray | null;
+  while ((directMatch = directPathPattern.exec(content))) {
+    addReference(directMatch[1]);
+  }
+  const pathJoinPattern = /path\.join\(([^)]*)\)/g;
+  let joinMatch: RegExpExecArray | null;
+  while ((joinMatch = pathJoinPattern.exec(content))) {
+    const segments = [...joinMatch[1].matchAll(/['"]([^'"]+)['"]/g)].map((match) => match[1]);
+    const rootIndex = segments.findIndex((segment) => segment === 'src' || segment === 'out');
+    if (rootIndex >= 0 && rootIndex < segments.length - 1) {
+      addReference(segments.slice(rootIndex).join('/'));
+    }
+  }
+  return references;
+}
+
 function addImportEdges(
   projectPath: string,
   snapshotId: string,
@@ -828,6 +871,23 @@ function addImportEdges(
           kind: 'tested_by',
           weight: 1,
           evidence: specifier
+        });
+      }
+    }
+    if (file.isTest) {
+      for (const target of collectExplicitTestSourceReferences(content, fileSet)) {
+        const targetFile = fileByPath.get(target);
+        if (!targetFile || targetFile.isTest) continue;
+        const sourceId = nodeIdForPath('file', target);
+        const targetId = nodeIdForPath('file', file.relativePath);
+        if (edges.some((edge) => edge.kind === 'tested_by' && edge.sourceId === sourceId && edge.targetId === targetId)) continue;
+        edges.push({
+          snapshotId,
+          sourceId,
+          targetId,
+          kind: 'tested_by',
+          weight: 1,
+          evidence: 'test-source-reference'
         });
       }
     }
@@ -1520,12 +1580,12 @@ function signalWeight(signal: ProjectGrowthSummaryNode['colorSignal']): number {
   return 1;
 }
 
-function signalStatusLabel(signal: ProjectGrowthSummaryNode['colorSignal'], tests: number, confidence: number): string {
+function signalStatusLabel(signal: ProjectGrowthSummaryNode['colorSignal'], directCoveragePercent: number, confidence: number): string {
   if (signal === 'blocked') return 'rework';
   if (signal === 'attention') return 'risk';
-  if (signal === 'watch') return tests > 0 ? 'growing' : 'needs_verification';
+  if (signal === 'watch') return directCoveragePercent >= 100 ? 'growing' : 'needs_verification';
   if (signal === 'growing') return 'growing';
-  if (tests > 0 && confidence >= 0.75) return 'formed';
+  if (directCoveragePercent >= 100 && confidence >= 0.75) return 'formed';
   return 'stable';
 }
 
@@ -1599,19 +1659,22 @@ function buildCapabilityHealth(
       .filter(Boolean) as ProjectGrowthModuleSummary[];
     const primaryLinkedModules = linkedModules.filter(isPrimaryGrowthModule);
     const displayModules = primaryLinkedModules.length > 0 ? primaryLinkedModules : linkedModules;
-    const tests = displayModules.reduce((sum, module) => sum + module.tests, 0);
+    const productionFiles = displayModules.reduce((sum, module) => sum + module.productionFiles, 0);
+    const directlyTestedFiles = displayModules.reduce((sum, module) => sum + module.directlyTestedFiles, 0);
+    const directTestCases = displayModules.reduce((sum, module) => sum + module.directTestCases, 0);
+    const directCoveragePercent = productionFiles > 0 ? Math.round((directlyTestedFiles / productionFiles) * 100) : 0;
     const files = displayModules.reduce((sum, module) => sum + module.files, 0);
     const strongestSignal = displayModules
       .map((module) => module.signal)
       .sort((a, b) => signalWeight(b) - signalWeight(a))[0] || capability.signal;
     let status = roadmapStatus === 'Completed' ? 'not_observed' : 'unshaped';
-    if (displayModules.length > 0 && tests > 0 && signalWeight(strongestSignal) <= signalWeight('watch')) {
+    if (displayModules.length > 0 && directCoveragePercent >= 100 && signalWeight(strongestSignal) <= signalWeight('watch')) {
       status = 'formed';
     } else if (displayModules.some((module) => module.signal === 'blocked')) {
       status = 'rework';
     } else if (displayModules.some((module) => module.signal === 'attention')) {
       status = 'risk';
-    } else if (displayModules.length > 0 && tests === 0) {
+    } else if (displayModules.length > 0 && directCoveragePercent < 100) {
       status = 'needs_verification';
     } else if (displayModules.length > 0) {
       status = 'growing';
@@ -1619,11 +1682,11 @@ function buildCapabilityHealth(
     const evidence = displayModules.slice(0, 4).map((module) => {
       const signals = nodeSignals.get(module.nodeId) || [];
       const reason = signals.find((signal) => signal.level === 'blocked' || signal.level === 'attention' || signal.level === 'watch')?.value;
-      return reason ? `${module.label}: ${reason}` : `${module.label}: ${module.files} 个文件 / ${module.tests} 个测试`;
+      return reason ? `${module.label}: ${reason}` : `${module.label}: ${module.directlyTestedFiles}/${module.productionFiles} 个生产文件有直接测试引用`;
     });
     const moduleNames = displayModules.map((module) => module.label);
     const summary = displayModules.length > 0
-      ? `关联 ${displayModules.length} 个主要生长区域、${files} 个文件${tests > 0 ? `，已有 ${tests} 个测试项` : '，还缺少测试证据'}。`
+      ? `关联 ${displayModules.length} 个主要生长区域、${files} 个文件；${directlyTestedFiles}/${productionFiles} 个生产文件有直接测试引用${directTestCases > 0 ? `，涉及 ${directTestCases} 个测试项` : ''}。`
       : '当前还没有识别到明确的代码或交付证据。';
     let action = 'keep_observing';
     if (status === 'unshaped' || status === 'not_observed') action = 'link_or_revise';
@@ -1726,10 +1789,10 @@ function buildFocusAreas(
       const notableSignals = signals
         .filter((signal) => ['blocked', 'attention', 'watch'].includes(signal.level))
         .slice(0, 3);
-      const status = signalStatusLabel(module.signal, module.tests, module.confidence);
+      const status = signalStatusLabel(module.signal, module.directCoveragePercent, module.confidence);
       const evidence = notableSignals.length > 0
         ? notableSignals.map((signal) => signal.value)
-        : [`${module.files} 个文件 / ${module.tests} 个测试 / ${Math.round(module.confidence * 100)}% 归类置信度`];
+        : [`${module.directlyTestedFiles}/${module.productionFiles} 个生产文件有直接测试引用`];
       let action = 'keep_observing';
       if (status === 'needs_verification') action = 'add_verification';
       if (status === 'risk' || status === 'rework') action = 'reduce_risk';
@@ -1738,7 +1801,7 @@ function buildFocusAreas(
         nodeId: module.nodeId,
         label: module.label,
         status,
-        summary: `${module.role} · ${module.files} 个文件 · ${module.loc.toLocaleString()} 行 · ${module.tests} 个测试`,
+        summary: `${module.role} · ${module.files} 个文件 · ${module.loc.toLocaleString()} 行 · 直接文件覆盖 ${module.directCoveragePercent}%`,
         labelSource: module.labelSource,
         action,
         files: module.files,
@@ -1784,10 +1847,10 @@ function buildRecommendedActions(
     }
   }
   for (const module of modules.filter(isPrimaryGrowthModule)) {
-    if (module.tests === 0 && module.loc >= 1200) {
+    if (module.directCoveragePercent === 0 && module.loc >= 1200) {
       actions.push({
         title: `${module.label} 缺少验证证据`,
-        detail: `${module.files} 个文件、${module.loc.toLocaleString()} 行代码，但没有识别到测试项。`,
+        detail: `${module.productionFiles} 个生产文件、${module.loc.toLocaleString()} 行代码，但没有识别到直接指向这些源码的测试证据。`,
         target: module.label,
         targetId: module.nodeId,
         level: 'needs_verification',
@@ -1919,20 +1982,62 @@ export function buildProjectGrowthViewModel(
       source: signal.source
     }))
     .slice(0, 24);
+  const moduleByFile = new Map<string, string>();
+  for (const edge of data.edges) {
+    if (edge.kind === 'contains' && edge.sourceId.startsWith('module:') && edge.targetId.startsWith('file:')) {
+      moduleByFile.set(edge.targetId, edge.sourceId);
+    }
+  }
+  const fileById = new Map(data.nodes.filter((node) => node.kind === 'file').map((node) => [node.nodeId, node]));
+  const productionFilesByModule = new Map<string, Set<string>>();
+  const testedProductionFilesByModule = new Map<string, Set<string>>();
+  const directTestFilesByModule = new Map<string, Set<string>>();
+  for (const [fileId, moduleId] of moduleByFile.entries()) {
+    const file = fileById.get(fileId);
+    if (!file || file.excluded || file.primaryRole === 'verification' || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(file.path)) continue;
+    const files = productionFilesByModule.get(moduleId) || new Set<string>();
+    files.add(fileId);
+    productionFilesByModule.set(moduleId, files);
+  }
+  for (const edge of data.edges) {
+    if (edge.kind !== 'tested_by') continue;
+    const moduleId = moduleByFile.get(edge.sourceId);
+    const sourceFile = fileById.get(edge.sourceId);
+    const targetFile = fileById.get(edge.targetId);
+    if (!moduleId || !sourceFile || !targetFile || sourceFile.excluded || targetFile.excluded) continue;
+    if (sourceFile.primaryRole === 'verification' || targetFile.primaryRole !== 'verification') continue;
+    const testedFiles = testedProductionFilesByModule.get(moduleId) || new Set<string>();
+    testedFiles.add(edge.sourceId);
+    testedProductionFilesByModule.set(moduleId, testedFiles);
+    const testFiles = directTestFilesByModule.get(moduleId) || new Set<string>();
+    testFiles.add(edge.targetId);
+    directTestFilesByModule.set(moduleId, testFiles);
+  }
   const modules = data.nodes
     .filter((node) => node.kind === 'module')
     .sort((a, b) => b.loc - a.loc)
-    .map((node) => ({
-      nodeId: node.nodeId,
-      label: node.label,
-      role: node.primaryRole,
-      labelSource: labelSourceById.get(node.nodeId) || 'scan_fallback',
-      loc: node.loc,
-      files: node.fileCount,
-      tests: node.testFileCount,
-      signal: summarizeDirectoryStatus(node, data.signals),
-      confidence: node.confidence
-    }));
+    .map((node) => {
+      const productionFiles = productionFilesByModule.get(node.nodeId) || new Set<string>();
+      const testedProductionFiles = testedProductionFilesByModule.get(node.nodeId) || new Set<string>();
+      const directTestFiles = directTestFilesByModule.get(node.nodeId) || new Set<string>();
+      const directTestCases = [...directTestFiles].reduce((sum, fileId) => sum + Math.max(1, fileById.get(fileId)?.testFileCount || 0), 0);
+      return {
+        nodeId: node.nodeId,
+        label: node.label,
+        role: node.primaryRole,
+        labelSource: labelSourceById.get(node.nodeId) || 'scan_fallback',
+        loc: node.loc,
+        files: node.fileCount,
+        tests: node.testFileCount,
+        productionFiles: productionFiles.size,
+        directlyTestedFiles: testedProductionFiles.size,
+        directTestFiles: directTestFiles.size,
+        directTestCases,
+        directCoveragePercent: productionFiles.size > 0 ? Math.round((testedProductionFiles.size / productionFiles.size) * 100) : 0,
+        signal: summarizeDirectoryStatus(node, data.signals),
+        confidence: node.confidence
+      };
+    });
   const capabilities = data.nodes
     .filter((node) => node.kind === 'capability')
     .sort((a, b) => a.nodeId.localeCompare(b.nodeId, undefined, { numeric: true }))
@@ -1943,12 +2048,6 @@ export function buildProjectGrowthViewModel(
       modules: [...new Set(incomingByTarget.get(node.nodeId) || [])],
       signal: summarizeDirectoryStatus(node, data.signals)
     }));
-  const moduleByFile = new Map<string, string>();
-  for (const edge of data.edges) {
-    if (edge.kind === 'contains' && edge.sourceId.startsWith('module:') && edge.targetId.startsWith('file:')) {
-      moduleByFile.set(edge.targetId, edge.sourceId);
-    }
-  }
   const edgeByIdentity = new Map<string, ProjectGrowthEdgeSummary>();
   for (const edge of data.edges) {
     if (!['imports', 'depends_on', 'tested_by', 'implements'].includes(edge.kind)) continue;

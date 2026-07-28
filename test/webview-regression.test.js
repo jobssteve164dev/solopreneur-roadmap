@@ -3195,6 +3195,16 @@ test('project growth recommendations focus their existing roadmap step', () => {
   assert.match(roadmapSource, /scrollIntoView\(\{ behavior: 'smooth', block: 'center' \}\)/);
 });
 
+test('project growth history is full width and coverage comes from complete snapshot evidence', () => {
+  const growthSource = fs.readFileSync(path.join(projectRoot, 'src/projectGrowth.ts'), 'utf8');
+  const growthWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/projectGrowthWebview.ts'), 'utf8');
+
+  assert.match(growthWebviewSource, /\.detail-grid \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(growthSource, /directCoveragePercent: productionFiles\.size > 0/);
+  assert.match(growthSource, /for \(const edge of data\.edges\) \{[\s\S]*?edge\.kind !== 'tested_by'/);
+  assert.doesNotMatch(growthWebviewSource, /const verificationEdges = \(viewModel\.keyEdges/);
+});
+
 test('sidebar roadmap action uses the concise roadmap label', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
   assert.match(sidebarSource, /projectOpen: '项目路线图'/);

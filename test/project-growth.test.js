@@ -32,10 +32,12 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   fs.mkdirSync(solopreneurDir, { recursive: true });
 
   writeFile(path.join(tempRoot, 'src', 'db', 'store.ts'), [
+    "import { cacheReady } from './cache';",
     'export function loadProject() {',
-    '  return { ok: true };',
+    '  return { ok: cacheReady };',
     '}'
   ].join('\n'));
+  writeFile(path.join(tempRoot, 'src', 'db', 'cache.ts'), 'export const cacheReady = true;\n');
   writeFile(path.join(tempRoot, 'src', 'extension.ts'), [
     "import * as Papa from 'papaparse';",
     "import { loadProject } from './db/store';",
@@ -47,7 +49,9 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   writeFile(path.join(tempRoot, 'test', 'store.test.js'), [
     "const assert = require('node:assert/strict');",
     "const test = require('node:test');",
-    "const { loadProject } = require('../src/db/store');",
+    "const path = require('node:path');",
+    "const projectRoot = path.resolve(__dirname, '..');",
+    "const storeModule = path.join(projectRoot, 'out', 'db', 'store.js');",
     "test('loads the project', () => assert.equal(loadProject().ok, true));",
     "test('keeps the test harness healthy', () => assert.equal(1, 1));"
   ].join('\n'));
@@ -97,7 +101,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
     now: new Date('2026-01-03T00:00:00.000Z')
   });
 
-  assert.equal(view.totals.files, 4);
+  assert.equal(view.totals.files, 5);
   assert.ok(view.totals.modules >= 3);
   assert.equal(view.totals.capabilities, 1);
   assert.equal(view.totals.packages, 1);
@@ -114,6 +118,13 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(new Set(view.modules.map((module) => module.nodeId)).size, view.modules.length);
   assert.equal(new Set(view.modules.map((module) => module.label)).size, view.modules.length);
   assert.equal(view.modules.find((module) => module.nodeId === 'module:path:test').tests, 1);
+  const dataModule = view.modules.find((module) => module.label === 'src/db');
+  assert.ok(dataModule);
+  assert.equal(dataModule.productionFiles, 2);
+  assert.equal(dataModule.directlyTestedFiles, 1);
+  assert.equal(dataModule.directTestFiles, 1);
+  assert.equal(dataModule.directTestCases, 2);
+  assert.equal(dataModule.directCoveragePercent, 50);
   assert.ok(view.capabilities.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.capabilityHealth.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));
@@ -144,6 +155,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
     edge.kind === 'tested_by'
     && edge.sourceId === 'file:src/db/store.ts'
     && edge.targetId === 'file:test/store.test.js'
+    && edge.evidence === 'test-source-reference'
   )));
   assert.ok(latest.edges.some((edge) => (
     edge.kind === 'depends_on'
@@ -157,14 +169,14 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(persistedView.totals.capabilities, 1);
   assert.ok(persistedView.gaps.length > 0);
 
-  writeFile(path.join(tempRoot, 'src', 'db', 'cache.ts'), [
-    'export const cacheReady = true;'
+  writeFile(path.join(tempRoot, 'src', 'db', 'queue.ts'), [
+    'export const queueReady = true;'
   ].join('\n'));
   const secondView = await refreshProjectGrowthSnapshot(tempRoot, projectRoot, {
     scanReason: 'test-second',
     now: new Date('2026-01-04T00:00:00.000Z')
   });
-  assert.equal(secondView.totals.files, 5);
+  assert.equal(secondView.totals.files, 6);
   assert.ok(secondView.diff);
   assert.equal(secondView.diff.filesAdded, 1);
   assert.equal(secondView.diff.filesRemoved, 0);
@@ -270,6 +282,11 @@ test('project growth webview uses locale labels for roadmap and history metadata
       files: 2,
       loc: 24,
       tests: 1,
+      productionFiles: 2,
+      directlyTestedFiles: 1,
+      directTestFiles: 1,
+      directTestCases: 2,
+      directCoveragePercent: 50,
       confidence: 0.82,
       paths: ['src/data.js']
     }],
@@ -328,8 +345,11 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(zhHtml, /真实模块协同关系/);
   assert.match(zhHtml, /协同判断/);
   assert.match(zhHtml, /架构与验证盲区/);
-  assert.match(zhHtml, /直接测试关系/);
-  assert.match(zhHtml, /有直接覆盖/);
+  assert.match(zhHtml, /直接文件覆盖率/);
+  assert.match(zhHtml, /部分生产文件有直接测试/);
+  assert.match(zhHtml, /关联测试文件/);
+  assert.match(zhHtml, /测试项/);
+  assert.match(zhHtml, />50%<\/strong>/);
   assert.match(zhHtml, /data-roadmap-target="roadmap-data"/);
   assert.match(zhHtml, /打开路线图环节/);
   assert.match(zhHtml, /relationship-matrix/);

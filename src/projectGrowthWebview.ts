@@ -53,11 +53,15 @@ const locales = {
     architectureJudgement: "协同判断",
     verificationMatrix: "架构与验证盲区",
     verificationMatrixHint: "逐个真实模块核对代码体量、直接测试关系与验证覆盖，优先处理核心但无证据的区域。",
-    covered: "有直接覆盖",
-    partialCoverage: "部分覆盖",
+    covered: "生产文件全部有直接测试",
+    partialCoverage: "部分生产文件有直接测试",
     blindSpot: "验证盲区",
-    coverage: "覆盖状态",
-    directTests: "直接测试关系",
+    coverage: "直接文件覆盖率",
+    productionFiles: "生产文件",
+    directlyTestedFiles: "已直接覆盖",
+    directTestFiles: "关联测试文件",
+    directTestCases: "测试项",
+    noProductionFiles: "无生产文件",
     openRoadmapStep: "打开路线图环节",
     graphPrimary: "完整构成",
     graphDependencies: "模块协作",
@@ -215,11 +219,15 @@ const locales = {
     architectureJudgement: "Collaboration judgement",
     verificationMatrix: "Architecture & Verification Blind Spots",
     verificationMatrixHint: "Review each real module's code weight, direct test relationships, and verification coverage. Prioritize core areas without evidence.",
-    covered: "Directly covered",
-    partialCoverage: "Partially covered",
+    covered: "All production files directly tested",
+    partialCoverage: "Some production files directly tested",
     blindSpot: "Blind spot",
-    coverage: "Coverage",
-    directTests: "Direct test links",
+    coverage: "Direct file coverage",
+    productionFiles: "Production files",
+    directlyTestedFiles: "Directly tested",
+    directTestFiles: "Test files",
+    directTestCases: "Test cases",
+    noProductionFiles: "No production files",
     openRoadmapStep: "Open roadmap step",
     graphPrimary: "Full structure",
     graphDependencies: "Module collaboration",
@@ -707,39 +715,50 @@ export function getProjectGrowthWebviewHtml(
     </div>
   ` : `<div class="empty-state">${escapeHtml(t.emptyEdges)}</div>`;
 
-  const verificationEdges = (viewModel.keyEdges || []).filter((edge) => edge.kind === 'tested_by');
   const verificationRows = [...displayModules].sort((a, b) => b.loc - a.loc).map((module) => {
-    const directLinks = verificationEdges
-      .filter((edge) => edge.sourceId === module.nodeId)
-      .reduce((sum, edge) => sum + edge.weight, 0);
-    const coverageState = directLinks > 0 ? 'covered' : module.tests > 0 ? 'partial' : 'blind';
-    const coverageLabel = coverageState === 'covered' ? t.covered : coverageState === 'partial' ? t.partialCoverage : t.blindSpot;
-    return { ...module, directLinks, coverageState, coverageLabel };
+    const productionFiles = Number(module.productionFiles || 0);
+    const directlyTestedFiles = Number(module.directlyTestedFiles || 0);
+    const directCoveragePercent = Number(module.directCoveragePercent || 0);
+    const coverageState = productionFiles === 0 ? 'not-applicable' : directCoveragePercent >= 100 ? 'covered' : directCoveragePercent > 0 ? 'partial' : 'blind';
+    const coverageLabel = coverageState === 'covered'
+      ? t.covered
+      : coverageState === 'partial'
+        ? t.partialCoverage
+        : coverageState === 'not-applicable'
+          ? t.noProductionFiles
+          : t.blindSpot;
+    return { ...module, productionFiles, directlyTestedFiles, directCoveragePercent, coverageState, coverageLabel };
   });
   const coveredCount = verificationRows.filter((row) => row.coverageState === 'covered').length;
+  const partialCount = verificationRows.filter((row) => row.coverageState === 'partial').length;
   const blindCount = verificationRows.filter((row) => row.coverageState === 'blind').length;
+  const coverableCount = verificationRows.filter((row) => row.coverageState !== 'not-applicable').length;
   const verificationMatrixHtml = verificationRows.length > 0 ? `
     <div class="verification-summary">
-      <strong>${coveredCount}/${verificationRows.length}</strong>
+      <strong>${coveredCount}/${coverableCount}</strong>
       <span>${escapeHtml(t.covered)}</span>
+      <strong class="${partialCount > 0 ? 'warn-text' : ''}">${partialCount}</strong>
+      <span>${escapeHtml(t.partialCoverage)}</span>
       <strong class="${blindCount > 0 ? 'danger-text' : ''}">${blindCount}</strong>
       <span>${escapeHtml(t.blindSpot)}</span>
     </div>
     <div class="verification-grid" role="table" aria-label="${escapeHtml(t.verificationMatrix)}">
       <div class="verification-row verification-head" role="row">
         <span role="columnheader">${escapeHtml(isZh ? '真实模块' : 'Real module')}</span>
-        <span role="columnheader">${escapeHtml(t.files)}</span>
-        <span role="columnheader">${escapeHtml(t.lines)}</span>
-        <span role="columnheader">${escapeHtml(t.directTests)}</span>
+        <span role="columnheader">${escapeHtml(t.productionFiles)}</span>
+        <span role="columnheader">${escapeHtml(t.directlyTestedFiles)}</span>
+        <span role="columnheader">${escapeHtml(t.directTestFiles)}</span>
+        <span role="columnheader">${escapeHtml(t.directTestCases)}</span>
         <span role="columnheader">${escapeHtml(t.coverage)}</span>
       </div>
       ${verificationRows.map((row) => `
         <div class="verification-row coverage-${row.coverageState}" role="row">
           <span role="cell"><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(formatMappedLabel(t.roleLabels, row.role))}</small></span>
-          <span role="cell">${row.files}</span>
-          <span role="cell">${row.loc.toLocaleString()}</span>
-          <span role="cell">${row.directLinks}</span>
-          <span role="cell"><i></i>${escapeHtml(row.coverageLabel)}</span>
+          <span role="cell">${row.productionFiles}</span>
+          <span role="cell">${row.directlyTestedFiles}</span>
+          <span role="cell">${row.directTestFiles}</span>
+          <span role="cell">${row.directTestCases}</span>
+          <span role="cell"><i></i><strong>${row.directCoveragePercent}%</strong><small>${escapeHtml(row.coverageLabel)}</small></span>
         </div>`).join('')}
     </div>
   ` : `<div class="empty-state">${escapeHtml(t.emptyModules)}</div>`;
@@ -1312,17 +1331,20 @@ export function getProjectGrowthWebviewHtml(
 
     .verification-summary { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; color: var(--muted); font-size: 11px; }
     .verification-summary strong { color: var(--success); font-size: 21px; }
+    .verification-summary .warn-text { margin-left: 18px; color: var(--warn); }
     .verification-summary .danger-text { margin-left: 18px; color: var(--danger); }
     .verification-grid { overflow: auto; border: 1px solid var(--border); border-radius: 9px; }
-    .verification-row { display: grid; grid-template-columns: minmax(200px, 1.5fr) 80px 100px 120px minmax(130px, .8fr); min-width: 720px; min-height: 48px; align-items: center; border-bottom: 1px solid var(--border); }
+    .verification-row { display: grid; grid-template-columns: minmax(210px, 1.5fr) 92px 100px 110px 90px minmax(220px, 1fr); min-width: 900px; min-height: 52px; align-items: center; border-bottom: 1px solid var(--border); }
     .verification-row:last-child { border-bottom: 0; }
     .verification-row > span { min-width: 0; padding: 9px 12px; font-size: 11px; }
     .verification-row > span + span { border-left: 1px solid var(--border); }
     .verification-row strong, .verification-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .verification-row small { margin-top: 2px; color: var(--muted); }
     .verification-head { min-height: 36px; background: rgba(255,255,255,.035); color: var(--muted); font-weight: 700; }
-    .verification-row > span:last-child { display: flex; align-items: center; gap: 7px; font-weight: 700; }
-    .verification-row > span:last-child i { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; }
+    .verification-row:not(.verification-head) > span:last-child { display: grid; grid-template-columns: 8px 42px minmax(0, 1fr); align-items: center; gap: 7px; font-weight: 700; }
+    .verification-row:not(.verification-head) > span:last-child i { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; }
+    .verification-row:not(.verification-head) > span:last-child strong { font-size: 12px; }
+    .verification-row:not(.verification-head) > span:last-child small { margin: 0; font-size: 10px; font-weight: 600; }
     .coverage-covered > span:last-child { color: var(--success); }
     .coverage-covered > span:last-child i { background: var(--success); }
     .coverage-partial > span:last-child { color: var(--warn); }
@@ -1330,6 +1352,8 @@ export function getProjectGrowthWebviewHtml(
     .coverage-blind { background: rgba(255,23,68,.025); }
     .coverage-blind > span:last-child { color: var(--danger); }
     .coverage-blind > span:last-child i { background: var(--danger); }
+    .coverage-not-applicable > span:last-child { color: var(--muted); }
+    .coverage-not-applicable > span:last-child i { background: var(--muted); }
 
     .primary-understanding-grid {
       grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.7fr);
@@ -1470,7 +1494,7 @@ export function getProjectGrowthWebviewHtml(
 
     .detail-grid {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
       gap: 16px;
       align-items: start;
     }
