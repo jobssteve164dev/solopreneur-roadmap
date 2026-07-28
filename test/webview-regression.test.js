@@ -2930,11 +2930,49 @@ test('project investment analytics aggregate local run effort for portfolio cons
   assert.equal(stats.totalDurationMs, 90 * 60 * 1000);
   assert.equal(stats.recentDurationMs, 60 * 60 * 1000);
   assert.ok(stats.focusScore > 0);
+  assert.equal(stats.workHabits.observedSessionCount, 2);
+  assert.equal(stats.workHabits.excludedSessionCount, 0);
+  assert.equal(stats.workHabits.activeDayCount, 2);
+  assert.equal(stats.workHabits.averageSessionDurationMs, 45 * 60 * 1000);
+  assert.equal(stats.workHabits.preferredStartHour, 9);
 
   const summaries = projectPortfolio.buildProjectPortfolioSummaries([{ name: 'Invested', path: projectRootA }]);
   assert.equal(summaries[0].investment.taskRunCount, 1);
   assert.equal(summaries[0].investment.soloConversationCount, 1);
   assert.equal(summaries[0].investment.totalDurationMs, 90 * 60 * 1000);
+});
+
+test('work duration analytics exclude delayed status processing from effort and habits', () => {
+  const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-delayed-'));
+  const digestRoot = path.join(projectRootA, '.solopreneur', 'run-digests');
+  fs.mkdirSync(digestRoot, { recursive: true });
+  fs.writeFileSync(path.join(digestRoot, 'delayed.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'delayed',
+    runKind: 'solo_continue',
+    status: 'Recorded',
+    startedAt: '2026-06-01T10:00:00.000Z',
+    finishedAt: '2026-07-22T10:00:00.000Z',
+    durationMs: 51 * 24 * 60 * 60 * 1000
+  }), 'utf8');
+  fs.writeFileSync(path.join(digestRoot, 'trusted.json'), JSON.stringify({
+    schemaVersion: 2,
+    runId: 'trusted',
+    runKind: 'solo',
+    status: 'Completed',
+    startedAt: '2026-07-22T11:00:00.000Z',
+    finishedAt: '2026-07-22T11:25:00.000Z',
+    durationMs: 25 * 60 * 1000
+  }), 'utf8');
+
+  analytics.clearProjectInvestmentCache(projectRootA);
+  const stats = analytics.readProjectInvestmentStats(projectRootA, new Date('2026-07-22T12:00:00.000Z'));
+  assert.equal(stats.totalDurationMs, 25 * 60 * 1000);
+  assert.equal(stats.averageRunDurationMs, 25 * 60 * 1000);
+  assert.equal(stats.workHabits.observedSessionCount, 1);
+  assert.equal(stats.workHabits.excludedSessionCount, 1);
+  assert.equal(stats.workHabits.medianSessionDurationMs, 25 * 60 * 1000);
 });
 
 test('project investment analytics prefer database run index for enriched portfolio stats', async () => {

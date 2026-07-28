@@ -4,6 +4,7 @@ import * as Papa from 'papaparse';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexEntry } from './db/types';
 import { AgentTokenUsage, extractRunTokenUsage, extractTokenUsageFromOutput, normalizeTokenUsage } from './tokenUsage';
+import { getTrustedWorkDurationMs } from './workHabits';
 
 export interface AgentImpactProject {
   name: string;
@@ -411,7 +412,12 @@ function buildAgentImpactSummaryFromProjectRuns(
     for (const run of runs) {
       const agent = run.agent;
       const timestamp = run.timestamp;
-      const minutes = run.minutes;
+      const trustedDurationMs = getTrustedWorkDurationMs({
+        startedAt: timestamp ? new Date(timestamp - run.minutes * 60000).toISOString() : '',
+        finishedAt: timestamp ? new Date(timestamp).toISOString() : '',
+        durationMs: run.minutes * 60000
+      });
+      const minutes = trustedDurationMs === null ? 0 : run.minutes;
       const changedFiles = run.changedFiles.map((file) => `${project.path}:${file}`);
       const agentStats = byAgent.get(agent) || { agent, runs: 0, minutes: 0, tokens: 0, tokenRuns: 0, files: new Set<string>(), latestRunAtMs: 0 };
 

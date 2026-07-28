@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexEntry } from './db/types';
+import { buildWorkHabitStats, getTrustedWorkDurationMs, WorkHabitStats } from './workHabits';
 
 export interface ProjectInvestmentStats {
   schemaVersion: number;
@@ -17,6 +18,7 @@ export interface ProjectInvestmentStats {
   investmentScore: number;
   momentumScore: number;
   focusScore: number;
+  workHabits: WorkHabitStats;
 }
 
 interface CachedProjectInvestment {
@@ -51,7 +53,8 @@ function emptyProjectInvestmentStats(now = new Date()): ProjectInvestmentStats {
     latestRunAt: '',
     investmentScore: 0,
     momentumScore: 0,
-    focusScore: 0
+    focusScore: 0,
+    workHabits: buildWorkHabitStats([], now)
   };
 }
 
@@ -337,7 +340,7 @@ function buildProjectInvestmentStatsFromRuns(runs: InvestmentRun[], now: Date): 
     if (run.status === 'Failed') {
       stats.failedRunCount += 1;
     }
-    const durationMs = Math.max(0, Number(run.durationMs || 0));
+    const durationMs = getTrustedWorkDurationMs(run) ?? 0;
     stats.totalDurationMs += durationMs;
     const timestamp = Date.parse(run.finishedAt || run.startedAt || '');
     if (Number.isFinite(timestamp)) {
@@ -348,8 +351,11 @@ function buildProjectInvestmentStatsFromRuns(runs: InvestmentRun[], now: Date): 
     }
   }
   const runCount = stats.taskRunCount + stats.soloConversationCount;
+  stats.workHabits = buildWorkHabitStats(runs, now);
   stats.latestRunAt = latestRunAtMs ? new Date(latestRunAtMs).toISOString() : '';
-  stats.averageRunDurationMs = runCount > 0 ? Math.round(stats.totalDurationMs / runCount) : 0;
+  stats.averageRunDurationMs = stats.workHabits.observedSessionCount > 0
+    ? Math.round(stats.totalDurationMs / stats.workHabits.observedSessionCount)
+    : 0;
 
   const recentMinutes = stats.recentDurationMs / 60000;
   const totalMinutes = stats.totalDurationMs / 60000;

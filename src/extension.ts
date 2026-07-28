@@ -4239,6 +4239,7 @@ function buildAgentShellScript(
   const touchedFilesPath = path.join(runDir, 'touched-files.txt');
   const workspaceSnapshotPath = path.join(runDir, 'workspace-before.json');
   const startedAtFilePath = path.join(runDir, 'started_at');
+  const finishedAtFilePath = path.join(runDir, 'finished_at');
   const sessionFilePath = path.join(runDir, 'session.json');
   const codexHomeFilePath = path.join(runDir, 'codex-home.txt');
   const decisionFilePath = effectiveCompletionDecisionFilePath || path.join(runDir, 'completion.json');
@@ -4297,6 +4298,7 @@ function buildAgentShellScript(
     ...enhancementContextPreflight,
     ...promptExportScript,
     terminalExecutionScript,
+    `${shellQuote(process.execPath)} -e ${shellQuote('process.stdout.write(new Date().toISOString())')} > ${shellQuote(finishedAtFilePath)}`,
     `kill "$solomap_status_heartbeat_pid" 2>/dev/null || true`,
     sessionCaptureScript,
     `git -C ${shellQuote(effectiveWorkspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
@@ -7825,9 +7827,14 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       failureCode = failureCode || 'agent_exit_failed';
       failureReason = completionReason || 'Agent CLI exited before completing this task.';
     }
-    const finishedAt = new Date().toISOString();
+    const recordedFinishedAtPath = outputFilePath ? path.join(path.dirname(String(outputFilePath)), 'finished_at') : '';
+    const recordedFinishedAt = readTextFileSafe(recordedFinishedAtPath).trim();
+    const finishedAt = Number.isFinite(Date.parse(recordedFinishedAt)) ? recordedFinishedAt : new Date().toISOString();
     const startedTime = startedAt ? Date.parse(String(startedAt)) : NaN;
-    const runDurationMs = Number.isFinite(startedTime) ? Math.max(0, Date.now() - startedTime) : 0;
+    const finishedTime = Date.parse(finishedAt);
+    const runDurationMs = Number.isFinite(startedTime) && Number.isFinite(finishedTime)
+      ? Math.max(0, finishedTime - startedTime)
+      : 0;
     const handoffEntry = workspaceRoot && runKind !== 'roadmap_revision' && !isSoloConversation && !isReviewRun && !isContinuationRun
       ? buildRunHandoffEntry(
         nextStatus,

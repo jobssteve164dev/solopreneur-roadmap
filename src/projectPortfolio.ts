@@ -6,6 +6,7 @@ import { summarizeDocumentationForReview } from './documentationManifest';
 import { readLearningSummary } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
 import { ProjectInvestmentStats, readProjectInvestmentStats, readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
+import { buildWorkHabitStats } from './workHabits';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import {
   ProjectDeliverySummary,
@@ -119,7 +120,8 @@ function emptyInvestmentStats(): ProjectInvestmentStats {
     latestRunAt: '',
     investmentScore: 0,
     momentumScore: 0,
-    focusScore: 0
+    focusScore: 0,
+    workHabits: buildWorkHabitStats([])
   };
 }
 
