@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.399 - 2026-07-29
+
+### Fixed
+- organize global conversation snapshots (6c0f16d)
+- simplify collaboration workspace layout (cc44732)
+- keep collaboration inside existing workbench (76e4639)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.398 - 2026-07-29
 
 ### Added
