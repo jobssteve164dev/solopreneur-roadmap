@@ -206,6 +206,8 @@ test("the signed-in workbench exposes a co-create tab backed by the encrypted ro
   assert.match(html, /<div class="desk shell"><aside class="desk-side">/);
   assert.match(html, /<h1>共创空间<\/h1>/);
   assert.match(html, /class="active" aria-current="page"[^>]*>共创空间<\/a>/);
+  assert.match(html, /<div class="room-switcher"><label for="recent-list">最近共创<\/label><select/);
+  assert.doesNotMatch(html, /<aside class="recent"/);
   assert.doesNotMatch(html, /workspace-nav|workspace-account|SoloMap · 个人工作台/);
   assert.match(html, /const accountNickname = "独立开发者"/);
   assert.match(html, /粘贴 SoloMap 邀请码/);
