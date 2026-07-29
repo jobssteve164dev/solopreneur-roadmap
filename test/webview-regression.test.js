@@ -875,6 +875,14 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /entitlement\.paste/);
   assert.match(html, /data-issue-panel/);
   assert.match(html, /data-toggle-issue-form/);
+  assert.match(html, /id="btn-toggle-collaboration"[^>]*><span class="codicon codicon-live-share"/);
+  assert.match(html, /id="btn-toggle-feedback"[^>]*><span class="codicon codicon-comment-discussion"/);
+  assert.match(html, /\.collaboration-create-controls \.settings-input,[\s\S]*height:\s*40px/);
+  assert.match(script, /data-collaboration-invite-code/);
+  assert.match(script, /command: 'collaboration\.joinRoom'/);
+  assert.match(script, /command: 'collaboration\.copyInviteCode'/);
+  assert.match(script, /class="collaboration-message-actions"' \+ \(expanded \? '' : ' hidden'\)/);
+  assert.match(script, /data-collaboration-message-menu/);
 
   const { elements, postedMessages, dispatchMessage, context } = runScriptWithMinimalDom(script, [
     'tasks-list',

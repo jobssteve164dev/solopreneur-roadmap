@@ -5,9 +5,13 @@ const path = require('node:path');
 const projectRoot = path.resolve(__dirname, '..');
 const {
   appendCollaborationIdea,
-  buildCollaborationInviteUrl,
+  buildCollaborationInviteCode,
+  collaborationDeviceCredentialSecretKey,
   collaborationRoomsStateKey,
   collaborationRoomSecretsKey,
+  createCollaborationRoom,
+  parseCollaborationInviteCode,
+  readOrCreateCollaborationDeviceCredential,
   readCollaborationRooms,
   saveCollaborationRoom
 } = require(path.join(projectRoot, 'out', 'collaborationRooms.js'));
@@ -62,16 +66,97 @@ test('collaboration rooms keep metadata in global state and credentials in secre
   assert.deepEqual(restored, [room]);
 });
 
-test('collaboration invite keeps the encryption key in the URL fragment', () => {
-  const url = buildCollaborationInviteUrl({
+test('collaboration invite code is opaque in normal use and round-trips room credentials', () => {
+  const room = {
     roomId: 'room1234567890ABCDEFGH',
     relayToken: 'relayToken1234567890ABCDEFGHijklmnop',
     encryptionKey: 'abcdefghijklmnopqrstuvwxyzABCDEFGH123456789'
-  }, 'zh');
-  assert.match(url, /^https:\/\/solomap\.app\/zh\/room\//);
-  assert.match(url, /\?token=relayToken/);
-  assert.match(url, /#abcdefghijklmnopqrstuvwxyzABCDEFGH123456789$/);
-  assert.equal(new URL(url).hash.slice(1), 'abcdefghijklmnopqrstuvwxyzABCDEFGH123456789');
+  };
+  const code = buildCollaborationInviteCode(room);
+  assert.match(code, /^SM1\.[A-Za-z0-9_-]+$/);
+  assert.doesNotMatch(code, /https?:|room123|relayToken/);
+  assert.deepEqual(parseCollaborationInviteCode(code), room);
+  assert.throws(() => parseCollaborationInviteCode('SM1.incomplete'), /invalid_invite_code/);
+});
+
+test('anonymous device credentials are registered once and reused from secret storage', async () => {
+  const storage = createStorage();
+  const issuedCredential = `${'a'.repeat(40)}.${'b'.repeat(40)}`;
+  let requests = 0;
+  const fetcher = async () => {
+    requests += 1;
+    return new Response(JSON.stringify({ ok: true, deviceCredential: issuedCredential }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  assert.equal(await readOrCreateCollaborationDeviceCredential(storage.context, fetcher), issuedCredential);
+  assert.equal(await readOrCreateCollaborationDeviceCredential(storage.context, fetcher), issuedCredential);
+  assert.equal(requests, 1);
+  assert.equal(storage.secretValues.get(collaborationDeviceCredentialSecretKey), issuedCredential);
+});
+
+test('room creation falls back from an invalid account grant to the saved anonymous device credential', async () => {
+  const storage = createStorage();
+  const issuedCredential = `${'a'.repeat(40)}.${'b'.repeat(40)}`;
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) return new Response(JSON.stringify({ ok: false }), { status: 401 });
+    if (calls.length === 2) {
+      return new Response(JSON.stringify({ ok: true, deviceCredential: issuedCredential }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    return new Response(JSON.stringify({ ok: true, tier: 'anonymous', expiresAt: Date.now() + 3600000 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const result = await createCollaborationRoom(storage.context, {
+    roomId: 'room1234567890ABCDEFGH',
+    relayToken: 'relayToken1234567890ABCDEFGHijklmnop',
+    expiresAt: Date.now() + 3600000
+  }, 'expired-passport-grant', fetcher);
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].init.headers.authorization, 'Bearer expired-passport-grant');
+  assert.match(calls[1].url, /\/api\/collaboration\/devices$/);
+  assert.equal(calls[2].init.headers.authorization, `Device ${issuedCredential}`);
+});
+
+test('an expired anonymous device credential is replaced once before room creation is retried', async () => {
+  const storage = createStorage();
+  const expiredCredential = `${'x'.repeat(40)}.${'y'.repeat(40)}`;
+  const freshCredential = `${'c'.repeat(40)}.${'d'.repeat(40)}`;
+  storage.secretValues.set(collaborationDeviceCredentialSecretKey, expiredCredential);
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) return new Response(JSON.stringify({ ok: false }), { status: 401 });
+    if (calls.length === 2) {
+      return new Response(JSON.stringify({ ok: true, deviceCredential: freshCredential }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    return new Response(JSON.stringify({ ok: true, tier: 'anonymous' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const result = await createCollaborationRoom(storage.context, {
+    roomId: 'room1234567890ABCDEFGH',
+    relayToken: 'relayToken1234567890ABCDEFGHijklmnop',
+    expiresAt: Date.now() + 3600000
+  }, '', fetcher);
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].init.headers.authorization, `Device ${expiredCredential}`);
+  assert.match(calls[1].url, /\/api\/collaboration\/devices$/);
+  assert.equal(calls[2].init.headers.authorization, `Device ${freshCredential}`);
+  assert.equal(storage.secretValues.get(collaborationDeviceCredentialSecretKey), freshCredential);
 });
 
 test('saving a collaboration idea appends without replacing existing project notes', () => {

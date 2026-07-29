@@ -161,7 +161,9 @@ import {
 import { recordLocalDiagnosticError } from './localDiagnostics';
 import {
   appendCollaborationIdea,
-  buildCollaborationInviteUrl,
+  buildCollaborationInviteCode,
+  createCollaborationRoom,
+  parseCollaborationInviteCode,
   readCollaborationRooms,
   saveCollaborationRoom
 } from './collaborationRooms';
@@ -678,6 +680,50 @@ async function handleSharedWebviewAction(
     'collaboration.getRooms': async () => {
       await respond({ command: 'collaborationRoomsLoaded', rooms: await readCollaborationRooms(context) });
     },
+    'collaboration.createRoom': async (request) => {
+      try {
+        const passportGrant = await readPassportGrant(context);
+        const result = await createCollaborationRoom(context, {
+          roomId: String(request.roomId || ''),
+          relayToken: String(request.relayToken || ''),
+          expiresAt: Number(request.expiresAt || 0)
+        }, String(passportGrant?.grant || ''), fetch);
+        if (!result.ok) {
+          await respond({ command: 'collaborationRoomCreateFailed', error: String(result.error || 'room_creation_failed') });
+          return;
+        }
+        await respond({
+          command: 'collaborationRoomCreated',
+          expiresAt: Number(result.expiresAt || 0),
+          tier: String(result.tier || 'anonymous'),
+          quota: result.quota || null
+        });
+      } catch (error) {
+        await respond({
+          command: 'collaborationRoomCreateFailed',
+          error: error instanceof Error ? error.message : 'room_creation_failed'
+        });
+      }
+    },
+    'collaboration.joinRoom': async (request) => {
+      try {
+        const credentials = parseCollaborationInviteCode(String(request.inviteCode || ''));
+        const now = Date.now();
+        const rooms = await saveCollaborationRoom(context, {
+          ...credentials,
+          title: String(request.title || ''),
+          projectPath: String(request.projectPath || ''),
+          authorId: String(request.authorId || ''),
+          nickname: String(request.nickname || ''),
+          createdAt: now,
+          expiresAt: now + 72 * 60 * 60 * 1000,
+          lastActiveAt: now
+        });
+        await respond({ command: 'collaborationRoomJoined', roomId: credentials.roomId, rooms });
+      } catch {
+        await respond({ command: 'collaborationRoomJoinFailed', error: 'invalid_invite_code' });
+      }
+    },
     'collaboration.saveRoom': async (request) => {
       const rooms = await saveCollaborationRoom(context, {
         roomId: String(request.roomId || ''),
@@ -689,16 +735,18 @@ async function handleSharedWebviewAction(
         encryptionKey: String(request.encryptionKey || ''),
         createdAt: Number(request.createdAt || Date.now()),
         expiresAt: Number(request.expiresAt || 0),
-        lastActiveAt: Number(request.lastActiveAt || Date.now())
+        lastActiveAt: Number(request.lastActiveAt || Date.now()),
+        creatorTier: ['anonymous', 'account', 'pro'].includes(String(request.creatorTier || '')) ? request.creatorTier : undefined,
+        quota: request.quota && typeof request.quota === 'object' ? request.quota : undefined
       });
       await respond({ command: 'collaborationRoomsLoaded', rooms });
     },
-    'collaboration.copyInvite': async (request) => {
+    'collaboration.copyInviteCode': async (request) => {
       const roomId = String(request.roomId || '');
       const room = (await readCollaborationRooms(context)).find((item) => item.roomId === roomId);
       if (!room) throw new Error('The collaboration room is unavailable or expired.');
-      await vscode.env.clipboard.writeText(buildCollaborationInviteUrl(room, getPersistedSettings(context).language));
-      await respond({ command: 'collaborationInviteCopied', roomId });
+      await vscode.env.clipboard.writeText(buildCollaborationInviteCode(room));
+      await respond({ command: 'collaborationInviteCodeCopied', roomId });
     },
     'collaboration.saveIdea': async (request) => {
       const projectPath = String(request.projectPath || '');

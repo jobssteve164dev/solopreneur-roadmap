@@ -29,6 +29,14 @@
       {
         "name": "COLLABORATION_ROOMS",
         "class_name": "CollaborationRoom"
+      },
+      {
+        "name": "COLLABORATION_QUOTAS",
+        "class_name": "CollaborationQuota"
+      },
+      {
+        "name": "COLLABORATION_GLOBAL_QUOTA",
+        "class_name": "CollaborationQuota"
       }
     ]
   },
@@ -38,6 +46,30 @@
       "new_sqlite_classes": [
         "CollaborationRoom"
       ]
+    },
+    {
+      "tag": "collaboration-quotas-v1",
+      "new_sqlite_classes": [
+        "CollaborationQuota"
+      ]
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "COLLABORATION_DEVICE_REGISTRATION_LIMITER",
+      "namespace_id": "21001",
+      "simple": {
+        "limit": 5,
+        "period": 60
+      }
+    },
+    {
+      "name": "COLLABORATION_ROOM_CREATE_LIMITER",
+      "namespace_id": "21002",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
     }
   ]
 }

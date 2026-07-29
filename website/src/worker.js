@@ -19,7 +19,9 @@ import {
   collaborationRoomPageHeaders
 } from "./collaborationPage.js";
 import {
+  CollaborationQuota,
   CollaborationRoom,
+  handleCollaborationDeviceRegistration,
   handleCollaborationRoomCreate,
   handleCollaborationSocket
 } from "./collaborationRelay.js";
@@ -692,7 +694,12 @@ async function verifyState(env, state) {
     return null;
   }
   const expected = await hmacSha256(env.SOLOMAP_PASSPORT_PRODUCT_SECRET, parts[0]);
-  const actual = base64UrlDecode(parts[1]);
+  let actual;
+  try {
+    actual = base64UrlDecode(parts[1]);
+  } catch {
+    return { allowed: false, reason: "invalid_signature" };
+  }
   if (!timingSafeEqual(expected, actual)) {
     return null;
   }
@@ -864,6 +871,25 @@ async function verifySignedGrant(env, grant) {
     deviceLimit: Number(payload.deviceLimit || payload.maxDevices || SOLOMAP_PRO_DEVICE_LIMIT),
     expiresAt: String(payload.expiresAt || "")
   };
+}
+
+async function resolveCollaborationAccountCreator(request, env) {
+  const session = await readSession(request, env);
+  if (session && (session.id || session.email)) {
+    const stableId = base64UrlEncode(await sha256(String(session.id || session.email)));
+    return { subjectId: `account:${stableId}`, tier: "account" };
+  }
+  const authorization = String(request.headers.get("authorization") || "");
+  const grant = authorization.replace(/^Bearer\s+/i, "");
+  if (!grant || grant === authorization) return null;
+  let verified = await verifySignedGrant(env, grant);
+  if (!verified.allowed) {
+    const passportResult = await verifyGrantWithPassport(env, grant);
+    if (passportResult) verified = passportResult;
+  }
+  if (!verified.allowed || (!verified.userId && !verified.email)) return null;
+  const stableId = base64UrlEncode(await sha256(String(verified.userId || verified.email)));
+  return { subjectId: `account:${stableId}`, tier: "pro" };
 }
 
 async function verifyGrantWithPassport(env, grant) {
@@ -5013,6 +5039,8 @@ function handleLocaleRedirect(request, env, origin) {
   // 排除 API、静态文件、健康检查等路由
   if (
     pathname.startsWith("/api/") ||
+    pathname === "/room" ||
+    pathname === "/zh/room" ||
     pathname.startsWith("/room/") ||
     pathname.startsWith("/zh/room/") ||
     pathname === "/health" ||
@@ -5131,18 +5159,23 @@ export default {
       return textResponse("ok");
     }
 
+    if (url.pathname === "/api/collaboration/devices" && (request.method === "POST" || request.method === "OPTIONS")) {
+      return handleCollaborationDeviceRegistration(request, env);
+    }
+
     if (url.pathname === "/api/collaboration/rooms" && (request.method === "POST" || request.method === "OPTIONS")) {
-      return handleCollaborationRoomCreate(request, env);
+      const creator = request.method === "POST" ? await resolveCollaborationAccountCreator(request, env) : null;
+      return handleCollaborationRoomCreate(request, env, creator);
     }
 
     if (/^\/api\/collaboration\/rooms\/[A-Za-z0-9_-]{20,64}\/socket$/.test(url.pathname)) {
       return handleCollaborationSocket(request, env);
     }
 
-    const collaborationRoomMatch = url.pathname.match(/^\/(zh\/)?room\/([A-Za-z0-9_-]{20,64})$/);
+    const collaborationRoomMatch = url.pathname.match(/^\/(zh\/)?room(?:\/([A-Za-z0-9_-]{20,64}))?$/);
     if (request.method === "GET" && collaborationRoomMatch) {
       return htmlResponse(
-        buildCollaborationRoomPage(collaborationRoomMatch[2], collaborationRoomMatch[1] ? "zh" : "en"),
+        buildCollaborationRoomPage(collaborationRoomMatch[2] || "", collaborationRoomMatch[1] ? "zh" : "en"),
         200,
         collaborationRoomPageHeaders()
       );
@@ -5302,4 +5335,4 @@ Sitemap: ${origin}/sitemap.xml
   }
 };
 
-export { CollaborationRoom, resetStatsCacheForTest };
+export { CollaborationQuota, CollaborationRoom, resetStatsCacheForTest };
