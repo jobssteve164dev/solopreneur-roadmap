@@ -63,7 +63,6 @@ function extractConclusion(output: string): string {
   let tail = match[1]
     .replace(/\r/g, '')
     .replace(/^Script (?:started|done).*$/gim, '')
-    .replace(/^tokens used\s*\n[\d,]+\s*$/gim, '')
     .trim();
 
   // Codex and several compatible CLIs print the speaker before the final answer.
@@ -73,6 +72,16 @@ function extractConclusion(output: string): string {
   const lastSpeaker = speakerMatches.at(-1);
   if (lastSpeaker?.index !== undefined) {
     tail = tail.slice(lastSpeaker.index + lastSpeaker[0].length).trim();
+  }
+
+  // Codex can print a long tool result or patch first, then the token counter, and
+  // only then the final answer. In that layout the counter is the reliable boundary:
+  // deleting the two counter lines alone leaves the preceding diff in the conclusion.
+  const tokenCounters = [...tail.matchAll(/^tokens used\s*\n[\d,]+\s*$/gim)];
+  const lastTokenCounter = tokenCounters.at(-1);
+  if (lastTokenCounter?.index !== undefined) {
+    const afterCounter = tail.slice(lastTokenCounter.index + lastTokenCounter[0].length).trim();
+    tail = afterCounter || tail.slice(0, lastTokenCounter.index).trim();
   }
 
   const lines = tail

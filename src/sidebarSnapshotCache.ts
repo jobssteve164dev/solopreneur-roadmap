@@ -8,6 +8,7 @@ const cacheVersion = 1;
 const cacheFileName = 'sidebar-core-snapshot-v1.json';
 const conversationCacheDirectoryName = 'conversations';
 const conversationCacheFilePattern = /^sidebar-conversation-[a-f0-9]{40}-v1\.json$/;
+const conversationPresentationVersion = 2;
 
 export interface SidebarConversationSnapshot {
   solo: AgentConversation[];
@@ -47,7 +48,7 @@ export function buildSidebarProjectSignature(projects: SolopreneurProject[]): st
 }
 
 export function buildConversationDatabaseSignature(projectPath: string): string {
-  return statSignature(path.join(projectPath, '.solopreneur', 'project_journal.db'));
+  return `${conversationPresentationVersion}:${statSignature(path.join(projectPath, '.solopreneur', 'project_journal.db'))}`;
 }
 
 function cachePath(globalDataPath: string): string {

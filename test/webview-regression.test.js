@@ -4743,6 +4743,44 @@ test('conversation presentation keeps the complete final Agent conclusion and dr
   ].join('\n'));
 });
 
+test('conversation presentation drops a leading diff when Codex prints the final answer after token usage', () => {
+  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const [conversation] = buildConversationPresentations('', '__solo__', [{
+    id: 32,
+    nodeId: '__solo__',
+    timestamp: '2026-07-29T09:42:31.736Z',
+    agentCli: 'codex',
+    command: 'codex exec',
+    status: 'Completed',
+    output: [
+      'Agent output tail:',
+      'nsureConversationCacheDirectory(globalDataPath);',
+      'diff --git a/test/cache.test.js b/test/cache.test.js',
+      '--- a/test/cache.test.js',
+      '+++ b/test/cache.test.js',
+      '@@ -1,2 +1,3 @@',
+      '+ added assertion',
+      'tokens used',
+      '63,396',
+      '已查清并修复。',
+      '',
+      '根因：结论提取误把前面的补丁当成最终答复。',
+      '',
+      '验证结果：',
+      '- 回归通过。'
+    ].join('\n')
+  }]);
+
+  assert.equal(conversation.conclusion, [
+    '已查清并修复。',
+    '',
+    '根因：结论提取误把前面的补丁当成最终答复。',
+    '',
+    '验证结果：',
+    '- 回归通过。'
+  ].join('\n'));
+});
+
 test('conversation presentation prefers a complete explicit conclusion section without a speaker marker', () => {
   const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
   const [conversation] = buildConversationPresentations('', '2', [{
