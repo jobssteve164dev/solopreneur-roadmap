@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.400 - 2026-07-29
+
+### Added
+- add opt-in Codex conversation view (9f2151c)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.399 - 2026-07-29
 
 ### Fixed
