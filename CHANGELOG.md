@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.390 - 2026-07-29
+
+### Docs
+- design interactive terminal sentinel lifecycle (2567de2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.389 - 2026-07-29
 
 ### Added
