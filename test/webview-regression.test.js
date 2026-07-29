@@ -4946,6 +4946,8 @@ test('agent command builder uses non-interactive task runs and native continuati
     [
       'module.exports.__buildAgentCommand = agentCli_1.buildAgentCommand;',
       'module.exports.__buildAgentCommandForPromptFile = agentCli_1.buildAgentCommandForPromptFile;',
+      'module.exports.__buildReadOnlyAgentCommandForPromptFile = agentCli_1.buildReadOnlyAgentCommandForPromptFile;',
+      'module.exports.__buildAgentContinuationCommandForPromptFile = agentCli_1.buildAgentContinuationCommandForPromptFile;',
       'module.exports.__buildAgentCommandFromShellVar = agentCli_1.buildAgentCommandFromShellVar;',
       'module.exports.__buildNativeContinueCommand = agentCli_1.buildNativeContinueCommand;',
       'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;',
@@ -5104,6 +5106,13 @@ test('agent command builder uses non-interactive task runs and native continuati
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
   );
+  assert.equal(
+    extensionModule.__buildReadOnlyAgentCommandForPromptFile('codex', '/workspace/app/review.txt', '/workspace/app'),
+    "cat '/workspace/app/review.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --sandbox read-only --ask-for-approval never -"
+  );
+  assert.match(extensionModule.__buildReadOnlyAgentCommandForPromptFile('agy', '/workspace/app/review.txt', '/workspace/app'), /--mode plan --sandbox/);
+  assert.doesNotMatch(extensionModule.__buildReadOnlyAgentCommandForPromptFile('agy', '/workspace/app/review.txt', '/workspace/app'), /dangerously-skip-permissions/);
+  assert.equal(extensionModule.__buildReadOnlyAgentCommandForPromptFile('opencode', '/workspace/app/review.txt', '/workspace/app'), '');
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('cursor-agent', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
     "'cursor-agent' -p --force --output-format text 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
@@ -7524,7 +7533,12 @@ test('completed step starts read-only Agent review before marking the step compl
   const reviewPrompt = fs.readFileSync(path.join(runDir, 'review-12', 'prompt.txt'), 'utf8');
   assert.match(reviewPrompt, /只读复核 Agent/);
   assert.match(reviewPrompt, /不要修改项目文件/);
+  assert.match(reviewPrompt, /goalSatisfied/);
+  assert.doesNotMatch(reviewPrompt, /H\/I\/J/);
   const reviewScript = fs.readFileSync(path.join(runDir, 'review-12', 'run-agent-review.sh'), 'utf8');
+  assert.match(reviewScript, /--mode plan --sandbox/);
+  assert.doesNotMatch(reviewScript, /dangerously-skip-permissions/);
+  assert.match(reviewScript, /SOLOMAP_REVIEW_JSON_START/);
   assert.match(reviewScript, /process\.argv\[1\]/);
   assert.match(reviewScript, /review-result\.json' \|\| status=125/);
 
@@ -7690,11 +7704,15 @@ test('passing Agent review completes the deferred roadmap step', async () => {
     status: 'pass',
     summary: '复核通过，可以完成环节。',
     findings: [],
-    nextAction: '写入完成证据'
+    nextAction: '写入完成证据',
+    goalSatisfied: true,
+    evidenceSufficient: true,
+    criteria: [{ criterion: '实现 MVP', status: 'pass', evidence: ['output:main'], reason: '验证通过' }]
   }), 'utf8');
   fs.writeFileSync(path.join(runDir, 'changes.txt'), '', 'utf8');
   fs.writeFileSync(path.join(runDir, 'touched-files.txt'), '', 'utf8');
   fs.writeFileSync(path.join(runDir, 'output.log'), 'Review passed.\n', 'utf8');
+  fs.writeFileSync(path.join(runDir, 'review-evidence.json'), JSON.stringify({ workspaceRoot: tempRoot, mainOutputFilePath: path.join(runDir, 'output.log') }), 'utf8');
   fs.writeFileSync(path.join(runDir, 'command.txt'), 'agy review\n', 'utf8');
   const statusFilePath = path.join(tempRoot, '.agent_status.json');
   fs.writeFileSync(statusFilePath, JSON.stringify({
@@ -7735,6 +7753,127 @@ test('passing Agent review completes the deferred roadmap step', async () => {
   assert.equal(loggedStatus, 'Completed');
   assert.match(loggedOutput, /Review decision: pass/);
   assert.match(loggedOutput, /复核通过，可以完成环节/);
+});
+
+test('high-risk review only triggers for real changes and rejects evidence-free pass results', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__shouldRunAgentReview = shouldRunAgentReview;',
+      'module.exports.__parseAgentReviewResult = parseAgentReviewResult;'
+    ].join('\n')
+  );
+  assert.equal(extensionModule.__shouldRunAgentReview(
+    'high_risk',
+    'solo',
+    '__solo__',
+    'Completed',
+    'No workspace file changes detected.',
+    'No project files were touched during this run.'
+  ), false);
+  assert.equal(extensionModule.__shouldRunAgentReview(
+    'high_risk',
+    'step',
+    '2',
+    'Completed',
+    'M src/app.js',
+    'M src/app.js'
+  ), true);
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-review-evidence-gate-'));
+  const resultPath = path.join(tempRoot, 'review-result.json');
+  fs.writeFileSync(resultPath, JSON.stringify({
+    status: 'pass',
+    summary: '看起来已经完成。',
+    findings: [],
+    nextAction: '',
+    goalSatisfied: true,
+    evidenceSufficient: true,
+    criteria: [{ criterion: '完成目标', status: 'pass', evidence: [], reason: '主 Agent 说已完成' }]
+  }), 'utf8');
+  const parsed = extensionModule.__parseAgentReviewResult(resultPath);
+  assert.equal(parsed.status, 'revise');
+  assert.match(parsed.findings[0], /缺少逐项完成标准或独立证据/);
+});
+
+test('first revise decision automatically returns actionable findings to the main Agent once', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
+      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-revise-'));
+  const reviewRunDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2', 'review-12');
+  fs.mkdirSync(reviewRunDir, { recursive: true });
+  fs.writeFileSync(path.join(reviewRunDir, 'review-result.json'), JSON.stringify({
+    status: 'revise',
+    summary: '缺少必要验证。',
+    findings: ['运行最窄回归并修复失败。'],
+    nextAction: 'npm test',
+    goalSatisfied: false,
+    evidenceSufficient: false,
+    criteria: [{ criterion: '测试通过', status: 'fail', evidence: ['output:main'], reason: '没有测试结果' }]
+  }), 'utf8');
+  fs.writeFileSync(path.join(reviewRunDir, 'changes.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(reviewRunDir, 'touched-files.txt'), '', 'utf8');
+  fs.writeFileSync(path.join(reviewRunDir, 'output.log'), 'Review requested revision.\n', 'utf8');
+  fs.writeFileSync(path.join(reviewRunDir, 'command.txt'), 'agy review\n', 'utf8');
+  const statusFilePath = path.join(tempRoot, '.agent_status.json');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: tempRoot,
+    nodeId: '2',
+    runKind: 'agent_review',
+    status: 'In Progress',
+    agentCli: 'agy',
+    executionLogId: 88,
+    reviewOfExecutionLogId: 12,
+    reviewTargetStatus: 'Completed',
+    reviewResultFilePath: path.join(reviewRunDir, 'review-result.json'),
+    reviewMainAgentCli: 'agy',
+    reviewMainNativeSessionId: 'session-12',
+    reviewAttempt: 1,
+    reviewTaskGoal: '完成 MVP',
+    reviewCompletionCriteria: ['测试通过'],
+    reviewerCliPath: 'agy',
+    collaborationReviewMode: 'all',
+    outputFilePath: path.join(reviewRunDir, 'output.log'),
+    changesFilePath: path.join(reviewRunDir, 'changes.txt'),
+    touchedFilesPath: path.join(reviewRunDir, 'touched-files.txt'),
+    commandFilePath: path.join(reviewRunDir, 'command.txt'),
+    startedAt: '2026-05-24T00:00:00.000Z'
+  }), 'utf8');
+
+  const executionLogs = [];
+  let launchedCommand = '';
+  extensionModule.__setCommandExistsForTest(() => true);
+  extensionModule.__setTerminalForTest(() => ({
+    show() {},
+    sendText(command) { launchedCommand = command; }
+  }));
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
+    updateNode: () => {},
+    updateAgentExecution: () => true,
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      executionLogs.push({ nodeId, agentCli, command, output, status });
+      return 90;
+    },
+    getAgentExecutions: () => executionLogs
+  }, tempRoot);
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.equal(executionLogs.length, 1);
+  assert.match(executionLogs[0].output, /Agent review revision started/);
+  assert.match(executionLogs[0].output, /Continuation parent conversation: 12/);
+  assert.match(launchedCommand, /run-agent\.sh/);
+  const revisionPrompt = fs.readFileSync(path.join(tempRoot, '.solopreneur', 'agent-runs', '2', '90', 'prompt.txt'), 'utf8');
+  assert.match(revisionPrompt, /运行最窄回归并修复失败/);
+  assert.match(revisionPrompt, /只修正以下明确问题/);
 });
 
 test('manual completion immediately persists the user decision for an active Agent run', () => {
