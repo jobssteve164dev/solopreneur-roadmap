@@ -224,10 +224,13 @@ import {
   updateStoredAgentSession
 } from './continuation';
 import { extractRunTokenUsage } from './tokenUsage';
+import { CustomConversationTurn, CustomConversationTurnResult, CustomConversationView } from './customConversationView';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
+const customConversationViews = new Map<string, CustomConversationView>();
+const customConversationExecutionKeys = new Map<number, string>();
 let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPath = '';
 let projectGrowthLoadSequence = 0;
@@ -615,10 +618,12 @@ async function handleSharedWebviewAction(
   try {
     return await dispatchPluginAction(message, surface, {
     'conversation.runStep': async (request) => {
-      revealAgentStartupTerminal(
-        String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
-        `step-${String(request.nodeId || 'conversation')}`
-      );
+      if (!shouldUseCustomConversationView(context, String(request.agentCli || ''))) {
+        revealAgentStartupTerminal(
+          String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
+          `step-${String(request.nodeId || 'conversation')}`
+        );
+      }
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunAgent(
@@ -631,7 +636,9 @@ async function handleSharedWebviewAction(
       );
     },
     'conversation.runSolo': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'solo');
+      if (!shouldUseCustomConversationView(context, String(request.agentCli || ''))) {
+        revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'solo');
+      }
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleRunSoloConversation(
@@ -881,12 +888,27 @@ async function handleSharedWebviewAction(
       }
     },
     'conversation.continue': async (request) => {
-      revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue');
       const conversationId = Number(request.conversationId || 0);
+      const customViewAlreadyOpen = revealCustomConversationForExecution(conversationId);
+      const customViewMayApply = Boolean(getPersistedSettings(context).customConversationViewEnabled);
+      if (!customViewAlreadyOpen && !customViewMayApply) {
+        revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue');
+      }
       try {
         const projectPath = await ensureActionProject(context, request.projectPath || '');
         if (!projectPath && request.projectPath) return;
         const nodeId = String(request.nodeId || '');
+        if (customViewAlreadyOpen) {
+          refreshConversation(nodeId);
+          return;
+        }
+        if (openOrRestoreCustomConversation(context, nodeId, conversationId)) {
+          refreshConversation(nodeId);
+          return;
+        }
+        if (customViewMayApply) {
+          revealAgentStartupTerminal(String(projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue');
+        }
         await handleContinueNativeConversation(context, nodeId, conversationId);
         refreshConversation(nodeId);
       } finally {
@@ -933,6 +955,7 @@ async function handleSharedWebviewAction(
       refreshConversation(String(request.nodeId || ''));
     },
     'conversation.openTerminal': async (request) => {
+      if (revealCustomConversationForExecution(Number(request.conversationId || 0))) return;
       showAgentTerminal(Number(request.conversationId || 0));
     },
     'attachment.choose': async (request) => {
@@ -1033,6 +1056,7 @@ async function handleSharedWebviewAction(
         globalDataPath: request.globalDataPath,
         reviewerCliPath: request.reviewerCliPath,
         collaborationReviewMode: request.collaborationReviewMode,
+        customConversationViewEnabled: request.customConversationViewEnabled,
         automationTasks: request.automationTasks
       });
       vscode.window.showInformationMessage('SoloMap settings saved successfully!');
@@ -1251,6 +1275,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     taskPermissionMode: 'auto',
     reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
     collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
+    customConversationViewEnabled: saved.customConversationViewEnabled ?? config.get('customConversationViewEnabled') ?? false,
     // VS Code configuration is the durable, user-visible source for automation.
     // globalState remains a fallback for installations created before the setting existed.
     automationTasks: normalizeAutomationSettings(config.get('automationTasks') || saved.automationTasks || {}),
@@ -1817,6 +1842,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     taskPermissionMode: 'auto',
     reviewerCliPath: hasSetting('reviewerCliPath') ? String(settings.reviewerCliPath ?? '').trim() : String(currentSettings.reviewerCliPath ?? '').trim(),
     collaborationReviewMode: normalizeCollaborationReviewMode(hasSetting('collaborationReviewMode') ? settings.collaborationReviewMode : currentSettings.collaborationReviewMode),
+    customConversationViewEnabled: hasSetting('customConversationViewEnabled') ? !!settings.customConversationViewEnabled : !!currentSettings.customConversationViewEnabled,
     automationTasks: hasSetting('automationTasks')
       ? mergeAutomationSettings(currentSettings.automationTasks, settings.automationTasks)
       : normalizeAutomationSettings(currentSettings.automationTasks),
@@ -1836,6 +1862,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
   await config.update('reviewerCliPath', nextSettings.reviewerCliPath, vscode.ConfigurationTarget.Global);
   await config.update('collaborationReviewMode', nextSettings.collaborationReviewMode, vscode.ConfigurationTarget.Global);
+  await config.update('customConversationViewEnabled', nextSettings.customConversationViewEnabled, vscode.ConfigurationTarget.Global);
   await config.update('automationTasks', nextSettings.automationTasks, vscode.ConfigurationTarget.Global);
   await config.update('telegramEnabled', nextSettings.telegramEnabled, vscode.ConfigurationTarget.Global);
   await config.update('telegramBotToken', nextSettings.telegramBotToken, vscode.ConfigurationTarget.Global);
@@ -5477,6 +5504,408 @@ function launchAgentConversationTerminal(input: {
   return terminal;
 }
 
+interface CustomConversationRunArtifacts {
+  workspaceRoot: string;
+  nodeId: string;
+  executionLogId: number;
+  runKind: string;
+  agentCli: string;
+  selectedModel: string;
+  userMessage: string;
+  globalDataPath: string;
+  statusFilePath: string;
+  outputFilePath: string;
+  changesFilePath: string;
+  touchedFilesPath: string;
+  workspaceSnapshotPath: string;
+  completionDecisionFilePath: string;
+  sessionFilePath: string;
+  codexHomeFilePath: string;
+  commandFilePath: string;
+  promptFilePath: string;
+  roadmapBackupFilePath: string;
+  reviewerCliPath: string;
+  collaborationReviewMode: string;
+  startedAt: string;
+  sessionId: string;
+  heartbeat?: NodeJS.Timeout;
+}
+
+const customConversationRuns = new Map<number, CustomConversationRunArtifacts>();
+
+function customConversationKey(workspaceRoot: string, nodeId: string): string {
+  return `${path.resolve(workspaceRoot)}::${nodeId}`;
+}
+
+function shouldUseCustomConversationView(context: vscode.ExtensionContext, requestedAgentCli = ''): boolean {
+  const settings = getPersistedSettings(context);
+  if (!settings.customConversationViewEnabled) return false;
+  const configured = String(requestedAgentCli || settings.cliPath || '').trim();
+  const resolved = resolveAgentCli(configured || 'agy', requestedAgentCli ? '' : settings.cliPath);
+  return getAgentProvider(resolved) === 'codex';
+}
+
+function runCustomConversationUtility(command: string, workspaceRoot: string): void {
+  childProcess.execSync(command, {
+    cwd: workspaceRoot,
+    stdio: 'ignore',
+    shell: process.platform === 'win32' ? undefined : '/bin/bash'
+  });
+}
+
+function beginCustomConversationRun(input: {
+  workspaceRoot: string;
+  nodeId: string;
+  executionLogId: number;
+  runKind: string;
+  agentCli: string;
+  selectedModel: string;
+  userMessage: string;
+  prompt: string;
+  completionDecisionFilePath?: string;
+  roadmapBackupFilePath?: string;
+  globalDataPath: string;
+  reviewerCliPath?: string;
+  collaborationReviewMode?: string;
+  enabledEnhancements?: Record<string, boolean>;
+  runDir: string;
+  sessionId?: string;
+}): CustomConversationTurn {
+  const statusFilePath = getAgentStatusFilePath(input.workspaceRoot, input.executionLogId);
+  const completionDecisionFilePath = input.completionDecisionFilePath || path.join(input.runDir, 'completion.json');
+  const generated = buildAgentShellScript(
+    input.agentCli,
+    input.selectedModel,
+    input.prompt,
+    input.workspaceRoot,
+    input.nodeId,
+    input.executionLogId,
+    input.userMessage,
+    completionDecisionFilePath,
+    input.sessionId || '',
+    '',
+    input.runKind,
+    input.roadmapBackupFilePath || '',
+    input.globalDataPath,
+    'auto',
+    input.reviewerCliPath || '',
+    input.collaborationReviewMode || 'high_risk',
+    input.enabledEnhancements || {},
+    input.runDir,
+    statusFilePath
+  );
+  const workspaceSnapshotPath = path.join(input.runDir, 'workspace-before.json');
+  const touchedFilesPath = path.join(input.runDir, 'touched-files.txt');
+  const sessionFilePath = path.join(input.runDir, 'session.json');
+  const codexHomeFilePath = path.join(input.runDir, 'codex-home.txt');
+  const startedAt = new Date().toISOString();
+  fs.mkdirSync(input.runDir, { recursive: true });
+  fs.writeFileSync(generated.outputFilePath, '', 'utf8');
+  fs.writeFileSync(generated.commandFilePath, `${input.agentCli} [SoloMap conversation view]`, 'utf8');
+  fs.writeFileSync(generated.changesFilePath, '', 'utf8');
+  fs.writeFileSync(touchedFilesPath, '', 'utf8');
+  fs.writeFileSync(path.join(input.runDir, 'started_at'), startedAt, 'utf8');
+  fs.writeFileSync(codexHomeFilePath, process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'utf8');
+  if (input.sessionId) fs.writeFileSync(sessionFilePath, JSON.stringify({ sessionId: input.sessionId, source: 'acp' }), 'utf8');
+  runCustomConversationUtility(buildWorkspaceSnapshotScript(input.workspaceRoot, workspaceSnapshotPath), input.workspaceRoot);
+  const artifacts: CustomConversationRunArtifacts = {
+    workspaceRoot: input.workspaceRoot,
+    nodeId: input.nodeId,
+    executionLogId: input.executionLogId,
+    runKind: input.runKind,
+    agentCli: input.agentCli,
+    selectedModel: input.selectedModel,
+    userMessage: input.userMessage,
+    globalDataPath: input.globalDataPath,
+    statusFilePath,
+    outputFilePath: generated.outputFilePath,
+    changesFilePath: generated.changesFilePath,
+    touchedFilesPath,
+    workspaceSnapshotPath,
+    completionDecisionFilePath,
+    sessionFilePath,
+    codexHomeFilePath,
+    commandFilePath: generated.commandFilePath,
+    promptFilePath: generated.promptFilePath,
+    roadmapBackupFilePath: input.roadmapBackupFilePath || '',
+    reviewerCliPath: input.reviewerCliPath || '',
+    collaborationReviewMode: input.collaborationReviewMode || 'high_risk',
+    startedAt,
+    sessionId: input.sessionId || ''
+  };
+  customConversationRuns.set(input.executionLogId, artifacts);
+  writeCustomConversationStatus(artifacts, 'Running');
+  artifacts.heartbeat = setInterval(() => {
+    try {
+      const now = new Date();
+      fs.utimesSync(artifacts.statusFilePath, now, now);
+    } catch {}
+  }, 30_000);
+  registerActiveConversation({
+    workspaceRoot: input.workspaceRoot,
+    globalDataPath: input.globalDataPath,
+    conversationId: input.executionLogId,
+    executionLogId: input.executionLogId,
+    nodeId: input.nodeId,
+    statusFilePath,
+    runKind: input.runKind,
+    ownerInstanceId: activeConversationOwnerInstanceId
+  });
+  if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
+  customConversationExecutionKeys.set(input.executionLogId, customConversationKey(input.workspaceRoot, input.nodeId));
+  postNodeConversations(input.nodeId);
+  return { executionLogId: input.executionLogId, userMessage: input.userMessage, prompt: input.prompt };
+}
+
+function writeCustomConversationStatus(
+  artifacts: CustomConversationRunArtifacts,
+  status: string,
+  extra: Record<string, unknown> = {}
+): void {
+  fs.mkdirSync(path.dirname(artifacts.statusFilePath), { recursive: true });
+  fs.writeFileSync(artifacts.statusFilePath, JSON.stringify({
+    workspaceRoot: artifacts.workspaceRoot,
+    nodeId: artifacts.nodeId,
+    runKind: artifacts.runKind,
+    roadmapBackupFilePath: artifacts.roadmapBackupFilePath,
+    globalDataPath: artifacts.globalDataPath,
+    agentCli: artifacts.agentCli,
+    selectedModel: artifacts.selectedModel,
+    commandPreview: `${artifacts.agentCli} [SoloMap conversation view]`,
+    commandFilePath: artifacts.commandFilePath,
+    promptFilePath: artifacts.promptFilePath,
+    executionLogId: artifacts.executionLogId,
+    userMessage: artifacts.userMessage,
+    outputFilePath: artifacts.outputFilePath,
+    changesFilePath: artifacts.changesFilePath,
+    touchedFilesPath: artifacts.touchedFilesPath,
+    completionDecisionFilePath: artifacts.completionDecisionFilePath,
+    sessionFilePath: artifacts.sessionFilePath,
+    codexHomeFilePath: artifacts.codexHomeFilePath,
+    nativeSessionId: artifacts.sessionId,
+    sessionKey: getAgentSessionKey(artifacts.agentCli),
+    sessionProvider: 'codex',
+    sessionMode: artifacts.sessionId ? 'acp' : 'acp-connecting',
+    startedAt: artifacts.startedAt,
+    reviewerCliPath: artifacts.reviewerCliPath,
+    collaborationReviewMode: artifacts.collaborationReviewMode,
+    status,
+    ...extra
+  }), 'utf8');
+}
+
+function bindCustomConversationSession(executionLogId: number, sessionId: string): void {
+  const artifacts = customConversationRuns.get(executionLogId);
+  if (!artifacts || !sessionId) return;
+  artifacts.sessionId = sessionId;
+  fs.writeFileSync(artifacts.sessionFilePath, JSON.stringify({ sessionId, source: 'acp' }), 'utf8');
+  updateStoredAgentSession(artifacts.workspaceRoot, artifacts.nodeId, artifacts.agentCli, sessionId);
+  writeCustomConversationStatus(artifacts, 'Running');
+}
+
+async function finishCustomConversationRun(turn: CustomConversationTurn, result: CustomConversationTurnResult): Promise<void> {
+  const artifacts = customConversationRuns.get(turn.executionLogId);
+  if (!artifacts) return;
+  if (artifacts.heartbeat) clearInterval(artifacts.heartbeat);
+  const finishedAt = new Date().toISOString();
+  const transcript = [
+    `User: ${turn.userMessage}`,
+    result.assistantText ? `Agent:\n${result.assistantText}` : '',
+    result.error ? `SoloMap: ${result.error}` : ''
+  ].filter(Boolean).join('\n\n');
+  fs.writeFileSync(artifacts.outputFilePath, transcript, 'utf8');
+  fs.writeFileSync(path.join(path.dirname(artifacts.outputFilePath), 'finished_at'), finishedAt, 'utf8');
+  if (artifacts.sessionId) {
+    fs.writeFileSync(artifacts.sessionFilePath, JSON.stringify({ sessionId: artifacts.sessionId, source: 'acp' }), 'utf8');
+  }
+  try {
+    const changes = childProcess.execFileSync('git', ['-C', artifacts.workspaceRoot, 'status', '--short'], { encoding: 'utf8' });
+    fs.writeFileSync(artifacts.changesFilePath, changes, 'utf8');
+  } catch {
+    fs.writeFileSync(artifacts.changesFilePath, '', 'utf8');
+  }
+  runCustomConversationUtility(
+    buildWorkspaceDiffScript(artifacts.workspaceRoot, artifacts.workspaceSnapshotPath, artifacts.touchedFilesPath),
+    artifacts.workspaceRoot
+  );
+  const cancelled = result.stopReason === 'cancelled';
+  const failed = Boolean(result.error) || result.stopReason === 'error';
+  const isContinuation = isContinuationRunKind(artifacts.runKind);
+  writeCustomConversationStatus(
+    artifacts,
+    failed || (cancelled && !isContinuation) ? 'Failed' : 'In Progress',
+    {
+      finishedAt,
+      ...(failed ? { failureCode: 'conversation_view_error', failureReason: result.error || 'Codex 对话未能完成当前回复。' } : {}),
+      ...(cancelled && !isContinuation ? { failureCode: 'stopped_by_user', failureReason: 'Stopped by user.' } : {})
+    }
+  );
+  await processRegisteredStatusFile(extensionContextRef, artifacts.statusFilePath, true);
+  customConversationRuns.delete(turn.executionLogId);
+  customConversationExecutionKeys.delete(turn.executionLogId);
+}
+
+async function prepareCustomConversationContinuation(
+  context: vscode.ExtensionContext,
+  workspaceRoot: string,
+  nodeId: string,
+  agentCli: string,
+  selectedModel: string,
+  sessionId: string,
+  rootConversationId: number,
+  userMessage: string
+): Promise<CustomConversationTurn | null> {
+  if (!syncEngine || workspaceRoot !== activeProjectRoot) return null;
+  const request = String(userMessage || '').trim();
+  if (!request) return null;
+  const settings = getPersistedSettings(context);
+  const preGitHash = await createPreSessionGitCommit(workspaceRoot);
+  const launchSummary = [
+    preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
+    'Agent continuation started.',
+    `Run started at: ${new Date().toISOString()}`,
+    buildContinuationMetadataBlock(rootConversationId, sessionId),
+    `User supplement:\n${request}`
+  ].filter(Boolean).join('\n\n');
+  const executionLogId = syncEngine.logAgentExecution(
+    nodeId,
+    agentCli,
+    `${agentCli} [SoloMap conversation view]`,
+    launchSummary,
+    'Running'
+  );
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
+  const completionDecisionFilePath = path.join(runDir, 'completion.json');
+  const node = nodeId === soloConversationId ? null : syncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
+  const prompt = buildInteractiveContinuationPrompt(
+    node,
+    request,
+    workspaceRoot,
+    completionDecisionFilePath,
+    [],
+    settings.globalPrompt,
+    settings.globalDataPath
+  );
+  return beginCustomConversationRun({
+    workspaceRoot,
+    nodeId,
+    executionLogId,
+    runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
+    agentCli,
+    selectedModel,
+    userMessage: request,
+    prompt,
+    completionDecisionFilePath,
+    globalDataPath: settings.globalDataPath,
+    reviewerCliPath: settings.reviewerCliPath,
+    collaborationReviewMode: settings.collaborationReviewMode,
+    enabledEnhancements: settings.enabledEnhancements,
+    runDir,
+    sessionId
+  });
+}
+
+function launchCustomConversationView(input: {
+  context: vscode.ExtensionContext;
+  workspaceRoot: string;
+  nodeId: string;
+  title: string;
+  agentCli: string;
+  selectedModel: string;
+  rootConversationId: number;
+  initialTurn?: CustomConversationTurn;
+  existingSessionId?: string;
+}): void {
+  const key = customConversationKey(input.workspaceRoot, input.nodeId);
+  let view = customConversationViews.get(key);
+  if (view && input.initialTurn) {
+    customConversationViews.delete(key);
+    void view.dispose();
+    view = undefined;
+  }
+  if (!view) {
+    view = new CustomConversationView({
+      extensionPath: input.context.extensionPath,
+      workspaceRoot: input.workspaceRoot,
+      agentCli: input.agentCli,
+      selectedModel: input.selectedModel,
+      title: input.title,
+      language: getPersistedSettings(input.context).language,
+      existingSessionId: input.existingSessionId,
+      onSessionReady: async (sessionId) => {
+        if (input.initialTurn) bindCustomConversationSession(input.initialTurn.executionLogId, sessionId);
+      },
+      prepareTurn: async (userMessage) => prepareCustomConversationContinuation(
+        input.context,
+        input.workspaceRoot,
+        input.nodeId,
+        input.agentCli,
+        input.selectedModel,
+        view?.getSessionId() || '',
+        input.rootConversationId,
+        userMessage
+      ),
+      finishTurn: finishCustomConversationRun
+    });
+    customConversationViews.set(key, view);
+  }
+  const currentView = view;
+  void currentView.open(input.initialTurn).catch(async (error) => {
+    if (input.initialTurn && customConversationRuns.has(input.initialTurn.executionLogId)) {
+      await finishCustomConversationRun(input.initialTurn, {
+        assistantText: '',
+        stopReason: 'error',
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+}
+
+function revealCustomConversationForExecution(executionLogId: number): boolean {
+  const key = customConversationExecutionKeys.get(executionLogId);
+  const view = key ? customConversationViews.get(key) : null;
+  if (!view) return false;
+  view.reveal();
+  return true;
+}
+
+function openOrRestoreCustomConversation(
+  context: vscode.ExtensionContext,
+  requestedNodeId: string,
+  conversationId: number
+): boolean {
+  if (!syncEngine || !activeProjectRoot || !conversationId) return false;
+  const nodeId = resolveConversationNodeIdForContinuation(requestedNodeId, conversationId) || requestedNodeId;
+  if (!getPersistedSettings(context).customConversationViewEnabled) return false;
+  const existingView = customConversationViews.get(customConversationKey(activeProjectRoot, nodeId));
+  if (existingView) {
+    existingView.reveal();
+    return true;
+  }
+  const conversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId));
+  if (!conversation || getAgentProvider(String(conversation.agentCli || '')) !== 'codex') return false;
+  const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
+  const sessionConversation = resolveContinuationSessionConversation(nodeId, conversationId) || conversation;
+  const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
+  if (!sessionId) return false;
+  const node = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
+  const settings = getPersistedSettings(context);
+  const agentCli = resolveAgentCli(String(conversation.agentCli || settings.cliPath || 'codex'), '');
+  launchCustomConversationView({
+    context,
+    workspaceRoot: activeProjectRoot,
+    nodeId,
+    title: nodeId === soloConversationId
+      ? (settings.language === 'en' ? 'Solo Conversation' : 'Solo 对话')
+      : (node?.title || (settings.language === 'en' ? 'Agent Conversation' : 'Agent 对话')),
+    agentCli,
+    selectedModel: '',
+    rootConversationId: Number(rootConversation.id || conversationId),
+    existingSessionId: sessionId
+  });
+  return true;
+}
+
 async function handleAgentTerminalClosed(terminalName: string): Promise<boolean> {
   const matched = [...agentTerminalNamesByConversationId.entries()]
     .find(([, name]) => name === terminalName);
@@ -6295,6 +6724,12 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   if (!syncEngine || !activeProjectRoot || !nodeId) {
     return;
   }
+  const customViewKey = customConversationExecutionKeys.get(conversationId);
+  const customView = customViewKey ? customConversationViews.get(customViewKey) : null;
+  if (customView?.stop()) {
+    customView.reveal();
+    return;
+  }
   const runningStatus = findAgentStatusForConversation(activeProjectRoot, conversationId);
   const statusFilePath = runningStatus
     ? getAgentStatusFilePath(activeProjectRoot, Number(runningStatus.executionLogId || conversationId))
@@ -6594,6 +7029,36 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     launchSummary,
     'Running'
   );
+
+  if (shouldUseCustomConversationView(context, agentCli)) {
+    const initialTurn = beginCustomConversationRun({
+      workspaceRoot: activeProjectRoot,
+      nodeId: soloConversationId,
+      executionLogId,
+      runKind: 'solo',
+      agentCli,
+      selectedModel,
+      userMessage: request,
+      prompt: conversationPrompt,
+      roadmapBackupFilePath,
+      globalDataPath: settings.globalDataPath,
+      reviewerCliPath: settings.reviewerCliPath,
+      collaborationReviewMode: settings.collaborationReviewMode,
+      enabledEnhancements: settings.enabledEnhancements,
+      runDir
+    });
+    launchCustomConversationView({
+      context,
+      workspaceRoot: activeProjectRoot,
+      nodeId: soloConversationId,
+      title: settings.language === 'en' ? 'Solo Conversation' : 'Solo 对话',
+      agentCli,
+      selectedModel,
+      rootConversationId: executionLogId,
+      initialTurn
+    });
+    return executionLogId;
+  }
 
   const { finalCommand } = buildAgentShellScript(
     agentCli,
@@ -7122,6 +7587,36 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
+
+  if (shouldUseCustomConversationView(context, agentCli)) {
+    const initialTurn = beginCustomConversationRun({
+      workspaceRoot,
+      nodeId,
+      executionLogId,
+      runKind: 'step',
+      agentCli,
+      selectedModel,
+      userMessage: userMessage.trim(),
+      prompt: conversationPrompt,
+      completionDecisionFilePath,
+      globalDataPath: settings.globalDataPath,
+      reviewerCliPath: settings.reviewerCliPath,
+      collaborationReviewMode: settings.collaborationReviewMode,
+      enabledEnhancements: settings.enabledEnhancements,
+      runDir
+    });
+    launchCustomConversationView({
+      context,
+      workspaceRoot,
+      nodeId,
+      title: node.title || (settings.language === 'en' ? 'Agent Conversation' : 'Agent 对话'),
+      agentCli,
+      selectedModel,
+      rootConversationId: executionLogId,
+      initialTurn
+    });
+    return;
+  }
 
   const { finalCommand } = buildAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
 
@@ -8873,6 +9368,15 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
  * Formulates the premium glassmorphic Webview page bundle.
  */
 export function deactivate() {
+  for (const view of customConversationViews.values()) {
+    void view.dispose();
+  }
+  for (const run of customConversationRuns.values()) {
+    if (run.heartbeat) clearInterval(run.heartbeat);
+  }
+  customConversationViews.clear();
+  customConversationExecutionKeys.clear();
+  customConversationRuns.clear();
   if (watcher) {
     watcher.dispose();
   }

@@ -24,6 +24,7 @@ export interface SolopreneurSettings {
   taskPermissionMode?: string;
   reviewerCliPath?: string;
   collaborationReviewMode?: string;
+  customConversationViewEnabled?: boolean;
   automationTasks?: SolomapAutomationSettings;
   proEntitlements?: Record<string, boolean>;
   proAccount?: ProAccountStatus;
