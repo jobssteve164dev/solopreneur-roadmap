@@ -166,6 +166,35 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       color: #00e5ff;
     }
 
+    .btn-collaboration {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      justify-content: center;
+      position: relative;
+    }
+
+    .btn-collaboration.is-active {
+      color: #49d6d0;
+      background: rgba(73, 214, 208, 0.10);
+    }
+
+    .btn-collaboration .collaboration-badge {
+      position: absolute;
+      top: 1px;
+      right: 1px;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: #49d6d0;
+      box-shadow: 0 0 0 2px var(--vscode-sidebar-background, var(--bg-dark));
+      display: none;
+    }
+
+    .btn-collaboration.has-room .collaboration-badge {
+      display: block;
+    }
+
     .btn-focus-timer {
       width: 23px;
       height: 23px;
@@ -188,7 +217,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     /* Settings Panel Overlay */
     .settings-overlay,
     .focus-timer-overlay,
-    .feedback-overlay {
+    .feedback-overlay,
+    .collaboration-overlay {
       position: absolute;
       top: 45px;
       left: 10px;
@@ -204,6 +234,292 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       max-height: calc(100vh - 70px);
       overflow-y: auto;
       animation: slide-down 0.2s ease-out;
+    }
+
+    .collaboration-overlay {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .collaboration-overlay .settings-header {
+      margin: 0;
+      padding: 12px;
+    }
+
+    .collaboration-content {
+      max-height: calc(100vh - 118px);
+      display: flex;
+      flex-direction: column;
+      min-height: 260px;
+    }
+
+    .collaboration-start,
+    .collaboration-room-list {
+      padding: 12px;
+    }
+
+    .collaboration-intro {
+      color: var(--text-muted);
+      font-size: 10.5px;
+      line-height: 1.55;
+      margin: 0 0 10px;
+    }
+
+    .collaboration-create-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: end;
+    }
+
+    .collaboration-create-row .settings-input {
+      min-height: 34px;
+    }
+
+    .collaboration-primary,
+    .collaboration-secondary,
+    .collaboration-message-action {
+      min-height: 34px;
+      border-radius: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      padding: 7px 10px;
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.05);
+      cursor: pointer;
+      font-size: 10.5px;
+      font-weight: 750;
+    }
+
+    .collaboration-primary {
+      border-color: rgba(73, 214, 208, 0.42);
+      background: rgba(73, 214, 208, 0.12);
+      color: #8ff5ee;
+    }
+
+    .collaboration-primary:hover,
+    .collaboration-primary:focus-visible {
+      border-color: rgba(73, 214, 208, 0.72);
+      background: rgba(73, 214, 208, 0.18);
+    }
+
+    .collaboration-primary:disabled,
+    .collaboration-secondary:disabled,
+    .collaboration-message-action:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    .collaboration-room-list {
+      border-top: 1px solid var(--border-glass);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .collaboration-room-list-title {
+      color: var(--text-muted);
+      font-size: 9.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .collaboration-room-item {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--border-glass);
+      border-radius: 7px;
+      padding: 7px 9px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.03);
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .collaboration-room-item:hover,
+    .collaboration-room-item:focus-visible {
+      border-color: rgba(73, 214, 208, 0.45);
+      background: rgba(73, 214, 208, 0.07);
+    }
+
+    .collaboration-room-item-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .collaboration-room-item-name {
+      font-size: 10.5px;
+      font-weight: 800;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .collaboration-room-item-time {
+      color: var(--text-muted);
+      font-size: 9px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .collaboration-room {
+      display: flex;
+      min-height: 0;
+      flex: 1;
+      flex-direction: column;
+    }
+
+    .collaboration-room-top {
+      padding: 9px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-glass);
+    }
+
+    .collaboration-room-status {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-muted);
+      font-size: 9.5px;
+    }
+
+    .collaboration-status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #fbbf24;
+      flex: none;
+    }
+
+    .collaboration-status-dot.online {
+      background: #49d6d0;
+      box-shadow: 0 0 0 3px rgba(73, 214, 208, 0.10);
+    }
+
+    .collaboration-status-dot.error {
+      background: #fb7185;
+    }
+
+    .collaboration-room-actions {
+      display: inline-flex;
+      gap: 6px;
+    }
+
+    .collaboration-room-actions .collaboration-secondary {
+      min-height: 30px;
+      padding: 5px 8px;
+    }
+
+    .collaboration-messages {
+      flex: 1;
+      min-height: 180px;
+      max-height: min(440px, calc(100vh - 310px));
+      overflow-y: auto;
+      padding: 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .collaboration-empty,
+    .collaboration-error {
+      margin: auto;
+      max-width: 260px;
+      color: var(--text-muted);
+      font-size: 10.5px;
+      line-height: 1.55;
+      text-align: center;
+    }
+
+    .collaboration-error {
+      color: #fda4af;
+      margin: 8px 0 0;
+      max-width: none;
+      text-align: left;
+    }
+
+    .collaboration-message {
+      max-width: 92%;
+      align-self: flex-start;
+      padding: 8px 9px;
+      border-radius: 9px 9px 9px 3px;
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .collaboration-message.mine {
+      align-self: flex-end;
+      border-radius: 9px 9px 3px 9px;
+      border-color: rgba(124, 77, 255, 0.28);
+      background: rgba(124, 77, 255, 0.10);
+    }
+
+    .collaboration-message-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 9px;
+      margin-bottom: 4px;
+      color: var(--text-muted);
+      font-size: 8.5px;
+    }
+
+    .collaboration-message-author {
+      color: #7be8e1;
+      font-weight: 800;
+    }
+
+    .collaboration-message-text {
+      color: var(--text-main);
+      font-size: 10.5px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .collaboration-message-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 7px;
+    }
+
+    .collaboration-message-action {
+      min-height: 28px;
+      padding: 4px 7px;
+      font-size: 9px;
+      font-weight: 700;
+    }
+
+    .collaboration-compose {
+      padding: 10px 11px 11px;
+      border-top: 1px solid var(--border-glass);
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px;
+      align-items: end;
+    }
+
+    .collaboration-compose textarea {
+      min-height: 54px;
+      max-height: 130px;
+      resize: vertical;
+    }
+
+    .collaboration-footnote {
+      padding: 0 11px 10px;
+      color: var(--text-muted);
+      font-size: 8.5px;
+      line-height: 1.45;
     }
 
     .focus-timer-card {
@@ -3425,6 +3741,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     <h2 class="brand-title"><img class="brand-wordmark" src="${wordmarkUri}" width="120" height="31" alt="SoloMap"></h2>
     <div class="header-actions">
       <button class="btn-gear btn-focus-timer" id="btn-toggle-focus-timer" title="Focus Timer"><span class="codicon codicon-clock"></span></button>
+      <button class="btn-gear btn-collaboration" id="btn-toggle-collaboration" title="Quick co-create" aria-label="Quick co-create"><span class="codicon codicon-comment-discussion"></span><span class="collaboration-badge" aria-hidden="true"></span></button>
       <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
       <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
     </div>
@@ -3442,6 +3759,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
   </div>
 
   <div class="global-focus-panel" id="global-focus-panel"></div>
+
+  <div class="collaboration-overlay" id="collaboration-panel">
+    <div class="settings-header">
+      <h3><span class="codicon codicon-comment-discussion"></span> <span id="collaboration-title">Quick co-create</span></h3>
+      <button class="btn-close-settings" id="btn-close-collaboration" aria-label="Close quick co-create"><span class="codicon codicon-close"></span></button>
+    </div>
+    <div class="collaboration-content" id="collaboration-content"></div>
+  </div>
 
   <div class="focus-timer-overlay" id="focus-timer-panel">
     <div class="settings-header">
@@ -3908,6 +4233,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const agentTimePlannerInput = document.getElementById('agent-time-planner-input');
     const btnAgentTimePlanner = document.getElementById('btn-agent-time-planner');
     const timePlanDraft = document.getElementById('time-plan-draft');
+    const btnToggleCollaboration = document.getElementById('btn-toggle-collaboration');
+    const btnCloseCollaboration = document.getElementById('btn-close-collaboration');
+    const collaborationPanel = document.getElementById('collaboration-panel');
+    const collaborationContent = document.getElementById('collaboration-content');
     const btnToggleFeedback = document.getElementById('btn-toggle-feedback');
     const btnCloseFeedback = document.getElementById('btn-close-feedback');
     const feedbackPanel = document.getElementById('feedback-panel');
@@ -3966,6 +4295,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnOpenScheduledTasks = document.getElementById('btn-open-scheduled-tasks');
     let focusTimerTick = null;
     let currentTimePlans = [];
+    let collaborationRooms = [];
+    let collaborationActiveRoom = null;
+    let collaborationSocket = null;
+    let collaborationCryptoKey = null;
+    let collaborationOnlineCount = 0;
+    let collaborationConnectionState = 'idle';
+    let collaborationError = '';
+    let collaborationNotice = '';
+    let collaborationPendingCopyRoomId = '';
+    let collaborationNickname = String((typeof vscode.getState === 'function' && vscode.getState() && vscode.getState().collaborationNickname) || '');
+    const collaborationMessages = new Map();
+    const collaborationSavedIdeaIds = new Set();
     let currentLanguage = 'zh';
     let currentNodes = [];
     let activeProjectPath = '';
@@ -4026,6 +4367,337 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function sameConversations(left, right) {
       return conversationsSignature(left) === conversationsSignature(right);
+    }
+
+    function collaborationRandomId(byteLength) {
+      const value = new Uint8Array(byteLength);
+      crypto.getRandomValues(value);
+      return collaborationToBase64Url(value);
+    }
+
+    function collaborationToBase64Url(bytes) {
+      let binary = '';
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replace(/[+]/g, '-').replace(/[/]/g, '_').replace(/=+$/g, '');
+    }
+
+    function collaborationFromBase64Url(value) {
+      const base64 = String(value || '').replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - String(value || '').length % 4) % 4);
+      const binary = atob(base64);
+      return Uint8Array.from(binary, character => character.charCodeAt(0));
+    }
+
+    function collaborationFormatRemaining(expiresAt) {
+      const minutes = Math.max(0, Math.ceil((Number(expiresAt || 0) - Date.now()) / 60000));
+      if (minutes >= 60) return Math.floor(minutes / 60) + 'h ' + (minutes % 60) + 'm';
+      return minutes + 'm';
+    }
+
+    function collaborationCurrentProject() {
+      const projectPath = currentProjects.selectedProjectPath || '';
+      return (currentProjects.projects || []).find(project => project.path === projectPath)
+        || (currentProjects.portfolio || []).find(project => project.path === projectPath)
+        || null;
+    }
+
+    function collaborationRoomTitle(project) {
+      const projectName = project && (project.name || project.path) ? (project.name || project.path) : '';
+      return projectName ? projectName + ' · ' + t('collaborationRoomDefault') : t('collaborationRoomDefault');
+    }
+
+    async function collaborationImportKey(value) {
+      return crypto.subtle.importKey('raw', collaborationFromBase64Url(value), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    }
+
+    async function collaborationEncryptPayload(payload) {
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(collaborationActiveRoom.roomId) },
+        collaborationCryptoKey,
+        new TextEncoder().encode(JSON.stringify(payload))
+      );
+      return { iv: collaborationToBase64Url(iv), ciphertext: collaborationToBase64Url(new Uint8Array(encrypted)) };
+    }
+
+    async function collaborationDecryptEnvelope(envelope) {
+      const decrypted = await crypto.subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: collaborationFromBase64Url(envelope.iv),
+          additionalData: new TextEncoder().encode(collaborationActiveRoom.roomId)
+        },
+        collaborationCryptoKey,
+        collaborationFromBase64Url(envelope.ciphertext)
+      );
+      const payload = JSON.parse(new TextDecoder().decode(decrypted));
+      if (!payload || typeof payload.text !== 'string' || typeof payload.authorName !== 'string') {
+        throw new Error('Invalid collaboration message payload.');
+      }
+      const text = payload.text.trim().slice(0, 4000);
+      const authorName = payload.authorName.trim().slice(0, 40);
+      if (!text || !authorName) throw new Error('Invalid collaboration message payload.');
+      const authoredAt = Number(payload.createdAt);
+      const relayTime = Number(envelope.receivedAt || envelope.createdAt);
+      const createdAt = Number.isFinite(authoredAt) && Math.abs(authoredAt - Date.now()) <= 2 * 24 * 60 * 60 * 1000
+        ? authoredAt
+        : (Number.isFinite(relayTime) && Math.abs(relayTime - Date.now()) <= 2 * 24 * 60 * 60 * 1000 ? relayTime : Date.now());
+      return { authorName, text, createdAt };
+    }
+
+    async function collaborationAcceptEnvelope(envelope, deferRender) {
+      if (!envelope || envelope.type !== 'message' || collaborationMessages.has(envelope.id)) return;
+      try {
+        const payload = await collaborationDecryptEnvelope(envelope);
+        collaborationMessages.set(envelope.id, { ...envelope, ...payload });
+        if (!deferRender) renderCollaborationPanel();
+      } catch {
+        collaborationError = t('collaborationDecryptFailed');
+        if (!deferRender) renderCollaborationPanel();
+      }
+    }
+
+    function collaborationDisconnect() {
+      const socket = collaborationSocket;
+      collaborationSocket = null;
+      collaborationCryptoKey = null;
+      collaborationConnectionState = 'idle';
+      collaborationOnlineCount = 0;
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'Closed locally');
+    }
+
+    async function collaborationConnect(room) {
+      collaborationDisconnect();
+      collaborationActiveRoom = room;
+      collaborationMessages.clear();
+      collaborationError = '';
+      collaborationNotice = '';
+      if (!room || Number(room.expiresAt || 0) <= Date.now()) {
+        collaborationConnectionState = 'expired';
+        renderCollaborationPanel();
+        return;
+      }
+      collaborationConnectionState = 'connecting';
+      renderCollaborationPanel();
+      try {
+        collaborationCryptoKey = await collaborationImportKey(room.encryptionKey);
+        const socketUrl = 'wss://solomap.app/api/collaboration/rooms/' + encodeURIComponent(room.roomId) + '/socket?token=' + encodeURIComponent(room.relayToken);
+        const socket = new WebSocket(socketUrl);
+        collaborationSocket = socket;
+        socket.addEventListener('open', () => {
+          if (collaborationSocket !== socket) return;
+          collaborationConnectionState = 'connected';
+          renderCollaborationPanel();
+        });
+        socket.addEventListener('message', async event => {
+          if (collaborationSocket !== socket) return;
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+          if (message.type === 'history') {
+            collaborationActiveRoom.expiresAt = Number(message.expiresAt || collaborationActiveRoom.expiresAt);
+            for (const envelope of message.messages || []) await collaborationAcceptEnvelope(envelope, true);
+            renderCollaborationPanel();
+            return;
+          }
+          if (message.type === 'presence') {
+            collaborationOnlineCount = Number(message.count || 0);
+            renderCollaborationPanel();
+            return;
+          }
+          await collaborationAcceptEnvelope(message, false);
+        });
+        socket.addEventListener('close', event => {
+          if (collaborationSocket !== socket) return;
+          collaborationSocket = null;
+          collaborationConnectionState = event.code === 4001 ? 'expired' : 'offline';
+          renderCollaborationPanel();
+        });
+        socket.addEventListener('error', () => {
+          if (collaborationSocket !== socket) return;
+          collaborationConnectionState = 'offline';
+          collaborationError = t('collaborationCreateFailed');
+          renderCollaborationPanel();
+        });
+      } catch {
+        collaborationConnectionState = 'offline';
+        collaborationError = t('collaborationCreateFailed');
+        renderCollaborationPanel();
+      }
+    }
+
+    async function createCollaborationRoom() {
+      const project = collaborationCurrentProject();
+      if (!project || !project.path) {
+        collaborationError = t('collaborationProjectRequired');
+        renderCollaborationPanel();
+        return;
+      }
+      const nicknameInput = collaborationContent.querySelector('[data-collaboration-nickname]');
+      const nickname = String(nicknameInput ? nicknameInput.value : collaborationNickname).trim();
+      if (!nickname) {
+        if (nicknameInput) nicknameInput.focus();
+        return;
+      }
+      collaborationNickname = nickname.slice(0, 40);
+      if (typeof vscode.setState === 'function') {
+        vscode.setState({ ...(vscode.getState() || {}), collaborationNickname });
+      }
+      collaborationConnectionState = 'creating';
+      collaborationError = '';
+      renderCollaborationPanel();
+      const now = Date.now();
+      const room = {
+        roomId: collaborationRandomId(18),
+        relayToken: collaborationRandomId(32),
+        encryptionKey: collaborationRandomId(32),
+        title: collaborationRoomTitle(project),
+        projectPath: project.path,
+        createdAt: now,
+        lastActiveAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+        authorId: collaborationRandomId(16),
+        nickname: collaborationNickname
+      };
+      try {
+        const response = await fetch('https://solomap.app/api/collaboration/rooms', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ roomId: room.roomId, relayToken: room.relayToken, expiresAt: room.expiresAt })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || 'Room creation failed.');
+        room.expiresAt = Number(result.expiresAt || room.expiresAt);
+        collaborationRooms = [room, ...collaborationRooms.filter(item => item.roomId !== room.roomId)];
+        collaborationPendingCopyRoomId = room.roomId;
+        vscode.postMessage({ command: 'collaboration.saveRoom', ...room });
+        await collaborationConnect(room);
+      } catch {
+        collaborationConnectionState = 'idle';
+        collaborationError = t('collaborationCreateFailed');
+        renderCollaborationPanel();
+      }
+    }
+
+    async function sendCollaborationMessage() {
+      const input = collaborationContent.querySelector('[data-collaboration-message-input]');
+      const text = String(input ? input.value : '').trim();
+      if (!text || !collaborationSocket || collaborationSocket.readyState !== WebSocket.OPEN || !collaborationActiveRoom) return;
+      const createdAt = Date.now();
+      const encrypted = await collaborationEncryptPayload({
+        authorName: collaborationActiveRoom.nickname || collaborationNickname,
+        text,
+        createdAt
+      });
+      collaborationSocket.send(JSON.stringify({
+        type: 'message',
+        id: collaborationRandomId(16),
+        authorId: collaborationActiveRoom.authorId,
+        createdAt,
+        ...encrypted
+      }));
+      if (input) input.value = '';
+    }
+
+    function addCollaborationMessageToAgent(messageId) {
+      const message = collaborationMessages.get(messageId);
+      const projectPath = String(collaborationActiveRoom && collaborationActiveRoom.projectPath || currentProjects.selectedProjectPath || '');
+      if (!message || !projectPath) return;
+      const prefix = currentLanguage === 'zh' ? '来自临时共创房间的建议' : 'Suggestion from a quick co-create room';
+      const addition = prefix + '（' + message.authorName + '）：\\n' + message.text;
+      const existing = String(projectSoloDrafts[projectPath] || '').trim();
+      projectSoloDrafts[projectPath] = existing ? existing + '\\n\\n' + addition : addition;
+      projectConversationModes[projectPath] = 'solo';
+      collaborationNotice = t('collaborationAddedToAgent');
+      collaborationPanel.style.display = 'none';
+      if (projectPath !== currentProjects.selectedProjectPath) {
+        vscode.postMessage({ command: 'project.select', projectPath });
+      } else {
+        renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+      }
+    }
+
+    function saveCollaborationMessageAsIdea(messageId) {
+      const message = collaborationMessages.get(messageId);
+      const projectPath = String(collaborationActiveRoom && collaborationActiveRoom.projectPath || '');
+      if (!message || !projectPath) return;
+      vscode.postMessage({
+        command: 'collaboration.saveIdea',
+        projectPath,
+        messageId,
+        authorName: message.authorName,
+        text: message.text,
+        createdAt: message.createdAt
+      });
+    }
+
+    function collaborationConnectionLabel() {
+      if (collaborationConnectionState === 'connected') return t('collaborationConnected');
+      if (collaborationConnectionState === 'offline') return t('collaborationOffline');
+      if (collaborationConnectionState === 'expired') return t('collaborationExpired');
+      return t('collaborationConnecting');
+    }
+
+    function renderCollaborationPanel() {
+      if (!collaborationContent) return;
+      collaborationRooms = (collaborationRooms || []).filter(room => Number(room.expiresAt || 0) > Date.now());
+      if (!collaborationActiveRoom) {
+        const roomRows = collaborationRooms.length
+          ? collaborationRooms.map(room => '<button type="button" class="collaboration-room-item" data-collaboration-open-room="' + escapeHtml(room.roomId) + '"><span class="collaboration-room-item-main"><span class="collaboration-room-item-name">' + escapeHtml(room.title || t('collaborationRoomDefault')) + '</span><span class="collaboration-room-item-time">' + escapeHtml(collaborationFormatRemaining(room.expiresAt) + ' ' + t('collaborationRemaining')) + '</span></span><span class="codicon codicon-chevron-right"></span></button>').join('')
+          : '<div class="collaboration-empty">' + escapeHtml(t('collaborationRoomsEmpty')) + '</div>';
+        collaborationContent.innerHTML = '<div class="collaboration-start"><p class="collaboration-intro">' + escapeHtml(t('collaborationIntro')) + '</p><div class="collaboration-create-row"><label class="settings-lbl-title"><span>' + escapeHtml(t('collaborationNameLabel')) + '</span><input type="text" class="settings-input" maxlength="40" data-collaboration-nickname placeholder="' + escapeHtml(t('collaborationNamePlaceholder')) + '" value="' + escapeHtml(collaborationNickname) + '"></label><button type="button" class="collaboration-primary" data-collaboration-create' + (collaborationConnectionState === 'creating' ? ' disabled' : '') + '>' + escapeHtml(collaborationConnectionState === 'creating' ? t('collaborationCreating') : t('collaborationCreate')) + '</button></div>' + (collaborationError ? '<div class="collaboration-error" role="alert">' + escapeHtml(collaborationError) + '</div>' : '') + '</div><div class="collaboration-room-list"><div class="collaboration-room-list-title">' + escapeHtml(t('collaborationRooms')) + '</div>' + roomRows + '</div>';
+        const createButton = collaborationContent.querySelector('[data-collaboration-create]');
+        if (createButton) createButton.addEventListener('click', createCollaborationRoom);
+        collaborationContent.querySelectorAll('[data-collaboration-open-room]').forEach(button => {
+          button.addEventListener('click', () => {
+            const room = collaborationRooms.find(item => item.roomId === button.getAttribute('data-collaboration-open-room'));
+            if (room) void collaborationConnect(room);
+          });
+        });
+        btnToggleCollaboration.classList.toggle('has-room', collaborationRooms.length > 0);
+        return;
+      }
+
+      const room = collaborationActiveRoom;
+      const statusClassName = collaborationConnectionState === 'connected' ? ' online' : (collaborationConnectionState === 'offline' || collaborationConnectionState === 'expired' ? ' error' : '');
+      const ordered = [...collaborationMessages.values()].sort((left, right) => Number(left.sequence || left.createdAt) - Number(right.sequence || right.createdAt));
+      const messageRows = ordered.length
+        ? ordered.map(message => {
+          const saved = collaborationSavedIdeaIds.has(message.id);
+          return '<article class="collaboration-message' + (message.authorId === room.authorId ? ' mine' : '') + '"><div class="collaboration-message-head"><span class="collaboration-message-author">' + escapeHtml(message.authorName) + '</span><span>' + escapeHtml(new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) + '</span></div><div class="collaboration-message-text">' + escapeHtml(message.text) + '</div><div class="collaboration-message-actions"><button type="button" class="collaboration-message-action" data-collaboration-to-agent="' + escapeHtml(message.id) + '">' + escapeHtml(t('collaborationToAgent')) + '</button><button type="button" class="collaboration-message-action" data-collaboration-save-idea="' + escapeHtml(message.id) + '"' + (saved ? ' disabled' : '') + '>' + escapeHtml(saved ? t('collaborationIdeaSaved') : t('collaborationSaveIdea')) + '</button></div></article>';
+        }).join('')
+        : '<div class="collaboration-empty">' + escapeHtml(t('collaborationMessageEmpty')) + '</div>';
+      const canSend = collaborationConnectionState === 'connected';
+      collaborationContent.innerHTML = '<div class="collaboration-room"><div class="collaboration-room-top"><div class="collaboration-room-status"><span class="collaboration-status-dot' + statusClassName + '"></span><span>' + escapeHtml(collaborationConnectionLabel()) + ' · ' + collaborationOnlineCount + ' ' + escapeHtml(t('collaborationOnline')) + ' · ' + escapeHtml(collaborationFormatRemaining(room.expiresAt) + ' ' + t('collaborationRemaining')) + '</span></div><div class="collaboration-room-actions"><button type="button" class="collaboration-secondary" data-collaboration-back title="' + escapeHtml(t('collaborationBack')) + '"><span class="codicon codicon-arrow-left"></span></button><button type="button" class="collaboration-secondary" data-collaboration-copy>' + escapeHtml(t('collaborationCopyInvite')) + '</button></div></div><div class="collaboration-messages" data-collaboration-messages>' + messageRows + '</div><div class="collaboration-compose"><textarea class="settings-input" maxlength="4000" rows="2" data-collaboration-message-input placeholder="' + escapeHtml(t('collaborationMessagePlaceholder')) + '"' + (canSend ? '' : ' disabled') + '></textarea><button type="button" class="collaboration-primary" data-collaboration-send' + (canSend ? '' : ' disabled') + '>' + escapeHtml(t('collaborationSend')) + '</button></div><div class="collaboration-footnote">' + escapeHtml(collaborationNotice || collaborationError || t('collaborationPrivacy')) + (collaborationConnectionState === 'offline' ? ' · <button type="button" class="collaboration-secondary" data-collaboration-reconnect>' + escapeHtml(t('collaborationConnecting')) + '</button>' : '') + '</div></div>';
+      const messages = collaborationContent.querySelector('[data-collaboration-messages]');
+      if (messages) messages.scrollTop = messages.scrollHeight;
+      const backButton = collaborationContent.querySelector('[data-collaboration-back]');
+      if (backButton) backButton.addEventListener('click', () => {
+        collaborationDisconnect();
+        collaborationActiveRoom = null;
+        collaborationMessages.clear();
+        collaborationError = '';
+        collaborationNotice = '';
+        renderCollaborationPanel();
+      });
+      const copyButton = collaborationContent.querySelector('[data-collaboration-copy]');
+      if (copyButton) copyButton.addEventListener('click', () => vscode.postMessage({ command: 'collaboration.copyInvite', roomId: room.roomId }));
+      const sendButton = collaborationContent.querySelector('[data-collaboration-send]');
+      if (sendButton) sendButton.addEventListener('click', () => void sendCollaborationMessage());
+      const messageInput = collaborationContent.querySelector('[data-collaboration-message-input]');
+      if (messageInput) messageInput.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+          event.preventDefault();
+          void sendCollaborationMessage();
+        }
+      });
+      const reconnectButton = collaborationContent.querySelector('[data-collaboration-reconnect]');
+      if (reconnectButton) reconnectButton.addEventListener('click', () => void collaborationConnect(room));
+      collaborationContent.querySelectorAll('[data-collaboration-to-agent]').forEach(button => button.addEventListener('click', () => addCollaborationMessageToAgent(button.getAttribute('data-collaboration-to-agent') || '')));
+      collaborationContent.querySelectorAll('[data-collaboration-save-idea]').forEach(button => button.addEventListener('click', () => saveCollaborationMessageAsIdea(button.getAttribute('data-collaboration-save-idea') || '')));
+      btnToggleCollaboration.classList.add('has-room');
     }
 
     function mergePortfolioUpdate(existingPortfolio, incomingPortfolio, registeredProjects, updatedProjectPaths) {
@@ -4357,6 +5029,37 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         enhancementStateEnabled: '已启用',
         enhancementStateDisabled: '未启用',
         stopRun: '停止',
+        collaborationTitle: '临时共创',
+        collaborationOpen: '打开临时共创',
+        collaborationClose: '关闭临时共创',
+        collaborationIntro: '为当前项目发起一个最长 24 小时的加密房间。聊天会消失，有价值的想法可以进入项目。',
+        collaborationNameLabel: '我的昵称',
+        collaborationNamePlaceholder: '参与者会看到这个昵称',
+        collaborationCreate: '发起共创',
+        collaborationCreating: '正在创建…',
+        collaborationRooms: '进行中的房间',
+        collaborationRoomsEmpty: '还没有进行中的共创房间。',
+        collaborationRoomDefault: '临时共创',
+        collaborationConnecting: '正在连接',
+        collaborationConnected: '已连接',
+        collaborationOffline: '连接已断开',
+        collaborationExpired: '房间已结束',
+        collaborationOnline: '人在线',
+        collaborationRemaining: '后结束',
+        collaborationCopyInvite: '复制邀请',
+        collaborationInviteCopied: '邀请链接已复制',
+        collaborationBack: '房间列表',
+        collaborationMessagePlaceholder: '分享一个想法、问题或审计意见…',
+        collaborationSend: '发送',
+        collaborationMessageEmpty: '围绕一个具体问题开始交流。',
+        collaborationToAgent: '加入 Agent 下一轮',
+        collaborationSaveIdea: '保存为项目想法',
+        collaborationIdeaSaved: '已保存',
+        collaborationAddedToAgent: '已放入当前项目的自由研讨输入框',
+        collaborationPrivacy: '端到端加密 · 中继只保存最长 24 小时密文 · 远端参与者不能控制 Agent',
+        collaborationProjectRequired: '请先选择一个项目。',
+        collaborationCreateFailed: '暂时无法创建房间，请检查网络后重试。',
+        collaborationDecryptFailed: '有一条消息无法解密，已安全跳过。',
         feedback: '建议反馈',
         feedbackNotWorking: '没跑通',
         feedbackNextStep: '不懂下一步',
@@ -4739,6 +5442,37 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         enhancementStateEnabled: 'Enabled',
         enhancementStateDisabled: 'Disabled',
         stopRun: 'Stop',
+        collaborationTitle: 'Quick co-create',
+        collaborationOpen: 'Open quick co-create',
+        collaborationClose: 'Close quick co-create',
+        collaborationIntro: 'Start an encrypted room for the current project. It lasts no longer than 24 hours, and useful ideas can move back into the project.',
+        collaborationNameLabel: 'Your name',
+        collaborationNamePlaceholder: 'Other participants will see this name',
+        collaborationCreate: 'Start room',
+        collaborationCreating: 'Creating…',
+        collaborationRooms: 'Active rooms',
+        collaborationRoomsEmpty: 'No active co-create rooms yet.',
+        collaborationRoomDefault: 'Quick co-create',
+        collaborationConnecting: 'Connecting',
+        collaborationConnected: 'Connected',
+        collaborationOffline: 'Disconnected',
+        collaborationExpired: 'Room ended',
+        collaborationOnline: 'online',
+        collaborationRemaining: 'remaining',
+        collaborationCopyInvite: 'Copy invite',
+        collaborationInviteCopied: 'Invite copied',
+        collaborationBack: 'Room list',
+        collaborationMessagePlaceholder: 'Share an idea, question, or review note…',
+        collaborationSend: 'Send',
+        collaborationMessageEmpty: 'Start with one concrete question.',
+        collaborationToAgent: 'Add to Agent next turn',
+        collaborationSaveIdea: 'Save as project idea',
+        collaborationIdeaSaved: 'Saved',
+        collaborationAddedToAgent: 'Added to the current project Solo draft',
+        collaborationPrivacy: 'End-to-end encrypted · relay keeps ciphertext up to 24 hours · participants cannot control the Agent',
+        collaborationProjectRequired: 'Choose a project first.',
+        collaborationCreateFailed: 'The room could not be created. Check the connection and try again.',
+        collaborationDecryptFailed: 'One message could not be decrypted and was skipped safely.',
         feedback: 'Feedback',
         feedbackNotWorking: 'Not working',
         feedbackNextStep: 'Next step unclear',
@@ -5003,6 +5737,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('portfolio-title', t('portfolioTitle'));
       btnToggleSettings.title = t('settingsTitle');
       if (btnToggleFocusTimer) btnToggleFocusTimer.title = t('focusTimerTitle');
+      if (btnToggleCollaboration) {
+        btnToggleCollaboration.title = t('collaborationOpen');
+        btnToggleCollaboration.setAttribute('aria-label', t('collaborationOpen'));
+      }
+      if (btnCloseCollaboration) {
+        btnCloseCollaboration.title = t('collaborationClose');
+        btnCloseCollaboration.setAttribute('aria-label', t('collaborationClose'));
+      }
       if (btnCloseFocusTimer) {
         btnCloseFocusTimer.title = t('closeTimePlan');
         btnCloseFocusTimer.setAttribute('aria-label', t('closeTimePlan'));
@@ -5010,6 +5752,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
       btnAddProject.title = t('chooseProject');
       setText('focus-timer-title', t('focusTimerTitle'));
+      setText('collaboration-title', t('collaborationTitle'));
       setText('focus-section-title', t('focusSectionTitle'));
       setText('label-focus-timer-minutes', t('focusTimerMinutes'));
       setText('text-start-focus-timer', t('focusTimerStart'));
@@ -5110,10 +5853,35 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderProAccount(currentSettings);
       renderAutomationSettings(currentSettings);
+      renderCollaborationPanel();
       renderSidebar(currentNodes);
     }
 
     // Toggle settings panel
+    if (btnToggleCollaboration) {
+      btnToggleCollaboration.addEventListener('click', () => {
+        if (collaborationPanel.style.display === 'block') {
+          collaborationPanel.style.display = 'none';
+          btnToggleCollaboration.classList.remove('is-active');
+        } else {
+          settingsPanel.style.display = 'none';
+          focusTimerPanel.style.display = 'none';
+          feedbackPanel.style.display = 'none';
+          collaborationPanel.style.display = 'block';
+          btnToggleCollaboration.classList.add('is-active');
+          vscode.postMessage({ command: 'collaboration.getRooms' });
+          renderCollaborationPanel();
+        }
+      });
+    }
+
+    if (btnCloseCollaboration) {
+      btnCloseCollaboration.addEventListener('click', () => {
+        collaborationPanel.style.display = 'none';
+        btnToggleCollaboration.classList.remove('is-active');
+      });
+    }
+
     if (btnToggleFocusTimer) {
       btnToggleFocusTimer.addEventListener('click', () => {
         if (focusTimerPanel.style.display === 'block') {
@@ -5121,6 +5889,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         } else {
           settingsPanel.style.display = 'none';
           if (feedbackPanel) feedbackPanel.style.display = 'none';
+          if (collaborationPanel) collaborationPanel.style.display = 'none';
+          if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
           focusTimerPanel.style.display = 'block';
           updateScheduledTasksTarget();
           renderScheduledTasksView();
@@ -5256,6 +6026,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         } else {
           settingsPanel.style.display = 'none';
           if (focusTimerPanel) focusTimerPanel.style.display = 'none';
+          if (collaborationPanel) collaborationPanel.style.display = 'none';
+          if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
           feedbackPanel.style.display = 'block';
         }
       });
@@ -5273,6 +6045,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       } else {
         feedbackPanel.style.display = 'none';
         if (focusTimerPanel) focusTimerPanel.style.display = 'none';
+        if (collaborationPanel) collaborationPanel.style.display = 'none';
+        if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
         settingsPanel.style.display = 'block';
         vscode.postMessage({ command: 'settings.get' });
         requestAgentImpact();
@@ -6179,6 +6953,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     vscode.postMessage({ command: 'getNodes' });
     vscode.postMessage({ command: 'settings.get' });
     vscode.postMessage({ command: 'project.getAll' });
+    vscode.postMessage({ command: 'collaboration.getRooms' });
     vscode.postMessage({ command: 'getDailyReview' });
 
     // Handle messages
@@ -6352,9 +7127,39 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderAgentImpact(message.status || {});
           break;
 
+        case 'collaborationRoomsLoaded': {
+          collaborationRooms = Array.isArray(message.rooms) ? message.rooms : [];
+          if (collaborationActiveRoom) {
+            const refreshedRoom = collaborationRooms.find(room => room.roomId === collaborationActiveRoom.roomId);
+            if (refreshedRoom) collaborationActiveRoom = { ...collaborationActiveRoom, ...refreshedRoom };
+          }
+          if (collaborationPendingCopyRoomId) {
+            const pendingRoomId = collaborationPendingCopyRoomId;
+            collaborationPendingCopyRoomId = '';
+            vscode.postMessage({ command: 'collaboration.copyInvite', roomId: pendingRoomId });
+          }
+          renderCollaborationPanel();
+          break;
+        }
+
+        case 'collaborationInviteCopied':
+          collaborationNotice = t('collaborationInviteCopied');
+          renderCollaborationPanel();
+          break;
+
+        case 'collaborationIdeaSaved':
+          collaborationSavedIdeaIds.add(String(message.messageId || ''));
+          collaborationNotice = t('collaborationIdeaSaved');
+          renderCollaborationPanel();
+          break;
+
         case 'sidebarActionFailed':
           pendingConversationContinuations.clear();
           deliveryActionMessage = message.message || '';
+          if (collaborationPanel && collaborationPanel.style.display === 'block') {
+            collaborationError = message.message || t('collaborationCreateFailed');
+            renderCollaborationPanel();
+          }
           if (cliTestBadge && settingsPanel && settingsPanel.style.display === 'block') {
             cliTestBadge.style.display = 'block';
             cliTestBadge.className = 'cli-badge error';

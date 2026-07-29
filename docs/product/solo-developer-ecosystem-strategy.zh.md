@@ -88,7 +88,7 @@ GitHub 主要连接代码与开源协作，Discord 等社区主要连接人与�
 
 侧边栏顶部可以提供协作房间入口。入口打开可折叠房间区域，显示在线人数和连接状态，不新增第四种路线图模式。
 
-### 第一版能力
+### 第一版目标能力
 
 - 随机生成房间和邀请链接，不使用项目名、仓库地址或本地路径作为房间标识。
 - 无需参与者安装 SoloMap；邀请链接可以打开官网轻量房间页面。
@@ -98,6 +98,20 @@ GitHub 主要连接代码与开源协作，Discord 等社区主要连接人与�
 - 只允许项目拥有者执行上述本地动作。
 - 默认临时，不把完整聊天记录写入项目 SQLite、Git 或路线图。
 - 可以在参与者重新连接时恢复少量短期密文消息。
+
+### 已落地的首个可用版本（2026-07-29）
+
+当前代码已经完成“创建房间—分享邀请—多人交流—把有效输入带回项目”的最小闭环：
+
+- SoloMap 侧边栏顶部提供“临时共创”入口，可创建房间并复制邀请链接。
+- 未安装 SoloMap 的参与者可直接在官网房间页以临时昵称加入。
+- 正文在浏览器或插件内使用 AES-GCM 加密；官网中继只接收和转发密文。
+- 房间最长存在 24 小时，只保留最近 100 条密文，每条消息的中继载荷不超过 16 KiB。
+- 插件将房间凭证放入 VS Code SecretStorage，官网参与者的最近房间只保存在当前浏览器 IndexedDB。
+- 项目拥有者可以把单条消息加入 Agent 下一轮输入，或追加保存到项目想法；两种动作都不会自动运行 Agent 或修改路线图。
+- 官网中继使用一个房间一个 Durable Object 的 WebSocket 通道，房间到期后由定时清理删除状态。
+
+首个版本尚未包含回复引用、Agent 粗粒度状态共享、文件传输、账号身份、跨设备同步和公共共创空间。这些缺口不改变当前临时房间的数据边界，也不会通过自动上传项目内容来补齐。
 
 ### 明确禁止
 
@@ -375,4 +389,3 @@ SoloMap 的信誉不应以粉丝数、点赞数或发言量为核心。更可信
 - Chitchatter：https://github.com/jeremyckahn/chitchatter
 - Cloudflare Durable Objects WebSocket：https://developers.cloudflare.com/durable-objects/best-practices/websockets/
 - Cloudflare Durable Objects 设计规则：https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
-

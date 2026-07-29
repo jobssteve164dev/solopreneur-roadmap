@@ -14,6 +14,15 @@ import {
   legalRoutes,
   legalSupplementRoute
 } from "./legalDocuments.js";
+import {
+  buildCollaborationRoomPage,
+  collaborationRoomPageHeaders
+} from "./collaborationPage.js";
+import {
+  CollaborationRoom,
+  handleCollaborationRoomCreate,
+  handleCollaborationSocket
+} from "./collaborationRelay.js";
 
 const SITE_ORIGIN = "https://solomap.app";
 const MARKETPLACE_URL = "https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap";
@@ -5004,6 +5013,8 @@ function handleLocaleRedirect(request, env, origin) {
   // 排除 API、静态文件、健康检查等路由
   if (
     pathname.startsWith("/api/") ||
+    pathname.startsWith("/room/") ||
+    pathname.startsWith("/zh/room/") ||
     pathname === "/health" ||
     pathname === "/robots.txt" ||
     pathname === "/llms.txt" ||
@@ -5118,6 +5129,23 @@ export default {
 
     if (url.pathname === "/health") {
       return textResponse("ok");
+    }
+
+    if (url.pathname === "/api/collaboration/rooms" && (request.method === "POST" || request.method === "OPTIONS")) {
+      return handleCollaborationRoomCreate(request, env);
+    }
+
+    if (/^\/api\/collaboration\/rooms\/[A-Za-z0-9_-]{20,64}\/socket$/.test(url.pathname)) {
+      return handleCollaborationSocket(request, env);
+    }
+
+    const collaborationRoomMatch = url.pathname.match(/^\/(zh\/)?room\/([A-Za-z0-9_-]{20,64})$/);
+    if (request.method === "GET" && collaborationRoomMatch) {
+      return htmlResponse(
+        buildCollaborationRoomPage(collaborationRoomMatch[2], collaborationRoomMatch[1] ? "zh" : "en"),
+        200,
+        collaborationRoomPageHeaders()
+      );
     }
 
     const authPageMatch = url.pathname.match(/^\/(?:zh\/)?(login|register|forgot-password|reset-password)$/);
@@ -5274,4 +5302,4 @@ Sitemap: ${origin}/sitemap.xml
   }
 };
 
-export { resetStatsCacheForTest };
+export { CollaborationRoom, resetStatsCacheForTest };

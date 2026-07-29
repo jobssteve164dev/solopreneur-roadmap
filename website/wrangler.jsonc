@@ -23,5 +23,21 @@
   },
   "vars": {
     "SITE_ORIGIN": "https://solomap.app"
-  }
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "COLLABORATION_ROOMS",
+        "class_name": "CollaborationRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "collaboration-rooms-v1",
+      "new_sqlite_classes": [
+        "CollaborationRoom"
+      ]
+    }
+  ]
 }

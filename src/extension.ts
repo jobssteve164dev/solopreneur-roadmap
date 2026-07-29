@@ -159,6 +159,12 @@ import {
   recordLocalUsageEvent as recordLocalUsageEventInStats
 } from './localUsageStats';
 import { recordLocalDiagnosticError } from './localDiagnostics';
+import {
+  appendCollaborationIdea,
+  buildCollaborationInviteUrl,
+  readCollaborationRooms,
+  saveCollaborationRoom
+} from './collaborationRooms';
 import { clearProjectInvestmentCache } from './projectAnalytics';
 import {
   claimActiveConversation,
@@ -668,6 +674,43 @@ async function handleSharedWebviewAction(
       confirmTimePlan(projectPath);
       sidebarProvider?.sendSettings();
       await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
+    },
+    'collaboration.getRooms': async () => {
+      await respond({ command: 'collaborationRoomsLoaded', rooms: await readCollaborationRooms(context) });
+    },
+    'collaboration.saveRoom': async (request) => {
+      const rooms = await saveCollaborationRoom(context, {
+        roomId: String(request.roomId || ''),
+        title: String(request.title || ''),
+        projectPath: String(request.projectPath || ''),
+        authorId: String(request.authorId || ''),
+        nickname: String(request.nickname || ''),
+        relayToken: String(request.relayToken || ''),
+        encryptionKey: String(request.encryptionKey || ''),
+        createdAt: Number(request.createdAt || Date.now()),
+        expiresAt: Number(request.expiresAt || 0),
+        lastActiveAt: Number(request.lastActiveAt || Date.now())
+      });
+      await respond({ command: 'collaborationRoomsLoaded', rooms });
+    },
+    'collaboration.copyInvite': async (request) => {
+      const roomId = String(request.roomId || '');
+      const room = (await readCollaborationRooms(context)).find((item) => item.roomId === roomId);
+      if (!room) throw new Error('The collaboration room is unavailable or expired.');
+      await vscode.env.clipboard.writeText(buildCollaborationInviteUrl(room, getPersistedSettings(context).language));
+      await respond({ command: 'collaborationInviteCopied', roomId });
+    },
+    'collaboration.saveIdea': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      const project = getProjects(context).find((item) => item.path === projectPath);
+      if (!project) throw new Error('Choose a registered project before saving this idea.');
+      const notes = appendCollaborationIdea(project.notes || '', {
+        authorName: String(request.authorName || ''),
+        text: String(request.text || ''),
+        createdAt: Number(request.createdAt || Date.now())
+      });
+      await updateProjectMetadata(context, projectPath, { notes });
+      await respond({ command: 'collaborationIdeaSaved', messageId: String(request.messageId || '') });
     },
     'conversation.runRoadmapRevision': async (request) => {
       revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'roadmap-revision');
