@@ -37,6 +37,10 @@
       {
         "name": "COLLABORATION_GLOBAL_QUOTA",
         "class_name": "CollaborationQuota"
+      },
+      {
+        "name": "COLLABORATION_LOBBY",
+        "class_name": "CollaborationLobby"
       }
     ]
   },
@@ -51,6 +55,12 @@
       "tag": "collaboration-quotas-v1",
       "new_sqlite_classes": [
         "CollaborationQuota"
+      ]
+    },
+    {
+      "tag": "collaboration-lobby-v1",
+      "new_sqlite_classes": [
+        "CollaborationLobby"
       ]
     }
   ],
@@ -68,6 +78,14 @@
       "namespace_id": "21002",
       "simple": {
         "limit": 10,
+        "period": 60
+      }
+    },
+    {
+      "name": "COLLABORATION_LOBBY_JOIN_LIMITER",
+      "namespace_id": "21003",
+      "simple": {
+        "limit": 30,
         "period": 60
       }
     }

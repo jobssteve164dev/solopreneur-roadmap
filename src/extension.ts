@@ -162,6 +162,7 @@ import { recordLocalDiagnosticError } from './localDiagnostics';
 import {
   appendCollaborationIdea,
   buildCollaborationInviteCode,
+  createCollaborationLobbySession,
   createCollaborationRoom,
   parseCollaborationInviteCode,
   readCollaborationRooms,
@@ -178,6 +179,7 @@ import {
   unregisterActiveConversation
 } from './activeConversationLedger';
 import {
+  buildPassportAccountUrl,
   buildPassportProUrl,
   buildProAccountStatus,
   clearProEntitlements,
@@ -240,6 +242,7 @@ let extensionContextRef: vscode.ExtensionContext | null = null;
 let activeProjectRoot: string | null = null;
 let syncEngineReady = false;
 let pendingPassportAuthNonce: string | null = null;
+let pendingPassportAuthIntent: 'pro' | 'collaboration' | null = null;
 let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
 let projectSelectionGeneration = 0;
@@ -679,6 +682,36 @@ async function handleSharedWebviewAction(
     },
     'collaboration.getRooms': async () => {
       await respond({ command: 'collaborationRoomsLoaded', rooms: await readCollaborationRooms(context) });
+    },
+    'collaboration.login': async () => {
+      await beginCollaborationAuthorization();
+    },
+    'collaboration.joinLobby': async (request) => {
+      const cached = await readPassportGrant(context);
+      if (!cached) {
+        await respond({ command: 'collaborationLobbyLoginRequired' });
+        return;
+      }
+      const verified = await verifyPassportGrant(cached.grant);
+      if (!verified.authenticated) {
+        await respond({ command: 'collaborationLobbyLoginRequired' });
+        return;
+      }
+      await writePassportGrant(context, verified, verified.grant || cached.grant);
+      const result = await createCollaborationLobbySession(String(request.nickname || ''), verified.grant || cached.grant, fetch);
+      if (!result.ok) {
+        await respond({
+          command: result.error === 'login_required' ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed',
+          error: String(result.error || 'lobby_join_failed')
+        });
+        return;
+      }
+      await respond({
+        command: 'collaborationLobbyJoined',
+        ...result,
+        nickname: String(request.nickname || '').trim().slice(0, 40),
+        projectPath: String(request.projectPath || '')
+      });
     },
     'collaboration.createRoom': async (request) => {
       try {
@@ -1375,14 +1408,15 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
   };
   await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  const proEntitlements = result.allowed ? {
+    ...(saved.proEntitlements || {}),
+    pro: true,
+    solomap_pro: true,
+    [strategyPyramidFeature]: true
+  } : clearProEntitlements(saved.proEntitlements || {});
   await context.globalState.update(settingsKey, {
     ...saved,
-    proEntitlements: {
-      ...(saved.proEntitlements || {}),
-      pro: true,
-      solomap_pro: true,
-      [strategyPyramidFeature]: true
-    },
+    proEntitlements,
     proAccount: buildProAccountStatus(result)
   });
   await broadcastSettings(context);
@@ -1401,6 +1435,10 @@ async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promi
   if (verified.allowed) {
     await writePassportGrant(context, verified, cached.grant);
     return true;
+  }
+  if (verified.authenticated) {
+    await writePassportGrant(context, verified, cached.grant);
+    return false;
   }
   if (grantContainsFeature(cached)) {
     return true;
@@ -1423,6 +1461,10 @@ async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<bool
     await writePassportGrant(context, verified, cached.grant);
     return true;
   }
+  if (verified.authenticated) {
+    await writePassportGrant(context, verified, cached.grant);
+    return false;
+  }
   if (grantContainsFeature(cached)) {
     return true;
   }
@@ -1443,7 +1485,7 @@ async function refreshProAccountStatus(context: vscode.ExtensionContext): Promis
     return;
   }
   const verified = await verifyPassportGrant(cached.grant);
-  if (verified.allowed) {
+  if (verified.authenticated || verified.allowed) {
     await writePassportGrant(context, verified, cached.grant);
     return;
   }
@@ -1457,12 +1499,21 @@ async function refreshProAccountStatus(context: vscode.ExtensionContext): Promis
 async function beginPassportAuthorization(): Promise<void> {
   const authNonce = createPassportAuthNonce();
   pendingPassportAuthNonce = authNonce;
+  pendingPassportAuthIntent = 'pro';
   await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('callback', authNonce, buildPassportCallbackUri())));
+}
+
+async function beginCollaborationAuthorization(): Promise<void> {
+  const authNonce = createPassportAuthNonce();
+  pendingPassportAuthNonce = authNonce;
+  pendingPassportAuthIntent = 'collaboration';
+  await vscode.env.openExternal(vscode.Uri.parse(buildPassportAccountUrl(authNonce, buildPassportCallbackUri())));
 }
 
 async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext): Promise<void> {
   const authNonce = createPassportAuthNonce();
   pendingPassportAuthNonce = authNonce;
+  pendingPassportAuthIntent = 'pro';
 
   await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('device', authNonce)));
   const code = await vscode.window.showInputBox({
@@ -1568,12 +1619,18 @@ async function handlePassportUri(context: vscode.ExtensionContext, uri: vscode.U
     authNonce: pendingPassportAuthNonce,
     callbackUri
   });
-  if (!result.allowed) {
-    vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
+  const callbackIntent = String(params.get('intent') || '') === 'collaboration' ? 'collaboration' : pendingPassportAuthIntent;
+  if (callbackIntent === 'collaboration' ? !result.authenticated : !result.allowed) {
+    vscode.window.showWarningMessage(callbackIntent === 'collaboration' ? 'SoloMap 登录未完成。' : 'SoloMap Pro 授权未通过。');
     return;
   }
   pendingPassportAuthNonce = null;
+  pendingPassportAuthIntent = null;
   await writePassportGrant(context, result, result.grant || grant);
+  if (callbackIntent === 'collaboration') {
+    vscode.window.showInformationMessage('已登录 SoloMap，可以进入共创大厅。');
+    return;
+  }
   vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
   await openStrategyPyramidPanel(context);
 }

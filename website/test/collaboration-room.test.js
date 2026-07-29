@@ -3,9 +3,11 @@ import test from "node:test";
 import vm from "node:vm";
 import worker from "../src/worker.js";
 import {
+  CollaborationLobby,
   CollaborationQuota,
   CollaborationRoom,
   collaborationRelayInternals,
+  handleCollaborationLobbySession,
   handleCollaborationRoomCreate
 } from "../src/collaborationRelay.js";
 
@@ -56,11 +58,68 @@ function createProtectedEnv() {
     SOLOMAP_PASSPORT_PRODUCT_SECRET: "test-collaboration-secret",
     COLLABORATION_DEVICE_REGISTRATION_LIMITER: { async limit() { return { success: true }; } },
     COLLABORATION_ROOM_CREATE_LIMITER: { async limit() { return { success: true }; } },
+    COLLABORATION_LOBBY_JOIN_LIMITER: { async limit() { return { success: true }; } },
+    COLLABORATION_LOBBY: createDurableNamespace(CollaborationLobby),
     COLLABORATION_ROOMS: createDurableNamespace(CollaborationRoom),
     COLLABORATION_QUOTAS: createDurableNamespace(CollaborationQuota),
     COLLABORATION_GLOBAL_QUOTA: createDurableNamespace(CollaborationQuota)
   };
 }
+
+test("the public lobby rejects signed-out users and issues only hourly tickets to accounts", async () => {
+  const env = createProtectedEnv();
+  const signedOut = await worker.fetch(new Request("https://solomap.app/api/collaboration/lobby/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ nickname: "Visitor" })
+  }), env, { waitUntil() {} });
+  assert.equal(signedOut.status, 401);
+  assert.equal((await signedOut.json()).error, "login_required");
+
+  const response = await handleCollaborationLobbySession(new Request("https://solomap.app/api/collaboration/lobby/session", {
+    method: "POST",
+    headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.20" },
+    body: JSON.stringify({ nickname: "  Solo  Builder  " })
+  }), env, { subjectId: "account:test-user", tier: "account" });
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.ok, true);
+  assert.equal(result.sessionEndsAt - result.sessionStartedAt, 60 * 60 * 1000);
+  assert.equal(result.sessionStartedAt % (60 * 60 * 1000), 0);
+  const ticket = await collaborationRelayInternals.verifyLobbyTicket(env, result.ticket);
+  assert.equal(ticket.nickname, "Solo Builder");
+  assert.equal(ticket.memberId, result.memberId);
+  assert.equal(await collaborationRelayInternals.verifyLobbyTicket(env, `${result.ticket.slice(0, -1)}x`), null);
+});
+
+test("lobby messages are bounded per account and the hourly alarm clears all retained data", async () => {
+  const storage = createDurableState();
+  const lobby = new CollaborationLobby(storage.state);
+  const { sessionStartedAt, sessionEndsAt } = collaborationRelayInternals.currentLobbySession();
+  await storage.state.storage.put({
+    session: { sessionStartedAt, sessionEndsAt },
+    messages: [],
+    memberUsage: {},
+    nextSequence: 1
+  });
+  const sent = [];
+  const socket = {
+    deserializeAttachment() { return { memberId: "m".repeat(32), nickname: "Builder" }; },
+    send(value) { sent.push(JSON.parse(value)); },
+    close() {}
+  };
+  for (let index = 0; index < 7; index += 1) {
+    await lobby.webSocketMessage(socket, JSON.stringify({
+      type: "message",
+      id: `message${String(index).padStart(10, "0")}`,
+      text: `Idea ${index}`
+    }));
+  }
+  assert.equal((await storage.state.storage.get("messages")).length, 6);
+  assert.equal(sent.at(-1).error, "message_rate_limited");
+  await lobby.alarm();
+  assert.equal(storage.values.size, 0);
+});
 
 async function registerDevice(env) {
   const response = await worker.fetch(new Request("https://solomap.app/api/collaboration/devices", {

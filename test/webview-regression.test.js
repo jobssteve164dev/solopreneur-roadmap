@@ -881,6 +881,12 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /data-collaboration-invite-code/);
   assert.match(script, /command: 'collaboration\.joinRoom'/);
   assert.match(script, /command: 'collaboration\.copyInviteCode'/);
+  assert.match(script, /command: 'collaboration\.login'/);
+  assert.match(script, /command: 'collaboration\.joinLobby'/);
+  assert.match(script, /collaborationLobbyTitle: '共创大厅'/);
+  assert.match(script, /collaborationLobbySignedOut: '登录后即可进入，未登录用户不能查看或发言。'/);
+  assert.match(script, /collaborationLobbyPrivacy: '公开大厅 · 消息服务端可见 · 整点永久清空 · 参与者不能控制 Agent'/);
+  assert.match(script, /collaborationActiveRoom\.isLobby/);
   assert.match(script, /class="collaboration-message-actions"' \+ \(expanded \? '' : ' hidden'\)/);
   assert.match(script, /data-collaboration-message-menu/);
 
@@ -4563,6 +4569,21 @@ test('external data loader exposes one shared loading boundary', async () => {
 
 test('pro account module keeps expired remote grants from unlocking local features', () => {
   const proAccount = require(path.join(projectRoot, 'out/proAccount.js'));
+
+  assert.deepEqual(proAccount.buildProAccountStatus({
+    authenticated: true,
+    allowed: false,
+    email: 'member@solomap.app',
+    userId: 'member-1',
+    entitlements: ['collaboration_lobby'],
+    expiresAt: '2999-01-01T00:00:00.000Z'
+  }), {
+    authenticated: true,
+    allowed: false,
+    email: 'member@solomap.app',
+    expiresAt: '2999-01-01T00:00:00.000Z'
+  });
+  assert.match(proAccount.buildPassportAccountUrl('n'.repeat(32), 'vscode://SZLK.solopreneur-roadmap/passport/callback'), /\/api\/collaboration\/account\/start/);
 
   assert.equal(proAccount.hasProEntitlement({
     proEntitlements: { strategy_pyramid: true },

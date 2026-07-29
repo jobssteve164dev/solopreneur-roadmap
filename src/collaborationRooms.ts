@@ -59,6 +59,15 @@ export interface CollaborationRoomCreateResult {
   quota?: CollaborationQuotaSummary;
 }
 
+export interface CollaborationLobbySession {
+  ok: boolean;
+  error?: string;
+  ticket?: string;
+  memberId?: string;
+  sessionStartedAt?: number;
+  sessionEndsAt?: number;
+}
+
 const collaborationInviteCodePrefix = 'SM1.';
 
 function normalizeMetadata(value: unknown): CollaborationRoomMetadata | null {
@@ -227,6 +236,33 @@ export async function createCollaborationRoom(
     deviceAttempt = await sendRoomCreateRequest(input, `Device ${deviceCredential}`, fetcher);
   }
   return deviceAttempt.result;
+}
+
+export async function createCollaborationLobbySession(
+  nickname: string,
+  passportGrant: string,
+  fetcher: typeof fetch = fetch
+): Promise<CollaborationLobbySession> {
+  const normalizedNickname = String(nickname || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  if (!normalizedNickname) return { ok: false, error: 'nickname_required' };
+  if (!passportGrant) return { ok: false, error: 'login_required' };
+  const response = await fetcher(`${collaborationSiteOrigin}/api/collaboration/lobby/session`, {
+    method: 'POST',
+    headers: {
+      'authorization': `Bearer ${passportGrant}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ nickname: normalizedNickname })
+  });
+  const result = await response.json().catch(() => ({ ok: false, error: `lobby_session_http_${response.status}` })) as CollaborationLobbySession;
+  if (!response.ok) return { ok: false, error: String(result.error || `lobby_session_http_${response.status}`) };
+  return {
+    ok: Boolean(result.ok),
+    ticket: String(result.ticket || ''),
+    memberId: String(result.memberId || ''),
+    sessionStartedAt: Number(result.sessionStartedAt || 0),
+    sessionEndsAt: Number(result.sessionEndsAt || 0)
+  };
 }
 
 export function buildCollaborationInviteCode(room: Pick<CollaborationRoomRecord, 'roomId' | 'relayToken' | 'encryptionKey'>): string {

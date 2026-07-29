@@ -867,6 +867,31 @@ test('website headless auth renders product-owned forms and creates a protected 
     assert.match(cookie, /HttpOnly/);
     assert.match(cookie, /SameSite=Lax/);
 
+    const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
+    const authNonce = 'l'.repeat(32);
+    const accountStart = await worker.default.fetch(new Request(
+      `https://solomap.app/api/collaboration/account/start?auth_nonce=${authNonce}&callback=${encodeURIComponent(callback)}`,
+      { headers: { cookie } }
+    ), env);
+    const callbackLocation = new URL(accountStart.headers.get('location') || '');
+    assert.equal(accountStart.status, 302);
+    assert.equal(callbackLocation.origin, 'null');
+    assert.equal(callbackLocation.protocol, 'vscode:');
+    assert.equal(callbackLocation.searchParams.get('intent'), 'collaboration');
+    const accountVerify = await worker.default.fetch(new Request('https://solomap.app/api/passport/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        code: callbackLocation.searchParams.get('code'),
+        authNonce,
+        callback
+      })
+    }), env);
+    const accountGrant = await accountVerify.json();
+    assert.equal(accountGrant.authenticated, true);
+    assert.equal(accountGrant.allowed, false);
+    assert.deepEqual(accountGrant.entitlements, ['collaboration_lobby']);
+
     const workbench = await worker.default.fetch(new Request('https://solomap.app/workbench', { headers: { cookie } }), env);
     const workbenchHtml = await workbench.text();
     assert.equal(workbench.status, 200);

@@ -9,6 +9,7 @@ const {
   collaborationDeviceCredentialSecretKey,
   collaborationRoomsStateKey,
   collaborationRoomSecretsKey,
+  createCollaborationLobbySession,
   createCollaborationRoom,
   parseCollaborationInviteCode,
   readOrCreateCollaborationDeviceCredential,
@@ -169,4 +170,25 @@ test('saving a collaboration idea appends without replacing existing project not
   assert.match(notes, /临时共创想法/);
   assert.match(notes, /Reviewer/);
   assert.match(notes, /Audit the reconnect path before release\./);
+});
+
+test('public lobby sessions require an account grant and never fall back to an anonymous device', async () => {
+  assert.deepEqual(await createCollaborationLobbySession('Builder', ''), { ok: false, error: 'login_required' });
+  const calls = [];
+  const result = await createCollaborationLobbySession('  Builder  ', 'account-grant', async (url, init) => {
+    calls.push({ url, init });
+    return new Response(JSON.stringify({
+      ok: true,
+      ticket: 'signed-ticket',
+      memberId: 'member-id',
+      sessionStartedAt: 1000,
+      sessionEndsAt: 2000
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/api\/collaboration\/lobby\/session$/);
+  assert.equal(calls[0].init.headers.authorization, 'Bearer account-grant');
+  assert.equal(JSON.parse(calls[0].init.body).nickname, 'Builder');
+  assert.equal(result.ok, true);
+  assert.equal(result.ticket, 'signed-ticket');
 });

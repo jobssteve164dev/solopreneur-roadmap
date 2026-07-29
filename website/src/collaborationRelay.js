@@ -27,6 +27,15 @@ const GLOBAL_ANONYMOUS_QUOTA = Object.freeze({
 });
 
 const MAX_DAILY_DEVICE_REGISTRATIONS = 2000;
+const LOBBY_SESSION_MS = 60 * 60 * 1000;
+const LOBBY_TICKET_LIFETIME_MS = 5 * 60 * 1000;
+const LOBBY_MAX_CONNECTIONS = 80;
+const LOBBY_MAX_CONNECTIONS_PER_MEMBER = 2;
+const LOBBY_MAX_MESSAGES = 500;
+const LOBBY_MAX_MESSAGE_CHARACTERS = 1000;
+const LOBBY_MESSAGE_RATE_WINDOW_MS = 60 * 1000;
+const LOBBY_MAX_MESSAGES_PER_WINDOW = 6;
+const LOBBY_MAX_MESSAGES_PER_SESSION = 60;
 
 function jsonResponse(payload, status = 200, headers = {}) {
   return new Response(JSON.stringify(payload), {
@@ -56,6 +65,41 @@ function toBase64Url(bytes) {
 async function hashRelayToken(token) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   return toBase64Url(new Uint8Array(digest));
+}
+
+async function signLobbyTicket(secret, payload) {
+  const encoded = toBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(encoded));
+  return `${encoded}.${toBase64Url(new Uint8Array(signature))}`;
+}
+
+async function verifyLobbyTicket(env, ticket, now = Date.now()) {
+  const secret = String(env.SOLOMAP_PASSPORT_PRODUCT_SECRET || "");
+  const parts = String(ticket || "").split(".");
+  if (!secret || parts.length !== 2) return null;
+  try {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(parts[0]));
+    const expected = new Uint8Array(signature);
+    const actual = fromBase64Url(parts[1]);
+    if (toBase64Url(actual) !== parts[1]) return null;
+    if (!timingSafeEqual(expected, actual)) return null;
+    const payload = JSON.parse(new TextDecoder().decode(fromBase64Url(parts[0])));
+    if (payload.purpose !== "solomap_collaboration_lobby") return null;
+    if (!/^[A-Za-z0-9_-]{32,64}$/.test(String(payload.memberId || ""))) return null;
+    if (!Number.isFinite(Number(payload.sessionStartedAt)) || !Number.isFinite(Number(payload.sessionEndsAt))) return null;
+    if (Number(payload.sessionEndsAt) <= now || Number(payload.expiresAt) <= now) return null;
+    if (Math.floor(now / LOBBY_SESSION_MS) * LOBBY_SESSION_MS !== Number(payload.sessionStartedAt)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function currentLobbySession(now = Date.now()) {
+  const sessionStartedAt = Math.floor(now / LOBBY_SESSION_MS) * LOBBY_SESSION_MS;
+  return { sessionStartedAt, sessionEndsAt: sessionStartedAt + LOBBY_SESSION_MS };
 }
 
 function fromBase64Url(value) {
@@ -102,6 +146,7 @@ async function verifyDeviceCredential(env, credential, now = Date.now()) {
     const [payload, signature] = String(credential).split(".");
     const expected = fromBase64Url(await signDeviceCredential(secret, payload));
     const actual = fromBase64Url(signature);
+    if (toBase64Url(actual) !== signature) return null;
     if (!timingSafeEqual(expected, actual)) return null;
     const parsed = JSON.parse(new TextDecoder().decode(fromBase64Url(payload)));
     if (parsed.purpose !== "solomap_collaboration_device" || !/^[A-Za-z0-9_-]{32}$/.test(String(parsed.deviceId || ""))) return null;
@@ -301,6 +346,68 @@ export async function handleCollaborationRoomCreate(request, env, accountCreator
     await rollbackReservation(env, creator, roomId, creatorReservationCreated, globalReservationId, globalReservationCreated);
     return jsonResponse({ ok: false, error: "room_initialization_failed" }, 502, collaborationCorsHeaders());
   }
+}
+
+export async function handleCollaborationLobbySession(request, env, accountCreator = null) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: collaborationCorsHeaders() });
+  }
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, error: "method_not_allowed" }, 405, collaborationCorsHeaders());
+  }
+  if (!accountCreator) {
+    return jsonResponse({ ok: false, error: "login_required" }, 401, collaborationCorsHeaders());
+  }
+  if (!env.COLLABORATION_LOBBY || !env.SOLOMAP_PASSPORT_PRODUCT_SECRET) {
+    return jsonResponse({ ok: false, error: "collaboration_unavailable" }, 503, collaborationCorsHeaders());
+  }
+  const rateLimit = await consumeRateLimit(env.COLLABORATION_LOBBY_JOIN_LIMITER, requestSourceKey(request, "lobby"));
+  if (!rateLimit.configured) return jsonResponse({ ok: false, error: "protection_unavailable" }, 503, collaborationCorsHeaders());
+  if (!rateLimit.success) return jsonResponse({ ok: false, error: "lobby_join_limited" }, 429, collaborationCorsHeaders());
+
+  let body;
+  try {
+    body = await parseBoundedJson(request);
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "invalid_json";
+    return jsonResponse({ ok: false, error: code }, code === "request_too_large" ? 413 : 400, collaborationCorsHeaders());
+  }
+  const nickname = String(body.nickname || "").trim().replace(/\s+/g, " ").slice(0, 40);
+  if (!nickname) return jsonResponse({ ok: false, error: "nickname_required" }, 400, collaborationCorsHeaders());
+
+  const now = Date.now();
+  const { sessionStartedAt, sessionEndsAt } = currentLobbySession(now);
+  const memberId = (await hashRelayToken(`${accountCreator.subjectId}:${sessionStartedAt}`)).slice(0, 43);
+  const ticket = await signLobbyTicket(String(env.SOLOMAP_PASSPORT_PRODUCT_SECRET), {
+    purpose: "solomap_collaboration_lobby",
+    memberId,
+    nickname,
+    sessionStartedAt,
+    sessionEndsAt,
+    expiresAt: Math.min(sessionEndsAt, now + LOBBY_TICKET_LIFETIME_MS)
+  });
+  return jsonResponse({ ok: true, ticket, memberId, sessionStartedAt, sessionEndsAt }, 200, collaborationCorsHeaders());
+}
+
+export async function handleCollaborationLobbySocket(request, env) {
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    return jsonResponse({ ok: false, error: "websocket_required" }, 426);
+  }
+  if (!env.COLLABORATION_LOBBY) return jsonResponse({ ok: false, error: "collaboration_unavailable" }, 503);
+  const ticket = String(new URL(request.url).searchParams.get("ticket") || "");
+  const identity = await verifyLobbyTicket(env, ticket);
+  if (!identity) return jsonResponse({ ok: false, error: "invalid_lobby_ticket" }, 403);
+  const stub = env.COLLABORATION_LOBBY.get(env.COLLABORATION_LOBBY.idFromName(String(identity.sessionStartedAt)));
+  return stub.fetch("https://collaboration-lobby.internal/connect", {
+    method: "GET",
+    headers: {
+      "upgrade": "websocket",
+      "x-solomap-member-id": String(identity.memberId),
+      "x-solomap-nickname": encodeURIComponent(String(identity.nickname)),
+      "x-solomap-session-start": String(identity.sessionStartedAt),
+      "x-solomap-session-end": String(identity.sessionEndsAt)
+    }
+  });
 }
 
 export async function handleCollaborationSocket(request, env) {
@@ -577,14 +684,165 @@ export class CollaborationRoom {
   }
 }
 
+export class CollaborationLobby {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return jsonResponse({ ok: false, error: "websocket_required" }, 426);
+    }
+    return this.connect(request);
+  }
+
+  async connect(request) {
+    const now = Date.now();
+    const memberId = String(request.headers.get("x-solomap-member-id") || "");
+    const nickname = decodeURIComponent(String(request.headers.get("x-solomap-nickname") || ""));
+    const sessionStartedAt = Number(request.headers.get("x-solomap-session-start") || 0);
+    const sessionEndsAt = Number(request.headers.get("x-solomap-session-end") || 0);
+    if (!/^[A-Za-z0-9_-]{32,64}$/.test(memberId) || !nickname || nickname.length > 40) {
+      return jsonResponse({ ok: false, error: "invalid_lobby_identity" }, 403);
+    }
+    if (sessionEndsAt <= now || sessionStartedAt !== Math.floor(now / LOBBY_SESSION_MS) * LOBBY_SESSION_MS || sessionEndsAt !== sessionStartedAt + LOBBY_SESSION_MS) {
+      return jsonResponse({ ok: false, error: "lobby_session_ended" }, 410);
+    }
+    const sockets = this.state.getWebSockets();
+    if (sockets.length >= LOBBY_MAX_CONNECTIONS) return jsonResponse({ ok: false, error: "lobby_full" }, 429);
+    const sameMemberConnections = sockets.filter((socket) => {
+      const attachment = typeof socket.deserializeAttachment === "function" ? socket.deserializeAttachment() || {} : {};
+      return attachment.memberId === memberId;
+    }).length;
+    if (sameMemberConnections >= LOBBY_MAX_CONNECTIONS_PER_MEMBER) {
+      return jsonResponse({ ok: false, error: "lobby_member_connection_limit" }, 429);
+    }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    this.state.acceptWebSocket(server);
+    if (typeof server.serializeAttachment === "function") server.serializeAttachment({ memberId, nickname });
+    const storedSession = await this.state.storage.get("session");
+    if (!storedSession) {
+      await this.state.storage.put({
+        session: { sessionStartedAt, sessionEndsAt },
+        messages: [],
+        memberUsage: {},
+        nextSequence: 1
+      });
+      await this.state.storage.setAlarm(sessionEndsAt);
+    }
+    const messages = await this.state.storage.get("messages") || [];
+    server.send(JSON.stringify({ type: "history", messages, sessionStartedAt, expiresAt: sessionEndsAt }));
+    this.broadcastPresence();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(socket, rawMessage) {
+    const session = await this.state.storage.get("session");
+    const now = Date.now();
+    if (!session || Number(session.sessionEndsAt) <= now) {
+      socket.close(4001, "Lobby session ended");
+      await this.expireSession();
+      return;
+    }
+    const attachment = typeof socket.deserializeAttachment === "function" ? socket.deserializeAttachment() || {} : {};
+    const memberId = String(attachment.memberId || "");
+    const nickname = String(attachment.nickname || "");
+    const serialized = typeof rawMessage === "string" ? rawMessage : new TextDecoder().decode(rawMessage);
+    if (new TextEncoder().encode(serialized).byteLength > MAX_MESSAGE_BYTES) {
+      socket.send(JSON.stringify({ type: "error", error: "message_too_large" }));
+      return;
+    }
+    let incoming;
+    try {
+      incoming = JSON.parse(serialized);
+    } catch {
+      socket.send(JSON.stringify({ type: "error", error: "invalid_message" }));
+      return;
+    }
+    const text = String(incoming?.text || "").trim();
+    if (incoming?.type !== "message" || !MESSAGE_ID_PATTERN.test(String(incoming.id || "")) || !text || text.length > LOBBY_MAX_MESSAGE_CHARACTERS) {
+      socket.send(JSON.stringify({ type: "error", error: "invalid_message" }));
+      return;
+    }
+
+    const memberUsage = await this.state.storage.get("memberUsage") || {};
+    const usage = memberUsage[memberId] || { messageTimes: [], total: 0 };
+    const messageTimes = (Array.isArray(usage.messageTimes) ? usage.messageTimes : [])
+      .map(Number)
+      .filter((createdAt) => Number.isFinite(createdAt) && createdAt > now - LOBBY_MESSAGE_RATE_WINDOW_MS);
+    if (messageTimes.length >= LOBBY_MAX_MESSAGES_PER_WINDOW || Number(usage.total || 0) >= LOBBY_MAX_MESSAGES_PER_SESSION) {
+      socket.send(JSON.stringify({ type: "error", error: "message_rate_limited" }));
+      return;
+    }
+    messageTimes.push(now);
+    memberUsage[memberId] = { messageTimes, total: Number(usage.total || 0) + 1 };
+
+    const messages = await this.state.storage.get("messages") || [];
+    if (messages.some((message) => message.id === incoming.id)) return;
+    const sequence = Number(await this.state.storage.get("nextSequence") || 1);
+    const stored = {
+      type: "message",
+      id: String(incoming.id),
+      authorId: memberId,
+      authorName: nickname,
+      text,
+      createdAt: now,
+      sequence
+    };
+    await this.state.storage.put({
+      messages: [...messages, stored].slice(-LOBBY_MAX_MESSAGES),
+      memberUsage,
+      nextSequence: sequence + 1
+    });
+    this.broadcast(stored);
+  }
+
+  webSocketClose() {
+    this.broadcastPresence();
+  }
+
+  webSocketError() {
+    this.broadcastPresence();
+  }
+
+  async alarm() {
+    await this.expireSession();
+  }
+
+  broadcast(payload) {
+    const serialized = JSON.stringify(payload);
+    for (const socket of this.state.getWebSockets()) {
+      try { socket.send(serialized); } catch { /* Runtime drops closed sockets. */ }
+    }
+  }
+
+  broadcastPresence() {
+    queueMicrotask(() => this.broadcast({ type: "presence", count: this.state.getWebSockets().length }));
+  }
+
+  async expireSession() {
+    for (const socket of this.state.getWebSockets()) {
+      try { socket.close(4001, "Lobby session ended"); } catch { /* Socket already closed. */ }
+    }
+    await this.state.storage.deleteAll();
+  }
+}
+
 export const collaborationRelayInternals = {
   COLLABORATION_QUOTAS,
   GLOBAL_ANONYMOUS_QUOTA,
   MAX_CONNECTIONS,
   MAX_MESSAGES,
   MAX_ROOM_LIFETIME_MS,
+  LOBBY_MAX_CONNECTIONS,
+  LOBBY_MAX_MESSAGES_PER_SESSION,
+  currentLobbySession,
   issueDeviceCredential,
   isValidCipherEnvelope,
   parseRoomId,
-  verifyDeviceCredential
+  verifyDeviceCredential,
+  verifyLobbyTicket
 };

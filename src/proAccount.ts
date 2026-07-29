@@ -18,6 +18,7 @@ export interface PassportGrantCache {
 }
 
 export interface PassportVerifyResult {
+  authenticated?: boolean;
   allowed: boolean;
   reason?: string;
   grant?: string;
@@ -147,6 +148,14 @@ export function buildPassportProUrl(mode: 'callback' | 'device', authNonce: stri
   return url.toString();
 }
 
+export function buildPassportAccountUrl(authNonce: string, callbackUri: string): string {
+  const url = new URL('/api/collaboration/account/start', getPassportBaseUrl());
+  url.searchParams.set('source', 'vscode');
+  url.searchParams.set('auth_nonce', authNonce);
+  url.searchParams.set('callback', callbackUri);
+  return url.toString();
+}
+
 export function buildPassportVerifyUrl(): string {
   return new URL('/api/passport/verify', getPassportBaseUrl()).toString();
 }
@@ -191,6 +200,7 @@ export async function verifyPassportGrant(
     }
     const body = await response.json() as PassportVerifyResult;
     return {
+      authenticated: Boolean(body.authenticated || body.allowed || body.email || body.userId),
       allowed: Boolean(body.allowed),
       reason: String(body.reason || ''),
       grant: String(body.grant || ''),

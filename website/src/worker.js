@@ -19,9 +19,12 @@ import {
   collaborationRoomPageHeaders
 } from "./collaborationPage.js";
 import {
+  CollaborationLobby,
   CollaborationQuota,
   CollaborationRoom,
   handleCollaborationDeviceRegistration,
+  handleCollaborationLobbySession,
+  handleCollaborationLobbySocket,
   handleCollaborationRoomCreate,
   handleCollaborationSocket
 } from "./collaborationRelay.js";
@@ -700,6 +703,7 @@ async function verifyState(env, state) {
   } catch {
     return { allowed: false, reason: "invalid_signature" };
   }
+  if (base64UrlEncode(actual) !== parts[1]) return null;
   if (!timingSafeEqual(expected, actual)) {
     return null;
   }
@@ -787,7 +791,9 @@ async function issueSoloMapGrant(env, email = "pro-test@solomap.app", options = 
     feature: STRATEGY_PYRAMID_FEATURE,
     email,
     userId: options.userId || `passport:${email}`,
-    entitlements: Array.isArray(options.entitlements) && options.entitlements.length ? options.entitlements : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"],
+    entitlements: Object.prototype.hasOwnProperty.call(options, "entitlements") && Array.isArray(options.entitlements)
+      ? options.entitlements
+      : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"],
     deviceLimit: getProDeviceLimit(env),
     issuedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
@@ -837,6 +843,29 @@ async function verifySoloMapExchangeCode(env, code, expected = {}) {
   };
 }
 
+async function issueCollaborationAccountExchangeCode(env, grant, context = {}) {
+  return signState(env, {
+    purpose: "solomap_collaboration_account_exchange",
+    product: SOLOMAP_PRODUCT,
+    callback: String(context.callback || ""),
+    authNonce: normalizeAuthNonce(context.authNonce),
+    grant,
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  });
+}
+
+async function verifyCollaborationAccountExchangeCode(env, code, expected = {}) {
+  const payload = await verifyState(env, code);
+  if (!payload || payload.purpose !== "solomap_collaboration_account_exchange") return null;
+  if (payload.product !== SOLOMAP_PRODUCT) return { authenticated: false, allowed: false, reason: "invalid_exchange_scope" };
+  const expectedNonce = normalizeAuthNonce(expected.authNonce);
+  if (!expectedNonce || payload.authNonce !== expectedNonce) return { authenticated: false, allowed: false, reason: "auth_context_mismatch" };
+  if (String(expected.callback || "") !== String(payload.callback || "")) return { authenticated: false, allowed: false, reason: "callback_mismatch" };
+  const verified = await verifySignedGrant(env, String(payload.grant || ""));
+  return { ...verified, grant: verified.authenticated ? String(payload.grant || "") : "" };
+}
+
 async function verifySignedGrant(env, grant) {
   if (!env.SOLOMAP_PASSPORT_PRODUCT_SECRET) {
     return { allowed: false, reason: "missing_product_secret" };
@@ -846,7 +875,15 @@ async function verifySignedGrant(env, grant) {
     return { allowed: false, reason: "invalid_grant" };
   }
   const expected = await hmacSha256(env.SOLOMAP_PASSPORT_PRODUCT_SECRET, parts[0]);
-  const actual = base64UrlDecode(parts[1]);
+  let actual;
+  try {
+    actual = base64UrlDecode(parts[1]);
+  } catch {
+    return { authenticated: false, allowed: false, reason: "invalid_signature" };
+  }
+  if (base64UrlEncode(actual) !== parts[1]) {
+    return { authenticated: false, allowed: false, reason: "invalid_signature" };
+  }
   if (!timingSafeEqual(expected, actual)) {
     return { allowed: false, reason: "invalid_signature" };
   }
@@ -858,13 +895,17 @@ async function verifySignedGrant(env, grant) {
   }
   const entitlements = Array.isArray(payload.entitlements) ? payload.entitlements.map((item) => String(item || "")).filter(Boolean) : [];
   const expiresAtMs = Date.parse(payload.expiresAt || "");
-  const allowed = payload.product === SOLOMAP_PRODUCT &&
-    entitlements.includes(STRATEGY_PYRAMID_FEATURE) &&
+  const authenticated = payload.product === SOLOMAP_PRODUCT &&
+    Boolean(payload.userId || payload.email) &&
     Number.isFinite(expiresAtMs) &&
     expiresAtMs > Date.now();
+  const allowed = authenticated &&
+    entitlements.includes(STRATEGY_PYRAMID_FEATURE) &&
+    Number.isFinite(expiresAtMs);
   return {
+    authenticated,
     allowed,
-    reason: allowed ? "allowed" : "not_entitled",
+    reason: allowed ? "allowed" : authenticated ? "authenticated" : "invalid_identity",
     email: String(payload.email || ""),
     userId: String(payload.userId || ""),
     entitlements,
@@ -883,13 +924,37 @@ async function resolveCollaborationAccountCreator(request, env) {
   const grant = authorization.replace(/^Bearer\s+/i, "");
   if (!grant || grant === authorization) return null;
   let verified = await verifySignedGrant(env, grant);
-  if (!verified.allowed) {
+  if (!verified.authenticated && !verified.allowed) {
     const passportResult = await verifyGrantWithPassport(env, grant);
     if (passportResult) verified = passportResult;
   }
-  if (!verified.allowed || (!verified.userId && !verified.email)) return null;
+  const authenticated = Boolean(verified.authenticated || (verified.allowed && (verified.userId || verified.email)));
+  if (!authenticated || (!verified.userId && !verified.email)) return null;
   const stableId = base64UrlEncode(await sha256(String(verified.userId || verified.email)));
-  return { subjectId: `account:${stableId}`, tier: "pro" };
+  return { subjectId: `account:${stableId}`, tier: verified.allowed ? "pro" : "account" };
+}
+
+async function handleCollaborationAccountStart(request, env) {
+  const url = new URL(request.url);
+  const callback = String(url.searchParams.get("callback") || "");
+  const authNonce = normalizeAuthNonce(url.searchParams.get("auth_nonce"));
+  if (!isAllowedVsCodeCallback(callback) || !authNonce) {
+    return jsonResponse({ ok: false, reason: "invalid_auth_context" }, 400);
+  }
+  const session = await readSession(request, env);
+  if (!session || (!session.id && !session.email)) {
+    const returnTo = `${url.pathname}${url.search}`;
+    return Response.redirect(`${url.origin}/login?return_to=${encodeURIComponent(returnTo)}`, 302);
+  }
+  const grant = await issueSoloMapGrant(env, String(session.email || ""), {
+    userId: String(session.id || session.email || ""),
+    entitlements: ["collaboration_lobby"]
+  });
+  const code = await issueCollaborationAccountExchangeCode(env, grant, { callback, authNonce });
+  const callbackUrl = new URL(callback);
+  callbackUrl.searchParams.set("code", code);
+  callbackUrl.searchParams.set("intent", "collaboration");
+  return Response.redirect(callbackUrl.toString(), 302);
 }
 
 async function verifyGrantWithPassport(env, grant) {
@@ -915,6 +980,7 @@ async function verifyGrantWithPassport(env, grant) {
   const body = await response.json();
   const data = body && typeof body === "object" && body.ok === true && body.data ? body.data : body;
   return {
+    authenticated: Boolean(data.authenticated || data.allowed) && Boolean(data.email || data.userId || data.user_id),
     allowed: Boolean(data.allowed),
     reason: String(data.reason || ""),
     email: String(data.email || ""),
@@ -1672,6 +1738,11 @@ async function handlePassportDeviceVerify(request, env) {
   if (exchanged) {
     return jsonResponse(exchanged);
   }
+  const accountExchange = await verifyCollaborationAccountExchangeCode(env, grant, {
+    authNonce: payload.authNonce || payload.auth_nonce || "",
+    callback: payload.callback || ""
+  });
+  if (accountExchange) return jsonResponse(accountExchange);
   return jsonResponse(await verifySignedGrant(env, grant));
 }
 
@@ -1700,11 +1771,18 @@ async function handlePassportVerify(request, env) {
   if (exchanged) {
     return jsonResponse(exchanged);
   }
+  const accountExchange = await verifyCollaborationAccountExchangeCode(env, grant, {
+    authNonce: payload.authNonce || payload.auth_nonce || "",
+    callback: payload.callback || ""
+  });
+  if (accountExchange) return jsonResponse(accountExchange);
+  const signedGrant = await verifySignedGrant(env, grant);
+  if (signedGrant.authenticated) return jsonResponse(signedGrant);
   const passportResult = await verifyGrantWithPassport(env, grant);
   if (passportResult) {
     return jsonResponse(passportResult);
   }
-  return jsonResponse(await verifySignedGrant(env, grant));
+  return jsonResponse(signedGrant);
 }
 
 function escapeHtml(value) {
@@ -5168,8 +5246,21 @@ export default {
       return handleCollaborationRoomCreate(request, env, creator);
     }
 
+    if (url.pathname === "/api/collaboration/lobby/session" && (request.method === "POST" || request.method === "OPTIONS")) {
+      const creator = request.method === "POST" ? await resolveCollaborationAccountCreator(request, env) : null;
+      return handleCollaborationLobbySession(request, env, creator);
+    }
+
+    if (url.pathname === "/api/collaboration/lobby/socket") {
+      return handleCollaborationLobbySocket(request, env);
+    }
+
     if (/^\/api\/collaboration\/rooms\/[A-Za-z0-9_-]{20,64}\/socket$/.test(url.pathname)) {
       return handleCollaborationSocket(request, env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/collaboration/account/start") {
+      return handleCollaborationAccountStart(request, env);
     }
 
     const collaborationRoomMatch = url.pathname.match(/^\/(zh\/)?room(?:\/([A-Za-z0-9_-]{20,64}))?$/);
@@ -5335,4 +5426,4 @@ Sitemap: ${origin}/sitemap.xml
   }
 };
 
-export { CollaborationQuota, CollaborationRoom, resetStatsCacheForTest };
+export { CollaborationLobby, CollaborationQuota, CollaborationRoom, resetStatsCacheForTest };
