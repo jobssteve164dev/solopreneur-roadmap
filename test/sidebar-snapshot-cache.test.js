@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
+  buildConversationDatabaseSignature,
   buildSidebarProjectSignature,
   readCachedConversationSnapshot,
   readSidebarCoreSnapshot,
@@ -29,12 +30,14 @@ function cleanupFixture(fixture) {
   const projectKey = createHash('sha1').update(fixture.projectPath).digest('hex');
   for (const filePath of [
     path.join(fixture.cachePath, 'sidebar-core-snapshot-v1.json'),
-    path.join(fixture.cachePath, `sidebar-conversation-${projectKey}-v1.json`),
+    path.join(fixture.cachePath, 'conversations', `sidebar-conversation-${projectKey}-v1.json`),
     path.join(fixture.solopreneurPath, 'project_journal.db'),
     path.join(fixture.solopreneurPath, 'roadmap.csv')
   ]) {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
+  const conversationCachePath = path.join(fixture.cachePath, 'conversations');
+  if (fs.existsSync(conversationCachePath)) fs.rmdirSync(conversationCachePath);
   fs.rmdirSync(fixture.cachePath);
   fs.rmdirSync(fixture.solopreneurPath);
   fs.rmdirSync(fixture.projectPath);
@@ -69,10 +72,43 @@ test('conversation snapshot cache is reused only while the local journal is unch
       flow: [{ id: 3, nodeId: '__flow__::flow-1::loop-1::builder', status: 'Completed' }]
     };
     writeCachedConversationSnapshot(fixture.cachePath, fixture.projectPath, snapshot);
+    const projectKey = createHash('sha1').update(fixture.projectPath).digest('hex');
+    assert.equal(
+      fs.existsSync(path.join(fixture.cachePath, 'conversations', `sidebar-conversation-${projectKey}-v1.json`)),
+      true
+    );
+    assert.equal(
+      fs.existsSync(path.join(fixture.cachePath, `sidebar-conversation-${projectKey}-v1.json`)),
+      false
+    );
     assert.deepEqual(readCachedConversationSnapshot(fixture.cachePath, fixture.projectPath), snapshot);
 
     fs.appendFileSync(path.join(fixture.solopreneurPath, 'project_journal.db'), '-changed');
     assert.equal(readCachedConversationSnapshot(fixture.cachePath, fixture.projectPath), null);
+  } finally {
+    cleanupFixture(fixture);
+  }
+});
+
+test('legacy conversation snapshots are moved out of the global root before reading', () => {
+  const fixture = createFixture();
+  try {
+    const snapshot = {
+      solo: [{ id: 1, nodeId: '__solo__', status: 'Completed' }],
+      project: [],
+      flow: []
+    };
+    const projectKey = createHash('sha1').update(fixture.projectPath).digest('hex');
+    const fileName = `sidebar-conversation-${projectKey}-v1.json`;
+    const legacyPath = path.join(fixture.cachePath, fileName);
+    fs.writeFileSync(legacyPath, JSON.stringify({
+      signature: buildConversationDatabaseSignature(fixture.projectPath),
+      snapshot
+    }));
+
+    assert.deepEqual(readCachedConversationSnapshot(fixture.cachePath, fixture.projectPath), snapshot);
+    assert.equal(fs.existsSync(legacyPath), false);
+    assert.equal(fs.existsSync(path.join(fixture.cachePath, 'conversations', fileName)), true);
   } finally {
     cleanupFixture(fixture);
   }

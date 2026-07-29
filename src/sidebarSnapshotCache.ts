@@ -6,6 +6,8 @@ import { ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio'
 
 const cacheVersion = 1;
 const cacheFileName = 'sidebar-core-snapshot-v1.json';
+const conversationCacheDirectoryName = 'conversations';
+const conversationCacheFilePattern = /^sidebar-conversation-[a-f0-9]{40}-v1\.json$/;
 
 export interface SidebarConversationSnapshot {
   solo: AgentConversation[];
@@ -54,7 +56,34 @@ function cachePath(globalDataPath: string): string {
 
 function conversationCachePath(globalDataPath: string, projectPath: string): string {
   const projectKey = createHash('sha1').update(projectPath).digest('hex');
-  return path.join(globalDataPath, `sidebar-conversation-${projectKey}-v1.json`);
+  return path.join(globalDataPath, conversationCacheDirectoryName, `sidebar-conversation-${projectKey}-v1.json`);
+}
+
+function nextConflictPath(targetPath: string): string {
+  let index = 1;
+  let candidate = `${targetPath}.legacy-${index}`;
+  while (fs.existsSync(candidate)) {
+    index += 1;
+    candidate = `${targetPath}.legacy-${index}`;
+  }
+  return candidate;
+}
+
+export function ensureConversationCacheDirectory(globalDataPath: string): string {
+  const directoryPath = path.join(globalDataPath, conversationCacheDirectoryName);
+  if (!globalDataPath) return directoryPath;
+  try {
+    fs.mkdirSync(directoryPath, { recursive: true });
+    for (const fileName of fs.readdirSync(globalDataPath)) {
+      if (!conversationCacheFilePattern.test(fileName)) continue;
+      const legacyPath = path.join(globalDataPath, fileName);
+      const targetPath = path.join(directoryPath, fileName);
+      fs.renameSync(legacyPath, fs.existsSync(targetPath) ? nextConflictPath(targetPath) : targetPath);
+    }
+  } catch (error) {
+    console.error('SoloMap failed to organize conversation snapshots:', error);
+  }
+  return directoryPath;
 }
 
 export function readSidebarCoreSnapshot(globalDataPath: string): SidebarCoreSnapshotCache | null {
@@ -94,6 +123,7 @@ export function readCachedConversationSnapshot(globalDataPath: string, projectPa
   if (!globalDataPath || !projectPath) return null;
   let cached: CachedConversationSnapshot;
   try {
+    ensureConversationCacheDirectory(globalDataPath);
     cached = JSON.parse(fs.readFileSync(conversationCachePath(globalDataPath, projectPath), 'utf8')) as CachedConversationSnapshot;
   } catch {
     return null;
@@ -110,7 +140,7 @@ export function writeCachedConversationSnapshot(
 ): void {
   if (!globalDataPath || !projectPath) return;
   try {
-    fs.mkdirSync(globalDataPath, { recursive: true });
+    ensureConversationCacheDirectory(globalDataPath);
     fs.writeFileSync(conversationCachePath(globalDataPath, projectPath), JSON.stringify({
       signature: buildConversationDatabaseSignature(projectPath),
       snapshot
