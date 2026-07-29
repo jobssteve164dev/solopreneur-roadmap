@@ -122,11 +122,6 @@
           ],
           "description": "Controls when SoloMap runs a secondary read-only Agent review after a task run."
         },
-        "solopreneur.customConversationViewEnabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Open supported Agent conversations in SoloMap's dedicated conversation view. When disabled, conversations keep using the integrated terminal. / 在 SoloMap 独立对话视图中打开受支持的 Agent 对话；关闭时继续使用集成终端。"
-        },
         "solopreneur.automationTasks": {
           "type": "object",
           "default": {
@@ -199,7 +194,6 @@
     "build-webview": "echo 'No webview build configured yet'"
   },
   "dependencies": {
-    "@agentclientprotocol/codex-acp": "1.1.7",
     "@vscode/codicons": "^0.0.38",
     "c8": "12.0.0",
     "dependency-cruiser": "^16.10.4",

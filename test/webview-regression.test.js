@@ -23,38 +23,6 @@ test('Agent CLI upgrade action delegates every installed CLI to the Agent', () =
   assert.match(webview, /command: 'agent\.upgradeAll'/);
 });
 
-test('custom conversation view is opt-in and only routes supported foreground conversations', () => {
-  const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
-  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
-  const sidebar = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarWebview.ts'), 'utf8');
-  const view = fs.readFileSync(path.join(projectRoot, 'src', 'customConversationView.ts'), 'utf8');
-  const client = fs.readFileSync(path.join(projectRoot, 'src', 'acpClient.ts'), 'utf8');
-  assert.equal(manifest.contributes.configuration.properties['solopreneur.customConversationViewEnabled'].default, false);
-  assert.match(sidebar, /id="setting-custom-conversation-view"/);
-  assert.match(sidebar, /customConversationViewEnabled: settingCustomConversationView \? settingCustomConversationView\.checked : false/);
-  assert.match(extension, /if \(!settings\.customConversationViewEnabled\) return false/);
-  assert.match(extension, /return getAgentProvider\(resolved\) === 'codex'/);
-  assert.match(extension, /if \(shouldUseCustomConversationView\(context, agentCli\)\)/);
-  assert.match(view, /createWebviewPanel\([\s\S]*?'solopreneur\.conversation'/);
-  assert.match(client, /session\/request_permission/);
-  assert.match(client, /elicitation\/create/);
-  assert.match(client, /session\/cancel/);
-});
-
-test('custom conversation view emits a parseable keyboard-first webview', () => {
-  const module = loadCompiledModule('out/customConversationView.js', '');
-  const html = module.getCustomConversationHtml({ cspSource: 'https://webview.test' }, 'zh');
-  const scripts = [...html.matchAll(/<script nonce="[^"]+">([\s\S]*?)<\/script>/g)];
-  assert.equal(scripts.length, 1);
-  assert.doesNotThrow(() => new vm.Script(scripts[0][1]));
-  assert.match(html, /id="prompt"/);
-  assert.match(html, /event\.key === 'Enter' && !event\.shiftKey/);
-  assert.match(html, /aria-live="polite"/);
-  assert.match(html, /prefers-reduced-motion/);
-  assert.doesNotMatch(html, />ACP</);
-  assert.doesNotMatch(html, />JSON-RPC</);
-});
-
 test('settings maintenance tasks launch outside the current project', () => {
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const sidebarProvider = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8');
@@ -8657,7 +8625,6 @@ test('partial settings updates preserve existing user settings after extension u
     globalDataPath: globalRoot,
     reviewerCliPath: 'agy',
     collaborationReviewMode: 'off',
-    customConversationViewEnabled: true,
     automationTasks: {
       focusMinutes: 45,
       scheduledTasks: [
@@ -8695,7 +8662,6 @@ test('partial settings updates preserve existing user settings after extension u
     globalPrompt: undefined,
     reviewerCliPath: undefined,
     collaborationReviewMode: undefined,
-    customConversationViewEnabled: undefined,
     automationTasks: {
       focusMinutes: 15,
       triggers: {
@@ -8711,7 +8677,6 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(persisted.globalDataPath, globalRoot);
   assert.equal(persisted.reviewerCliPath, 'agy');
   assert.equal(persisted.collaborationReviewMode, 'off');
-  assert.equal(persisted.customConversationViewEnabled, true);
   assert.equal(persisted.agentModelPreferences.codex, 'gpt-5');
   assert.equal(persisted.automationTasks.focusMinutes, 15);
   assert.equal(persisted.automationTasks.triggers.completed.notify, true);

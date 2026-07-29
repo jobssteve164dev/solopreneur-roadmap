@@ -825,45 +825,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       color: var(--text-main);
     }
 
-    .settings-toggle-row {
-      min-height: 44px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 7px 8px;
-      border: 1px solid var(--border-glass);
-      border-radius: 7px;
-      cursor: pointer;
-    }
-
-    .settings-toggle-copy { min-width: 0; }
-    .settings-toggle-title { color: var(--text-main); font-size: 10px; font-weight: 750; }
-    .settings-toggle-help { margin-top: 2px; color: var(--text-muted); font-size: 8.5px; line-height: 1.4; }
-    .settings-toggle-input { position: absolute; opacity: 0; pointer-events: none; }
-    .settings-toggle-track {
-      flex: 0 0 auto;
-      width: 32px;
-      height: 18px;
-      padding: 2px;
-      border: 1px solid var(--border-glass);
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.08);
-      transition: background 160ms ease, border-color 160ms ease;
-    }
-    .settings-toggle-thumb {
-      display: block;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: var(--text-muted);
-      transition: transform 160ms ease, background 160ms ease;
-    }
-    .settings-toggle-input:checked + .settings-toggle-track { background: rgba(0, 229, 255, 0.22); border-color: #00e5ff; }
-    .settings-toggle-input:checked + .settings-toggle-track .settings-toggle-thumb { transform: translateX(14px); background: #00e5ff; }
-    .settings-toggle-input:focus-visible + .settings-toggle-track { outline: 2px solid var(--vscode-focusBorder, #00e5ff); outline-offset: 2px; }
-    @media (prefers-reduced-motion: reduce) { .settings-toggle-track, .settings-toggle-thumb { transition: none; } }
-
     .automation-select-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -4182,15 +4143,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         Review runs are read-only and appear as a separate conversation in the same step.
       </div>
     </div>
-
-    <label class="settings-toggle-row" for="setting-custom-conversation-view">
-      <span class="settings-toggle-copy">
-        <span class="settings-toggle-title" id="label-custom-conversation-view">新版对话界面</span>
-        <span class="settings-toggle-help" id="help-custom-conversation-view">在独立视图中连续对话；目前支持 Codex，其他 Agent 仍使用终端。</span>
-      </span>
-      <input class="settings-toggle-input" type="checkbox" id="setting-custom-conversation-view">
-      <span class="settings-toggle-track" aria-hidden="true"><span class="settings-toggle-thumb"></span></span>
-    </label>
     </div>
 
     <div class="settings-card">
@@ -4451,7 +4403,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const settingReviewerCliSelect = document.getElementById('setting-reviewer-cli-select');
     const settingReviewerCliPathCustom = document.getElementById('setting-reviewer-clipath-custom');
     const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
-    const settingCustomConversationView = document.getElementById('setting-custom-conversation-view');
     const proAccountPanel = document.getElementById('pro-account-panel');
     const btnOpenProAuthorization = document.getElementById('btn-open-pro-authorization');
     const btnPasteProCode = document.getElementById('btn-paste-pro-code');
@@ -5303,8 +5254,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         reviewerCliPathHelp: '可选的副 Agent CLI，只读复核任务结果，不直接改文件。',
         collaborationReviewMode: '自动复核',
         collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
-        customConversationView: '新版对话界面',
-        customConversationViewHelp: '在独立视图中连续对话；目前支持 Codex，其他 Agent 仍使用终端。',
         reviewerSame: '跟随主 Agent',
         settingsSectionBasic: '基础',
         settingsSectionAccount: '账户与 Pro',
@@ -5746,8 +5695,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         reviewerCliPathHelp: 'Optional secondary CLI for read-only review after task runs.',
         collaborationReviewMode: 'Auto Review',
         collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
-        customConversationView: 'New conversation view',
-        customConversationViewHelp: 'Continue in a dedicated view. Codex is supported first; other Agents keep using the terminal.',
         reviewerSame: 'Same as main Agent',
         settingsSectionBasic: 'Basics',
         settingsSectionAccount: 'Account & Pro',
@@ -6261,8 +6208,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('help-reviewer-cli-path', t('reviewerCliPathHelp'));
       setText('label-collaboration-review-mode', t('collaborationReviewMode'));
       setText('help-collaboration-review-mode', t('collaborationReviewHelp'));
-      setText('label-custom-conversation-view', t('customConversationView'));
-      setText('help-custom-conversation-view', t('customConversationViewHelp'));
       setText('option-reviewer-same', t('reviewerSame'));
       if (settingReviewerCliSelect) setSoloSelectValue(settingReviewerCliSelect, getSoloSelectValue(settingReviewerCliSelect));
       setText('settings-section-basic', t('settingsSectionBasic'));
@@ -7370,7 +7315,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
         reviewerCliPath: getEffectiveReviewerCliPath(),
         collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
-        customConversationViewEnabled: settingCustomConversationView ? settingCustomConversationView.checked : false,
         automationTasks
       };
     }
@@ -7448,7 +7392,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
-          if (settingCustomConversationView) settingCustomConversationView.checked = Boolean(message.settings.customConversationViewEnabled);
           syncSettingAgentModelSelect();
           ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
