@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.393 - 2026-07-29
+
+### Docs
+- validate ACP interactive terminal design (a108a35)
+- define SoloMap collaboration ecosystem strategy (8544c43)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.392 - 2026-07-29
 
 ### Docs
