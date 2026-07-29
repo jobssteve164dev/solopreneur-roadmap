@@ -37,6 +37,7 @@ import {
   resolveAgentCli,
   shellQuote
 } from './agentCli';
+import { ensureSolomapMaintenanceWorkspace } from './solomapGlobal';
 
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
@@ -574,9 +575,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private openDependencyAction(action: string, cliPath: string) {
+    const workspaceRoot = this._getProjects().selectedProjectPath
+      || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+      || process.cwd();
+    const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, this._getSettings().globalDataPath);
     const terminal = vscode.window.createTerminal({
       name: 'Setup',
       iconPath: vscode.Uri.joinPath(this._extensionUri, 'resources', 'logo.svg'),
+      cwd: maintenanceRoot,
     });
     terminal.show(true);
     if (action === 'github-auth') {

@@ -10,12 +10,29 @@ const projectRoot = path.resolve(__dirname, '..');
 
 test('Agent CLI upgrade action delegates every installed CLI to the Agent', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'agentCliUpgrade.ts'), 'utf8');
+  const { buildAgentCliUpgradePrompt } = require(path.join(projectRoot, 'out', 'agentCliUpgrade.js'));
   assert.match(source, /Upgrade every Agent CLI currently installed/);
   assert.match(source, /Do not install CLIs that are not already installed/);
   assert.match(source, /do it last/);
+  assert.match(source, /buildSystemMaintenancePromptGuard/);
+  const prompt = buildAgentCliUpgradePrompt('/tmp/.solomap-global/maintenance/runs/upgrade/result.json', '/tmp/.solomap-global/maintenance');
+  assert.match(prompt, /系统维护任务，不是项目开发任务/);
+  assert.match(prompt, /不要查找、读取或分析用户当前项目/);
   const webview = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarWebview.ts'), 'utf8');
   assert.match(webview, /id="btn-upgrade-agent-clis"/);
   assert.match(webview, /command: 'agent\.upgradeAll'/);
+});
+
+test('settings maintenance tasks launch outside the current project', () => {
+  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const sidebarProvider = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8');
+  assert.match(extension, /const \{ maintenanceRoot, runsRoot \} = ensureSolomapMaintenanceWorkspace/);
+  assert.match(extension, /buildAgentCommandForPromptFile\(agentCli, promptFilePath, maintenanceRoot/);
+  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `cli-upgrade-/);
+  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `skill-/);
+  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `mcp-/);
+  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `enhance-/);
+  assert.match(sidebarProvider, /cwd: maintenanceRoot/);
 });
 
 test('time plan panel delegates an optional request through the structured time-plan contract', () => {
@@ -330,6 +347,12 @@ function loadCompiledModule(relativePath, exportPatch) {
         }
         if (id === './solomapGlobal') {
           return loadCompiledModule('out/solomapGlobal.js', '');
+        }
+        if (id === './systemMaintenance') {
+          return require(path.join(projectRoot, 'out/systemMaintenance.js'));
+        }
+        if (id === './agentCliUpgrade') {
+          return require(path.join(projectRoot, 'out/agentCliUpgrade.js'));
         }
         if (id === './agentCli') {
           return require(path.join(projectRoot, 'out/agentCli.js'));
@@ -4977,6 +5000,7 @@ test('agent command builder uses non-interactive task runs and native continuati
       'module.exports.__buildSoloMapSystemMemoryPrompt = solomapGlobal_1.buildSoloMapSystemMemoryPrompt;',
       'module.exports.__buildSolomapStartupPackInstructions = solomapGlobal_1.buildSolomapStartupPackInstructions;',
       'module.exports.__ensureSolomapMemoryStore = solomapGlobal_1.ensureSolomapMemoryStore;',
+      'module.exports.__ensureSolomapMaintenanceWorkspace = solomapGlobal_1.ensureSolomapMaintenanceWorkspace;',
       'module.exports.__ensureSolomapSkillStore = solomapGlobal_1.ensureSolomapSkillStore;',
       'module.exports.__readSolomapSkillRegistry = solomapGlobal_1.readSolomapSkillRegistry;',
       'module.exports.__writeSolomapSkillRegistry = solomapGlobal_1.writeSolomapSkillRegistry;',
@@ -5652,6 +5676,17 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(startupPack, /自动建议写入合适的 memory\/pattern\/decision\/domain 或学习候选/);
 
   const skillStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-skill-store-'));
+  const maintenanceWorkspace = extensionModule.__ensureSolomapMaintenanceWorkspace('/workspace/app', skillStoreRoot);
+  assert.match(maintenanceWorkspace.maintenanceRoot, /\.solomap-global[/\\]maintenance$/);
+  assert.ok(fs.existsSync(maintenanceWorkspace.runsRoot));
+  const maintenanceAgentCommand = extensionModule.__buildAgentCommandForPromptFile(
+    'codex',
+    path.join(maintenanceWorkspace.runsRoot, 'prompt.txt'),
+    maintenanceWorkspace.maintenanceRoot,
+    'auto'
+  );
+  assert.ok(maintenanceAgentCommand.includes(`-C '${maintenanceWorkspace.maintenanceRoot}'`));
+  assert.doesNotMatch(maintenanceAgentCommand, /\/workspace\/app/);
   const skillStore = extensionModule.__ensureSolomapSkillStore('/workspace/app', skillStoreRoot);
   assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'installed')));
   assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'runs')));
@@ -5720,6 +5755,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(installPrompt, /solomap\.skill\.json/);
   assert.match(installPrompt, /source\.lock\.json/);
   assert.match(installPrompt, /DISABLE_TELEMETRY=1/);
+  assert.match(installPrompt, /系统维护任务，不是项目开发任务/);
+  assert.match(installPrompt, /不要查找、读取或分析用户当前项目/);
+  assert.doesNotMatch(installPrompt, /项目目录：\/workspace\/app/);
 
   const fakeSkillDir = path.join(skillStore.skillsRoot, 'installed', 'frontend-ui');
   fs.mkdirSync(path.join(fakeSkillDir, 'package'), { recursive: true });
@@ -5789,6 +5827,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(mcpInstallPrompt, /solomap\.mcp\.json/);
   assert.match(mcpInstallPrompt, /不要启动 MCP server/);
   assert.match(mcpInstallPrompt, /profiles/);
+  assert.match(mcpInstallPrompt, /系统维护任务，不是项目开发任务/);
+  assert.doesNotMatch(mcpInstallPrompt, /项目目录：\/workspace\/app/);
 
   const fakeMcpDir = path.join(mcpStore.mcpRoot, 'servers', 'github-readonly');
   fs.mkdirSync(path.join(fakeMcpDir, 'package'), { recursive: true });
@@ -5933,6 +5973,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.match(enhancementInstallPrompt, /solomap-enhancement-installer/);
   assert.match(enhancementInstallPrompt, /code-structure-assistant/);
   assert.match(enhancementInstallPrompt, /安装结果 JSON 必须写入/);
+  assert.match(enhancementInstallPrompt, /系统维护任务，不是项目开发任务/);
+  assert.doesNotMatch(enhancementInstallPrompt, /项目目录：\/workspace\/app/);
   assert.doesNotMatch(enhancementInstallPrompt, /codegraph install --target=auto --location=global --yes\s*\|\| true/);
 
   const validationEnhancementStore = extensionModule.__ensureSolomapEnhancementStore('/workspace/app', enhancementRuntimeRoot);

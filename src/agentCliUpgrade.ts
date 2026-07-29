@@ -1,6 +1,9 @@
-export function buildAgentCliUpgradePrompt(resultFilePath: string): string {
+import { buildSystemMaintenancePromptGuard } from './systemMaintenance';
+
+export function buildAgentCliUpgradePrompt(resultFilePath: string, maintenanceRoot: string): string {
   return [
     'Upgrade every Agent CLI currently installed on this machine to its latest stable version.',
+    ...buildSystemMaintenancePromptGuard(maintenanceRoot),
     '',
     'Scope:',
     '- Detect installed Agent CLIs, including agy, Codex, Claude Code, Cursor CLI, GitHub Copilot CLI, and OpenCode.',

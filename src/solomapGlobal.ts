@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { buildSystemMaintenancePromptGuard } from './systemMaintenance';
 import * as childProcess from 'child_process';
 import { RoadmapNode } from './db/types';
 import { appendLearningEvent, buildLearningPromotionContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
@@ -566,6 +567,13 @@ export function getSolomapMcpRoot(workspaceRoot: string, globalDataPath = ''): s
 
 export function getSolomapEnhancementsRoot(workspaceRoot: string, globalDataPath = ''): string {
   return path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'enhancements');
+}
+
+export function ensureSolomapMaintenanceWorkspace(workspaceRoot: string, globalDataPath = ''): { maintenanceRoot: string; runsRoot: string } {
+  const maintenanceRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'maintenance');
+  const runsRoot = path.join(maintenanceRoot, 'runs');
+  fs.mkdirSync(runsRoot, { recursive: true });
+  return { maintenanceRoot, runsRoot };
 }
 
 export function getSolomapEnhancementRuntimeRoot(workspaceRoot: string, globalDataPath = ''): string {
@@ -1300,12 +1308,13 @@ export function buildSolomapStartupPackInstructions(input: {
 export function buildSkillInstallPrompt(skillInput: string, workspaceRoot: string, globalDataPath: string, resultFilePath: string): string {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
+  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   return [
     '你正在为 SoloMap 安装一个跨 Agent 通用 skill package。',
     '这是受控安装任务；只能按 SoloMap 指定目录和 schema 落盘，不要安装到各 Agent 自己的全局技能目录作为正式结果。',
+    ...buildSystemMaintenancePromptGuard(maintenanceRoot),
     '',
     `用户提供的 skill 来源：${skillInput}`,
-    `项目目录：${workspaceRoot}`,
     `SoloMap 全局目录：${globalRoot}`,
     `SoloMap 技能目录：${skillsRoot}`,
     `安装结果 JSON：${resultFilePath}`,
@@ -1558,10 +1567,11 @@ export function buildSolomapMcpCandidateInstructions(workspaceRoot: string, glob
 export function buildMcpInstallPrompt(mcpInput: string, workspaceRoot: string, globalDataPath: string, resultFilePath: string): string {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
+  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   return [
     '你正在为 SoloMap 安装一个跨 Agent 通用 MCP 能力连接器。',
+    ...buildSystemMaintenancePromptGuard(maintenanceRoot),
     '',
-    `项目目录：${workspaceRoot}`,
     `用户提供的 MCP 来源：${mcpInput}`,
     `SoloMap Global 目录：${globalRoot}`,
     `SoloMap MCP 目录：${mcpRoot}`,
@@ -2113,17 +2123,18 @@ export function buildEnhancementInstallPrompt(enhancementId: string, workspaceRo
   const enhancement = getBuiltinEnhancementDefinition(enhancementId);
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const enhancementsRoot = getSolomapEnhancementsRoot(workspaceRoot, globalDataPath);
+  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   const installedPath = path.join(enhancementsRoot, 'installed', enhancementId);
   const installerSkillPath = path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), 'installed/solomap-enhancement-installer/package/SKILL.md');
   return [
     '你正在为 SoloMap 安装一个受管执行增强。',
+    ...buildSystemMaintenancePromptGuard(maintenanceRoot),
     '请先读取并遵守这个安装 skill：',
     installerSkillPath,
     '',
     `请求安装的增强 ID：${enhancementId}`,
     `增强名称：${enhancement?.title || enhancementId}`,
     `增强说明：${enhancement?.description || ''}`,
-    `项目目录：${workspaceRoot}`,
     `SoloMap 全局目录：${globalRoot}`,
     `SoloMap 增强目录：${enhancementsRoot}`,
     `目标安装目录：${installedPath}`,
@@ -2149,17 +2160,18 @@ export function buildEnhancementUninstallPrompt(enhancementId: string, workspace
   const enhancement = getBuiltinEnhancementDefinition(enhancementId);
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const enhancementsRoot = getSolomapEnhancementsRoot(workspaceRoot, globalDataPath);
+  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   const installedPath = path.join(enhancementsRoot, 'installed', enhancementId);
   const installerSkillPath = path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), 'installed/solomap-enhancement-installer/package/SKILL.md');
   return [
     '你正在为 SoloMap 卸载一个受管执行增强。',
+    ...buildSystemMaintenancePromptGuard(maintenanceRoot),
     '请先读取并遵守这个安装/卸载 skill：',
     installerSkillPath,
     '',
     `请求卸载的增强 ID：${enhancementId}`,
     `增强名称：${enhancement?.title || enhancementId}`,
     `增强说明：${enhancement?.description || ''}`,
-    `项目目录：${workspaceRoot}`,
     `SoloMap 全局目录：${globalRoot}`,
     `SoloMap 增强目录：${enhancementsRoot}`,
     `当前安装目录：${installedPath}`,
