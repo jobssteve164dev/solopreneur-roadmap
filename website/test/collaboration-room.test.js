@@ -188,7 +188,8 @@ test("the signed-in workbench exposes a co-create tab backed by the encrypted ro
     { waitUntil() {} }
   );
   assert.equal(workbench.status, 200);
-  assert.match(await workbench.text(), /href="\/zh\/workbench\/collaboration">共创空间<\/a>/);
+  const workbenchHtml = await workbench.text();
+  assert.match(workbenchHtml, /href="\/zh\/workbench\/collaboration">共创空间<\/a>/);
 
   const response = await worker.fetch(
     new Request("https://solomap.app/zh/workbench/collaboration", { headers: { cookie } }),
@@ -199,9 +200,13 @@ test("the signed-in workbench exposes a co-create tab backed by the encrypted ro
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("content-security-policy"), /connect-src 'self' ws: wss:/);
   const html = await response.text();
-  assert.match(html, /<h1>加入一次正在发生的共创<\/h1>/);
+  const headerPattern = /<header class="topbar">[\s\S]*?<\/header>/;
+  const normalizeLanguageLink = (value) => String(value || "").replace(/href="\/workbench(?:\/collaboration)?\?lang=en"/, 'href="/workbench?lang=en"');
+  assert.equal(normalizeLanguageLink(html.match(headerPattern)?.[0]), normalizeLanguageLink(workbenchHtml.match(headerPattern)?.[0]));
+  assert.match(html, /<div class="desk shell"><aside class="desk-side">/);
+  assert.match(html, /<h1>共创空间<\/h1>/);
   assert.match(html, /class="active" aria-current="page"[^>]*>共创空间<\/a>/);
-  assert.match(html, /账号 · 独立开发者/);
+  assert.doesNotMatch(html, /workspace-nav|workspace-account|SoloMap · 个人工作台/);
   assert.match(html, /const accountNickname = "独立开发者"/);
   assert.match(html, /粘贴 SoloMap 邀请码/);
   assert.match(html, /indexedDB\.open\("solomap-collaboration"/);
