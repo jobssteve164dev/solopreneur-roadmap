@@ -460,13 +460,3 @@ export function parseCollaborationInviteCode(value: string): CollaborationRoomCr
   }
   return { roomId, relayToken, encryptionKey };
 }
-
-export function appendCollaborationIdea(existingNotes: string, input: { authorName: string; text: string; createdAt: number }): string {
-  const text = String(input.text || '').trim();
-  if (!text) return String(existingNotes || '');
-  const author = String(input.authorName || '').trim().slice(0, 40) || '共创参与者';
-  const timestamp = new Date(Number(input.createdAt || Date.now()));
-  const date = Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : new Date().toISOString();
-  const entry = `[临时共创想法 · ${date} · ${author}]\n${text.slice(0, 4000)}`;
-  return [String(existingNotes || '').trim(), entry].filter(Boolean).join('\n\n');
-}

@@ -796,6 +796,7 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
   const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
   const script = extractLastScript(html);
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
 
   assert.doesNotThrow(() => new vm.Script(script));
   assert.doesNotMatch(html, /<select\b|<option\b/);
@@ -889,6 +890,13 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /collaborationActiveRoom\.isLobby/);
   assert.match(script, /class="collaboration-message-actions"' \+ \(expanded \? '' : ' hidden'\)/);
   assert.match(script, /data-collaboration-message-menu/);
+  assert.match(script, /data-collaboration-to-solo/);
+  assert.match(script, /data-collaboration-quick-note/);
+  assert.match(script, /collaborationToAgent: '带回自由研讨'/);
+  assert.match(script, /collaborationSaveIdea: '快速新建笔记'/);
+  assert.match(script, /command: 'issue\.create',[\s\S]*category: 'quick-note',[\s\S]*sourceMessageId: messageId/);
+  assert.match(extensionSource, /'issue\.create':[\s\S]*createProjectIssue\([\s\S]*sourceMessageId: String\(request\.sourceMessageId \|\| ''\)/);
+  assert.doesNotMatch(script, /command: 'collaboration\.saveIdea'/);
 
   const { elements, postedMessages, dispatchMessage, context } = runScriptWithMinimalDom(script, [
     'tasks-list',

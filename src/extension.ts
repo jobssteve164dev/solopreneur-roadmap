@@ -160,7 +160,6 @@ import {
 } from './localUsageStats';
 import { recordLocalDiagnosticError } from './localDiagnostics';
 import {
-  appendCollaborationIdea,
   buildCollaborationInviteCode,
   createCollaborationLobbySession,
   createCollaborationRoom,
@@ -793,18 +792,6 @@ async function handleSharedWebviewAction(
       await vscode.env.clipboard.writeText(buildCollaborationInviteCode(room));
       await respond({ command: 'collaborationInviteCodeCopied', roomId });
     },
-    'collaboration.saveIdea': async (request) => {
-      const projectPath = String(request.projectPath || '');
-      const project = getProjects(context).find((item) => item.path === projectPath);
-      if (!project) throw new Error('Choose a registered project before saving this idea.');
-      const notes = appendCollaborationIdea(project.notes || '', {
-        authorName: String(request.authorName || ''),
-        text: String(request.text || ''),
-        createdAt: Number(request.createdAt || Date.now())
-      });
-      await updateProjectMetadata(context, projectPath, { notes });
-      await respond({ command: 'collaborationIdeaSaved', messageId: String(request.messageId || '') });
-    },
     'conversation.runRoadmapRevision': async (request) => {
       revealAgentStartupTerminal(String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'roadmap-revision');
       const projectPath = await ensureActionProject(context, request.projectPath || '');
@@ -1144,7 +1131,13 @@ async function handleSharedWebviewAction(
         String(request.category || 'discussion'),
         String(request.priority || '')
       );
-      await respond({ command: 'issueActionCompleted', projectPath, success: result.ok, message: result.message });
+      await respond({
+        command: 'issueActionCompleted',
+        projectPath,
+        success: result.ok,
+        message: result.message,
+        sourceMessageId: String(request.sourceMessageId || '')
+      });
       sendProjectsToWebviews(context);
     },
     'issue.close': async (request) => {

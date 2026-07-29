@@ -4459,7 +4459,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let collaborationLobbyLoginPending = false;
     let collaborationNickname = String((typeof vscode.getState === 'function' && vscode.getState() && vscode.getState().collaborationNickname) || '');
     const collaborationMessages = new Map();
-    const collaborationSavedIdeaIds = new Set();
+    const collaborationCreatedQuickNoteIds = new Set();
     const collaborationExpandedMessageIds = new Set();
     let currentLanguage = 'zh';
     let currentNodes = [];
@@ -4904,7 +4904,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (input) input.value = '';
     }
 
-    function addCollaborationMessageToAgent(messageId) {
+    function bringCollaborationMessageToSolo(messageId) {
       const message = collaborationMessages.get(messageId);
       const projectPath = String(collaborationActiveRoom && collaborationActiveRoom.projectPath || currentProjects.selectedProjectPath || '');
       if (!message) return;
@@ -4929,7 +4929,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
     }
 
-    function saveCollaborationMessageAsIdea(messageId) {
+    function createCollaborationQuickNote(messageId) {
       const message = collaborationMessages.get(messageId);
       const projectPath = String(collaborationActiveRoom && collaborationActiveRoom.projectPath || currentProjects.selectedProjectPath || '');
       if (!message) return;
@@ -4939,12 +4939,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         return;
       }
       vscode.postMessage({
-        command: 'collaboration.saveIdea',
+        command: 'issue.create',
         projectPath,
-        messageId,
-        authorName: message.authorName,
-        text: message.text,
-        createdAt: message.createdAt
+        title: String(message.text || '').trim().replace(/\s+/g, ' ').slice(0, 180),
+        body: '',
+        category: 'quick-note',
+        priority: '',
+        sourceMessageId: messageId
       });
     }
 
@@ -5003,9 +5004,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const ordered = [...collaborationMessages.values()].sort((left, right) => Number(left.sequence || left.createdAt) - Number(right.sequence || right.createdAt));
       const messageRows = ordered.length
         ? ordered.map(message => {
-          const saved = collaborationSavedIdeaIds.has(message.id);
+          const saved = collaborationCreatedQuickNoteIds.has(message.id);
           const expanded = collaborationExpandedMessageIds.has(message.id);
-          return '<article class="collaboration-message' + (message.authorId === room.authorId ? ' mine' : '') + '"><div class="collaboration-message-head"><span class="collaboration-message-author">' + escapeHtml(message.authorName) + '</span><span class="collaboration-message-meta"><span>' + escapeHtml(new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) + '</span><button type="button" class="collaboration-message-menu" data-collaboration-message-menu="' + escapeHtml(message.id) + '" aria-expanded="' + (expanded ? 'true' : 'false') + '" title="' + escapeHtml(expanded ? t('collaborationActionsCollapse') : t('collaborationActionsExpand')) + '"><span class="codicon codicon-chevron-' + (expanded ? 'up' : 'down') + '"></span></button></span></div><div class="collaboration-message-text">' + escapeHtml(message.text) + '</div><div class="collaboration-message-actions"' + (expanded ? '' : ' hidden') + '><button type="button" class="collaboration-message-action" data-collaboration-to-agent="' + escapeHtml(message.id) + '">' + escapeHtml(t('collaborationToAgent')) + '</button><button type="button" class="collaboration-message-action" data-collaboration-save-idea="' + escapeHtml(message.id) + '"' + (saved ? ' disabled' : '') + '>' + escapeHtml(saved ? t('collaborationIdeaSaved') : t('collaborationSaveIdea')) + '</button></div></article>';
+          return '<article class="collaboration-message' + (message.authorId === room.authorId ? ' mine' : '') + '"><div class="collaboration-message-head"><span class="collaboration-message-author">' + escapeHtml(message.authorName) + '</span><span class="collaboration-message-meta"><span>' + escapeHtml(new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) + '</span><button type="button" class="collaboration-message-menu" data-collaboration-message-menu="' + escapeHtml(message.id) + '" aria-expanded="' + (expanded ? 'true' : 'false') + '" title="' + escapeHtml(expanded ? t('collaborationActionsCollapse') : t('collaborationActionsExpand')) + '"><span class="codicon codicon-chevron-' + (expanded ? 'up' : 'down') + '"></span></button></span></div><div class="collaboration-message-text">' + escapeHtml(message.text) + '</div><div class="collaboration-message-actions"' + (expanded ? '' : ' hidden') + '><button type="button" class="collaboration-message-action" data-collaboration-to-solo="' + escapeHtml(message.id) + '">' + escapeHtml(t('collaborationToAgent')) + '</button><button type="button" class="collaboration-message-action" data-collaboration-quick-note="' + escapeHtml(message.id) + '"' + (saved ? ' disabled' : '') + '>' + escapeHtml(saved ? t('collaborationIdeaSaved') : t('collaborationSaveIdea')) + '</button></div></article>';
         }).join('')
         : '<div class="collaboration-empty">' + escapeHtml(t('collaborationMessageEmpty')) + '</div>';
       const canSend = collaborationConnectionState === 'connected';
@@ -5048,8 +5049,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         else collaborationExpandedMessageIds.add(messageId);
         renderCollaborationPanel();
       }));
-      collaborationContent.querySelectorAll('[data-collaboration-to-agent]').forEach(button => button.addEventListener('click', () => addCollaborationMessageToAgent(button.getAttribute('data-collaboration-to-agent') || '')));
-      collaborationContent.querySelectorAll('[data-collaboration-save-idea]').forEach(button => button.addEventListener('click', () => saveCollaborationMessageAsIdea(button.getAttribute('data-collaboration-save-idea') || '')));
+      collaborationContent.querySelectorAll('[data-collaboration-to-solo]').forEach(button => button.addEventListener('click', () => bringCollaborationMessageToSolo(button.getAttribute('data-collaboration-to-solo') || '')));
+      collaborationContent.querySelectorAll('[data-collaboration-quick-note]').forEach(button => button.addEventListener('click', () => createCollaborationQuickNote(button.getAttribute('data-collaboration-quick-note') || '')));
       btnToggleCollaboration.classList.add('has-room');
     }
 
@@ -5423,12 +5424,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationMessagePlaceholder: '分享一个想法、问题或审计意见…',
         collaborationSend: '发送',
         collaborationMessageEmpty: '围绕一个具体问题开始交流。',
-        collaborationToAgent: '加入 Agent 下一轮',
-        collaborationSaveIdea: '保存为项目想法',
-        collaborationIdeaSaved: '已保存',
+        collaborationToAgent: '带回自由研讨',
+        collaborationSaveIdea: '快速新建笔记',
+        collaborationIdeaSaved: '笔记已创建',
         collaborationActionsExpand: '展开消息操作',
         collaborationActionsCollapse: '收起消息操作',
-        collaborationAddedToAgent: '已放入当前项目的自由研讨输入框',
+        collaborationAddedToAgent: '已带回当前项目的自由研讨输入框',
         collaborationPrivacy: '端到端加密 · 密文随房间到期清理 · 远端参与者不能控制 Agent',
         collaborationProjectRequired: '请先选择一个项目。',
         collaborationCreateFailed: '暂时无法创建房间，请检查网络后重试。',
@@ -5864,12 +5865,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationMessagePlaceholder: 'Share an idea, question, or review note…',
         collaborationSend: 'Send',
         collaborationMessageEmpty: 'Start with one concrete question.',
-        collaborationToAgent: 'Add to Agent next turn',
-        collaborationSaveIdea: 'Save as project idea',
-        collaborationIdeaSaved: 'Saved',
+        collaborationToAgent: 'Bring to Solo',
+        collaborationSaveIdea: 'Create quick note',
+        collaborationIdeaSaved: 'Note created',
         collaborationActionsExpand: 'Show message actions',
         collaborationActionsCollapse: 'Hide message actions',
-        collaborationAddedToAgent: 'Added to the current project Solo draft',
+        collaborationAddedToAgent: 'Brought back to the current project Solo draft',
         collaborationPrivacy: 'End-to-end encrypted · ciphertext is cleared when the room ends · participants cannot control the Agent',
         collaborationProjectRequired: 'Choose a project first.',
         collaborationCreateFailed: 'The room could not be created. Check the connection and try again.',
@@ -7618,12 +7619,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderCollaborationPanel();
           break;
 
-        case 'collaborationIdeaSaved':
-          collaborationSavedIdeaIds.add(String(message.messageId || ''));
-          collaborationNotice = t('collaborationIdeaSaved');
-          renderCollaborationPanel();
-          break;
-
         case 'sidebarActionFailed':
           pendingConversationContinuations.clear();
           deliveryActionMessage = message.message || '';
@@ -7767,6 +7762,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'issueActionCompleted':
+          if (message.sourceMessageId) {
+            if (message.success) {
+              collaborationCreatedQuickNoteIds.add(String(message.sourceMessageId));
+              collaborationNotice = t('collaborationIdeaSaved');
+              collaborationError = '';
+            } else {
+              collaborationError = message.message || t('collaborationCreateFailed');
+            }
+            renderCollaborationPanel();
+            break;
+          }
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           issueActionMessage = message.message || '';
           if (message.success) {

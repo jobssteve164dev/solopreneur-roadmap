@@ -4,7 +4,6 @@ const path = require('node:path');
 
 const projectRoot = path.resolve(__dirname, '..');
 const {
-  appendCollaborationIdea,
   buildCollaborationInviteCode,
   collaborationDeviceCredentialSecretKey,
   collaborationRoomsStateKey,
@@ -207,18 +206,6 @@ test('an expired anonymous device credential is replaced once before room creati
   assert.match(calls[1].url, /\/api\/collaboration\/devices$/);
   assert.equal(calls[2].init.headers.authorization, `Device ${freshCredential}`);
   assert.equal(storage.secretValues.get(collaborationDeviceCredentialSecretKey), freshCredential);
-});
-
-test('saving a collaboration idea appends without replacing existing project notes', () => {
-  const notes = appendCollaborationIdea('Existing project note.', {
-    authorName: 'Reviewer',
-    text: 'Audit the reconnect path before release.',
-    createdAt: Date.parse('2026-07-29T10:00:00.000Z')
-  });
-  assert.match(notes, /^Existing project note\./);
-  assert.match(notes, /临时共创想法/);
-  assert.match(notes, /Reviewer/);
-  assert.match(notes, /Audit the reconnect path before release\./);
 });
 
 test('public lobby sessions require an account grant and never fall back to an anonymous device', async () => {

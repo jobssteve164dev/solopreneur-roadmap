@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import worker from "../src/worker.js";
+import { createSessionCookie } from "../src/headlessAuth.js";
 import {
   CollaborationLobby,
   CollaborationQuota,
@@ -160,6 +161,54 @@ test("room pages are private, encrypted browser clients with a local recent-room
   assert.match(joinHtml, /粘贴 SoloMap 邀请码/);
   assert.match(joinHtml, /parseInviteCode/);
   assert.doesNotThrow(() => new vm.Script([...joinHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1]));
+});
+
+test("the signed-in workbench exposes a co-create tab backed by the encrypted room client", async () => {
+  const env = {
+    SITE_ORIGIN: "https://solomap.app",
+    SOLOMAP_PASSPORT_PRODUCT_SECRET: "test-collaboration-secret"
+  };
+  const signedOut = await worker.fetch(
+    new Request("https://solomap.app/zh/workbench/collaboration"),
+    env,
+    { waitUntil() {} }
+  );
+  assert.equal(signedOut.status, 302);
+  assert.equal(signedOut.headers.get("location"), "https://solomap.app/zh/login?return_to=%2Fzh%2Fworkbench%2Fcollaboration");
+
+  const sessionCookie = await createSessionCookie(
+    new Request("https://solomap.app/zh/workbench"),
+    env,
+    { id: "user-1", email: "builder@example.com", name: "独立开发者" }
+  );
+  const cookie = sessionCookie.split(";")[0];
+  const workbench = await worker.fetch(
+    new Request("https://solomap.app/zh/workbench", { headers: { cookie } }),
+    env,
+    { waitUntil() {} }
+  );
+  assert.equal(workbench.status, 200);
+  assert.match(await workbench.text(), /href="\/zh\/workbench\/collaboration">共创空间<\/a>/);
+
+  const response = await worker.fetch(
+    new Request("https://solomap.app/zh/workbench/collaboration", { headers: { cookie } }),
+    env,
+    { waitUntil() {} }
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.match(response.headers.get("content-security-policy"), /connect-src 'self' ws: wss:/);
+  const html = await response.text();
+  assert.match(html, /<h1>加入一次正在发生的共创<\/h1>/);
+  assert.match(html, /class="active" aria-current="page"[^>]*>共创空间<\/a>/);
+  assert.match(html, /账号 · 独立开发者/);
+  assert.match(html, /const accountNickname = "独立开发者"/);
+  assert.match(html, /粘贴 SoloMap 邀请码/);
+  assert.match(html, /indexedDB\.open\("solomap-collaboration"/);
+  assert.match(html, /crypto\.subtle\.decrypt/);
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+  assert.equal(scripts.length, 1);
+  assert.doesNotThrow(() => new vm.Script(scripts[0][1]));
 });
 
 test("room creation validates credentials before allocating a Durable Object", async () => {
