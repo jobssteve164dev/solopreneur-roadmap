@@ -4572,6 +4572,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function collaborationCreateErrorLabel(code) {
       const labels = {
+        collaboration_request_timeout: t('collaborationRequestTimeout'),
+        collaboration_network_error: t('collaborationNetworkError'),
         active_room_limit: t('collaborationActiveLimit'),
         daily_room_limit: t('collaborationDailyLimit'),
         room_creation_limited: t('collaborationRateLimited'),
@@ -5430,6 +5432,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationPrivacy: '端到端加密 · 密文随房间到期清理 · 远端参与者不能控制 Agent',
         collaborationProjectRequired: '请先选择一个项目。',
         collaborationCreateFailed: '暂时无法创建房间，请检查网络后重试。',
+        collaborationRequestTimeout: '创建等待超时，请检查网络后重试。',
+        collaborationNetworkError: '暂时无法连接共创服务，请稍后重试。',
         collaborationActiveLimit: '当前额度下已有进行中的房间，请结束或等待房间到期后再创建。',
         collaborationDailyLimit: '今天的房间创建额度已用完，登录账号可获得更高额度。',
         collaborationRateLimited: '创建得太频繁，请稍后再试。',
@@ -5869,6 +5873,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationPrivacy: 'End-to-end encrypted · ciphertext is cleared when the room ends · participants cannot control the Agent',
         collaborationProjectRequired: 'Choose a project first.',
         collaborationCreateFailed: 'The room could not be created. Check the connection and try again.',
+        collaborationRequestTimeout: 'Room creation timed out. Check the connection and try again.',
+        collaborationNetworkError: 'The co-create service could not be reached. Try again shortly.',
         collaborationActiveLimit: 'Your current allowance already has an active room. End it or wait for it to expire before creating another.',
         collaborationDailyLimit: 'Today’s room allowance is used up. Sign in for a higher allowance.',
         collaborationRateLimited: 'Rooms are being created too quickly. Try again shortly.',

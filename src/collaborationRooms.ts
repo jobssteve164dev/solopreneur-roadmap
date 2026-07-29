@@ -68,7 +68,61 @@ export interface CollaborationLobbySession {
   sessionEndsAt?: number;
 }
 
+export type CollaborationDiagnosticStage =
+  | 'account_create'
+  | 'device_registration'
+  | 'device_create'
+  | 'device_refresh';
+
+export interface CollaborationDiagnosticEvent {
+  stage: CollaborationDiagnosticStage;
+  outcome: 'fallback' | 'failure';
+  durationMs: number;
+  status?: number;
+  error: string;
+}
+
+export type CollaborationDiagnosticSink = (event: CollaborationDiagnosticEvent) => void;
+
 const collaborationInviteCodePrefix = 'SM1.';
+const collaborationCreateDeadlineMs = 15_000;
+
+function diagnosticErrorCode(error: unknown): string {
+  if (error instanceof Error && error.message === 'collaboration_request_timeout') return error.message;
+  return 'collaboration_network_error';
+}
+
+async function fetchWithDeadline(
+  url: string,
+  init: RequestInit,
+  fetcher: typeof fetch,
+  deadlineAt: number
+): Promise<{ response: Response; durationMs: number }> {
+  const remainingMs = Math.max(1, deadlineAt - Date.now());
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  const timeout = setTimeout(() => controller.abort(), remainingMs);
+  try {
+    const response = await fetcher(url, { ...init, signal: controller.signal });
+    return { response, durationMs: Date.now() - startedAt };
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error('collaboration_request_timeout');
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function emitCollaborationDiagnostic(
+  sink: CollaborationDiagnosticSink | undefined,
+  event: CollaborationDiagnosticEvent
+): void {
+  try {
+    sink?.(event);
+  } catch {
+    // Diagnostics must never change the room creation result.
+  }
+}
 
 function normalizeMetadata(value: unknown): CollaborationRoomMetadata | null {
   const item = value as Partial<CollaborationRoomMetadata> | null;
@@ -164,37 +218,61 @@ export async function saveCollaborationRoom(context: CollaborationStorage, input
 }
 
 async function requestCollaborationDeviceCredential(
-  fetcher: typeof fetch
+  fetcher: typeof fetch,
+  deadlineAt: number,
+  stage: 'device_registration' | 'device_refresh',
+  diagnosticSink?: CollaborationDiagnosticSink
 ): Promise<string> {
-  const response = await fetcher(`${collaborationSiteOrigin}/api/collaboration/devices`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}'
-  });
+  let response: Response;
+  let durationMs = 0;
+  const startedAt = Date.now();
+  try {
+    const request = await fetchWithDeadline(`${collaborationSiteOrigin}/api/collaboration/devices`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}'
+    }, fetcher, deadlineAt);
+    response = request.response;
+    durationMs = request.durationMs;
+  } catch (error) {
+    emitCollaborationDiagnostic(diagnosticSink, {
+      stage,
+      outcome: 'failure',
+      durationMs: Date.now() - startedAt,
+      error: diagnosticErrorCode(error)
+    });
+    throw new Error(diagnosticErrorCode(error));
+  }
   const result = await response.json().catch(() => ({})) as { deviceCredential?: string; error?: string };
   const credential = String(result.deviceCredential || '');
   if (!response.ok || !deviceCredentialPattern.test(credential)) {
-    throw new Error(String(result.error || `device_registration_http_${response.status}`));
+    const error = String(result.error || `device_registration_http_${response.status}`);
+    emitCollaborationDiagnostic(diagnosticSink, { stage, outcome: 'failure', durationMs, status: response.status, error });
+    throw new Error(error);
   }
   return credential;
 }
 
 export async function readOrCreateCollaborationDeviceCredential(
   context: CollaborationStorage,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  deadlineAt = Date.now() + collaborationCreateDeadlineMs,
+  diagnosticSink?: CollaborationDiagnosticSink
 ): Promise<string> {
   const existing = String(await context.secrets.get(collaborationDeviceCredentialSecretKey) || '');
   if (deviceCredentialPattern.test(existing)) return existing;
-  const credential = await requestCollaborationDeviceCredential(fetcher);
+  const credential = await requestCollaborationDeviceCredential(fetcher, deadlineAt, 'device_registration', diagnosticSink);
   await context.secrets.store(collaborationDeviceCredentialSecretKey, credential);
   return credential;
 }
 
 async function refreshCollaborationDeviceCredential(
   context: CollaborationStorage,
-  fetcher: typeof fetch
+  fetcher: typeof fetch,
+  deadlineAt: number,
+  diagnosticSink?: CollaborationDiagnosticSink
 ): Promise<string> {
-  const credential = await requestCollaborationDeviceCredential(fetcher);
+  const credential = await requestCollaborationDeviceCredential(fetcher, deadlineAt, 'device_refresh', diagnosticSink);
   await context.secrets.store(collaborationDeviceCredentialSecretKey, credential);
   return credential;
 }
@@ -202,38 +280,117 @@ async function refreshCollaborationDeviceCredential(
 async function sendRoomCreateRequest(
   input: CollaborationRoomCreateInput,
   authorization: string,
-  fetcher: typeof fetch
-): Promise<{ status: number; result: CollaborationRoomCreateResult }> {
-  const response = await fetcher(`${collaborationSiteOrigin}/api/collaboration/rooms`, {
+  fetcher: typeof fetch,
+  deadlineAt: number
+): Promise<{ status: number; result: CollaborationRoomCreateResult; durationMs: number }> {
+  const request = await fetchWithDeadline(`${collaborationSiteOrigin}/api/collaboration/rooms`, {
     method: 'POST',
     headers: {
       'authorization': authorization,
       'content-type': 'application/json'
     },
     body: JSON.stringify(input)
-  });
+  }, fetcher, deadlineAt);
+  const response = request.response;
   const result = await response.json().catch(() => ({ ok: false, error: `room_create_http_${response.status}` })) as CollaborationRoomCreateResult;
-  return { status: response.status, result };
+  return { status: response.status, result, durationMs: request.durationMs };
 }
 
 export async function createCollaborationRoom(
   context: CollaborationStorage,
   input: CollaborationRoomCreateInput,
   passportGrant = '',
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  diagnosticSink?: CollaborationDiagnosticSink,
+  createDeadlineMs = collaborationCreateDeadlineMs
 ): Promise<CollaborationRoomCreateResult> {
   if (!roomIdPattern.test(String(input.roomId || '')) || !relayTokenPattern.test(String(input.relayToken || ''))) {
     return { ok: false, error: 'invalid_room_credentials' };
   }
+  const normalizedDeadlineMs = Math.max(1, Number(createDeadlineMs) || collaborationCreateDeadlineMs);
+  const deadlineAt = Date.now() + normalizedDeadlineMs;
   if (passportGrant) {
-    const accountAttempt = await sendRoomCreateRequest(input, `Bearer ${passportGrant}`, fetcher);
-    if (accountAttempt.result.ok || ![401, 403].includes(accountAttempt.status)) return accountAttempt.result;
+    const accountStartedAt = Date.now();
+    try {
+      const accountAttempt = await sendRoomCreateRequest(
+        input,
+        `Bearer ${passportGrant}`,
+        fetcher,
+        Math.min(deadlineAt, Date.now() + Math.min(4_000, Math.max(1, Math.floor(normalizedDeadlineMs / 3))))
+      );
+      if (accountAttempt.result.ok) return accountAttempt.result;
+      if (![401, 403].includes(accountAttempt.status)) {
+        emitCollaborationDiagnostic(diagnosticSink, {
+          stage: 'account_create',
+          outcome: 'failure',
+          durationMs: accountAttempt.durationMs,
+          status: accountAttempt.status,
+          error: String(accountAttempt.result.error || `room_create_http_${accountAttempt.status}`)
+        });
+        return accountAttempt.result;
+      }
+      emitCollaborationDiagnostic(diagnosticSink, {
+        stage: 'account_create',
+        outcome: 'fallback',
+        durationMs: accountAttempt.durationMs,
+        status: accountAttempt.status,
+        error: String(accountAttempt.result.error || 'account_grant_rejected')
+      });
+    } catch (error) {
+      emitCollaborationDiagnostic(diagnosticSink, {
+        stage: 'account_create',
+        outcome: 'fallback',
+        durationMs: Date.now() - accountStartedAt,
+        error: diagnosticErrorCode(error)
+      });
+    }
   }
-  let deviceCredential = await readOrCreateCollaborationDeviceCredential(context, fetcher);
-  let deviceAttempt = await sendRoomCreateRequest(input, `Device ${deviceCredential}`, fetcher);
+  let deviceCredential = await readOrCreateCollaborationDeviceCredential(context, fetcher, deadlineAt, diagnosticSink);
+  let deviceAttempt: Awaited<ReturnType<typeof sendRoomCreateRequest>>;
+  let deviceCreateStartedAt = Date.now();
+  try {
+    deviceAttempt = await sendRoomCreateRequest(input, `Device ${deviceCredential}`, fetcher, deadlineAt);
+  } catch (error) {
+    const code = diagnosticErrorCode(error);
+    emitCollaborationDiagnostic(diagnosticSink, {
+      stage: 'device_create',
+      outcome: 'failure',
+      durationMs: Date.now() - deviceCreateStartedAt,
+      error: code
+    });
+    throw new Error(code);
+  }
   if ([401, 403].includes(deviceAttempt.status)) {
-    deviceCredential = await refreshCollaborationDeviceCredential(context, fetcher);
-    deviceAttempt = await sendRoomCreateRequest(input, `Device ${deviceCredential}`, fetcher);
+    emitCollaborationDiagnostic(diagnosticSink, {
+      stage: 'device_create',
+      outcome: 'fallback',
+      durationMs: deviceAttempt.durationMs,
+      status: deviceAttempt.status,
+      error: String(deviceAttempt.result.error || 'device_credential_rejected')
+    });
+    deviceCredential = await refreshCollaborationDeviceCredential(context, fetcher, deadlineAt, diagnosticSink);
+    deviceCreateStartedAt = Date.now();
+    try {
+      deviceAttempt = await sendRoomCreateRequest(input, `Device ${deviceCredential}`, fetcher, deadlineAt);
+    } catch (error) {
+      const code = diagnosticErrorCode(error);
+      emitCollaborationDiagnostic(diagnosticSink, {
+        stage: 'device_create',
+        outcome: 'failure',
+        durationMs: Date.now() - deviceCreateStartedAt,
+        error: code
+      });
+      throw new Error(code);
+    }
+  }
+  if (!deviceAttempt.result.ok) {
+    emitCollaborationDiagnostic(diagnosticSink, {
+      stage: 'device_create',
+      outcome: 'failure',
+      durationMs: deviceAttempt.durationMs,
+      status: deviceAttempt.status,
+      error: String(deviceAttempt.result.error || `room_create_http_${deviceAttempt.status}`)
+    });
   }
   return deviceAttempt.result;
 }

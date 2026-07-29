@@ -127,6 +127,55 @@ test('room creation falls back from an invalid account grant to the saved anonym
   assert.equal(calls[2].init.headers.authorization, `Device ${issuedCredential}`);
 });
 
+test('room creation falls back to the device when the cached account request has a network failure', async () => {
+  const storage = createStorage();
+  const issuedCredential = `${'a'.repeat(40)}.${'b'.repeat(40)}`;
+  storage.secretValues.set(collaborationDeviceCredentialSecretKey, issuedCredential);
+  const diagnostics = [];
+  let requests = 0;
+  const result = await createCollaborationRoom(storage.context, {
+    roomId: 'room1234567890ABCDEFGH',
+    relayToken: 'relayToken1234567890ABCDEFGHijklmnop',
+    expiresAt: Date.now() + 3600000
+  }, 'expired-account-secret', async (_url, init) => {
+    requests += 1;
+    if (String(init.headers.authorization).startsWith('Bearer ')) throw new Error('socket unavailable');
+    return new Response(JSON.stringify({ ok: true, tier: 'anonymous', expiresAt: Date.now() + 3600000 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  }, (event) => diagnostics.push(event));
+
+  assert.equal(result.ok, true);
+  assert.equal(requests, 2);
+  assert.deepEqual(diagnostics.map(({ stage, outcome, error }) => ({ stage, outcome, error })), [{
+    stage: 'account_create',
+    outcome: 'fallback',
+    error: 'collaboration_network_error'
+  }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /expired-account-secret|socket unavailable/);
+});
+
+test('room creation aborts a stalled request and reports its exact diagnostic stage', async () => {
+  const storage = createStorage();
+  storage.secretValues.set(collaborationDeviceCredentialSecretKey, `${'a'.repeat(40)}.${'b'.repeat(40)}`);
+  const diagnostics = [];
+  const startedAt = Date.now();
+  await assert.rejects(createCollaborationRoom(storage.context, {
+    roomId: 'room1234567890ABCDEFGH',
+    relayToken: 'relayToken1234567890ABCDEFGHijklmnop',
+    expiresAt: Date.now() + 3600000
+  }, '', (_url, init) => new Promise((_resolve, reject) => {
+    init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+  }), (event) => diagnostics.push(event), 60), /collaboration_request_timeout/);
+
+  assert.ok(Date.now() - startedAt < 500);
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].stage, 'device_create');
+  assert.equal(diagnostics[0].outcome, 'failure');
+  assert.equal(diagnostics[0].error, 'collaboration_request_timeout');
+});
+
 test('an expired anonymous device credential is replaced once before room creation is retried', async () => {
   const storage = createStorage();
   const expiredCredential = `${'x'.repeat(40)}.${'y'.repeat(40)}`;

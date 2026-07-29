@@ -714,13 +714,23 @@ async function handleSharedWebviewAction(
       });
     },
     'collaboration.createRoom': async (request) => {
+      const diagnosticDataPath = getPersistedSettings(context).globalDataPath;
       try {
         const passportGrant = await readPassportGrant(context);
         const result = await createCollaborationRoom(context, {
           roomId: String(request.roomId || ''),
           relayToken: String(request.relayToken || ''),
           expiresAt: Number(request.expiresAt || 0)
-        }, String(passportGrant?.grant || ''), fetch);
+        }, String(passportGrant?.grant || ''), fetch, (event) => {
+          const detail = [
+            `outcome=${event.outcome}`,
+            `duration_ms=${Math.max(0, Math.round(event.durationMs))}`,
+            ...(event.status ? [`http_status=${event.status}`] : []),
+            `error=${event.error}`
+          ].join(' ');
+          recordLocalDiagnosticError(diagnosticDataPath, `collaboration.create.${event.stage}`, detail);
+          console.warn(`SoloMap collaboration room creation ${event.outcome} at ${event.stage}: ${detail}`);
+        });
         if (!result.ok) {
           await respond({ command: 'collaborationRoomCreateFailed', error: String(result.error || 'room_creation_failed') });
           return;
@@ -732,6 +742,8 @@ async function handleSharedWebviewAction(
           quota: result.quota || null
         });
       } catch (error) {
+        recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.create.failed', error);
+        console.error('SoloMap collaboration room creation failed:', error);
         await respond({
           command: 'collaborationRoomCreateFailed',
           error: error instanceof Error ? error.message : 'room_creation_failed'
