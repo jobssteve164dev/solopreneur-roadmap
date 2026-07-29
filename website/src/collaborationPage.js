@@ -182,6 +182,114 @@ export function buildCollaborationRoomPage(roomId = "", locale = "en", options =
 </html>`;
 }
 
+export function buildCollaborationLobbyPage(locale = "en", options = {}) {
+  const zh = locale === "zh";
+  const displayName = String(options.displayName || "").trim();
+  const siteStyles = String(options.siteStyles || "");
+  const workbenchStyles = String(options.workbenchStyles || "");
+  const headerHtml = String(options.headerHtml || "");
+  const sidebarHtml = String(options.sidebarHtml || "");
+  const footerHtml = String(options.footerHtml || "");
+  const copy = zh ? {
+    pageTitle: "共创大厅 · SoloMap",
+    title: "共创大厅",
+    lead: "和此刻在线的 SoloMap 用户自由交流。大厅每小时整点开启新一轮。",
+    connecting: "正在进入大厅",
+    connected: "已连接",
+    offline: "连接已断开",
+    ended: "本轮已结束",
+    retry: "重新连接",
+    next: "进入新一轮",
+    participants: "人在线",
+    remaining: "后清空",
+    empty: "从一个具体问题开始，和大厅里的独立开发者交换想法。",
+    messageLabel: "消息",
+    messagePlaceholder: "分享一个想法或问题…",
+    send: "发送",
+    privacy: "大厅消息公开可见，并会在整点永久清空。",
+    rateLimited: "发言太快，请稍后再继续。",
+    unavailable: "暂时无法进入大厅，请稍后重试。"
+  } : {
+    pageTitle: "Co-create lobby · SoloMap",
+    title: "Co-create lobby",
+    lead: "Talk freely with SoloMap users who are online now. A new lobby session starts every hour.",
+    connecting: "Entering lobby",
+    connected: "Connected",
+    offline: "Disconnected",
+    ended: "This session has ended",
+    retry: "Reconnect",
+    next: "Enter new session",
+    participants: "online",
+    remaining: "until messages clear",
+    empty: "Start with one concrete question and exchange ideas with other solo developers.",
+    messageLabel: "Message",
+    messagePlaceholder: "Share an idea or question…",
+    send: "Send",
+    privacy: "Lobby messages are public and permanently cleared on the hour.",
+    rateLimited: "You are posting too quickly. Continue in a moment.",
+    unavailable: "The lobby is unavailable right now. Try again shortly."
+  };
+
+  return `<!doctype html>
+<html lang="${zh ? "zh-CN" : "en"}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>${escapeHtml(copy.pageTitle)}</title>
+  ${siteStyles}${workbenchStyles}
+  <style>
+    .lobby-main{min-width:0;padding:40px 0 56px 40px}.lobby-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:24px}.lobby-head h1{margin:0 0 8px;font-size:clamp(30px,3vw,38px);line-height:1.12}.lobby-head p{margin:0;color:var(--muted);line-height:1.6}.lobby-status{flex:none;display:flex;align-items:center;gap:8px;min-height:32px;color:var(--muted);font-size:13px}.lobby-status-dot{width:9px;height:9px;border-radius:50%;background:#7a7672}.lobby-status-dot.online{background:var(--accent);box-shadow:0 0 0 4px rgba(0,240,255,.1)}.lobby-status-dot.error{background:#ff6b78}.lobby-shell{min-height:620px;border:1px solid var(--border);border-radius:16px;background:var(--glass-bg);overflow:hidden;display:flex;flex-direction:column}.lobby-messages{flex:1;min-height:360px;max-height:620px;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:12px}.lobby-empty{margin:auto;max-width:520px;text-align:center;color:var(--muted);line-height:1.65}.lobby-message{max-width:min(680px,88%);padding:12px 14px;border:1px solid var(--border);border-radius:14px 14px 14px 4px;background:rgba(255,255,255,.035);align-self:flex-start}.lobby-message.mine{align-self:flex-end;border-radius:14px 14px 4px 14px;background:rgba(0,240,255,.08);border-color:rgba(0,240,255,.25)}.lobby-message-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:6px}.lobby-message-author{font-size:12px;font-weight:800;color:var(--accent)}.lobby-message-time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.lobby-message-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}.lobby-composer{padding:16px 20px 20px;border-top:1px solid var(--border);background:rgba(0,0,0,.12)}.lobby-composer label{display:block;margin-bottom:8px;font-size:13px;font-weight:750}.lobby-compose-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.lobby-input{width:100%;min-height:52px;padding:11px 13px;color:var(--fg);background:rgba(0,0,0,.24);border:1px solid var(--border);border-radius:10px;outline:none;resize:none;font:inherit}.lobby-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,240,255,.1)}.lobby-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:0 20px 16px;color:var(--muted);font-size:12px}.lobby-foot button{border:0;background:none;color:var(--accent);padding:0;text-decoration:underline;cursor:pointer}.lobby-foot button[hidden]{display:none}.lobby-error{color:#ff8c96}.lobby-composer button:disabled,.lobby-input:disabled{cursor:not-allowed;opacity:.5}@media(max-width:960px){.lobby-main{padding:30px 0 48px}}@media(max-width:600px){.lobby-head{display:block;margin-bottom:18px}.lobby-status{margin-top:12px}.lobby-shell{min-height:560px}.lobby-messages{padding:16px}.lobby-message{max-width:94%}.lobby-composer{padding:12px}.lobby-compose-row{grid-template-columns:1fr}.lobby-compose-row button{width:100%}}
+  </style>
+</head>
+<body>
+  ${headerHtml}
+  <div class="desk shell">
+    ${sidebarHtml}
+    <main class="lobby-main">
+      <header class="lobby-head"><div><h1>${escapeHtml(copy.title)}</h1><p>${escapeHtml(copy.lead)}</p></div><div class="lobby-status" role="status" aria-live="polite"><span class="lobby-status-dot" id="status-dot"></span><span id="status-text">${escapeHtml(copy.connecting)}</span></div></header>
+      <section class="lobby-shell" aria-label="${escapeHtml(copy.title)}">
+        <div class="lobby-messages" id="messages" role="log" aria-live="polite" aria-relevant="additions"><div class="lobby-empty" id="empty">${escapeHtml(copy.empty)}</div></div>
+        <form class="lobby-composer" id="composer"><label for="message-input">${escapeHtml(copy.messageLabel)}</label><div class="lobby-compose-row"><textarea class="lobby-input" id="message-input" maxlength="1000" rows="2" placeholder="${escapeHtml(copy.messagePlaceholder)}" disabled></textarea><button class="button primary" id="send-button" type="submit" disabled>${escapeHtml(copy.send)}</button></div></form>
+        <footer class="lobby-foot"><span id="presence">0 ${escapeHtml(copy.participants)}</span><span id="countdown"></span><span>${escapeHtml(copy.privacy)}</span><span class="lobby-error" id="error" role="alert"></span><button id="reconnect" type="button" hidden>${escapeHtml(copy.retry)}</button></footer>
+      </section>
+    </main>
+  </div>
+  ${footerHtml}
+  <script>
+  (() => {
+    const copy = ${inlineJson(copy)};
+    const nickname = ${inlineJson(displayName)};
+    const state = { socket: null, memberId: "", expiresAt: 0, messages: new Map(), ended: false };
+    const messagesElement = document.getElementById("messages");
+    const emptyElement = document.getElementById("empty");
+    const messageInput = document.getElementById("message-input");
+    const sendButton = document.getElementById("send-button");
+    const statusDot = document.getElementById("status-dot");
+    const statusText = document.getElementById("status-text");
+    const presence = document.getElementById("presence");
+    const countdown = document.getElementById("countdown");
+    const errorElement = document.getElementById("error");
+    const reconnect = document.getElementById("reconnect");
+
+    function randomId(bytes) { const value = new Uint8Array(bytes); crypto.getRandomValues(value); let binary = ""; for (const byte of value) binary += String.fromCharCode(byte); return btoa(binary).replace(/[+]/g, "-").replace(/[/]/g, "_").replace(/=+$/g, ""); }
+    function setStatus(kind, label) { statusDot.className = "lobby-status-dot" + (kind ? " " + kind : ""); statusText.textContent = label; }
+    function formatRemaining(ms) { const minutes = Math.max(0, Math.ceil(ms / 60000)); if (minutes >= 60) return Math.floor(minutes / 60) + "h " + (minutes % 60) + "m"; return minutes + "m"; }
+    function updateCountdown() { if (!state.expiresAt) { countdown.textContent = ""; return; } const remaining = state.expiresAt - Date.now(); if (remaining <= 0) { state.ended = true; countdown.textContent = copy.ended; setStatus("error", copy.ended); messageInput.disabled = true; sendButton.disabled = true; reconnect.textContent = copy.next; reconnect.hidden = false; return; } countdown.textContent = formatRemaining(remaining) + " " + copy.remaining; }
+    function renderMessages() { const ordered = [...state.messages.values()].sort((left, right) => Number(left.sequence || left.createdAt) - Number(right.sequence || right.createdAt)); messagesElement.replaceChildren(); if (!ordered.length) { messagesElement.append(emptyElement); return; } for (const message of ordered) { const article = document.createElement("article"); article.className = "lobby-message" + (message.authorId === state.memberId ? " mine" : ""); const head = document.createElement("div"); head.className = "lobby-message-head"; const author = document.createElement("span"); author.className = "lobby-message-author"; author.textContent = message.authorName; const time = document.createElement("span"); time.className = "lobby-message-time"; time.textContent = new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); const text = document.createElement("div"); text.className = "lobby-message-text"; text.textContent = message.text; head.append(author, time); article.append(head, text); messagesElement.append(article); } messagesElement.scrollTop = messagesElement.scrollHeight; }
+    function acceptMessage(message) { if (!message || message.type !== "message" || state.messages.has(message.id)) return; const text = String(message.text || "").trim().slice(0, 1000); const authorName = String(message.authorName || "").trim().slice(0, 40); if (!text || !authorName) return; state.messages.set(String(message.id), { ...message, text, authorName, createdAt: Number(message.createdAt || Date.now()) }); }
+    function closeSocket() { const socket = state.socket; state.socket = null; if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "Closed locally"); }
+    async function enterLobby() { closeSocket(); state.ended = false; state.messages.clear(); renderMessages(); errorElement.textContent = ""; reconnect.hidden = true; messageInput.disabled = true; sendButton.disabled = true; setStatus("", copy.connecting); try { const response = await fetch("/api/collaboration/lobby/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nickname }) }); const session = await response.json(); if (!response.ok || !session.ok) throw new Error(String(session.error || "lobby_unavailable")); state.memberId = String(session.memberId || ""); state.expiresAt = Number(session.sessionEndsAt || 0); updateCountdown(); const protocol = location.protocol === "https:" ? "wss:" : "ws:"; const socket = new WebSocket(protocol + "//" + location.host + "/api/collaboration/lobby/socket?ticket=" + encodeURIComponent(String(session.ticket || ""))); state.socket = socket; socket.addEventListener("open", () => { if (state.socket !== socket) return; setStatus("online", copy.connected); messageInput.disabled = false; sendButton.disabled = false; messageInput.focus(); }); socket.addEventListener("message", event => { if (state.socket !== socket) return; let message; try { message = JSON.parse(event.data); } catch { return; } if (message.type === "history") { state.expiresAt = Number(message.expiresAt || state.expiresAt); for (const item of message.messages || []) acceptMessage(item); renderMessages(); updateCountdown(); return; } if (message.type === "presence") { presence.textContent = String(message.count || 0) + " " + copy.participants; return; } if (message.type === "error") { errorElement.textContent = message.error === "message_rate_limited" ? copy.rateLimited : copy.unavailable; return; } acceptMessage(message); renderMessages(); }); socket.addEventListener("close", event => { if (state.socket !== socket) return; state.socket = null; messageInput.disabled = true; sendButton.disabled = true; if (event.code === 4001) { state.ended = true; setStatus("error", copy.ended); countdown.textContent = copy.ended; reconnect.textContent = copy.next; } else { setStatus("error", copy.offline); reconnect.textContent = copy.retry; } reconnect.hidden = false; }); socket.addEventListener("error", () => { if (state.socket !== socket) return; setStatus("error", copy.offline); errorElement.textContent = copy.unavailable; }); } catch { setStatus("error", copy.offline); errorElement.textContent = copy.unavailable; reconnect.textContent = copy.retry; reconnect.hidden = false; } }
+    document.getElementById("composer").addEventListener("submit", event => { event.preventDefault(); const text = messageInput.value.trim(); if (!text || !state.socket || state.socket.readyState !== WebSocket.OPEN) return; state.socket.send(JSON.stringify({ type: "message", id: randomId(16), text: text.slice(0, 1000) })); messageInput.value = ""; messageInput.focus(); });
+    reconnect.addEventListener("click", enterLobby);
+    setInterval(updateCountdown, 30000);
+    enterLobby();
+  })();
+  </script>
+</body>
+</html>`;
+}
+
 export function collaborationRoomPageHeaders(options = {}) {
   const workbench = Boolean(options.workbench);
   return {

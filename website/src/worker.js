@@ -15,6 +15,7 @@ import {
   legalSupplementRoute
 } from "./legalDocuments.js";
 import {
+  buildCollaborationLobbyPage,
   buildCollaborationRoomPage,
   collaborationRoomPageHeaders
 } from "./collaborationPage.js";
@@ -5357,8 +5358,7 @@ export default {
       };
       if (url.pathname.endsWith("/collaboration")) {
         const workbenchContent = content[workbenchLocale];
-        return htmlResponse(buildCollaborationRoomPage("", workbenchLocale, {
-          workbench: true,
+        return htmlResponse(buildCollaborationLobbyPage(workbenchLocale, {
           displayName: session.name || session.email.split("@")[0],
           siteStyles: buildStyles(),
           workbenchStyles: buildWorkbenchStyles(),
