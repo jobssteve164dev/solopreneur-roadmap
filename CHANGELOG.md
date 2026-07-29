@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.397 - 2026-07-29
+
+### Fixed
+- prevent expired collaboration auth from stalling room creation (6956643)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.396 - 2026-07-29
 
 ### Added
