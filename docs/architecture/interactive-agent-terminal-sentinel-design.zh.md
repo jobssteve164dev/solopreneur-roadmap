@@ -5,7 +5,7 @@
 - 状态：设计已落地，阶段 A 条件未全部通过。
 - 首版目标 Agent：Codex。
 - 本阶段边界：只落设计、验证 Hook 与恢复信号，不修改 SoloMap 运行时代码。
-- 当前阻塞：Codex Hook 生命周期信号可用，但普通本地扩展尚无“受支持、无额外警告、无需改写私有信任状态”的自动授权方式。
+- 当前阻塞：Codex Hook 生命周期信号可用，但普通本地扩展尚无“受支持、无额外警告、无需改写私有信任状态”的自动授权方式；`notify + rollout` 也无法在原生 TUI 首轮结束前可靠绑定根会话。
 
 ## 用户结果
 
@@ -172,6 +172,26 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 - 如果只能由用户在 `/hooks` 中手动批准，必须先把“一次性明确授权”设计成可理解的产品步骤，并由用户确认接受该体验。
 - 若改用 Codex `notify + rollout` 规避 Hook 信任门槛，应先单独验证并形成设计决策，不能在运行时实现阶段临时换方案。
 
+### `notify + rollout` 不构成等价替代
+
+`notify` 无需 Hook 信任授权，正常轮次完成时能够提供 `thread-id`、`turn-id` 和 `cwd`；相同身份也能在 rollout 中找到对应的 `task_started → task_complete`。它适合在会话已经绑定后提供低干扰的完成提示。
+
+但它不能独立承担首次轮次的生命周期绑定：
+
+- `notify` 只在 Agent 正常完成轮次后触发。用户在首轮按 Esc 中断时没有通知，只有新建 rollout 中的 `task_started → turn_aborted`。
+- SoloMap 在首轮完成通知到达前不知道 Codex 生成的根 `thread-id`，因而也不知道应监听哪份 rollout。
+- 按创建时间、工作目录或最新文件扫描 rollout，在同一工作区存在多个 Codex 会话时会误绑定，不能作为正式身份协议。
+- 先通过 app-server `thread/start` 创建空线程，再交给原生 TUI `resume` 的实验失败：未开始 turn 的线程没有可恢复会话文件，原生 TUI 返回找不到该 Session。
+- 尝试让运行级 stdio MCP 在启动时回传 `CODEX_THREAD_ID` 也没有得到身份；Codex CLI `0.145.0` 启动 MCP 子进程时该值为空。
+- `notify` 也不覆盖审批和用户输入请求，不能单独支持“需要你确认”的准确状态。
+
+因此 `notify + rollout` 只能作为已绑定会话的补充信号，不能替代 `SessionStart` 一类受信身份事件。原生 Codex TUI 与完整外部生命周期监控目前仍需在以下两条产品路径中选择：
+
+1. 保留原生 TUI，并设计一次性、用户可理解的 Hook 信任授权；
+2. 使用 Codex app-server 的正式线程/轮次事件协议，由 SoloMap 提供终端式对话界面，但不再宣称是原生 Codex TUI。
+
+未经验证的 rollout 猜测绑定不作为第三条生产路径。
+
 ## 终端与侧边栏行为
 
 - 当前轮执行中：显示“正在执行”，主动作是“打开终端”。
@@ -225,15 +245,28 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 - 限额、Provider 错误、Hook 处理器失败和进程崩溃的恢复矩阵尚未逐项验证。
 - 幂等消费与 VS Code 重载恢复属于 SoloMap 适配器行为，只能在阶段 B 代码存在后通过测试验证；不能用本次 Provider 探针替代。
 
+### `notify + rollout` 补充验证
+
+同一环境下另行使用运行级 `notify` 配置验证，未加载 SoloMap Hook，也未使用 Hook 信任绕过参数：
+
+- **正常多轮通过**：同一原生 TUI 连续两轮均收到 `agent-turn-complete`；`thread-id` 保持不变，`turn-id` 每轮不同，并与 rollout 的 `task_started → task_complete` 一致。
+- **交互体验通过**：终端没有出现 Hook 信任警告，用户全局 Codex 配置未被改写。
+- **已绑定后的中断恢复通过**：后续轮次按 Esc 中断时不触发 `notify`，rollout 记录同一 `turn-id` 的 `task_started → turn_aborted(interrupted)`。
+- **首次中断绑定未通过**：新原生 TUI 在首轮开始后立即中断，rollout 在约 150ms 内记录 `task_started → turn_aborted(interrupted)`，但没有 `notify`；SoloMap 在此之前拿不到该 TUI 的根 `thread-id`。
+- **空线程预创建未通过**：app-server `thread/start` 返回了线程 ID，但尚未开始 turn 时没有形成原生 TUI 可 `resume` 的持久会话。
+- **MCP 身份桥未通过**：运行级 stdio MCP 启动时观测到的 `CODEX_THREAD_ID` 为空，不能在首轮前把根身份带回 SoloMap。
+
+这组结果说明 `notify + rollout` 能降低 Hook 在正常完成路径上的依赖，但没有解决最关键的首次身份绑定，不能据此放行阶段 B。
+
 ### 当前判定
 
-Hook 事件模型在技术上可行，正常多轮和中断恢复链已经得到真实证据；但“无需破坏用户信任边界且不污染首次交互体验”的接入条件尚未成立，因此阶段 A 暂不通过，运行时代码继续保持不变。
+Hook 事件模型在技术上可行，正常多轮和中断恢复链已经得到真实证据；`notify + rollout` 的正常多轮与中断恢复也得到真实证据，但它无法在首次轮次结束前可靠绑定原生 TUI。由于“无需破坏用户信任边界且不污染首次交互体验”的接入条件仍未成立，阶段 A 暂不通过，运行时代码继续保持不变。
 
 阶段 B 只可在以下任一条件经用户确认后开始：
 
 1. Codex 提供并验证了受支持的 Hook 授权/安装接口；
 2. 产品明确采用一次性用户授权流程，并验证授权后升级与路径变化不会反复打扰；
-3. 另行批准并验证不依赖受信 Hook 的 `notify + rollout` 等价方案。
+3. 改用 Codex app-server，并明确接受由 SoloMap 承担终端式对话界面，而非继续使用原生 Codex TUI。
 
 ### 阶段 B：Codex 用户主动对话
 
@@ -290,5 +323,9 @@ Hook 事件模型在技术上可行，正常多轮和中断恢复链已经得到
 - [OpenAI Codex 配置与 managed hooks 说明](https://github.com/openai/codex/blob/main/docs/config.md)
 - [OpenAI Codex：本地 IDE/wrapper 缺少受支持 Hook 信任接口](https://github.com/openai/codex/issues/21615)
 - [OpenAI Codex：外部 `notify` 的 turn-complete 配置实现](https://github.com/openai/codex/blob/main/codex-rs/core/src/config/mod.rs)
+- [OpenAI Codex app-server：线程、轮次与服务器事件协议](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
+- [OpenAI Codex：集成方获取 Session ID 的讨论](https://github.com/openai/codex/issues/8923)
+- [OpenAI Codex：自定义 Session ID 请求未计划支持](https://github.com/openai/codex/issues/17782)
+- [OpenAI Codex：`notify` 不覆盖审批与用户输入请求](https://github.com/openai/codex/issues/11808)
 - [Google Gemini CLI Hooks 文档](https://github.com/google-gemini/gemini-cli/tree/main/docs/hooks)
 - [OpenCode 事件与 SDK 实现](https://github.com/anomalyco/opencode)

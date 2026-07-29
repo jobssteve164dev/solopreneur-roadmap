@@ -14,18 +14,20 @@ if (!outputPath) {
 
 let payload = {};
 try {
-  const input = fs.readFileSync(0, 'utf8').trim();
+  const input = invokedAs === 'Notify'
+    ? String(process.argv[3] || '').trim()
+    : fs.readFileSync(0, 'utf8').trim();
   payload = input ? JSON.parse(input) : {};
 } catch (error) {
-  process.stderr.write(`Invalid hook payload: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`Invalid lifecycle payload: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(2);
 }
 
 const record = {
   invokedAs,
-  hookEventName: String(payload.hook_event_name || payload.hookEventName || ''),
-  sessionId: String(payload.session_id || payload.sessionId || ''),
-  turnId: String(payload.turn_id || payload.turnId || ''),
+  hookEventName: String(payload.hook_event_name || payload.hookEventName || payload.type || ''),
+  sessionId: String(payload.session_id || payload.sessionId || payload['thread-id'] || ''),
+  turnId: String(payload.turn_id || payload.turnId || payload['turn-id'] || ''),
   cwd: String(payload.cwd || ''),
   reason: String(payload.reason || ''),
   stopHookActive: Boolean(payload.stop_hook_active || payload.stopHookActive),
