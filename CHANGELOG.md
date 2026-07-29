@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.389 - 2026-07-29
+
+### Added
+- make agent reviews evidence-driven (7712dfc)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.388 - 2026-07-28
 
 ### Added
