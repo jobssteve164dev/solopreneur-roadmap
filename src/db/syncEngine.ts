@@ -141,6 +141,10 @@ export class SyncEngine {
     return this.sqliteStore.getAllExecutionLogs();
   }
 
+  public getRecentProjectAgentExecutions(limit = 200): AgentConversation[] {
+    return this.sqliteStore.getRecentExecutionLogs(limit);
+  }
+
   public upsertRunIndex(record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
     this.sqliteStore.upsertRunIndex(record, files, signals);
   }

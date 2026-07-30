@@ -2195,6 +2195,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let currentFeedbackType = 'not_working';
     let activeMainView = 'roadmap';
     let currentSettings = {};
+    let settingsFormDirty = false;
+    let settingsSavePending = false;
+    let settingsRequestSeq = 0;
     let currentRoadmapLoading = false;
     let currentRoadmapError = '';
     let selectedEnhancementId = '';
@@ -2208,6 +2211,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const nodeConversations = {};
     const nodeConversationPaging = {};
     const nodeSupplementFiles = {};
+    const pendingPastedAttachments = {};
     const conversationDrafts = {};
     let conversationChildrenMap = {};
     const conversationLogScrollPositions = {};
@@ -2358,6 +2362,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         agentSelector: '选择 Agent',
         attachFiles: '选择补充文件',
         attachedFiles: '补充文件',
+        addingScreenshot: '正在添加截图…',
         removeAttachment: '移除',
         send: '发送',
         retry: '重试',
@@ -2565,6 +2570,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         agentSelector: 'Choose Agent',
         attachFiles: 'Attach files',
         attachedFiles: 'Attached files',
+        addingScreenshot: 'Adding screenshot…',
         removeAttachment: 'Remove',
         send: 'Send',
         retry: 'Retry',
@@ -2909,7 +2915,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         btnToggleRoadmapRevision.classList.remove('active');
         feedbackPanel.style.display = 'none';
         settingsPanel.style.display = 'flex';
+        settingsFormDirty = false;
         renderProjectSettings();
+        requestSettings();
       }
     });
 
@@ -3132,9 +3140,30 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
     });
 
+    function requestSettings() {
+      vscode.postMessage({
+        command: 'settings.get',
+        requestId: 'roadmap-settings-' + (++settingsRequestSeq)
+      });
+    }
+
+    if (settingsPanel) {
+      settingsPanel.addEventListener('input', () => {
+        settingsFormDirty = true;
+      });
+      settingsPanel.addEventListener('change', () => {
+        settingsFormDirty = true;
+      });
+      settingsPanel.addEventListener('click', event => {
+        if (event.target && event.target.closest && event.target.closest('[data-solo-option-value]')) {
+          settingsFormDirty = true;
+        }
+      });
+    }
+
     // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
-    vscode.postMessage({ command: 'settings.get' });
+    requestSettings();
     vscode.postMessage({ command: 'project.getAll' });
     vscode.postMessage({ command: 'getFlowState' });
     if (typeof setInterval === 'function') {
@@ -3198,6 +3227,16 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'settingsLoaded':
+          if (settingsSavePending && !message.requestId) {
+            settingsSavePending = false;
+            settingsFormDirty = false;
+          }
+          if (settingsSavePending || (settingsFormDirty && settingsPanel && settingsPanel.style.display === 'flex')) {
+            currentSettings = { ...currentSettings, ...(message.settings || {}) };
+            renderProAccount(currentSettings);
+            renderAbilitiesAndEnhancements(currentSettings);
+            break;
+          }
           currentSettings = message.settings || {};
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
           Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
@@ -3217,6 +3256,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           currentLanguage = getSoloSelectValue(settingLanguage) || currentLanguage;
           applyLanguage();
           renderFlowPanel();
+          break;
+        case 'settingsSaved':
+          settingsSavePending = false;
+          settingsFormDirty = false;
+          currentSettings = message.settings || currentSettings;
           break;
         case 'agentModelsLoaded': {
           const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
@@ -3310,6 +3354,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           }
           break;
         case 'supplementFilesSelected':
+          if (message.nodeId && pendingPastedAttachments[message.nodeId]) {
+            pendingPastedAttachments[message.nodeId].delete(String(message.requestId || ''));
+          }
           const soloDraft = message.nodeId === soloConversationId
             ? (soloBody.querySelector('[data-solo-input]')?.value || '')
             : '';
@@ -3384,6 +3431,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     btnSaveSettings.addEventListener('click', () => {
       const projectPath = getSoloSelectValue(projectSelect);
       if (!projectPath) return;
+      settingsSavePending = true;
       vscode.postMessage({
         command: 'project.updateMetadata',
         projectPath,
@@ -3395,6 +3443,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       });
       vscode.postMessage({
         command: 'settings.update',
+        requestId: 'roadmap-settings-save-' + (++settingsRequestSeq),
         cliPath: getEffectiveSettingCliPath(),
         agentModelPreferences: agentModelPreferenceMap,
         language: getSoloSelectValue(settingLanguage) || currentLanguage,
@@ -4778,17 +4827,27 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           command: 'attachment.save',
           nodeId,
           attachments
-        })
+        }),
+        state => {
+          if (!pendingPastedAttachments[nodeId]) pendingPastedAttachments[nodeId] = new Set();
+          if (state.phase === 'started') {
+            pendingPastedAttachments[nodeId].add(state.requestId);
+          } else {
+            pendingPastedAttachments[nodeId].delete(state.requestId);
+          }
+          if (afterPaste) afterPaste();
+        }
       );
     }
 
     function renderSupplementFiles(nodeId, files) {
-      if (!files || files.length === 0) {
+      const pending = pendingPastedAttachments[nodeId] && pendingPastedAttachments[nodeId].size > 0;
+      if ((!files || files.length === 0) && !pending) {
         return '';
       }
       return \`
         <div class="conversation-attachments" aria-label="\${escapeHtml(t('attachedFiles'))}">
-          \${files.map(file => \`
+          \${(files || []).map(file => \`
             <span class="conversation-attachment-chip" title="\${escapeHtml(file)}">
               <span>\${escapeHtml(file)}</span>
               <button
@@ -4800,6 +4859,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               </button>
             </span>
           \`).join('')}
+          \${pending ? \`<span class="conversation-attachment-chip"><span class="codicon codicon-loading loading-spin"></span><span>\${escapeHtml(t('addingScreenshot'))}</span></span>\` : ''}
         </div>
       \`;
     }

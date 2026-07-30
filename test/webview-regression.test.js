@@ -761,6 +761,19 @@ test('pasted image attachments are saved as project-relative SoloMap files', () 
   assert.equal(fs.readFileSync(path.join(root, files[0]), 'utf8'), 'hello');
 });
 
+test('pasted image attachments have an async persistence path for the extension host', async () => {
+  const attachments = require(path.join(projectRoot, 'out/attachments.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-pasted-attachment-async-'));
+  const files = await attachments.savePastedImageAttachmentsAsync(root, 'solo', [{
+    name: 'clipboard.png',
+    mimeType: 'image/png',
+    dataUrl: 'data:image/png;base64,aGVsbG8='
+  }]);
+
+  assert.equal(files.length, 1);
+  assert.equal(fs.readFileSync(path.join(root, files[0]), 'utf8'), 'hello');
+});
+
 test('attachment picker candidates are local project files and skip run artifacts', () => {
   const attachments = require(path.join(projectRoot, 'out/attachments.js'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-attachment-candidates-'));
@@ -1108,6 +1121,18 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     stopPropagation() {}
   });
   elements['setting-global-data-path'].value = '/workspace/.solomap-global';
+  elements['settings-panel'].listeners.input();
+  dispatchMessage({
+    command: 'settingsLoaded',
+    requestId: 'stale-settings-read',
+    settings: {
+      cliPath: 'agy',
+      language: 'zh',
+      globalPrompt: '',
+      globalDataPath: '/stale/path'
+    }
+  });
+  assert.equal(elements['setting-global-data-path'].value, '/workspace/.solomap-global');
   elements['btn-save-settings'].listeners.click();
 
   assert.equal(elements['settings-panel'].style.display, 'none');
@@ -1635,6 +1660,8 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(html, /data-solo-select/);
   assert.match(script, /renderSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
+  assert.match(script, /addingScreenshot/);
+  assert.match(script, /phase === 'started'/);
   assert.match(script, /attachment\.save/);
   assert.match(script, /conversation-log-pre/);
   assert.ok(script.includes("querySelectorAll('[data-conversation-id] .conversation-row')"));
@@ -1746,7 +1773,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     && message.projectType === 'content'
     && message.priority === 'P0'
   ));
-  assert.ok(!postedMessages.some((message) => message.command === 'settings.get'));
+  assert.ok(postedMessages.some((message) => message.command === 'settings.get' && message.requestId));
   assert.ok(!postedMessages.some((message) =>
     message.command === 'settings.update'
     && Object.prototype.hasOwnProperty.call(message, 'automationTasks')
@@ -2854,6 +2881,56 @@ test('sidebar conversation snapshots share one in-flight database read and only 
     postedMessages.filter((message) => message.command === 'sidebarProjectConversationSnapshotLoaded').length,
     1
   );
+});
+
+test('forced project refresh paints the valid local conversation snapshot before fresh loading finishes', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const snapshotCache = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-snapshot-first-paint-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const projectPath = path.join(root, 'project');
+  fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(projectPath, '.solopreneur', 'project_journal.db'), 'journal', 'utf8');
+  snapshotCache.writeCachedConversationSnapshot(globalRoot, projectPath, {
+    solo: [{ id: 1, nodeId: '__solo__', summary: 'Cached now' }],
+    project: [],
+    flow: []
+  });
+  let resolveFresh;
+  const fresh = new Promise((resolve) => {
+    resolveFresh = resolve;
+  });
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: globalRoot }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ name: 'app', path: projectPath }], selectedProjectPath: projectPath }),
+      getProjectConversationSnapshot: () => fresh
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+
+  const loading = provider.sendProjectConversationSnapshot(projectPath, true);
+  assert.equal(postedMessages.length, 1);
+  assert.equal(postedMessages[0].soloConversations[0].summary, 'Cached now');
+
+  resolveFresh({ solo: [{ id: 2, nodeId: '__solo__', summary: 'Fresh later' }], project: [], flow: [] });
+  await loading;
+  assert.equal(postedMessages.length, 2);
+  assert.equal(postedMessages[1].soloConversations[0].summary, 'Fresh later');
 });
 
 test('sidebar project portfolio summaries prioritize failed and in-progress work', () => {
@@ -8557,9 +8634,15 @@ test('project-level execution history returns latest roadmap run across nodes', 
   assert.equal(logs[0].id, latestRoadmapLogId);
   assert.equal(logs[0].nodeId, '3');
   assert.match(logs[0].output, /Latest roadmap run/);
+  for (let index = 0; index < 250; index += 1) {
+    store.logExecution(`step-${index}`, 'agy', `agy ${index}`, `Agent output tail:\n${index}.`, 'Completed');
+  }
+  const recent = store.getRecentExecutionLogs(25);
+  assert.equal(recent.length, 25);
+  assert.ok(Number(recent[0].id) > Number(recent[24].id));
   assert.match(extensionSource, /const sidebarProjectConversationHistoryLimit = 10/);
-  assert.match(extensionSource, /getProjectAgentExecutions\(\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
-  assert.match(extensionSource, /getAllExecutionLogs\(\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
+  assert.match(extensionSource, /getRecentProjectAgentExecutions\(sidebarConversationQueryLimit\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
+  assert.match(extensionSource, /getRecentExecutionLogs\(sidebarConversationQueryLimit\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
   store.close();
 });
 
@@ -8740,6 +8823,61 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).panelTitle, 'solomap Project Growth Graph');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshNoProject, 'Choose a project folder before refreshing project growth data.');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), 'Project growth data refreshed: 4 files, 3 modules.');
+});
+
+test('concurrent settings patches serialize without restoring stale values', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__updatePersistedSettings = updatePersistedSettings;',
+      'module.exports.__getPersistedSettings = getPersistedSettings;'
+    ].join('\n')
+  );
+  const saved = {
+    cliPath: 'codex',
+    language: 'en',
+    globalPrompt: 'Original',
+    globalDataPath: ''
+  };
+  const writes = [];
+  let releaseFirstWrite;
+  let writeCount = 0;
+  const context = {
+    extensionPath: projectRoot,
+    globalState: {
+      get() {
+        return saved;
+      },
+      update(_key, value) {
+        writeCount += 1;
+        writes.push(value);
+        if (writeCount === 1) {
+          return new Promise((resolve) => {
+            releaseFirstWrite = () => {
+              Object.assign(saved, value);
+              resolve();
+            };
+          });
+        }
+        Object.assign(saved, value);
+        return Promise.resolve();
+      }
+    }
+  };
+
+  const languageWrite = extensionModule.__updatePersistedSettings(context, { language: 'zh' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const promptWrite = extensionModule.__updatePersistedSettings(context, { globalPrompt: 'Keep the newer prompt' });
+
+  const optimistic = extensionModule.__getPersistedSettings(context);
+  assert.equal(optimistic.language, 'zh');
+  assert.equal(optimistic.globalPrompt, 'Keep the newer prompt');
+
+  releaseFirstWrite();
+  await Promise.all([languageWrite, promptWrite]);
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].language, 'zh');
+  assert.equal(writes[1].globalPrompt, 'Keep the newer prompt');
 });
 
 test('scheduled automation computes the next daily trigger time', () => {

@@ -140,7 +140,7 @@ import {
   filterProjectRelativeFiles,
   normalizeSupplementFiles,
   sanitizeAttachmentScope,
-  savePastedImageAttachments
+  savePastedImageAttachmentsAsync
 } from './attachments';
 import {
   getHiddenProjects as getHiddenProjectsFromRegistry,
@@ -249,6 +249,8 @@ let syncEngineInitGeneration = 0;
 let persistedSettingsCache: SolopreneurSettings | null = null;
 let persistedSettingsCacheSource = '';
 let persistedSettingsCacheWorkspaceRoot = '';
+let pendingPersistedSettings: SolopreneurSettings | null = null;
+let persistedSettingsWriteQueue: Promise<void> = Promise.resolve();
 const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
 
@@ -281,6 +283,7 @@ const usageStatsFileName = 'solomap-usage.json';
 const roadmapRevisionId = '__roadmap_revision__';
 const soloConversationId = '__solo__';
 const sidebarProjectConversationHistoryLimit = 10;
+const sidebarConversationQueryLimit = 200;
 const agentTerminalBaseName = 'solomap';
 const agentStatusDirName = 'agent-status';
 const automationRetryConversationIds = new Set<number>();
@@ -300,6 +303,8 @@ export async function activate(context: vscode.ExtensionContext) {
   persistedSettingsCache = null;
   persistedSettingsCacheSource = '';
   persistedSettingsCacheWorkspaceRoot = '';
+  pendingPersistedSettings = null;
+  persistedSettingsWriteQueue = Promise.resolve();
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('solopreneur')) {
@@ -955,11 +960,21 @@ async function handleSharedWebviewAction(
         return;
       }
       const scope = String(request.scope || request.targetId || request.nodeId || 'conversation');
-      const files = savePastedImageAttachments(projectPath, scope, request.attachments || []);
+      const files = await savePastedImageAttachmentsAsync(projectPath, scope, request.attachments || []);
       if (surface === 'sidebar') {
-        await respond({ command: 'pastedAttachmentsSaved', targetId: request.targetId || '', files });
+        await respond({
+          command: 'pastedAttachmentsSaved',
+          targetId: request.targetId || '',
+          requestId: String(request.requestId || ''),
+          files
+        });
       } else {
-        await respond({ command: 'supplementFilesSelected', nodeId: request.nodeId || '', files });
+        await respond({
+          command: 'supplementFilesSelected',
+          nodeId: request.nodeId || '',
+          requestId: String(request.requestId || ''),
+          files
+        });
       }
     },
     'agentModels.get': async (request) => {
@@ -1017,9 +1032,14 @@ async function handleSharedWebviewAction(
         activePanel?.webview.postMessage({ command: 'projectGrowthLoaded', projectPath, growth });
       }
     },
-    'settings.get': async () => {
+    'settings.get': async (request) => {
       invalidatePersistedSettingsCache();
-      await postSettingsLoaded(target, getSettingsWithRuntimeState(context));
+      await respond({
+        command: 'settingsLoaded',
+        settings: getSettingsWithRuntimeState(context),
+        requestId: String(request.requestId || ''),
+        editRevision: Number(request.editRevision || 0)
+      });
       void refreshProAccountStatus(context).catch((error) => {
         console.warn('SoloMap Pro status refresh failed after settings loaded:', error);
       });
@@ -1034,6 +1054,11 @@ async function handleSharedWebviewAction(
         reviewerCliPath: request.reviewerCliPath,
         collaborationReviewMode: request.collaborationReviewMode,
         automationTasks: request.automationTasks
+      });
+      await respond({
+        command: 'settingsSaved',
+        settings: getSettingsWithRuntimeState(context),
+        requestId: String(request.requestId || '')
       });
       vscode.window.showInformationMessage('SoloMap settings saved successfully!');
       await broadcastSettings(context);
@@ -1231,6 +1256,9 @@ async function handleSharedWebviewAction(
 }
 
 function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSettings {
+  if (pendingPersistedSettings) {
+    return pendingPersistedSettings;
+  }
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
   const savedSource = JSON.stringify(saved);
   const config = vscode.workspace.getConfiguration('solopreneur');
@@ -1344,9 +1372,8 @@ function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
 }
 
 async function clearStoredProAccess(context: vscode.ExtensionContext): Promise<void> {
-  const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
-  await context.globalState.update(settingsKey, {
-    ...saved,
+  const saved = getPersistedSettings(context);
+  await updatePersistedSettings(context, {
     proEntitlements: clearProEntitlements(saved.proEntitlements || {}),
     proAccount: {
       ...normalizeProAccountStatus(saved.proAccount),
@@ -1412,15 +1439,14 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
     checkedAt: new Date().toISOString()
   };
   await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
-  const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  const saved = getPersistedSettings(context);
   const proEntitlements = result.allowed ? {
     ...(saved.proEntitlements || {}),
     pro: true,
     solomap_pro: true,
     [strategyPyramidFeature]: true
   } : clearProEntitlements(saved.proEntitlements || {});
-  await context.globalState.update(settingsKey, {
-    ...saved,
+  await updatePersistedSettings(context, {
     proEntitlements,
     proAccount: buildProAccountStatus(result)
   });
@@ -1800,7 +1826,7 @@ function getSettingsWithRuntimeState(context: vscode.ExtensionContext): Solopren
 }
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: Partial<SolopreneurSettings>): Promise<void> {
-  const currentSettings = getPersistedSettings(context);
+  const currentSettings = pendingPersistedSettings || getPersistedSettings(context);
   const hasSetting = (key: keyof SolopreneurSettings) => (
     Object.prototype.hasOwnProperty.call(settings, key)
     && settings[key] !== undefined
@@ -1820,28 +1846,50 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     automationTasks: hasSetting('automationTasks')
       ? mergeAutomationSettings(currentSettings.automationTasks, settings.automationTasks)
       : normalizeAutomationSettings(currentSettings.automationTasks),
-    proEntitlements: currentSettings.proEntitlements || {},
-    proAccount: currentSettings.proAccount,
+    proEntitlements: hasSetting('proEntitlements') ? (settings.proEntitlements || {}) : (currentSettings.proEntitlements || {}),
+    proAccount: hasSetting('proAccount') ? normalizeProAccountStatus(settings.proAccount) : currentSettings.proAccount,
     enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), nextGlobalDataPath),
     telegramEnabled: hasSetting('telegramEnabled') ? !!settings.telegramEnabled : !!currentSettings.telegramEnabled,
     telegramBotToken: hasSetting('telegramBotToken') ? String(settings.telegramBotToken ?? '').trim() : String(currentSettings.telegramBotToken ?? '').trim(),
     telegramChatId: hasSetting('telegramChatId') ? String(settings.telegramChatId ?? '').trim() : String(currentSettings.telegramChatId ?? '').trim()
   };
-  await context.globalState.update(settingsKey, nextSettings);
-
-  const config = vscode.workspace.getConfiguration('solopreneur');
-  await config.update('cliPath', nextSettings.cliPath, vscode.ConfigurationTarget.Global);
-  await config.update('language', nextSettings.language, vscode.ConfigurationTarget.Global);
-  await config.update('globalPrompt', nextSettings.globalPrompt, vscode.ConfigurationTarget.Global);
-  await config.update('globalDataPath', nextSettings.globalDataPath, vscode.ConfigurationTarget.Global);
-  await config.update('reviewerCliPath', nextSettings.reviewerCliPath, vscode.ConfigurationTarget.Global);
-  await config.update('collaborationReviewMode', nextSettings.collaborationReviewMode, vscode.ConfigurationTarget.Global);
-  await config.update('automationTasks', nextSettings.automationTasks, vscode.ConfigurationTarget.Global);
-  await config.update('telegramEnabled', nextSettings.telegramEnabled, vscode.ConfigurationTarget.Global);
-  await config.update('telegramBotToken', nextSettings.telegramBotToken, vscode.ConfigurationTarget.Global);
-  await config.update('telegramChatId', nextSettings.telegramChatId, vscode.ConfigurationTarget.Global);
-  persistedSettingsCache = null;
+  pendingPersistedSettings = nextSettings;
+  persistedSettingsCache = nextSettings;
   persistedSettingsCacheSource = '';
+  persistedSettingsCacheWorkspaceRoot = getSettingsEnhancementWorkspaceRoot();
+
+  const configKeys: Array<keyof SolopreneurSettings> = [
+    'cliPath',
+    'language',
+    'globalPrompt',
+    'globalDataPath',
+    'reviewerCliPath',
+    'collaborationReviewMode',
+    'automationTasks',
+    'telegramEnabled',
+    'telegramBotToken',
+    'telegramChatId'
+  ];
+  const write = persistedSettingsWriteQueue
+    .catch(() => {})
+    .then(async () => {
+      await context.globalState.update(settingsKey, nextSettings);
+      const config = vscode.workspace.getConfiguration('solopreneur');
+      for (const key of configKeys) {
+        if (!hasSetting(key)) continue;
+        if (JSON.stringify(currentSettings[key]) === JSON.stringify(nextSettings[key])) continue;
+        await config.update(key, nextSettings[key], vscode.ConfigurationTarget.Global);
+      }
+    });
+  persistedSettingsWriteQueue = write;
+  try {
+    await write;
+  } finally {
+    if (pendingPersistedSettings === nextSettings) {
+      pendingPersistedSettings = null;
+      invalidatePersistedSettingsCache();
+    }
+  }
   if (hasSetting('automationTasks') && settings.automationTasks && typeof settings.automationTasks === 'object') {
     const automationPatch = settings.automationTasks as SolomapAutomationSettings;
     const triggerPatch = automationPatch.triggers || {};
@@ -1971,7 +2019,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     watcher.dispose();
     watcher = null;
   }
-  void sidebarProvider?.sendProjectConversationSnapshot(projectPath);
+  void sidebarProvider?.sendProjectConversationSnapshot(projectPath, true);
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
     postProjectsLoaded(activePanel.webview, { projects, selectedProjectPath: projectPath });
@@ -2650,7 +2698,11 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, syncEngine.getAgentExecutions(soloConversationId)), 1);
+    return selectLatestConversationRoots(buildConversationPresentations(
+      projectPath,
+      soloConversationId,
+      syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs
+    ), 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -2659,7 +2711,11 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, store.getExecutionLogs(soloConversationId)), 1);
+    return selectLatestConversationRoots(buildConversationPresentations(
+      projectPath,
+      soloConversationId,
+      store.getExecutionLogPage(soloConversationId, sidebarConversationQueryLimit, 0).logs
+    ), 1);
   } finally {
     store.close();
   }
@@ -2670,7 +2726,11 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
     return [];
   }
   if (syncEngine && activeProjectRoot === projectPath) {
-    return selectLatestConversationRoots(buildConversationPresentations(projectPath, nodeId, syncEngine.getAgentExecutions(nodeId)), 1);
+    return selectLatestConversationRoots(buildConversationPresentations(
+      projectPath,
+      nodeId,
+      syncEngine.getAgentExecutionPage(nodeId, sidebarConversationQueryLimit, 0).logs
+    ), 1);
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -2679,7 +2739,11 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return selectLatestConversationRoots(buildConversationPresentations(projectPath, nodeId, store.getExecutionLogs(nodeId)), 1);
+    return selectLatestConversationRoots(buildConversationPresentations(
+      projectPath,
+      nodeId,
+      store.getExecutionLogPage(nodeId, sidebarConversationQueryLimit, 0).logs
+    ), 1);
   } finally {
     store.close();
   }
@@ -2695,7 +2759,7 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
     return !excludeNodeIds.has(nodeId) && !nodeId.startsWith('__flow__::');
   };
   if (syncEngine && activeProjectRoot === projectPath) {
-    return hydrateProjectConversationContinuations(projectPath, syncEngine.getProjectAgentExecutions())
+    return hydrateProjectConversationContinuations(projectPath, syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit))
       .filter(isStepConversation)
       .slice(0, sidebarProjectConversationHistoryLimit);
   }
@@ -2706,7 +2770,7 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return hydrateProjectConversationContinuations(projectPath, store.getAllExecutionLogs())
+    return hydrateProjectConversationContinuations(projectPath, store.getRecentExecutionLogs(sidebarConversationQueryLimit))
       .filter(isStepConversation)
       .slice(0, sidebarProjectConversationHistoryLimit);
   } finally {
@@ -2738,7 +2802,10 @@ async function getProjectConversationSnapshotForProject(
     };
   };
   if (syncEngine && activeProjectRoot === projectPath) {
-    return buildSnapshot(syncEngine.getAgentExecutions(soloConversationId), syncEngine.getProjectAgentExecutions());
+    return buildSnapshot(
+      syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
+      syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit)
+    );
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
@@ -2747,7 +2814,10 @@ async function getProjectConversationSnapshotForProject(
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
-    return buildSnapshot(store.getExecutionLogs(soloConversationId), store.getAllExecutionLogs());
+    return buildSnapshot(
+      store.getExecutionLogPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
+      store.getRecentExecutionLogs(sidebarConversationQueryLimit)
+    );
   } finally {
     store.close();
   }

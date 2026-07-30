@@ -158,7 +158,9 @@ export function buildConversationPresentations(
   now = Date.now()
 ): PresentedAgentConversation[] {
   const normalizedConversations = normalizeAgentConversationLifecycles(workspaceRoot, conversations, { nowMs: now });
-  return hydrateConversationContinuations(workspaceRoot, nodeId, normalizedConversations).map((conversation) => {
+  return hydrateConversationContinuations(workspaceRoot, nodeId, normalizedConversations, {
+    validateCodexTranscript: false
+  }).map((conversation) => {
     const output = String(conversation.output || '');
     const rollbackGitHash = extractRollbackGitHash(output);
     return {

@@ -1229,8 +1229,7 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)))
-      .map((log) => this.normalizeConversationStatus(log));
+    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)));
   }
 
   /**
@@ -1262,8 +1261,7 @@ export class SqliteStore {
     const hasMore = logs.length > safeLimit;
     const page = logs.slice(0, safeLimit);
     return {
-      logs: this.filterSupersededRunningLogs(page.map((log) => this.normalizeConversationStatus(log)))
-        .map((log) => this.normalizeConversationStatus(log)),
+      logs: this.filterSupersededRunningLogs(page.map((log) => this.normalizeConversationStatus(log))),
       hasMore
     };
   }
@@ -1289,8 +1287,36 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)))
-      .map((log) => this.normalizeConversationStatus(log));
+    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)));
+  }
+
+  /**
+   * Retrieves a bounded recent slice across the project. Sidebar summaries only
+   * need the latest conversations; materializing the full, ever-growing output
+   * history can monopolize the extension host for seconds.
+   */
+  public getRecentExecutionLogs(limit = 200): AgentConversation[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    const safeLimit = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 200)));
+    const stmt = this.db.prepare(`
+      SELECT id, nodeId, timestamp, agentCli, command, output, status
+      FROM execution_logs
+      ORDER BY id DESC
+      LIMIT ?
+    `);
+    const logs: AgentConversation[] = [];
+    try {
+      stmt.bind([safeLimit]);
+      while (stmt.step()) {
+        logs.push(stmt.getAsObject() as unknown as AgentConversation);
+      }
+    } finally {
+      stmt.free();
+    }
+    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)));
   }
 
   /**

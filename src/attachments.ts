@@ -77,6 +77,35 @@ export function savePastedImageAttachments(projectRoot: string, scope: string, a
   }).filter(Boolean);
 }
 
+export async function savePastedImageAttachmentsAsync(
+  projectRoot: string,
+  scope: string,
+  attachments: PastedImageAttachment[]
+): Promise<string[]> {
+  if (!projectRoot || !Array.isArray(attachments) || attachments.length === 0) {
+    return [];
+  }
+
+  const safeScope = sanitizeAttachmentScope(scope);
+  const targetDir = path.join(projectRoot, '.solopreneur', 'attachments', safeScope);
+  await fs.promises.mkdir(targetDir, { recursive: true });
+  const files = await Promise.all(attachments.slice(0, 10).map(async (attachment, index) => {
+    const dataUrl = String(attachment?.dataUrl || '');
+    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\r\n]+)$/);
+    if (!match) return '';
+    const mimeType = String(attachment.mimeType || match[1] || 'image/png').toLowerCase();
+    if (!mimeType.startsWith('image/')) return '';
+    const extension = imageExtensionFromMimeType(mimeType);
+    const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+    const randomId = Math.random().toString(16).slice(2, 8);
+    const fileName = `${timestamp}-${randomId}-${index + 1}.${extension}`;
+    const filePath = path.join(targetDir, fileName);
+    await fs.promises.writeFile(filePath, Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
+    return path.relative(projectRoot, filePath).split(path.sep).join('/');
+  }));
+  return files.filter(Boolean);
+}
+
 export async function chooseSupplementFilesForProject(projectRoot: string): Promise<string[]> {
   const vscodeApi = require('vscode') as typeof vscode;
   const files = listProjectAttachmentCandidates(projectRoot);

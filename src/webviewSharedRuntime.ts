@@ -198,7 +198,12 @@ function bootstrapSoloMapWebviewRuntime(): void {
     });
   }
 
-  function bindPastedImageAttachments(input: Element | null, postMessage: (message: any) => void, buildMessage: (attachments: any[]) => any): void {
+  function bindPastedImageAttachments(
+    input: Element | null,
+    postMessage: (message: any) => void,
+    buildMessage: (attachments: any[]) => any,
+    onStateChange?: (state: { phase: 'started' | 'failed'; requestId: string; count: number }) => void
+  ): void {
     if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
     input.setAttribute('data-paste-image-bound', 'true');
     input.addEventListener('paste', async (rawEvent) => {
@@ -210,8 +215,14 @@ function bootstrapSoloMapWebviewRuntime(): void {
         .filter(Boolean) as File[];
       if (!files.length) return;
       event.preventDefault();
+      const requestId = 'paste-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      if (onStateChange) onStateChange({ phase: 'started', requestId, count: files.length });
       const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
-      if (attachments.length) postMessage(buildMessage(attachments));
+      if (attachments.length) {
+        postMessage({ ...buildMessage(attachments), requestId });
+      } else if (onStateChange) {
+        onStateChange({ phase: 'failed', requestId, count: files.length });
+      }
     });
   }
 

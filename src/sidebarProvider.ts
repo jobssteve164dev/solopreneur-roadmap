@@ -62,7 +62,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>;
   private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
-  private readonly _conversationSnapshotLoads = new Map<string, Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>>();
+  private readonly _conversationSnapshotLoads = new Map<string, {
+    promise: Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>;
+    startedAt: number;
+  }>();
   private readonly _latestConversationSnapshotRequest = new Map<string, number>();
   private _latestPortfolio: ProjectPortfolioSummary[] = [];
   private _corePortfolioRequest = 0;
@@ -518,23 +521,28 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
   public async sendProjectConversationSnapshot(projectPath: string, force = false) {
     const requestId = ++this._conversationSnapshotRequest;
+    let claimedSnapshotLoad: Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }> | null = null;
     this._latestConversationSnapshotRequest.set(projectPath, requestId);
     try {
       if (!this._view || !this._getProjectConversationSnapshot || !projectPath) return;
       const globalDataPath = this._getSettings().globalDataPath;
-      const cached = force ? null : readCachedConversationSnapshot(globalDataPath, projectPath);
+      const cached = readCachedConversationSnapshot(globalDataPath, projectPath);
       if (cached) {
         if (this._latestConversationSnapshotRequest.get(projectPath) === requestId) {
           this.postProjectConversationSnapshot(projectPath, cached);
         }
-        return;
+        if (!force) return;
       }
       let snapshotLoad = this._conversationSnapshotLoads.get(projectPath);
-      if (!snapshotLoad) {
-        snapshotLoad = this._getProjectConversationSnapshot(projectPath);
+      if (!snapshotLoad || (force && Date.now() - snapshotLoad.startedAt > 2_000)) {
+        snapshotLoad = {
+          promise: this._getProjectConversationSnapshot(projectPath),
+          startedAt: Date.now()
+        };
         this._conversationSnapshotLoads.set(projectPath, snapshotLoad);
       }
-      const snapshot = await snapshotLoad;
+      claimedSnapshotLoad = snapshotLoad.promise;
+      const snapshot = await snapshotLoad.promise;
       if (this._latestConversationSnapshotRequest.get(projectPath) === requestId) {
         writeCachedConversationSnapshot(globalDataPath, projectPath, snapshot);
         this.postProjectConversationSnapshot(projectPath, snapshot);
@@ -543,7 +551,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       console.error('SoloMap sidebar failed to send project conversation snapshot:', error);
     } finally {
       const snapshotLoad = this._conversationSnapshotLoads.get(projectPath);
-      if (snapshotLoad) {
+      if (snapshotLoad && snapshotLoad.promise === claimedSnapshotLoad) {
         this._conversationSnapshotLoads.delete(projectPath);
       }
     }

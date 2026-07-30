@@ -4494,6 +4494,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let currentFeedbackType = 'not_working';
     let currentCliPath = 'agy';
     let currentSettings = {};
+    let settingsFormDirty = false;
+    let settingsSavePending = false;
+    let settingsRequestSeq = 0;
     let lastDependencyStatus = null;
     let selectedEnhancementId = '';
     const projectConversationModes = {};
@@ -4506,6 +4509,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectContinueDrafts = {};
     const projectSoloFiles = {};
     const projectSoloDrafts = {};
+    const pendingPastedAttachments = {};
     const projectRefreshPaths = new Set();
     const pendingConversationContinuations = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
@@ -5458,6 +5462,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         soloPlaceholder: '说说你现在想处理的问题...',
         soloSend: '发送',
         soloAttach: '添加补充文件',
+        addingScreenshot: '正在添加截图…',
         soloHistory: '最近一次 Solo 对话',
         noSoloConversations: '还没有 Solo 对话。',
         continueHistory: '最近一次推进',
@@ -5899,6 +5904,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         soloPlaceholder: 'Describe what you want to handle...',
         soloSend: 'Send',
         soloAttach: 'Attach files',
+        addingScreenshot: 'Adding screenshot…',
         soloHistory: 'Latest Solo conversation',
         noSoloConversations: 'No Solo conversations yet.',
         continueHistory: 'Latest run',
@@ -6458,7 +6464,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (collaborationPanel) collaborationPanel.style.display = 'none';
         if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
         settingsPanel.style.display = 'block';
-        vscode.postMessage({ command: 'settings.get' });
+        settingsFormDirty = false;
+        requestSettings();
         requestAgentImpact();
       }
     });
@@ -7359,9 +7366,30 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
 
+    function requestSettings() {
+      vscode.postMessage({
+        command: 'settings.get',
+        requestId: 'sidebar-settings-' + (++settingsRequestSeq)
+      });
+    }
+
+    if (settingsPanel) {
+      settingsPanel.addEventListener('input', () => {
+        settingsFormDirty = true;
+      });
+      settingsPanel.addEventListener('change', () => {
+        settingsFormDirty = true;
+      });
+      settingsPanel.addEventListener('click', event => {
+        if (event.target && event.target.closest && event.target.closest('[data-solo-option-value]')) {
+          settingsFormDirty = true;
+        }
+      });
+    }
+
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
-    vscode.postMessage({ command: 'settings.get' });
+    requestSettings();
     vscode.postMessage({ command: 'project.getAll' });
     vscode.postMessage({ command: 'collaboration.getRooms' });
     vscode.postMessage({ command: 'getDailyReview' });
@@ -7383,6 +7411,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'settingsLoaded':
+          if (settingsSavePending && !message.requestId) {
+            settingsSavePending = false;
+            settingsFormDirty = false;
+          }
+          if (settingsSavePending || (settingsFormDirty && settingsPanel && settingsPanel.style.display === 'block')) {
+            currentSettings = { ...currentSettings, ...(message.settings || {}) };
+            renderProAccount(currentSettings);
+            renderAbilitiesAndEnhancements(currentSettings);
+            break;
+          }
           currentSettings = message.settings || {};
           if (currentSettings.proAccount && currentSettings.proAccount.authenticated) collaborationLobbyLoginPending = false;
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
@@ -7405,6 +7443,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           restartFocusTimerTick();
           renderCollaborationPanel();
+          break;
+
+        case 'settingsSaved':
+          settingsSavePending = false;
+          settingsFormDirty = false;
+          currentSettings = message.settings || currentSettings;
           break;
 
         case 'automationPlaySound':
@@ -7620,6 +7664,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'sidebarActionFailed':
+          settingsSavePending = false;
+          Object.keys(pendingPastedAttachments).forEach(key => pendingPastedAttachments[key].clear());
           pendingConversationContinuations.clear();
           deliveryActionMessage = message.message || '';
           if (collaborationPanel && collaborationPanel.style.display === 'block') {
@@ -7684,6 +7730,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'pastedAttachmentsSaved':
+          if (message.targetId && pendingPastedAttachments[message.targetId]) {
+            pendingPastedAttachments[message.targetId].delete(String(message.requestId || ''));
+          }
           if (message.targetId && String(message.targetId).startsWith('solo:')) {
             projectSoloFiles[message.targetId] = mergeAttachmentFiles(projectSoloFiles[message.targetId] || [], message.files || []);
             renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
@@ -7798,7 +7847,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     // Save Settings
     btnSaveSettings.addEventListener('click', () => {
-      vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
+      const payload = buildSettingsUpdatePayload(collectAutomationSettings());
+      payload.requestId = 'sidebar-settings-save-' + (++settingsRequestSeq);
+      settingsSavePending = true;
+      vscode.postMessage(payload);
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
     });
@@ -7999,7 +8051,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           targetId,
           scope: scope || targetId || 'conversation',
           attachments
-        })
+        }),
+        state => {
+          if (!pendingPastedAttachments[targetId]) pendingPastedAttachments[targetId] = new Set();
+          if (state.phase === 'started') {
+            pendingPastedAttachments[targetId].add(state.requestId);
+          } else {
+            pendingPastedAttachments[targetId].delete(state.requestId);
+          }
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        }
       );
     }
 
@@ -8582,15 +8643,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function renderProjectConversationFiles(targetId, files) {
-      if (!files || files.length === 0) return '';
+      const pending = pendingPastedAttachments[targetId] && pendingPastedAttachments[targetId].size > 0;
+      if ((!files || files.length === 0) && !pending) return '';
       return \`
         <div class="sidebar-solo-attachments">
-          \${files.map((file, index) => \`
+          \${(files || []).map((file, index) => \`
             <span class="sidebar-solo-file" title="\${escapeHtml(file)}">
               <span class="sidebar-solo-file-name">\${escapeHtml(file)}</span>
               <button class="sidebar-solo-file-remove" data-remove-project-file="\${escapeHtml(targetId)}::\${index}" title="Remove">&times;</button>
             </span>
           \`).join('')}
+          \${pending ? \`<span class="sidebar-solo-file"><span class="codicon codicon-loading loading-spin"></span><span class="sidebar-solo-file-name">\${escapeHtml(t('addingScreenshot'))}</span></span>\` : ''}
         </div>
       \`;
     }

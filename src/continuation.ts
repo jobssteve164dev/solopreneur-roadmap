@@ -403,12 +403,15 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
 export function hydrateConversationContinuations(
   workspaceRoot: string,
   nodeId: string,
-  conversations: AgentConversation[]
+  conversations: AgentConversation[],
+  options: { validateCodexTranscript?: boolean } = {}
 ): ContinuableAgentConversation[] {
   return conversations.map((conversation) => {
     const rootConversation = resolveContinuationRootConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
     const sessionConversation = resolveContinuationSessionConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
-    const sessionId = resolveNativeSessionIdForConversation(workspaceRoot, nodeId, sessionConversation);
+    const sessionId = options.validateCodexTranscript === false
+      ? extractNativeSessionIdFromConversation(sessionConversation)
+      : resolveNativeSessionIdForConversation(workspaceRoot, nodeId, sessionConversation);
     return {
       ...conversation,
       ...(sessionId ? { resumableNativeSessionId: sessionId } : {}),
