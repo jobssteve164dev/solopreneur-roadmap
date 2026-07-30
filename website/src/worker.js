@@ -1997,7 +1997,7 @@ function buildStyles() {
     .links a.language-link::after {
       display: none;
     }
-    .language-link {
+    .links a.language-link {
       border: 1px solid var(--line);
       border-radius: 999px;
       padding: 6px 12px;
@@ -2014,7 +2014,7 @@ function buildStyles() {
       background: rgba(73, 214, 208, 0.05);
       color: var(--cyan) !important;
     }
-    .install-link {
+    .links a.install-link {
       color: #11100e !important;
       background: linear-gradient(135deg, var(--soft) 0%, var(--ink) 100%);
       padding: 9px 16px;
@@ -3195,8 +3195,8 @@ function buildStyles() {
       .nav { min-height: 64px; gap: 10px; }
       .brand span { font-size: 15px; }
       .links { gap: 8px; }
-      .install-link,
-      .language-link { min-height: 44px; padding: 8px 10px; }
+      .links a.install-link,
+      .links a.language-link { min-height: 44px; padding: 8px 10px; }
       h1 { font-size: clamp(38px, 12vw, 44px); line-height: 1.02; }
       .hero-copy { font-size: 17px; }
       .button { width: 100%; }
