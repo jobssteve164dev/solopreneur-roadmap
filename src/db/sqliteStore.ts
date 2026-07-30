@@ -63,7 +63,7 @@ export class SqliteStore {
 
       const existed = fs.existsSync(this.dbFilePath);
       if (existed) {
-        const fileBuffer = fs.readFileSync(this.dbFilePath);
+        const fileBuffer = await fs.promises.readFile(this.dbFilePath);
         this.db = new this.SQL.Database(fileBuffer);
       } else {
         this.db = new this.SQL.Database();

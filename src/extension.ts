@@ -2019,6 +2019,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     watcher.dispose();
     watcher = null;
   }
+  const syncReady = ensureSyncEngine(context);
   void sidebarProvider?.sendProjectConversationSnapshot(projectPath, true);
   if (activePanel) {
     postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
@@ -2048,7 +2049,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     void refreshProjectGrowthPanel(context, projectPath);
   }
   scheduleProjectRunIndexBackfill(context, projectPath);
-  void ensureSyncEngine(context).then((ready) => {
+  void syncReady.then((ready) => {
     if (ready && selectionGeneration === projectSelectionGeneration && getSelectedProjectPath(context) === projectPath && activeProjectRoot === projectPath) {
       sendNodesToWebview();
       void postFlowStateToWebview(context);
@@ -2802,10 +2803,15 @@ async function getProjectConversationSnapshotForProject(
     };
   };
   if (syncEngine && activeProjectRoot === projectPath) {
-    return buildSnapshot(
-      syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
-      syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit)
-    );
+    if (!syncEngineReady && syncEngineInitPromise && syncEngineInitProjectRoot === projectPath) {
+      await syncEngineInitPromise;
+    }
+    if (syncEngine && syncEngineReady && activeProjectRoot === projectPath) {
+      return buildSnapshot(
+        syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
+        syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit)
+      );
+    }
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {

@@ -3363,9 +3363,11 @@ test('local-first loading paints and launches before optional or durable work', 
     'project switching must not rebuild every project card'
   );
   assert.ok(
-    selectBody.indexOf('sendProjectConversationSnapshot(projectPath)') < selectBody.indexOf('ensureSyncEngine(context).then'),
-    'the recent conversation snapshot must load before project engine initialization'
+    selectBody.indexOf('const syncReady = ensureSyncEngine(context)') < selectBody.indexOf('sendProjectConversationSnapshot(projectPath, true)'),
+    'the fresh conversation snapshot must reuse the selected project engine instead of opening the journal twice'
   );
+  assert.match(extensionSource, /if \(!syncEngineReady && syncEngineInitPromise[\s\S]*?await syncEngineInitPromise/);
+  assert.match(sqliteStoreSource, /await fs\.promises\.readFile\(this\.dbFilePath\)/);
 
   const sidebarProviderSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
   const coreBatchBody = sidebarProviderSource.slice(
