@@ -163,6 +163,7 @@ export function buildConversationPresentations(
   }).map((conversation) => {
     const output = String(conversation.output || '');
     const rollbackGitHash = extractRollbackGitHash(output);
+    const canContinue = conversation.status !== 'Running' && Boolean(conversation.resumableNativeSessionId);
     return {
       ...conversation,
       continuationParentConversationId: extractContinuationParentConversationId(output),
@@ -175,9 +176,9 @@ export function buildConversationPresentations(
       changedFiles: extractChangedFiles(output),
       rollbackGitHash,
       capabilities: {
-        canContinue: conversation.status !== 'Running' && Boolean(conversation.resumableNativeSessionId),
+        canContinue,
         canStop: conversation.status === 'Running',
-        canRetry: conversation.status === 'Failed',
+        canRetry: conversation.status === 'Failed' && !canContinue,
         canRollback: conversation.status !== 'Running' && Boolean(rollbackGitHash),
         canOpenTerminal: conversation.status === 'Running'
       }

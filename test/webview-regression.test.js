@@ -1550,10 +1550,10 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
       id: 8,
       nodeId: 'another-step',
       agentCli: 'codex',
-      status: 'Completed',
+      status: 'Failed',
       timestamp: '2026-05-26T10:05:00.000Z',
       command: 'codex exec',
-      output: 'User supplement:\n收尾另一个环节\n\nTouched project files:\nsrc/home.ts\n\nRun duration ms: 3000\n\nNative Agent session saved: .solopreneur/step-sessions/another-step.json (3350a3b7-7761-4ed5-9661-2e9c9de8f924)\n\nAgent output tail:\n另一个环节已完成。'
+      output: 'User supplement:\n收尾另一个环节\n\nFailure category: completion_state_failed\n\nFailure reason:\n完成判定未通过\n\nTouched project files:\nsrc/home.ts\n\nRun duration ms: 3000\n\nNative Agent session saved: .solopreneur/step-sessions/another-step.json (3350a3b7-7761-4ed5-9661-2e9c9de8f924)\n\nAgent output tail:\n需要继续完善。'
     }]
   });
   assert.match(elements['portfolio-list'].innerHTML, /收尾另一个环节/);
@@ -1976,6 +1976,42 @@ test('full roadmap conversation history keeps failed continuations under the mai
   assert.match(rendered, /data-conversation-id="__solo__:20"/);
   assert.doesNotMatch(rendered, /data-conversation-id="__solo__:12"/);
   assert.match(rendered, /续聊 1|Continuation/);
+});
+
+test('failed resumable conversations continue instead of restarting in the full roadmap', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
+  const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const [conversation] = presentation.buildConversationPresentations('', '__solo__', [{
+    id: 24,
+    nodeId: '__solo__',
+    status: 'Failed',
+    agentCli: 'codex',
+    command: 'codex exec',
+    output: [
+      'User supplement:',
+      '继续完成当前任务',
+      '',
+      'Failure category: completion_state_failed',
+      '',
+      'Failure reason:',
+      '完成判定未通过',
+      '',
+      'Native Agent session saved: session.json (019ecd99-4325-7050-8e71-7def92359c9f)'
+    ].join('\n')
+  }]);
+  const rendered = context.__renderConversationsForTest('__solo__', [conversation], 'empty');
+
+  assert.equal(conversation.capabilities.canContinue, true);
+  assert.equal(conversation.capabilities.canRetry, false);
+  assert.match(rendered, /data-continue-native-conversation-id="24"/);
+  assert.doesNotMatch(rendered, /data-retry-conversation-id="24"/);
 });
 
 test('full roadmap conversation history recovers continuation parent from the resume command session', () => {
