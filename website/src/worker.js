@@ -5340,7 +5340,7 @@ export default {
       const session = await readSession(request, env);
       if (!session) {
         const loginPath = workbenchLocale === "zh" ? "/zh/login" : "/login";
-        return Response.redirect(`${url.origin}${loginPath}?return_to=${encodeURIComponent(url.pathname)}`, 302);
+        return Response.redirect(`${url.origin}${loginPath}?return_to=${encodeURIComponent(`${url.pathname}${url.search}`)}`, 302);
       }
       const workbenchHeaders = {
         "Set-Cookie": `lang_pref=${workbenchLocale}; Path=/; Max-Age=31536000; SameSite=Lax`,
@@ -5358,14 +5358,18 @@ export default {
       };
       if (url.pathname.endsWith("/collaboration")) {
         const workbenchContent = content[workbenchLocale];
-        return htmlResponse(buildCollaborationLobbyPage(workbenchLocale, {
+        const collaborationPageOptions = {
           displayName: session.name || session.email.split("@")[0],
           siteStyles: buildStyles(),
           workbenchStyles: buildWorkbenchStyles(),
           headerHtml: buildHeader(workbenchContent, workbenchLocale, url.pathname),
           sidebarHtml: buildWorkbenchSidebar(workbenchLocale, "collaboration"),
           footerHtml: buildFooter(workbenchContent)
-        }), 200, {
+        };
+        const collaborationPageHtml = url.searchParams.get("view") === "rooms"
+          ? buildCollaborationRoomPage("", workbenchLocale, { ...collaborationPageOptions, workbench: true })
+          : buildCollaborationLobbyPage(workbenchLocale, collaborationPageOptions);
+        return htmlResponse(collaborationPageHtml, 200, {
           ...collaborationRoomPageHeaders({ workbench: true }),
           "Set-Cookie": workbenchHeaders["Set-Cookie"],
           "cache-control": "no-store"
