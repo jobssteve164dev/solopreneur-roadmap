@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.405 - 2026-07-31
+
+### Changed
+- fix website nav button spacing (30135f7)
+
+### Fixed
+- scope conversation file changes to current run (615de4d)
+- restore room access in co-create workbench (54c1f64)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.404 - 2026-07-30
 
 ### Fixed
