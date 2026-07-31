@@ -5737,8 +5737,9 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.ok(fs.existsSync(shellScript.commandFilePath));
   assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec --color always -C .*--skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /git -C/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /ls-files/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /check-ignore/);
+  assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -e -c/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /tee .*output\.log/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /codex' exec --color always -C .*--skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -/);
@@ -6867,6 +6868,39 @@ test('agent command builder uses non-interactive task runs and native continuati
   childProcess.execSync(writeRun.finalCommand, { cwd: writeRoot, stdio: 'ignore' });
   const touchedFiles = fs.readFileSync(path.join(writeRoot, '.solopreneur/agent-runs/write/touched-files.txt'), 'utf8');
   assert.match(touchedFiles, /[AM] \.solopreneur\/roadmap\.csv/);
+
+  const attributedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-attributed-agent-'));
+  childProcess.execFileSync('git', ['init', '-q'], { cwd: attributedRoot });
+  fs.mkdirSync(path.join(attributedRoot, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(attributedRoot, 'out'), { recursive: true });
+  fs.writeFileSync(path.join(attributedRoot, '.gitignore'), 'out/\n', 'utf8');
+  fs.writeFileSync(path.join(attributedRoot, 'README.md'), 'baseline\n', 'utf8');
+  fs.writeFileSync(path.join(attributedRoot, 'src', 'app.js'), 'export const value = 1;\n', 'utf8');
+  childProcess.execFileSync('git', ['add', '.'], { cwd: attributedRoot });
+  childProcess.execFileSync('git', ['-c', 'user.name=SoloMap Test', '-c', 'user.email=solomap@example.test', 'commit', '-qm', 'baseline'], { cwd: attributedRoot });
+  fs.appendFileSync(path.join(attributedRoot, 'README.md'), 'pre-existing user change\n', 'utf8');
+  const attributedCommand = `node -e ${extensionModule.__shellQuote([
+    'const fs=require("fs");',
+    'fs.appendFileSync("src/app.js","export const next = 2;\\n");',
+    'fs.writeFileSync("out/extension.js","generated\\n");'
+  ].join(''))}`;
+  const attributedRun = extensionModule.__buildAgentShellScript(
+    'codex',
+    attributedCommand,
+    attributedRoot,
+    'attributed',
+    9,
+    '',
+    undefined,
+    '',
+    attributedCommand
+  );
+  childProcess.execSync(attributedRun.finalCommand, { cwd: attributedRoot, stdio: 'ignore' });
+  const attributedChanges = fs.readFileSync(attributedRun.changesFilePath, 'utf8');
+  const attributedTouched = fs.readFileSync(path.join(attributedRoot, '.solopreneur/agent-runs/attributed/touched-files.txt'), 'utf8');
+  assert.match(attributedChanges, /M src\/app\.js/);
+  assert.doesNotMatch(attributedChanges, /README\.md|out\/extension\.js/);
+  assert.equal(attributedTouched, attributedChanges);
 
   const invalidBootstrapRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-bootstrap-invalid-'));
   fs.mkdirSync(path.join(invalidBootstrapRoot, '.solopreneur'), { recursive: true });

@@ -3705,6 +3705,7 @@ function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: s
   return `node -e ${shellQuote([
     'const fs=require("fs");',
     'const path=require("path");',
+    'const cp=require("child_process");',
     'const root=process.argv[1];',
     'const out=process.argv[2];',
     'const snapshot={};',
@@ -3713,7 +3714,24 @@ function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: s
     'if(rel==="node_modules" || rel.startsWith("node_modules/")) return true;',
     'if(rel===".solopreneur") return false;',
     'if(rel.startsWith(".solopreneur/")) return rel !== ".solopreneur/roadmap.csv";',
-    'return false;',
+    'return rel===".agent_status.json";',
+    '}',
+    'function gitFiles(){',
+    'const result=cp.spawnSync("git",["-C",root,"ls-files","--cached","--others","--exclude-standard","-z"],{encoding:"utf8"});',
+    'return result.status===0 ? result.stdout.split("\\0").filter(Boolean) : null;',
+    '}',
+    'function ignoredFiles(files){',
+    'const candidates=files.filter(rel=>rel!==".solopreneur/roadmap.csv");',
+    'if(!candidates.length) return new Set();',
+    'const result=cp.spawnSync("git",["-C",root,"check-ignore","--no-index","-z","--stdin"],{input:candidates.join("\\0")+"\\0",encoding:"utf8"});',
+    'return new Set(String(result.stdout||"").split("\\0").filter(Boolean));',
+    '}',
+    'function record(rel){',
+    'if(shouldSkip(rel)) return;',
+    'const full=path.join(root,rel);',
+    'let stat; try{stat=fs.statSync(full);}catch{return;}',
+    'if(!stat.isFile()) return;',
+    'snapshot[rel]={size:stat.size,mtimeMs:stat.mtimeMs};',
     '}',
     'function walk(dir){',
     'for(const entry of fs.readdirSync(dir,{withFileTypes:true})){',
@@ -3721,24 +3739,26 @@ function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: s
     'const rel=path.relative(root,full).replace(/\\\\/g,"/");',
     'if(shouldSkip(rel)) continue;',
     'if(entry.isDirectory()){ walk(full); continue; }',
-    'if(!entry.isFile() || rel===".agent_status.json") continue;',
-    'const stat=fs.statSync(full);',
-    'snapshot[rel]={size:stat.size,mtimeMs:stat.mtimeMs};',
+    'if(entry.isFile()) record(rel);',
     '}',
     '}',
-    'if(fs.existsSync(root)) walk(root);',
+    'const files=gitFiles();',
+    'if(files){const ignored=ignoredFiles(files); for(const rel of files){if(!ignored.has(rel)) record(rel);}}',
+    'else if(fs.existsSync(root)) walk(root);',
     'fs.mkdirSync(path.dirname(out),{recursive:true});',
     'fs.writeFileSync(out, JSON.stringify(snapshot));'
   ].join(''))} ${shellQuote(workspaceRoot)} ${shellQuote(snapshotFilePath)}`;
 }
 
-function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: string, touchedFilesPath: string): string {
+function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: string, touchedFilesPath: string, changesFilePath: string): string {
   return `node -e ${shellQuote([
     'const fs=require("fs");',
     'const path=require("path");',
+    'const cp=require("child_process");',
     'const root=process.argv[1];',
     'const beforeFile=process.argv[2];',
     'const out=process.argv[3];',
+    'const changesOut=process.argv[4];',
     'let before={};',
     'try{ before=JSON.parse(fs.readFileSync(beforeFile,"utf8"))||{}; } catch {}',
     'const after={};',
@@ -3747,7 +3767,24 @@ function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: strin
     'if(rel==="node_modules" || rel.startsWith("node_modules/")) return true;',
     'if(rel===".solopreneur") return false;',
     'if(rel.startsWith(".solopreneur/")) return rel !== ".solopreneur/roadmap.csv";',
-    'return false;',
+    'return rel===".agent_status.json";',
+    '}',
+    'function gitFiles(){',
+    'const result=cp.spawnSync("git",["-C",root,"ls-files","--cached","--others","--exclude-standard","-z"],{encoding:"utf8"});',
+    'return result.status===0 ? result.stdout.split("\\0").filter(Boolean) : null;',
+    '}',
+    'function ignoredFiles(files){',
+    'const candidates=files.filter(rel=>rel!==".solopreneur/roadmap.csv");',
+    'if(!candidates.length) return new Set();',
+    'const result=cp.spawnSync("git",["-C",root,"check-ignore","--no-index","-z","--stdin"],{input:candidates.join("\\0")+"\\0",encoding:"utf8"});',
+    'return new Set(String(result.stdout||"").split("\\0").filter(Boolean));',
+    '}',
+    'function record(rel){',
+    'if(shouldSkip(rel)) return;',
+    'const full=path.join(root,rel);',
+    'let stat; try{stat=fs.statSync(full);}catch{return;}',
+    'if(!stat.isFile()) return;',
+    'after[rel]={size:stat.size,mtimeMs:stat.mtimeMs};',
     '}',
     'function walk(dir){',
     'for(const entry of fs.readdirSync(dir,{withFileTypes:true})){',
@@ -3755,12 +3792,12 @@ function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: strin
     'const rel=path.relative(root,full).replace(/\\\\/g,"/");',
     'if(shouldSkip(rel)) continue;',
     'if(entry.isDirectory()){ walk(full); continue; }',
-    'if(!entry.isFile() || rel===".agent_status.json") continue;',
-    'const stat=fs.statSync(full);',
-    'after[rel]={size:stat.size,mtimeMs:stat.mtimeMs};',
+    'if(entry.isFile()) record(rel);',
     '}',
     '}',
-    'if(fs.existsSync(root)) walk(root);',
+    'const files=gitFiles();',
+    'if(files){const ignored=ignoredFiles(files); for(const rel of files){if(!ignored.has(rel)) record(rel);}}',
+    'else if(fs.existsSync(root)) walk(root);',
     'const changes=[];',
     'for(const [rel,meta] of Object.entries(after)){',
     'const prev=before[rel];',
@@ -3770,8 +3807,10 @@ function buildWorkspaceDiffScript(workspaceRoot: string, snapshotFilePath: strin
     'for(const rel of Object.keys(before)){ if(!after[rel]) changes.push(`D ${rel}`); }',
     'changes.sort((a,b)=>a.localeCompare(b));',
     'fs.mkdirSync(path.dirname(out),{recursive:true});',
-    'fs.writeFileSync(out, changes.join("\\n"));'
-  ].join(''))} ${shellQuote(workspaceRoot)} ${shellQuote(snapshotFilePath)} ${shellQuote(touchedFilesPath)}`;
+    'const content=changes.join("\\n");',
+    'fs.writeFileSync(out, content);',
+    'fs.writeFileSync(changesOut, content);'
+  ].join(''))} ${shellQuote(workspaceRoot)} ${shellQuote(snapshotFilePath)} ${shellQuote(touchedFilesPath)} ${shellQuote(changesFilePath)}`;
 }
 
 function toProjectRelativeRuntimePath(workspaceRoot: string, targetPath: string): string {
@@ -4513,7 +4552,7 @@ function buildAgentShellScript(
   const noChangesStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'no_deliverable_changes', failureReason: 'Agent exited without project file changes or a completion decision.' });
   const sessionCaptureScript = buildSessionCaptureScript(agentProvider, effectiveWorkspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(effectiveWorkspaceRoot, workspaceSnapshotPath);
-  const workspaceDiffScript = buildWorkspaceDiffScript(effectiveWorkspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  const workspaceDiffScript = buildWorkspaceDiffScript(effectiveWorkspaceRoot, workspaceSnapshotPath, touchedFilesPath, changesFilePath);
   const enhancementRuntime = ensureSolomapEnhancementRuntime(effectiveWorkspaceRoot, effectiveGlobalDataPath, effectiveEnabledEnhancements);
   const enhancementContextFilePath = path.join(runDir, 'harness-enhancements.md');
   const enhancementContextPreflight = buildSolomapEnhancementContextPreflight(effectiveWorkspaceRoot, enhancementContextFilePath, effectiveUserMessage, enhancementRuntime.runtimeRoot, effectiveEnabledEnhancements);
@@ -4557,7 +4596,6 @@ function buildAgentShellScript(
     `${shellQuote(process.execPath)} -e ${shellQuote('process.stdout.write(new Date().toISOString())')} > ${shellQuote(finishedAtFilePath)}`,
     `kill "$solomap_status_heartbeat_pid" 2>/dev/null || true`,
     sessionCaptureScript,
-    `git -C ${shellQuote(effectiveWorkspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
     `if [ ${shellQuote(effectiveRunKind)} != 'solo' ] && [ ${shellQuote(effectiveRunKind)} != 'solo_continue' ] && [ ${shellQuote(effectiveRunKind)} != 'step_continue' ] && [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].filter(Boolean).join('; ');
@@ -5088,7 +5126,7 @@ function startAgentReviewRun(input: {
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_review_failed', failureReason: 'Review Agent exited before writing a valid review decision.' });
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(input.workspaceRoot, workspaceSnapshotPath);
-  const workspaceDiffScript = buildWorkspaceDiffScript(input.workspaceRoot, workspaceSnapshotPath, touchedFilesPath);
+  const workspaceDiffScript = buildWorkspaceDiffScript(input.workspaceRoot, workspaceSnapshotPath, touchedFilesPath, changesFilePath);
   const terminalExecutionScript = [
     `(${loggedCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
     'status=${PIPESTATUS[0]}',
@@ -5110,7 +5148,6 @@ function startAgentReviewRun(input: {
     `while true; do sleep 30; touch ${shellQuote(statusFilePath)}; done & solomap_status_heartbeat_pid=$!`,
     terminalExecutionScript,
     `kill "$solomap_status_heartbeat_pid" 2>/dev/null || true`,
-    `git -C ${shellQuote(input.workspaceRoot)} status --short > ${shellQuote(changesFilePath)} 2>/dev/null || true`,
     workspaceDiffScript,
     `if [ -s ${shellQuote(touchedFilesPath)} ]; then status=126; fi`,
     `node -e 'const fs=require("fs");try{const p=process.argv[1];const v=JSON.parse(fs.readFileSync(p,"utf8"));if(!["pass","revise","needs_user_confirmation"].includes(String(v.status||""))) process.exit(2);}catch(e){process.exit(2)}' ${shellQuote(reviewResultFilePath)} || status=125`,
