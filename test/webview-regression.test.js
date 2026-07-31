@@ -6902,6 +6902,31 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.doesNotMatch(attributedChanges, /README\.md|out\/extension\.js/);
   assert.equal(attributedTouched, attributedChanges);
 
+  const nonGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-non-git-agent-'));
+  fs.mkdirSync(path.join(nonGitRoot, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(nonGitRoot, 'src', 'app.js'), 'export const value = 1;\n', 'utf8');
+  const nonGitCommand = `node -e ${extensionModule.__shellQuote([
+    'const fs=require("fs");',
+    'fs.appendFileSync("src/app.js","export const next = 2;\\n");',
+    'fs.mkdirSync("dist",{recursive:true});',
+    'fs.writeFileSync("dist/bundle.js","generated\\n");'
+  ].join(''))}`;
+  const nonGitRun = extensionModule.__buildAgentShellScript(
+    'codex',
+    nonGitCommand,
+    nonGitRoot,
+    'non-git',
+    10,
+    '',
+    undefined,
+    '',
+    nonGitCommand
+  );
+  childProcess.execSync(nonGitRun.finalCommand, { cwd: nonGitRoot, stdio: 'ignore' });
+  const nonGitChanges = fs.readFileSync(nonGitRun.changesFilePath, 'utf8');
+  assert.match(nonGitChanges, /M src\/app\.js/);
+  assert.doesNotMatch(nonGitChanges, /dist\/bundle\.js/);
+
   const invalidBootstrapRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-bootstrap-invalid-'));
   fs.mkdirSync(path.join(invalidBootstrapRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(invalidBootstrapRoot, '.solopreneur', 'roadmap.csv'), [
