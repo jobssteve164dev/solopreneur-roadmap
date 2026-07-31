@@ -1133,7 +1133,7 @@ async function handleSharedWebviewAction(
       const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
       if (!projectPath) return;
       if (request.nodeId) {
-        await handleRunAgent(context, String(request.nodeId), '', '');
+        await handleRunAgent(context, String(request.nodeId), '', getPersistedSettings(context).cliPath || '');
       } else {
         await vscode.commands.executeCommand('solopreneur.showRoadmap');
       }

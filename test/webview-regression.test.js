@@ -3500,6 +3500,14 @@ test('local-first loading paints and launches before optional or durable work', 
       `${action} must reveal a terminal before project/database preparation`
     );
   }
+  const projectContinueStart = dispatchBody.indexOf("'project.continue': async");
+  const projectContinueEnd = dispatchBody.indexOf('\n    },', projectContinueStart);
+  const projectContinueBody = dispatchBody.slice(projectContinueStart, projectContinueEnd);
+  assert.match(
+    projectContinueBody,
+    /handleRunAgent\(context,\s*String\(request\.nodeId\),\s*'',\s*getPersistedSettings\(context\)\.cliPath \|\| ''\)/,
+    'project card quick continue must explicitly use the persisted default Agent CLI'
+  );
   const revealBody = extensionSource.slice(
     extensionSource.indexOf('function revealAgentStartupTerminal'),
     extensionSource.indexOf('function launchAgentConversationTerminal')
