@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.407 - 2026-07-31
+
+### Changed
+- fix sidebar quick continue agent selection (b367588)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.406 - 2026-07-31
 
 ### Tests
