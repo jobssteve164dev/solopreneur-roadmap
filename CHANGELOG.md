@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.408 - 2026-08-01
+
+### Changed
+- fix independent sidebar conversation state (2dc4a0b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.407 - 2026-07-31
 
 ### Changed
