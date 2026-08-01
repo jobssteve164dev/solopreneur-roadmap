@@ -1740,6 +1740,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       border-color: rgba(56, 189, 248, 0.22);
     }
 
+    .global-priority.P99 {
+      color: var(--text-muted);
+      background: rgba(148, 163, 184, 0.08);
+      border-color: rgba(148, 163, 184, 0.18);
+    }
+
     .global-focus-foot {
       margin-top: 7px;
       display: flex;
@@ -5486,6 +5492,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterActive: '进行中',
         filterFailed: '有失败',
         filterCompleted: '已完成',
+        filterFrozen: '冻结',
         projectOpen: '项目路线图',
         projectGrowth: '项目生长图',
         issueOpenGithub: '打开 Issue',
@@ -5928,6 +5935,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         filterActive: 'Active',
         filterFailed: 'Failed',
         filterCompleted: 'Done',
+        filterFrozen: 'Frozen',
         projectOpen: 'Open Roadmap',
         projectGrowth: 'Project Growth',
         issueOpenGithub: 'Open Issue',
@@ -8472,6 +8480,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (activePortfolioFilter === 'active') {
         return project.overallStatus === 'Running' || project.overallStatus === 'In Progress' || Number(project.failedNodes || 0) > 0;
       }
+      if (activePortfolioFilter === 'frozen') {
+        return project.globalPriority === 'P99';
+      }
       return true;
     }
 
@@ -8556,7 +8567,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         { key: 'all', label: t('filterAll') },
         { key: 'active', label: t('filterActive') },
         { key: 'failed', label: t('filterFailed') },
-        { key: 'completed', label: t('filterCompleted') }
+        { key: 'completed', label: t('filterCompleted') },
+        { key: 'frozen', label: t('filterFrozen') }
       ];
       portfolioFilters.innerHTML = filters.map(filter => (
         '<button type="button" class="portfolio-filter-btn ' + (activePortfolioFilter === filter.key ? 'active' : '') +

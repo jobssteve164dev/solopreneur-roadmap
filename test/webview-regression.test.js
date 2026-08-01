@@ -2774,6 +2774,18 @@ test('adding a project asks for a global methodology project type', () => {
   assert.match(source, /type:\s*projectType\.value/);
 });
 
+test('project priority supports freezing and the sidebar can filter frozen projects', () => {
+  const roadmapSource = fs.readFileSync(path.join(projectRoot, 'src', 'roadmapWebview.ts'), 'utf8');
+  const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarWebview.ts'), 'utf8');
+
+  assert.match(roadmapSource, /\{ value: 'P99', label: 'P99 冻结' \}/);
+  assert.match(sidebarSource, /filterFrozen: '冻结'/);
+  assert.match(sidebarSource, /filterFrozen: 'Frozen'/);
+  assert.match(sidebarSource, /activePortfolioFilter === 'frozen'[\s\S]*?project\.globalPriority === 'P99'/);
+  assert.match(sidebarSource, /\{ key: 'frozen', label: t\('filterFrozen'\) \}/);
+  assert.match(sidebarSource, /\.global-priority\.P99/);
+});
+
 test('local project actions use local refresh instead of external portfolio refresh', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const functionBody = (name) => {

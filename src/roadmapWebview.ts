@@ -3617,7 +3617,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         { value: '', label: '自动优先级' },
         { value: 'P0', label: 'P0' },
         { value: 'P1', label: 'P1' },
-        { value: 'P2', label: 'P2' }
+        { value: 'P2', label: 'P2' },
+        { value: 'P99', label: 'P99 冻结' }
       ];
     }
 
