@@ -888,6 +888,8 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(script, /entitlement\.login/);
   assert.match(script, /entitlement\.paste/);
   assert.match(html, /data-issue-panel/);
+  assert.match(script, /command: 'project\.continue',\s*projectPath,\s*nodeId,\s*agentCli: getEffectiveSettingCliPath\(\)/);
+  assert.match(script, /command: 'project\.continue',\s*projectPath: button\.getAttribute\('data-continue-project-path'\),\s*nodeId: button\.getAttribute\('data-continue-node-id'\),\s*agentCli: getEffectiveSettingCliPath\(\)/);
   assert.match(html, /data-toggle-issue-form/);
   assert.match(html, /id="btn-toggle-collaboration"[^>]*><span class="codicon codicon-live-share"/);
   assert.match(html, /id="btn-toggle-feedback"[^>]*><span class="codicon codicon-comment-discussion"/);
@@ -997,6 +999,18 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     globalThis.__buildSecurityActionPrompt = buildSecurityActionPrompt;
     globalThis.__renderGlobalFocus = renderGlobalFocus;
     globalThis.__renderIssueDetailWithPayload = (payload) => { issueDetails = payload; return renderIssueDetail('/workspace/app'); };
+    globalThis.__renderProjectConversationComposer = renderProjectConversationComposer;
+    globalThis.__setCurrentCliForTest = (cliPath) => {
+      currentSettings = { ...(currentSettings || {}), cliPath };
+      applySettingCliPath(cliPath);
+    };
+    globalThis.__renderContinueComposerWithRunningSolo = () => {
+      const projectPath = '/workspace/second';
+      sidebarSoloConversations = [{ id: 99, nodeId: '__solo__', status: 'Running' }];
+      projectConversationModes[projectPath] = 'continue';
+      const nodes = [{ id: 'step-1', title: '验证首页', stage: '产品', status: 'Pending', dependencies: '', agentCli: 'agy' }];
+      return renderProjectConversationComposer({ name: 'second', path: projectPath, nodes }, nodes);
+    };
     globalThis.__getCurrentPortfolio = () => currentProjects.portfolio;
     globalThis.__resetActiveProjectPath = () => { activeProjectPath = ''; currentProjects.selectedProjectPath = ''; };
   `);
@@ -1445,6 +1459,24 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-input/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-open-pro-upgrade|了解 Pro|Unlock Pro/);
+
+  context.__setCurrentCliForTest('codex');
+  const runningComposerHtml = context.__renderProjectConversationComposer({
+    name: 'second',
+    path: '/workspace/second',
+    nodes: [{ id: 'step-1', title: '验证首页', stage: '产品', status: 'Running', dependencies: '', agentCli: 'agy' }]
+  }, [{ id: 'step-1', title: '验证首页', stage: '产品', status: 'Running', dependencies: '', agentCli: 'agy' }]);
+  const runningInput = runningComposerHtml.match(/<textarea[^>]*data-project-conversation-input[^>]*>/)?.[0] || '';
+  const runningSend = runningComposerHtml.match(/<button[^>]*data-project-continue-send[^>]*>/)?.[0] || '';
+  assert.doesNotMatch(runningInput, /\sdisabled(?:\s|>)/, 'a running Agent must not freeze the project composer input');
+  assert.doesNotMatch(runningSend, /\sdisabled(?:\s|>)/, 'aggregate Running state must not block a new step conversation');
+  assert.match(runningComposerHtml, /class="solo-select portfolio-compose-agent"[^>]*data-value="codex"/, 'the project composer must default to the persisted Agent CLI');
+
+  const runningSoloComposerHtml = context.__renderContinueComposerWithRunningSolo();
+  const runningSoloInput = runningSoloComposerHtml.match(/<textarea[^>]*data-project-conversation-input[^>]*>/)?.[0] || '';
+  const runningSoloSend = runningSoloComposerHtml.match(/<button[^>]*data-project-continue-send[^>]*>/)?.[0] || '';
+  assert.doesNotMatch(runningSoloInput, /\sdisabled(?:\s|>)/, 'a running Solo conversation must not block step input');
+  assert.doesNotMatch(runningSoloSend, /\sdisabled(?:\s|>)/, 'a running Solo conversation must not block a step conversation');
 
   postedMessages.length = 0;
   elements['project-select'].listeners.click({
@@ -3505,7 +3537,7 @@ test('local-first loading paints and launches before optional or durable work', 
   const projectContinueBody = dispatchBody.slice(projectContinueStart, projectContinueEnd);
   assert.match(
     projectContinueBody,
-    /handleRunAgent\(context,\s*String\(request\.nodeId\),\s*'',\s*getPersistedSettings\(context\)\.cliPath \|\| ''\)/,
+    /handleRunAgent\(\s*context,\s*String\(request\.nodeId\),\s*'',\s*String\(request\.agentCli \|\| getPersistedSettings\(context\)\.cliPath \|\| ''\)\s*\)/,
     'project card quick continue must explicitly use the persisted default Agent CLI'
   );
   const revealBody = extensionSource.slice(

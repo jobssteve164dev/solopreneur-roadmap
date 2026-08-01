@@ -8593,7 +8593,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         : (mode === 'solo' || !node ? 'solo' : 'continue');
       const flowUnlocked = hasFlowPro(currentSettings || {});
       const targetId = activeMode === 'solo' ? soloTargetId : activeMode === 'flow' ? ('flow:' + projectPath) : (node ? node.id : '');
-      const disabled = activeMode === 'continue' && (!node || node.status === 'Running' || node.status === 'Completed');
+      const composerDisabled = activeMode === 'continue' && (!node || node.status === 'Completed');
       const files = activeMode === 'solo' ? (projectSoloFiles[soloTargetId] || []) : (projectContinueFiles[targetId] || []);
       const draft = activeMode === 'solo'
         ? (projectSoloDrafts[projectPath] || '')
@@ -8606,7 +8606,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           ? getAgentOptions({ agentCli: getEffectiveSettingCliPath() || 'agy' })
           : getAgentOptions(node);
       const modelTargetId = activeMode === 'flow' ? ('flow:' + projectPath) : targetId;
-      const selectedAgentCli = projectConversationAgentSelections[modelTargetId] || ((activeMode === 'solo' || activeMode === 'flow') ? (getEffectiveSettingCliPath() || 'agy') : (node?.agentCli || getEffectiveSettingCliPath() || 'agy'));
+      const selectedAgentCli = projectConversationAgentSelections[modelTargetId] || getEffectiveSettingCliPath() || node?.agentCli || 'agy';
       return \`
         <div class="portfolio-compose" data-project-continue-composer>
           <div class="portfolio-mode-toggle">
@@ -8624,13 +8624,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             </div>
           \` : \`
           <div class="portfolio-compose-agent-row">
-            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', agentOptions, disabled, selectedAgentCli)}
-            \${renderSoloSelect('portfolio-compose-model', 'data-project-continue-model data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', getAgentModelOptions(selectedAgentCli), disabled, getTargetModelValue(modelTargetId, selectedAgentCli))}
+            \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', agentOptions, composerDisabled, selectedAgentCli)}
+            \${renderSoloSelect('portfolio-compose-model', 'data-project-continue-model data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', getAgentModelOptions(selectedAgentCli), composerDisabled, getTargetModelValue(modelTargetId, selectedAgentCli))}
           </div>
           <div class="portfolio-compose-row">
             <button class="portfolio-compose-tool" data-project-attach-files data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" title="\${escapeHtml(t('soloAttach'))}"><span class="codicon codicon-attach"></span></button>
-            <textarea class="portfolio-compose-input" data-project-conversation-input data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" data-project-path="\${escapeHtml(projectPath)}" placeholder="\${escapeHtml(activeMode === 'solo' ? t('soloPlaceholder') : activeMode === 'flow' ? t('flowPlaceholder') : t('continuePlaceholder'))}" \${disabled ? 'disabled' : ''}>\${escapeHtml(draft)}</textarea>
-            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${disabled ? 'disabled' : ''}>
+            <textarea class="portfolio-compose-input" data-project-conversation-input data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" data-project-path="\${escapeHtml(projectPath)}" placeholder="\${escapeHtml(activeMode === 'solo' ? t('soloPlaceholder') : activeMode === 'flow' ? t('flowPlaceholder') : t('continuePlaceholder'))}" \${composerDisabled ? 'disabled' : ''}>\${escapeHtml(draft)}</textarea>
+            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${composerDisabled ? 'disabled' : ''}>
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
@@ -9230,7 +9230,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               vscode.postMessage({
                 command: 'project.continue',
                 projectPath,
-                nodeId
+                nodeId,
+                agentCli: getEffectiveSettingCliPath()
               });
             } else {
               activateProjectInSidebar(projectPath);
@@ -10145,7 +10146,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({
             command: 'project.continue',
             projectPath: button.getAttribute('data-continue-project-path'),
-            nodeId: button.getAttribute('data-continue-node-id')
+            nodeId: button.getAttribute('data-continue-node-id'),
+            agentCli: getEffectiveSettingCliPath()
           });
         });
       });
