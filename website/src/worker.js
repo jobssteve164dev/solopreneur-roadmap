@@ -3121,8 +3121,6 @@ function buildStyles() {
     }
     
     .docs-page {
-      width: min(1040px, calc(100% - 40px));
-      margin: 0 auto;
       padding: 72px 0 86px;
     }
     .docs-hero {
@@ -4813,7 +4811,7 @@ function buildDocIndexPage(locale, origin) {
 </head>
 <body>
   ${buildHeader(t, locale, t.docsPath)}
-  <main id="main-content" class="docs-page">
+  <main id="main-content" class="docs-page shell">
     <div class="docs-hero">
       <h1>${escapeHtml(docs.index.heading)}</h1>
       <p>${escapeHtml(docs.index.lead)}</p>
@@ -4888,7 +4886,7 @@ function buildDocPage(locale, slug, origin) {
 </head>
 <body>
   ${buildHeader(t, locale, pagePath)}
-  <main id="main-content" class="docs-page">
+  <main id="main-content" class="docs-page shell">
     <nav class="docs-breadcrumbs" aria-label="${locale === "zh" ? "面包屑" : "Breadcrumb"}"><a href="${t.homePath}">SoloMap</a> / <a href="${t.docsPath}">${locale === "zh" ? "文档" : "Docs"}</a> / <span aria-current="page">${escapeHtml(doc.title)}</span></nav>
     <div class="docs-hero">
       <h1>${escapeHtml(doc.heading)}</h1>

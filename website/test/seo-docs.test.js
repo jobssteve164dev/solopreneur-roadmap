@@ -19,6 +19,7 @@ test("the bilingual docs hub exposes start, problem, integration, comparison, an
     assert.match(html, /agents\/cursor/);
     assert.match(html, /compare\/solomap-vs-task-managers/);
     assert.match(html, /CollectionPage/);
+    assert.match(html, /<main id="main-content" class="docs-page shell">/);
   }
 });
 
@@ -34,6 +35,7 @@ test("nested guide routes have canonical metadata, breadcrumbs, authorship, FAQs
   assert.match(html, /TechArticle/);
   assert.match(html, /Maintained by the SoloMap team/);
   assert.match(html, /Continue reading/);
+  assert.match(html, /<main id="main-content" class="docs-page shell">/);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000; includeSubDomains; preload");
 });
 
