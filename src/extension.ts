@@ -2967,6 +2967,7 @@ async function openRoadmapPanel(
       localResourceRoots: [vscode.Uri.file(context.extensionPath)],
     }
   );
+  activePanel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo.png');
 
   // Paint a tiny shell first. Building and parsing the complete roadmap Webview
   // is intentionally deferred so opening a large view always has immediate feedback.
@@ -3085,6 +3086,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
       localResourceRoots: [vscode.Uri.file(context.extensionPath)]
     }
   );
+  activeProjectGrowthPanel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo.png');
 
   activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(
     activeProjectGrowthPanel.webview,
@@ -3251,6 +3253,7 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
       localResourceRoots: [vscode.Uri.file(context.extensionPath)]
     }
   );
+  activeStrategyPyramidPanel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo.png');
 
   activeStrategyPyramidPanel.webview.html = buildLocalDataStatusHtml(
     activeStrategyPyramidPanel.webview,
@@ -5538,7 +5541,7 @@ function createAgentTerminal(workspaceRoot: string, label: string, conversationI
   }
   let iconPath: vscode.Uri | vscode.ThemeIcon;
   if (extensionContextRef) {
-    iconPath = vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.svg');
+    iconPath = vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.png');
   } else {
     iconPath = new vscode.ThemeIcon('symbol-string');
   }
@@ -5559,7 +5562,7 @@ function revealAgentStartupTerminal(workspaceRoot: string, label: string): void 
   const terminal = vscode.window.createTerminal({
     name: makeAgentTerminalName(workspaceRoot, label),
     iconPath: extensionContextRef
-      ? vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.svg')
+      ? vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.png')
       : new vscode.ThemeIcon('symbol-string'),
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot

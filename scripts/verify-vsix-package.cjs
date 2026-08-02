@@ -9,7 +9,6 @@ const REQUIRED_FILES = [
   'extension/out/extension.js',
   'extension/resources/activitybar.svg',
   'extension/resources/logo.png',
-  'extension/resources/logo.svg',
   'extension/resources/logo_with_text.svg',
   'extension/resources/tools/solomap-experience.cjs',
   'extension/resources/tools/solomap-memory.cjs',
@@ -23,6 +22,7 @@ const REQUIRED_FILES = [
 ];
 const FORBIDDEN_PREFIXES = [
   'extension/.agents/',
+  'extension/.playwright-cli/',
   'extension/.solopreneur/',
   'extension/cache/',
   'extension/docs/',

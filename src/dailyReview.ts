@@ -461,7 +461,7 @@ export function startDailyReviewAgent(settings: SolopreneurSettings, projects: S
     cwd: workspaceRoot,
   };
   if (extensionUri) {
-    terminalOpts.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'logo.svg');
+    terminalOpts.iconPath = vscode.Uri.joinPath(extensionUri, 'resources', 'logo.png');
   }
   const terminal = vscode.window.createTerminal(terminalOpts);
   terminal.show(true);

@@ -589,7 +589,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, this._getSettings().globalDataPath);
     const terminal = vscode.window.createTerminal({
       name: 'Setup',
-      iconPath: vscode.Uri.joinPath(this._extensionUri, 'resources', 'logo.svg'),
+      iconPath: vscode.Uri.joinPath(this._extensionUri, 'resources', 'logo.png'),
       cwd: maintenanceRoot,
     });
     terminal.show(true);

@@ -654,13 +654,27 @@ test('webviews preserve extension URI schemes when loading bundled icons', () =>
   }
 });
 
-test('VSIX packaging preserves every runtime icon referenced by webviews and terminals', () => {
+test('large views and terminals use packaged runtime icons supported across VS Code hosts', () => {
   const vscodeIgnore = fs.readFileSync(path.join(projectRoot, '.vscodeignore'), 'utf8');
   const packageAudit = fs.readFileSync(path.join(projectRoot, 'scripts', 'verify-vsix-package.cjs'), 'utf8');
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const terminalSources = [
+    extensionSource,
+    fs.readFileSync(path.join(projectRoot, 'src', 'dailyReview.ts'), 'utf8'),
+    fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8')
+  ];
 
-  assert.doesNotMatch(vscodeIgnore, /^resources\/logo\.svg$/m);
-  assert.doesNotMatch(vscodeIgnore, /^resources\/logo_with_text\.\*$/m);
-  assert.match(packageAudit, /'extension\/resources\/logo\.svg'/);
+  assert.match(extensionSource, /activePanel\.iconPath = vscode\.Uri\.joinPath\(context\.extensionUri, 'resources', 'logo\.png'\)/);
+  assert.match(extensionSource, /activeProjectGrowthPanel\.iconPath = vscode\.Uri\.joinPath\(context\.extensionUri, 'resources', 'logo\.png'\)/);
+  assert.match(extensionSource, /activeStrategyPyramidPanel\.iconPath = vscode\.Uri\.joinPath\(context\.extensionUri, 'resources', 'logo\.png'\)/);
+  for (const source of terminalSources) {
+    assert.doesNotMatch(source, /'resources', 'logo\.svg'/);
+  }
+  assert.match(vscodeIgnore, /^\.playwright-cli\/$/m);
+  assert.match(vscodeIgnore, /^resources\/logo\.svg$/m);
+  assert.doesNotMatch(vscodeIgnore, /^resources\/logo_with_text\.svg$/m);
+  assert.match(packageAudit, /'extension\/\.playwright-cli\/'/);
+  assert.match(packageAudit, /'extension\/resources\/logo\.png'/);
   assert.match(packageAudit, /'extension\/resources\/logo_with_text\.svg'/);
 });
 
