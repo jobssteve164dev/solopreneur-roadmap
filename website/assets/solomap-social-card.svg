@@ -1,0 +1,19 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="accent" x1="120" y1="100" x2="1060" y2="560" gradientUnits="userSpaceOnUse"><stop stop-color="#49D6D0"/><stop offset=".52" stop-color="#A99CFF"/><stop offset="1" stop-color="#EF3E46"/></linearGradient>
+    <radialGradient id="glow"><stop stop-color="#49D6D0" stop-opacity=".2"/><stop offset="1" stop-color="#11100E" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#11100E"/>
+  <circle cx="1040" cy="100" r="420" fill="url(#glow)"/>
+  <rect x="54" y="54" width="1092" height="522" rx="30" fill="#1A1714" stroke="#3F3A34"/>
+  <g transform="translate(92 96) scale(.10)">
+    <path d="M669 257C595 188 437 199 371 284C314 358 348 446 458 487L558 524C659 562 685 653 622 733C548 826 380 820 304 706" stroke="url(#accent)" stroke-width="132" stroke-linecap="round" fill="none"/>
+    <circle cx="686" cy="285" r="72" fill="#49D6D0"/><circle cx="686" cy="285" r="35" fill="#11100E"/>
+    <circle cx="312" cy="690" r="72" fill="#A99CFF"/><circle cx="312" cy="690" r="35" fill="#11100E"/>
+  </g>
+  <text x="190" y="158" fill="#F6F0E8" font-family="DejaVu Sans, sans-serif" font-size="44" font-weight="700">SoloMap</text>
+  <text x="92" y="288" fill="#F6F0E8" font-family="DejaVu Sans, sans-serif" font-size="62" font-weight="700">Keep AI coding projects</text>
+  <text x="92" y="366" fill="#49D6D0" font-family="DejaVu Sans, sans-serif" font-size="62" font-weight="700">moving from verified context.</text>
+  <text x="92" y="446" fill="#BFB5A7" font-family="DejaVu Sans, sans-serif" font-size="28">Local-first roadmap · Agent execution · Durable handoffs</text>
+  <rect x="92" y="494" width="390" height="4" rx="2" fill="#A99CFF"/>
+</svg>

@@ -21,6 +21,17 @@
     "enabled": true,
     "head_sampling_rate": 1
   },
+  "assets": {
+    "directory": "./assets",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "analytics_engine_datasets": [
+    {
+      "binding": "SITE_ANALYTICS",
+      "dataset": "solomap_site_events"
+    }
+  ],
   "vars": {
     "SITE_ORIGIN": "https://solomap.app"
   },

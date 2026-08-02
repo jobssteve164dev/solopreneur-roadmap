@@ -29,14 +29,15 @@ import {
   handleCollaborationRoomCreate,
   handleCollaborationSocket
 } from "./collaborationRelay.js";
+import { docsCatalog } from "./docsCatalog.js";
 
 const SITE_ORIGIN = "https://solomap.app";
 const MARKETPLACE_URL = "https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap";
 const OPEN_VSX_URL = "https://open-vsx.org/extension/SZLK/solopreneur-roadmap";
 const GITHUB_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap";
 const FEEDBACK_URL = "https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new?template=seed-user-feedback.yml";
-const SCREENSHOT_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/docs/assets/solomap_red_terminal.png";
-const LOGO_URL = "https://raw.githubusercontent.com/jobssteve164dev/solopreneur-roadmap/main/resources/logo.svg";
+const SCREENSHOT_URL = `${SITE_ORIGIN}/solomap-social-card.png`;
+const LOGO_URL = "/logo.svg";
 const SOLOMAP_PRODUCT = "solomap";
 const STRATEGY_PYRAMID_FEATURE = "strategy_pyramid";
 const VSCODE_CALLBACK_PREFIXES = [
@@ -54,7 +55,7 @@ const PASSPORT_ACCOUNT_URL = `${PASSPORT_ISSUER}/passport/account`;
 const SOLOMAP_OIDC_CLIENT_ID = "solomap-vscode";
 const SOLOMAP_PRO_PLAN_ID = "solomap_pro_early_access_yearly";
 const SOLOMAP_PRO_DEVICE_LIMIT = 5;
-const SITEMAP_LASTMOD = "2026-06-06";
+const SITEMAP_LASTMOD = "2026-08-02";
 
 const securityHeaders = {
   "content-security-policy": [
@@ -62,13 +63,16 @@ const securityHeaders = {
     "img-src 'self' https://raw.githubusercontent.com data:",
     "style-src 'unsafe-inline'",
     "font-src 'none'",
-    "connect-src 'none'",
-    "script-src 'none'",
+    "connect-src 'self' https://cloudflareinsights.com",
+    "script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com",
+    "frame-src 'self'",
     "base-uri 'none'",
     "form-action 'none'",
     "frame-ancestors 'none'"
   ].join("; "),
   "referrer-policy": "strict-origin-when-cross-origin",
+  "strict-transport-security": "max-age=31536000; includeSubDomains; preload",
+  "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY"
 };
@@ -100,9 +104,9 @@ const content = {
       install: "Install"
     },
     meta: {
-      title: "SoloMap - Local-first roadmap and strategy cockpit for AI-built projects",
-      description: "SoloMap is a local-first roadmap and strategy cockpit for indie developers building with AI agents in VS Code.",
-      ogDescription: "Keep your AI-built projects moving with a local-first roadmap and strategy cockpit in VS Code.",
+      title: "AI Coding Agent Roadmap for Solo Developers | SoloMap",
+      description: "Plan AI coding work, run local Agent CLIs from roadmap steps, and resume projects from verified local context in VS Code.",
+      ogDescription: "Keep AI coding projects moving with a local-first roadmap, Agent execution, and durable project context in VS Code.",
       keywords: "solomap, vscode extension, local-first roadmap, ai coding agents, indie hackers, solo founders, strategy cockpit, portfolio management, cursor ide, claude code"
     },
     hero: {
@@ -114,10 +118,10 @@ const content = {
       secondaryCta: "Get it on Open VSX",
       githubCta: "View on GitHub",
       proofLabel: "Product highlights",
-      proof: ["Works in your workspace", "Bring your own Agent CLI", "Free core workflow"],
-      trustBadge: "Loved by 1,200+ solo developers keeping momentum",
-      screenshotLabel: "SoloMap running in VS Code",
-      screenshotAlt: "SoloMap roadmap and Agent terminal running inside Visual Studio Code"
+      proof: ["Open source under MIT", "Works with your local Agent CLI", "Roadmap stored as readable local files"],
+      trustBadge: "Available on VS Code Marketplace and Open VSX",
+      screenshotLabel: "Illustrated SoloMap workflow",
+      screenshotAlt: "Illustrated SoloMap workflow from roadmap step to Agent run and verified handoff"
     },
     problem: {
       title: "AI can write code. It does not keep your product on track.",
@@ -212,6 +216,7 @@ const content = {
       items: [
         "Your AI provider usage depends on the local Agent CLI you choose.",
         "GitHub data is used when you connect or refresh GitHub-backed signals.",
+        "The public website records anonymous aggregate page and outbound CTA events without advertising or tracking cookies; it does not receive your repository, roadmap, prompts, or local Agent history.",
         "Feedback is sent only when you open or submit a feedback issue yourself."
       ]
     },
@@ -284,10 +289,10 @@ const content = {
       secondaryCta: "在 Open VSX 获取",
       githubCta: "查看 GitHub",
       proofLabel: "产品亮点",
-      proof: ["在你的工作区里运行", "使用你已有的 Agent CLI", "Free 主路径保持可用"],
-      trustBadge: "超过 1,200+ 位独立开发者正在使用独道保持推进",
-      screenshotLabel: "独道在 VS Code 中运行",
-      screenshotAlt: "独道 (SoloMap) 路线图和 Agent 终端在 Visual Studio Code 中运行"
+      proof: ["MIT 开源", "接入你的本地 Agent CLI", "路线图保存为可读本地文件"],
+      trustBadge: "已上架 VS Code Marketplace 与 Open VSX",
+      screenshotLabel: "SoloMap 工作流程示意",
+      screenshotAlt: "从路线图环节到 Agent 执行和验证交接的 SoloMap 工作流程示意"
     },
     problem: {
       title: "AI 能写代码，但不会自动帮你经营项目方向。",
@@ -382,6 +387,7 @@ const content = {
       items: [
         "AI 服务的使用取决于你选择的本地 Agent CLI。",
         "GitHub 数据只在你连接或刷新相关信号时使用。",
+        "官网会在不使用广告或追踪 Cookie 的前提下记录匿名汇总的页面与外链 CTA 事件；它不会接收你的仓库、路线图、提示词或本地 Agent 历史。",
         "反馈只会在你主动打开或提交反馈 Issue 时发送。"
       ]
     },
@@ -557,6 +563,19 @@ const docsContent = {
   }
 };
 
+for (const locale of ["en", "zh"]) {
+  for (const [slug, doc] of Object.entries(docsContent[locale].pages)) {
+    doc.category = "Method";
+    doc.updatedAt = SITEMAP_LASTMOD;
+    doc.related = Object.keys(docsContent[locale].pages).filter((candidate) => candidate !== slug).slice(0, 2);
+  }
+  docsContent[locale].index = docsCatalog[locale].index;
+  docsContent[locale].pages = {
+    ...docsCatalog[locale].pages,
+    ...docsContent[locale].pages
+  };
+}
+
 function htmlResponse(body, status = 200, extraHeaders = {}) {
   return new Response(body, {
     status,
@@ -569,8 +588,9 @@ function htmlResponse(body, status = 200, extraHeaders = {}) {
   });
 }
 
-function textResponse(body, contentType = "text/plain; charset=utf-8") {
+function textResponse(body, contentType = "text/plain; charset=utf-8", status = 200) {
   return new Response(body, {
+    status,
     headers: {
       ...securityHeaders,
       "content-type": contentType,
@@ -1357,7 +1377,7 @@ async function buildProSubscriptionPage(request, env) {
 </head>
 <body>
   ${buildHeader(t, locale, pagePath)}
-  <main class="pro-page">
+  <main id="main-content" class="pro-page">
     <section class="hero">
       <div class="shell pro-hero-grid">
         <div>
@@ -1813,27 +1833,36 @@ function chinesePathFor(pagePath) {
 }
 
 function buildHead(t, origin, pagePath) {
+  const locale = t.lang === "zh-Hans" ? "zh_CN" : "en_US";
+  const imageUrl = absoluteUrl("/solomap-social-card.png", origin);
   return `<meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11100e">
   <title>${escapeHtml(t.meta.title)}</title>
   <meta name="description" content="${escapeHtml(t.meta.description)}">
+  ${t.meta.noindex ? `<meta name="robots" content="noindex,nofollow">` : ""}
   ${t.meta.keywords ? `<meta name="keywords" content="${escapeHtml(t.meta.keywords)}">` : ""}
-  <link rel="icon" href="${LOGO_URL}">
+  <link rel="icon" href="${LOGO_URL}" type="image/svg+xml">
   <link rel="canonical" href="${absoluteUrl(pagePath, origin)}">
   <link rel="alternate" hreflang="en" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="zh-CN" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
-  <link rel="alternate" hreflang="zh-TW" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
-  <link rel="alternate" hreflang="zh-HK" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
   <link rel="alternate" hreflang="x-default" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
   <meta property="og:title" content="${escapeHtml(t.meta.title)}">
   <meta property="og:description" content="${escapeHtml(t.meta.ogDescription)}">
-  <meta property="og:image" content="${SCREENSHOT_URL}">
+  <meta property="og:image" content="${imageUrl}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="SoloMap — local-first roadmap for AI coding projects">
   <meta property="og:url" content="${absoluteUrl(pagePath, origin)}">
   <meta property="og:type" content="website">
+  <meta property="og:site_name" content="SoloMap">
+  <meta property="og:locale" content="${locale}">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="${escapeHtml(t.meta.title)}">
-  <meta name="twitter:description" content="${escapeHtml(t.meta.description)}">`;
+  <meta name="twitter:description" content="${escapeHtml(t.meta.description)}">
+  <meta name="twitter:image" content="${imageUrl}">
+  <meta name="twitter:image:alt" content="SoloMap — local-first roadmap for AI coding projects">`;
 }
 
 function buildStyles() {
@@ -1846,7 +1875,7 @@ function buildStyles() {
       --bg: #11100e;
       --panel: #1a1714;
       --line: rgba(246, 240, 232, 0.16);
-      --red: #ef3e46;
+      --red: #c92f38;
       --cyan: #49d6d0;
       --green: #a5d66d;
       --shadow: rgba(0, 0, 0, 0.35);
@@ -1888,9 +1917,25 @@ function buildStyles() {
       color: var(--ink);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.5;
+      overflow-x: hidden;
     }
     a { color: inherit; text-decoration: none; }
     img { display: block; max-width: 100%; }
+    a, button { touch-action: manipulation; }
+    :focus-visible { outline: 3px solid var(--cyan); outline-offset: 3px; }
+    .skip-link {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 100;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: var(--ink);
+      color: var(--bg);
+      transform: translateY(-160%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     input[type="range"] {
       width: 100%;
       height: 18px;
@@ -2996,7 +3041,7 @@ function buildStyles() {
       max-width: 320px;
       line-height: 1.6;
     }
-    .footer-col h4 {
+    .footer-col h2 {
       margin: 0 0 20px;
       color: var(--ink);
       font-size: 15px;
@@ -3034,7 +3079,9 @@ function buildStyles() {
     }
     .footer-legal-links {
       display: flex;
+      flex-wrap: wrap;
       gap: 24px;
+      min-width: 0;
     }
     .footer-legal-links a {
       transition: color 0.2s ease;
@@ -3109,9 +3156,10 @@ function buildStyles() {
       justify-content: space-between;
       gap: 20px;
     }
-    .docs-card h2 {
+    .docs-card h3 {
       font-size: 24px;
       line-height: 1.08;
+      margin: 0;
     }
     .docs-card p,
     .docs-section p {
@@ -3122,6 +3170,16 @@ function buildStyles() {
       color: var(--cyan);
       font-weight: 760;
     }
+    .docs-category { margin-top: 42px; }
+    .docs-category:first-of-type { margin-top: 0; }
+    .docs-category > h2 { margin: 0 0 16px; font-size: 24px; }
+    .docs-meta { color: var(--muted); font-size: 13px; margin-top: 14px; }
+    .docs-breadcrumbs { margin-bottom: 24px; color: var(--muted); font-size: 14px; }
+    .docs-breadcrumbs a { color: var(--cyan); }
+    .docs-related { margin-top: 36px; padding-top: 28px; border-top: 1px solid var(--line); }
+    .docs-related h2 { font-size: 22px; }
+    .docs-related-links { display: flex; flex-wrap: wrap; gap: 10px; }
+    .docs-related-links a { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; color: var(--cyan); }
     .docs-body {
       display: grid;
       grid-template-columns: minmax(0, 0.66fr) minmax(280px, 0.34fr);
@@ -3272,24 +3330,26 @@ function renderModules(modules) {
           </div>`).join("");
 }
 
-function renderDocCards(t, docs, locale) {
-  return docs.index.cards.map(([slug, title, copy]) => {
+function renderDocCards(t, entries, locale) {
+  return entries.map(([slug, doc]) => {
     const href = `${t.docsPath}/${slug}`;
     return `<a class="docs-card" href="${href}">
             <div>
-              <h2>${escapeHtml(title)}</h2>
-              <p>${escapeHtml(copy)}</p>
+              <h3>${escapeHtml(doc.title)}</h3>
+              <p>${escapeHtml(doc.description)}</p>
             </div>
-            <span>${locale === "zh" ? "阅读方法" : "Read method"}</span>
+            <span>${locale === "zh" ? "阅读指南 →" : "Read guide →"}</span>
           </a>`;
   }).join("");
 }
 
 function renderDocSections(sections) {
-  return sections.map(([title, copy]) => `<article class="docs-section">
-            <h2>${escapeHtml(title)}</h2>
-            <p>${escapeHtml(copy)}</p>
-          </article>`).join("");
+  return sections.map((section) => {
+    const title = Array.isArray(section) ? section[0] : section.title;
+    const copy = Array.isArray(section) ? section[1] : section.copy;
+    const items = Array.isArray(section?.items) ? `<ul>${section.items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : "";
+    return `<section class="docs-section"><h2>${escapeHtml(title)}</h2><p>${escapeHtml(copy)}</p>${items}</section>`;
+  }).join("");
 }
 
 function renderDocFaq(items) {
@@ -3317,33 +3377,33 @@ function renderFaqItems(items) {
 function renderHeroPreview(locale) {
   const labels = locale === "zh"
     ? {
-        title: "SoloMap 工作区",
-        side: "项目",
-        activeProject: "SoloMap 官网",
-        build: "打造",
-        sell: "触达",
-        learn: "学习",
-        improve: "改进",
-        terminal: "Agent 执行",
-        nextBuild: ["编译插件包", "运行66项测试", "发布至应用市场"],
-        nextSell: ["更新网站地图", "验证GEO跳转", "索引规范网址"],
-        nextLearn: ["收集用户反馈", "衡量Pro转换率", "规划下个产品周期"]
+        title: "产品流程演示",
+        side: "当前项目",
+        activeProject: "我的产品",
+        build: "定义结果",
+        sell: "交给 Agent",
+        learn: "验证证据",
+        improve: "留下交接",
+        terminal: "当前环节",
+        nextBuild: ["用户结果明确", "边界已确认", "完成标准可验证"],
+        nextSell: ["Agent 正在执行", "改动保持可见", "不越过当前环节"],
+        nextLearn: ["检查真实改动", "运行相关验证", "记录下一步"]
       }
     : {
-        title: "SoloMap workspace",
-        side: "Projects",
-        activeProject: "SoloMap website",
-        build: "Build",
-        sell: "Sell",
-        learn: "Learn",
-        improve: "Improve",
-        terminal: "Agent run",
-        nextBuild: ["Compile extension", "Verify test suite", "Ship to marketplace"],
-        nextSell: ["Update sitemap", "Verify GEO redirects", "Index canonical URLs"],
-        nextLearn: ["Read user feedback", "Measure conversion rate", "Plan next cycle"]
+        title: "Product workflow illustration",
+        side: "Current project",
+        activeProject: "My product",
+        build: "Define outcome",
+        sell: "Run Agent",
+        learn: "Verify evidence",
+        improve: "Leave handoff",
+        terminal: "Active step",
+        nextBuild: ["User outcome is clear", "Boundary is explicit", "Done can be verified"],
+        nextSell: ["Agent is executing", "Changes stay visible", "Scope stays bounded"],
+        nextLearn: ["Inspect real changes", "Run relevant checks", "Record the next step"]
       };
 
-  return `<figure class="product-preview" aria-label="${escapeHtml(labels.title)}">
+  return `<figure class="product-preview">
           <div class="preview-titlebar">
             <span class="preview-dot" aria-hidden="true"></span>
             <span>${escapeHtml(labels.title)}</span>
@@ -3352,8 +3412,8 @@ function renderHeroPreview(locale) {
             <aside class="preview-side">
               <strong>${escapeHtml(labels.side)}</strong>
               <div class="project-chip">${escapeHtml(labels.activeProject)}</div>
-              <div class="project-chip">Cloudapi</div>
-              <div class="project-chip">Content Factory</div>
+              <div class="project-chip">${locale === "zh" ? "第二个实验" : "Second experiment"}</div>
+              <div class="project-chip">${locale === "zh" ? "维护任务" : "Maintenance"}</div>
             </aside>
             <div class="preview-main">
               <strong>Roadmap</strong>
@@ -3365,25 +3425,22 @@ function renderHeroPreview(locale) {
               </div>
               <div class="terminal">
                 <div class="terminal-group phase-1">
-                  <strong>${escapeHtml(labels.terminal)} (Build)</strong>
-                  <div class="terminal-line"><span class="info">[intent]</span> build landing page and features</div>
-                  <div class="terminal-line"><span class="ok">[action]</span> add premium glassmorphism layout</div>
-                  <div class="terminal-line"><span class="ok">[evidence]</span> 66 tests compiled and passing</div>
-                  <div class="terminal-line"><span class="warn">[next]</span> publish package to marketplace</div>
+                  <strong>${escapeHtml(labels.terminal)}</strong>
+                  <div class="terminal-line"><span class="info">${locale === "zh" ? "目标" : "Outcome"}</span> ${locale === "zh" ? "新用户能在五分钟内开始第一个项目" : "A new user can start a first project in five minutes"}</div>
+                  <div class="terminal-line"><span class="ok">${locale === "zh" ? "边界" : "Boundary"}</span> ${locale === "zh" ? "只处理安装、登记与首次执行" : "Setup, registration, and first run only"}</div>
+                  <div class="terminal-line"><span class="warn">${locale === "zh" ? "验证" : "Check"}</span> ${locale === "zh" ? "在真实 VS Code 流程中完成一次运行" : "Complete one run in the real VS Code flow"}</div>
                 </div>
                 <div class="terminal-group phase-2">
-                  <strong>${escapeHtml(labels.terminal)} (Sell)</strong>
-                  <div class="terminal-line"><span class="info">[intent]</span> index pages and track search keywords</div>
-                  <div class="terminal-line"><span class="ok">[action]</span> generate sitemap.xml & format XSLT</div>
-                  <div class="terminal-line"><span class="ok">[evidence]</span> googlebot crawling verified (bypass GEO redirects)</div>
-                  <div class="terminal-line"><span class="warn">[next]</span> publish terms & privacy policies</div>
+                  <strong>${locale === "zh" ? "本地 Agent 执行" : "Local Agent run"}</strong>
+                  <div class="terminal-line"><span class="info">${locale === "zh" ? "上下文" : "Context"}</span> ${locale === "zh" ? "目标、完成标准、相关文件" : "Outcome, done criteria, relevant files"}</div>
+                  <div class="terminal-line"><span class="ok">${locale === "zh" ? "执行" : "Action"}</span> ${locale === "zh" ? "改动与输出在工作区可见" : "Changes and output remain visible"}</div>
+                  <div class="terminal-line"><span class="warn">${locale === "zh" ? "状态" : "State"}</span> ${locale === "zh" ? "等待验证，不提前标记完成" : "Awaiting verification before completion"}</div>
                 </div>
                 <div class="terminal-group phase-3">
-                  <strong>${escapeHtml(labels.terminal)} (Learn & Improve)</strong>
-                  <div class="terminal-line"><span class="info">[intent]</span> compound solo capabilities</div>
-                  <div class="terminal-line"><span class="ok">[action]</span> upgrade portfolio strategy cockpit</div>
-                  <div class="terminal-line"><span class="ok">[evidence]</span> user converted to Pro Early Access</div>
-                  <div class="terminal-line"><span class="ok">[closed]</span> roadmap step complete</div>
+                  <strong>${locale === "zh" ? "验证与续接" : "Evidence and handoff"}</strong>
+                  <div class="terminal-line"><span class="ok">${locale === "zh" ? "证据" : "Evidence"}</span> ${locale === "zh" ? "真实流程已运行，结果可复查" : "Real flow ran and the result is reviewable"}</div>
+                  <div class="terminal-line"><span class="ok">${locale === "zh" ? "结果" : "Result"}</span> ${locale === "zh" ? "当前环节闭环" : "Current step closed"}</div>
+                  <div class="terminal-line"><span class="info">${locale === "zh" ? "下一步" : "Next"}</span> ${locale === "zh" ? "从已验证状态继续" : "Continue from verified state"}</div>
                 </div>
               </div>
               <div class="next-actions-container">
@@ -3399,6 +3456,7 @@ function renderHeroPreview(locale) {
               </div>
             </div>
           </div>
+          <figcaption class="sr-only">${escapeHtml(locale === "zh" ? "产品流程示意，不是真实项目数据截图。" : "Product workflow illustration; not a screenshot of real project data.")}</figcaption>
         </figure>`;
 }
 function buildStructuredData(t, origin, pagePath) {
@@ -3433,8 +3491,25 @@ function buildStructuredData(t, origin, pagePath) {
       }
     }))
   };
+  const organization = {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: "SoloMap",
+    url: origin,
+    logo: absoluteUrl("/logo.svg", origin),
+    sameAs: [GITHUB_URL, MARKETPLACE_URL, OPEN_VSX_URL]
+  };
+  const website = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "SoloMap",
+    url: origin,
+    inLanguage: ["en", "zh-Hans"]
+  };
   return `<script type="application/ld+json">${JSON.stringify(software)}</script>
-  <script type="application/ld+json">${JSON.stringify(faq)}</script>`;
+  <script type="application/ld+json">${JSON.stringify(faq)}</script>
+  <script type="application/ld+json">${JSON.stringify(organization)}</script>
+  <script type="application/ld+json">${JSON.stringify(website)}</script>`;
 }
 
 function buildProStructuredData(copy, origin, pagePath) {
@@ -3506,7 +3581,7 @@ function buildHeader(t, locale, currentPath) {
     : (currentPath === t.homePath ? "#pro" : `${t.homePath}#pro`);
   const installHref = currentPath === t.homePath ? "#install" : `${t.homePath}#install`;
   const brandName = (locale === "zh" || t.lang === "zh-Hans") ? "独道 SoloMap" : "SoloMap";
-  return `<header class="topbar">
+  return `<a class="skip-link" href="#main-content">${locale === "zh" ? "跳到主要内容" : "Skip to main content"}</a><header class="topbar">
     <nav class="shell nav" aria-label="Primary">
       <a class="brand" href="${t.homePath}" aria-label="SoloMap home">
         <img src="${LOGO_URL}" width="34" height="34" alt="">
@@ -3516,9 +3591,10 @@ function buildHeader(t, locale, currentPath) {
         <a href="${productHref}">${escapeHtml(t.nav.product)}</a>
         <a href="${proHref}">${escapeHtml(t.nav.pro)}</a>
         <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
-        <a href="${GITHUB_URL}">${escapeHtml(t.nav.github)}</a>
+        <a href="/go/github">${escapeHtml(t.nav.github)}</a>
+        <a class="workbench-link" href="${locale === "zh" ? "/zh/workbench" : "/workbench"}">${locale === "zh" ? "工作台" : "Workbench"}</a>
         <a class="language-link" href="${alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
-        <a class="install-link" href="${locale === "zh" ? "/zh/workbench" : "/workbench"}">${locale === "zh" ? "工作台" : "Workbench"}</a>
+        <a class="install-link" href="/go/marketplace">${escapeHtml(t.nav.install)}</a>
       </div>
     </nav>
   </header>`;
@@ -3540,7 +3616,7 @@ function buildFooter(t) {
           <div class="footer-brand-desc">${escapeHtml(desc)}</div>
         </div>
         <div class="footer-col">
-          <h4>${isZh ? "产品" : "Product"}</h4>
+          <h2>${isZh ? "产品" : "Product"}</h2>
           <ul>
             <li><a href="${t.homePath}#product">${escapeHtml(t.nav.product)}</a></li>
             <li><a href="${t.pathPrefix}/pro">${escapeHtml(t.nav.pro)}</a></li>
@@ -3549,16 +3625,16 @@ function buildFooter(t) {
           </ul>
         </div>
         <div class="footer-col">
-          <h4>${isZh ? "资源" : "Resources"}</h4>
+          <h2>${isZh ? "资源" : "Resources"}</h2>
           <ul>
-            <li><a href="${GITHUB_URL}">GitHub</a></li>
-            <li><a href="${MARKETPLACE_URL}">VS Code Marketplace</a></li>
-            <li><a href="${OPEN_VSX_URL}">Open VSX</a></li>
-            <li><a href="${FEEDBACK_URL}">${escapeHtml(t.footer.feedback)}</a></li>
+            <li><a href="/go/github">GitHub</a></li>
+            <li><a href="/go/marketplace">VS Code Marketplace</a></li>
+            <li><a href="/go/open-vsx">Open VSX</a></li>
+            <li><a href="/go/feedback">${escapeHtml(t.footer.feedback)}</a></li>
           </ul>
         </div>
         <div class="footer-col">
-          <h4>${isZh ? "网站地图与导航" : "Sitemap & Docs"}</h4>
+          <h2>${isZh ? "网站地图与导航" : "Sitemap & Docs"}</h2>
           <ul>
             <li><a href="${t.pathPrefix}/sitemap">${isZh ? "网站地图" : "Sitemap"}</a></li>
             <li><a href="${t.docsPath}/solomap-method">${isZh ? "SoloMap 方法" : "SoloMap Method"}</a></li>
@@ -3604,7 +3680,7 @@ function buildHtmlSitemapPage(locale, origin) {
 </head>
 <body>
   ${buildHeader(t, locale, `${t.pathPrefix}/sitemap`)}
-  <main class="privacy-page">
+  <main id="main-content" class="privacy-page">
     <div class="privacy-nav">
       <a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a>
     </div>
@@ -3742,7 +3818,7 @@ function buildPrivacyPolicyPage(locale, origin) {
 </head>
 <body>
   ${buildHeader(t, locale, `${t.pathPrefix}/privacy-policy`)}
-  <main class="privacy-page">
+  <main id="main-content" class="privacy-page">
     <div class="privacy-nav">
       <a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a>
     </div>
@@ -3836,7 +3912,7 @@ function buildTermsOfServicePage(locale, origin) {
 </head>
 <body>
   ${buildHeader(t, locale, `${t.pathPrefix}/terms-of-service`)}
-  <main class="privacy-page">
+  <main id="main-content" class="privacy-page">
     <div class="privacy-nav">
       <a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a>
     </div>
@@ -4012,7 +4088,7 @@ function buildPage(locale, origin, stats) {
 <body>
   ${buildHeader(t, locale, t.homePath)}
 
-  <main>
+  <main id="main-content">
     <section class="hero">
       <div class="shell hero-grid">
         <div>
@@ -4021,9 +4097,9 @@ function buildPage(locale, origin, stats) {
           <p class="hero-copy">${escapeHtml(t.hero.copy)}</p>
           <p class="cn-line">${escapeHtml(t.hero.support)}</p>
           <div class="cta-row">
-            <a class="button primary" href="${MARKETPLACE_URL}">${escapeHtml(t.hero.primaryCta)}</a>
-            <a class="button secondary" href="${OPEN_VSX_URL}">${escapeHtml(t.hero.secondaryCta)}</a>
-            <a class="button ghost" href="${GITHUB_URL}">${escapeHtml(t.hero.githubCta)}</a>
+            <a class="button primary" href="/go/marketplace">${escapeHtml(t.hero.primaryCta)}</a>
+            <a class="button secondary" href="/go/open-vsx">${escapeHtml(t.hero.secondaryCta)}</a>
+            <a class="button ghost" href="/go/github">${escapeHtml(t.hero.githubCta)}</a>
           </div>
           <div class="proof" aria-label="${escapeHtml(t.hero.proofLabel)}">
             ${renderListItems(t.hero.proof, "span")}
@@ -4111,6 +4187,18 @@ function buildPage(locale, origin, stats) {
       </div>
     </section>
 
+    <section class="section" aria-labelledby="homepage-guides">
+      <div class="shell">
+        <div class="section-head">
+          <h2 id="homepage-guides">${locale === "zh" ? "从你现在遇到的问题开始" : "Start with the problem you have now"}</h2>
+          <p>${locale === "zh" ? "快速上手、规划 AI 编码项目，或恢复一个已经中断的项目。" : "Set up SoloMap, build an AI coding roadmap, or resume a project after a break."}</p>
+        </div>
+        <div class="docs-grid">
+          ${renderDocCards(t, ["getting-started", "ai-coding-project-roadmap", "resume-ai-coding-projects"].map((slug) => [slug, docsContent[locale].pages[slug]]), locale)}
+        </div>
+      </div>
+    </section>
+
     <section class="section">
       <div class="shell">
         <div class="section-head" style="display:block;margin-bottom:22px">
@@ -4138,15 +4226,15 @@ function buildPage(locale, origin, stats) {
               ? `${t.install.openVsx} (${currentStats.openvsx.toLocaleString()} 次下载)`
               : `${t.install.openVsx} (${currentStats.openvsx.toLocaleString()} downloads)`;
             return `
-              <a class="button primary" href="${MARKETPLACE_URL}">${escapeHtml(vscodeText)}</a>
-              <a class="button secondary" href="${OPEN_VSX_URL}">${escapeHtml(openVsxText)}</a>
+              <a class="button primary" href="/go/marketplace">${escapeHtml(vscodeText)}</a>
+              <a class="button secondary" href="/go/open-vsx">${escapeHtml(openVsxText)}</a>
             `;
           })()}
           <button class="button soon" type="button" disabled>${escapeHtml(t.install.ios)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
           <button class="button soon" type="button" disabled>${escapeHtml(t.install.android)} <span class="soon-tag">${escapeHtml(t.install.comingSoon)}</span></button>
           <a class="button secondary" href="${locale === 'zh' ? '/zh/workbench' : '/workbench'}">${escapeHtml(t.install.webWorkspace)}</a>
-          <a class="button ghost" href="${GITHUB_URL}">${escapeHtml(t.install.github)}</a>
-          <a class="button ghost" href="${FEEDBACK_URL}">${escapeHtml(t.install.feedback)}</a>
+          <a class="button ghost" href="/go/github">${escapeHtml(t.install.github)}</a>
+          <a class="button ghost" href="/go/feedback">${escapeHtml(t.install.feedback)}</a>
         </div>
       </div>
     </section>
@@ -4702,22 +4790,36 @@ function buildDocIndexPage(locale, origin) {
     description: docs.index.description,
     ogDescription: docs.index.description
   };
+  const categoryLabels = new Map(docs.index.categories);
+  const categories = docs.index.categories.map(([key]) => {
+    const entries = Object.entries(docs.pages).filter(([, doc]) => doc.category === key);
+    if (!entries.length) return "";
+    return `<section class="docs-category" aria-labelledby="docs-${key.toLowerCase()}"><h2 id="docs-${key.toLowerCase()}">${escapeHtml(categoryLabels.get(key))}</h2><div class="docs-grid">${renderDocCards(t, entries, locale)}</div></section>`;
+  }).join("");
+  const collectionData = {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name: docs.index.title,
+    description: docs.index.description,
+    url: absoluteUrl(t.docsPath, origin),
+    hasPart: Object.entries(docs.pages).map(([slug, doc]) => ({ "@type": "TechArticle", name: doc.title, url: absoluteUrl(`${t.docsPath}/${slug}`, origin) }))
+  };
   return `<!doctype html>
 <html lang="${t.lang}">
 <head>
   ${buildHead({ ...t, meta }, origin, t.docsPath)}
+  <script type="application/ld+json">${JSON.stringify(collectionData)}</script>
   ${buildStyles()}
 </head>
 <body>
   ${buildHeader(t, locale, t.docsPath)}
-  <main class="docs-page">
+  <main id="main-content" class="docs-page">
     <div class="docs-hero">
       <h1>${escapeHtml(docs.index.heading)}</h1>
       <p>${escapeHtml(docs.index.lead)}</p>
+      <div class="cta-row"><a class="button primary" href="${t.docsPath}/getting-started">${locale === "zh" ? "从快速上手开始" : "Start with the quick start"}</a><a class="button ghost" href="/go/marketplace">${locale === "zh" ? "安装 SoloMap" : "Install SoloMap"}</a></div>
     </div>
-    <div class="docs-grid">
-      ${renderDocCards(t, docs, locale)}
-    </div>
+    ${categories}
   </main>
   ${buildFooter(t)}
 </body>
@@ -4735,15 +4837,24 @@ function buildDocPage(locale, slug, origin) {
   };
   const articleStructuredData = {
     "@context": "https://schema.org",
-    "@type": "Article",
+    "@type": "TechArticle",
     headline: doc.title,
     description: doc.description,
     url: absoluteUrl(pagePath, origin),
+    datePublished: doc.updatedAt,
+    dateModified: doc.updatedAt,
+    inLanguage: t.lang,
+    author: { "@type": "Organization", name: "SoloMap", url: origin },
     publisher: {
       "@type": "Organization",
       name: "SoloMap",
-      url: origin
-    },
+      url: origin,
+      logo: { "@type": "ImageObject", url: absoluteUrl("/logo.svg", origin) }
+    }
+  };
+  const faqStructuredData = {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
     mainEntity: doc.faq.map(([question, answer]) => ({
       "@type": "Question",
       name: question,
@@ -4753,19 +4864,36 @@ function buildDocPage(locale, slug, origin) {
       }
     }))
   };
+  const breadcrumbStructuredData = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "SoloMap", item: origin },
+      { "@type": "ListItem", position: 2, name: locale === "zh" ? "文档" : "Docs", item: absoluteUrl(t.docsPath, origin) },
+      { "@type": "ListItem", position: 3, name: doc.title, item: absoluteUrl(pagePath, origin) }
+    ]
+  };
+  const relatedLinks = (doc.related || []).map((relatedSlug) => {
+    const relatedDoc = docsContent[locale].pages[relatedSlug];
+    return relatedDoc ? `<a href="${t.docsPath}/${relatedSlug}">${escapeHtml(relatedDoc.title)}</a>` : "";
+  }).join("");
   return `<!doctype html>
 <html lang="${t.lang}">
 <head>
   ${buildHead({ ...t, meta }, origin, pagePath)}
   <script type="application/ld+json">${JSON.stringify(articleStructuredData)}</script>
+  <script type="application/ld+json">${JSON.stringify(faqStructuredData)}</script>
+  <script type="application/ld+json">${JSON.stringify(breadcrumbStructuredData)}</script>
   ${buildStyles()}
 </head>
 <body>
   ${buildHeader(t, locale, pagePath)}
-  <main class="docs-page">
+  <main id="main-content" class="docs-page">
+    <nav class="docs-breadcrumbs" aria-label="${locale === "zh" ? "面包屑" : "Breadcrumb"}"><a href="${t.homePath}">SoloMap</a> / <a href="${t.docsPath}">${locale === "zh" ? "文档" : "Docs"}</a> / <span aria-current="page">${escapeHtml(doc.title)}</span></nav>
     <div class="docs-hero">
       <h1>${escapeHtml(doc.heading)}</h1>
       <p>${escapeHtml(doc.lead)}</p>
+      <div class="docs-meta">${locale === "zh" ? "更新于" : "Updated"} ${escapeHtml(doc.updatedAt)} · ${locale === "zh" ? "由 SoloMap 团队维护" : "Maintained by the SoloMap team"}</div>
     </div>
     <div class="docs-body">
       <div class="docs-sections">
@@ -4775,6 +4903,8 @@ function buildDocPage(locale, slug, origin) {
         ${renderDocFaq(doc.faq)}
       </aside>
     </div>
+    <section class="docs-related"><h2>${locale === "zh" ? "继续阅读" : "Continue reading"}</h2><div class="docs-related-links">${relatedLinks}</div></section>
+    <section class="docs-related"><h2>${locale === "zh" ? "准备开始？" : "Ready to start?"}</h2><div class="cta-row"><a class="button primary" href="/go/marketplace">${locale === "zh" ? "安装 SoloMap" : "Install SoloMap"}</a><a class="button ghost" href="/go/feedback">${locale === "zh" ? "反馈问题" : "Send feedback"}</a></div></section>
   </main>
   ${buildFooter(t)}
 </body>
@@ -4834,7 +4964,7 @@ async function buildLegalDocumentPage(route, locale, origin, env) {
 </head>
 <body>
   ${buildHeader(t, locale, legalPath(route.slug, locale))}
-  <main class="privacy-page">
+  <main id="main-content" class="privacy-page">
     <div class="privacy-nav"><a href="${t.homePath}">← ${escapeHtml(t.privacy.back)}</a></div>
     <article class="privacy-article">
       <h1>${escapeHtml(title)}</h1>
@@ -4860,6 +4990,13 @@ function buildLegalUnavailablePage(locale, origin) {
 </html>`;
 }
 
+function buildNotFoundPage(locale, origin, requestedPath) {
+  const t = content[locale];
+  const title = locale === "zh" ? "页面不存在 | SoloMap" : "Page not found | SoloMap";
+  const description = locale === "zh" ? "这个地址没有对应页面。你可以返回首页或查看文档。" : "There is no page at this address. Return home or browse the SoloMap docs.";
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { title, description, ogDescription: description, noindex: true } }, origin, requestedPath)}${buildStyles()}</head><body>${buildHeader(t, locale, requestedPath)}<main id="main-content" class="privacy-page"><p class="eyebrow">404</p><h1>${locale === "zh" ? "这里没有你要找的页面" : "This page does not exist"}</h1><p>${escapeHtml(description)}</p><div class="cta-row"><a class="button primary" href="${t.homePath}">${locale === "zh" ? "返回首页" : "Return home"}</a><a class="button ghost" href="${t.docsPath}">${locale === "zh" ? "查看文档" : "Browse docs"}</a></div></main>${buildFooter(t)}</body></html>`;
+}
+
 function resolveRoute(pathname) {
   const legalRoute = findLegalRoute(pathname);
   if (legalRoute) {
@@ -4883,11 +5020,11 @@ function resolveRoute(pathname) {
   if (pathname === "/zh/docs" || pathname === "/zh/docs/") {
     return { type: "docs-index", locale: "zh", status: 200 };
   }
-  const englishDocMatch = pathname.match(/^\/docs\/([^/]+)$/);
+  const englishDocMatch = pathname.match(/^\/docs\/(.+)$/);
   if (englishDocMatch && docsContent.en.pages[englishDocMatch[1]]) {
     return { type: "doc", locale: "en", slug: englishDocMatch[1], status: 200 };
   }
-  const chineseDocMatch = pathname.match(/^\/zh\/docs\/([^/]+)$/);
+  const chineseDocMatch = pathname.match(/^\/zh\/docs\/(.+)$/);
   if (chineseDocMatch && docsContent.zh.pages[chineseDocMatch[1]]) {
     return { type: "doc", locale: "zh", slug: chineseDocMatch[1], status: 200 };
   }
@@ -4909,7 +5046,7 @@ function resolveRoute(pathname) {
   if (pathname === "/zh/terms-of-service" || pathname === "/zh/terms-of-service/") {
     return { type: "terms-of-service", locale: "zh", status: 200 };
   }
-  return { type: "home", locale: pathname.startsWith("/zh") ? "zh" : "en", status: 404 };
+  return { type: "not-found", locale: pathname.startsWith("/zh") ? "zh" : "en", status: 404, pathname };
 }
 
 function buildSitemap(origin) {
@@ -4940,8 +5077,6 @@ function buildSitemap(origin) {
     <xhtml:link rel="alternate" hreflang="en" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
     <xhtml:link rel="alternate" hreflang="zh-Hans" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
     <xhtml:link rel="alternate" hreflang="zh-CN" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
-    <xhtml:link rel="alternate" hreflang="zh-TW" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
-    <xhtml:link rel="alternate" hreflang="zh-HK" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
     <xhtml:link rel="alternate" hreflang="x-default" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
   </url>`;
   const urls = pairs.flatMap((pair) => [
@@ -5116,11 +5251,60 @@ SoloMap is a local-first roadmap and strategy cockpit for AI-built projects in V
 - SoloMap method: ${origin}/docs/solomap-method
 - Portfolio method: ${origin}/docs/portfolio-method
 - Micro execution loop: ${origin}/docs/micro-execution-loop
+- Quick start: ${origin}/docs/getting-started
+- AI coding roadmap guide: ${origin}/docs/ai-coding-project-roadmap
+- Resume an AI coding project: ${origin}/docs/resume-ai-coding-projects
+- Local-first project management: ${origin}/docs/local-first-ai-project-management
+- Codex integration: ${origin}/docs/agents/codex
+- Claude Code integration: ${origin}/docs/agents/claude-code
+- Cursor Agent integration: ${origin}/docs/agents/cursor
+- SoloMap vs task managers: ${origin}/docs/compare/solomap-vs-task-managers
 - Local-first note: ${origin}/privacy-local-first
 - VS Code Marketplace: ${MARKETPLACE_URL}
 - Open VSX: ${OPEN_VSX_URL}
 - GitHub: ${GITHUB_URL}
 `;
+}
+
+const outboundDestinations = {
+  marketplace: MARKETPLACE_URL,
+  "open-vsx": OPEN_VSX_URL,
+  github: GITHUB_URL,
+  feedback: FEEDBACK_URL
+};
+
+function handleOutboundRedirect(request, env, eventName) {
+  const destination = outboundDestinations[eventName];
+  if (!destination) return null;
+  try {
+    env.SITE_ANALYTICS?.writeDataPoint({
+      blobs: ["outbound_click", eventName],
+      doubles: [1],
+      indexes: [eventName]
+    });
+  } catch (error) {
+    console.warn("Unable to record anonymous site event", error);
+  }
+  return new Response(null, {
+    status: 302,
+    headers: {
+      ...securityHeaders,
+      location: destination,
+      "cache-control": "no-store"
+    }
+  });
+}
+
+function recordAnonymousPageView(env, pathname, routeType) {
+  try {
+    env.SITE_ANALYTICS?.writeDataPoint({
+      blobs: ["page_view", pathname, routeType],
+      doubles: [1],
+      indexes: [pathname.slice(0, 96)]
+    });
+  } catch (error) {
+    console.warn("Unable to record anonymous page view", error);
+  }
 }
 
 // 检查并处理多语言重定向及 Cookie 同步
@@ -5167,20 +5351,18 @@ function handleLocaleRedirect(request, env, origin) {
   let targetLang = "";
   if (langParam === "zh" || langParam === "en") {
     targetLang = langParam;
+  } else if (!["/", "/zh", "/zh/"].includes(pathname)) {
+    // A shared or bookmarked localized subpage is an explicit user choice.
+    targetLang = pathname.startsWith("/zh") ? "zh" : "en";
   } else if (langPref === "zh" || langPref === "en") {
     targetLang = langPref;
   } else {
-    // 仅在主页根路径上，若无明确偏好 cookie，才根据 GEO/Accept-Language 判定是否重定向到中文版
-    if (pathname === "/" || pathname === "/zh" || pathname === "/zh/") {
-      const country = request.cf?.country;
-      const acceptLang = request.headers.get("accept-language") || "";
-      const isChineseRegion = ["CN", "TW", "HK", "MO"].includes(country);
-      const prefersChinese = acceptLang.toLowerCase().includes("zh");
-      targetLang = (isChineseRegion || prefersChinese) ? "zh" : "en";
-    } else {
-      // 其他具体子路径在无偏好 cookie 时，直接遵循该 URL 路径自身的 locale，不发生 302 跳转
-      targetLang = pathname.startsWith("/zh") ? "zh" : "en";
-    }
+    // Only the homepage uses regional or browser language discovery.
+    const country = request.cf?.country;
+    const acceptLang = request.headers.get("accept-language") || "";
+    const isChineseRegion = ["CN", "TW", "HK", "MO"].includes(country);
+    const prefersChinese = acceptLang.toLowerCase().includes("zh");
+    targetLang = (isChineseRegion || prefersChinese) ? "zh" : "en";
   }
 
   const isCurrentZh = pathname.startsWith("/zh");
@@ -5236,6 +5418,26 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const origin = env.SITE_ORIGIN || SITE_ORIGIN;
+
+    if (url.hostname === "www.solomap.app") {
+      url.hostname = "solomap.app";
+      return Response.redirect(url.toString(), 301);
+    }
+
+    if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
+      url.pathname = url.pathname.replace(/\/+$/, "");
+      return Response.redirect(url.toString(), 301);
+    }
+
+    if (["/logo.svg", "/solomap-social-card.png", "/solomap-social-card.svg"].includes(url.pathname)) {
+      return env.ASSETS ? env.ASSETS.fetch(request) : textResponse("Asset not found", "text/plain; charset=utf-8", 404);
+    }
+
+    const outboundMatch = request.method === "GET" ? url.pathname.match(/^\/go\/([a-z-]+)$/) : null;
+    if (outboundMatch) {
+      const response = handleOutboundRedirect(request, env, outboundMatch[1]);
+      if (response) return response;
+    }
 
     const redirectRes = handleLocaleRedirect(request, env, origin);
     if (redirectRes instanceof Response) {
@@ -5426,6 +5628,9 @@ Sitemap: ${origin}/sitemap.xml
     }
 
     const route = resolveRoute(url.pathname);
+    if (request.method === "GET" && route.status === 200) {
+      recordAnonymousPageView(env, url.pathname, route.type);
+    }
 
     if (route.type === "sitemap-html") {
       return htmlResponse(buildHtmlSitemapPage(route.locale, origin), route.status, extraHeaders);
@@ -5452,6 +5657,9 @@ Sitemap: ${origin}/sitemap.xml
     }
     if (route.type === "doc") {
       return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status, extraHeaders);
+    }
+    if (route.type === "not-found") {
+      return htmlResponse(buildNotFoundPage(route.locale, origin, route.pathname), 404, extraHeaders);
     }
 
     const stats = await getStats(ctx);

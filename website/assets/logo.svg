@@ -1,0 +1,14 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>SoloMap logo mark</title>
+  <defs>
+    <linearGradient id="body" x1="255" y1="760" x2="735" y2="190" gradientUnits="userSpaceOnUse"><stop stop-color="#6C3BFF"/><stop offset=".42" stop-color="#4ADAF0"/><stop offset=".72" stop-color="#6638F2"/><stop offset="1" stop-color="#9B5CFF"/></linearGradient>
+    <linearGradient id="route" x1="304" y1="705" x2="676" y2="260" gradientUnits="userSpaceOnUse"><stop stop-color="#9B6CFF"/><stop offset=".42" stop-color="#48F2E8"/><stop offset="1" stop-color="#65F6F2"/></linearGradient>
+    <radialGradient id="node"><stop stop-color="#74FFF1"/><stop offset=".52" stop-color="#52DFF4"/><stop offset="1" stop-color="#8B55FF"/></radialGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="180" fill="#050507"/>
+  <path d="M669 257C595 188 437 199 371 284C314 358 348 446 458 487L558 524C659 562 685 653 622 733C548 826 380 820 304 706" stroke="url(#body)" stroke-width="132" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M626 245C526 226 413 264 389 356C367 443 440 494 529 531C608 564 637 638 590 708C541 781 401 785 324 696" stroke="#19151C" stroke-width="64" stroke-linecap="round"/>
+  <path d="M626 245C526 226 413 264 389 356C367 443 440 494 529 531C608 564 637 638 590 708C541 781 401 785 324 696" stroke="url(#route)" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="686" cy="285" r="72" fill="url(#node)"/><circle cx="686" cy="285" r="35" fill="#050507"/>
+  <circle cx="312" cy="690" r="72" fill="url(#node)"/><circle cx="312" cy="690" r="35" fill="#050507"/>
+</svg>
