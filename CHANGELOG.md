@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.411 - 2026-08-02
+
+### Fixed
+- restore runtime icons in extension package (501bff2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.410 - 2026-08-02
 
 ### Added
