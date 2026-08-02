@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.410 - 2026-08-02
+
+### Added
+- close SEO audit and expand docs (88c79ab)
+
+### Fixed
+- shrink and audit extension package (fa5ee3e)
+- align docs with site shell (29bfa84)
+
+### Tests
+- update sitemap freshness expectation (b312580)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.409 - 2026-08-01
 
 ### Added
