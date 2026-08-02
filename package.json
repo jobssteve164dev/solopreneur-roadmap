@@ -190,6 +190,8 @@
     "solomap:experience": "node resources/tools/solomap-experience.cjs",
     "validate:scheduled-tasks": "node resources/tools/validate-scheduled-tasks.cjs",
     "openvsx:rank": "node scripts/open-vsx-rank.cjs",
+    "package:vsix": "node scripts/package-vsix.cjs",
+    "verify:vsix": "node scripts/verify-vsix-package.cjs",
     "install:local-dev": "node scripts/install-local-dev.js",
     "build-webview": "echo 'No webview build configured yet'"
   },
@@ -199,14 +201,14 @@
     "dependency-cruiser": "^16.10.4",
     "istanbul-lib-coverage": "3.2.2",
     "papaparse": "^5.4.1",
-    "sql.js": "^1.8.0",
-    "typescript": "^4.9.5"
+    "sql.js": "^1.8.0"
   },
   "devDependencies": {
     "@types/istanbul-lib-coverage": "2.0.6",
     "@types/node": "^16.18.34",
     "@types/papaparse": "^5.3.7",
     "@types/sql.js": "^1.4.11",
-    "@types/vscode": "^1.75.0"
+    "@types/vscode": "^1.75.0",
+    "typescript": "^4.9.5"
   }
 }

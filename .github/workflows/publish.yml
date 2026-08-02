@@ -145,7 +145,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           VSIX_PATH="solopreneur-roadmap-${VERSION}.vsix"
-          npx @vscode/vsce package --out "$VSIX_PATH"
+          node scripts/package-vsix.cjs --out "$VSIX_PATH"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "VSIX_PATH=$VSIX_PATH" >> $GITHUB_ENV
           echo "VSIX package: $VSIX_PATH"
