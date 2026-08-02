@@ -9,6 +9,8 @@ const REQUIRED_FILES = [
   'extension/out/extension.js',
   'extension/resources/activitybar.svg',
   'extension/resources/logo.png',
+  'extension/resources/logo.svg',
+  'extension/resources/logo_with_text.svg',
   'extension/resources/tools/solomap-experience.cjs',
   'extension/resources/tools/solomap-memory.cjs',
   'extension/node_modules/@vscode/codicons/dist/codicon.css',
@@ -125,7 +127,7 @@ try {
     .filter((name) => FORBIDDEN_FILES.has(name)
       || FORBIDDEN_PREFIXES.some((prefix) => name.startsWith(prefix))
       || /^extension\/out\/.*\.js\.map$/.test(name)
-      || /^extension\/resources\/(?:logo_with_text\.|solomap_)/.test(name)
+      || /^extension\/resources\/(?:logo_with_text\.png|solomap_)/.test(name)
       || (name.startsWith('extension/node_modules/sql.js/dist/') && !ALLOWED_SQL_DIST_FILES.has(name)));
 
   if (missingFiles.length > 0) fail(`missing runtime files:\n- ${missingFiles.join('\n- ')}`);

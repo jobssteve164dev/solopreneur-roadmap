@@ -654,6 +654,16 @@ test('webviews preserve extension URI schemes when loading bundled icons', () =>
   }
 });
 
+test('VSIX packaging preserves every runtime icon referenced by webviews and terminals', () => {
+  const vscodeIgnore = fs.readFileSync(path.join(projectRoot, '.vscodeignore'), 'utf8');
+  const packageAudit = fs.readFileSync(path.join(projectRoot, 'scripts', 'verify-vsix-package.cjs'), 'utf8');
+
+  assert.doesNotMatch(vscodeIgnore, /^resources\/logo\.svg$/m);
+  assert.doesNotMatch(vscodeIgnore, /^resources\/logo_with_text\.\*$/m);
+  assert.match(packageAudit, /'extension\/resources\/logo\.svg'/);
+  assert.match(packageAudit, /'extension\/resources\/logo_with_text\.svg'/);
+});
+
 test('ability settings copy is localized in English webviews', () => {
   const sources = [
     fs.readFileSync(path.join(projectRoot, 'src', 'roadmapWebview.ts'), 'utf8'),
