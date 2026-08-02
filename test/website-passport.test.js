@@ -150,7 +150,7 @@ test('sitemap exposes indexable canonical URLs with hreflang and freshness signa
   assert.match(xml, /<urlset xmlns="http:\/\/www\.sitemaps\.org\/schemas\/sitemap\/0\.9"/);
   assert.match(xml, /<loc>https:\/\/solomap\.app\/pro<\/loc>/);
   assert.match(xml, /<loc>https:\/\/solomap\.app\/zh\/pro<\/loc>/);
-  assert.match(xml, /<lastmod>2026-06-06<\/lastmod>/);
+  assert.match(xml, /<lastmod>2026-08-02<\/lastmod>/);
   assert.match(xml, /<changefreq>weekly<\/changefreq>/);
   assert.match(xml, /<priority>0\.9<\/priority>/);
   assert.match(xml, /hreflang="x-default" href="https:\/\/solomap\.app\/pro"/);
