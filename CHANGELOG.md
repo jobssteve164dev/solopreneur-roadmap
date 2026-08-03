@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.413 - 2026-08-03
+
+### Fixed
+- wait for terminal readiness before commands (bb38386)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.412 - 2026-08-02
 
 ### Fixed
