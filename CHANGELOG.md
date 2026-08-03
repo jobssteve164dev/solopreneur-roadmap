@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.414 - 2026-08-03
+
+### Changed
+- fix sidebar conversation terminal status refresh (0bf5b4c)
+
+### Docs
+- lock terminal readiness regression constraints (2e40df8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.413 - 2026-08-03
 
 ### Fixed
