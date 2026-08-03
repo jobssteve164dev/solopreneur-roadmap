@@ -2473,7 +2473,7 @@ test('full roadmap composers preserve active input while running durations updat
   assert.doesNotMatch(script, /setInterval\(\(\) => \{[\s\S]*?soloRunning[\s\S]*?renderSoloPanel/);
 });
 
-test('sidebar keeps solo composer active when nodes load after the user starts typing', () => {
+test('sidebar keeps solo composer active and renders pasted attachments while the input stays focused', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     ''
@@ -2523,6 +2523,7 @@ test('sidebar keeps solo composer active when nodes load after the user starts t
         }
       };
       rememberProjectConversationInput(input);
+      const rememberedDraftBeforePaste = projectSoloDrafts[projectPath];
       currentNodes = [{ id: '1', title: '下一步', status: 'Pending', dependencies: '', agentCli: 'codex' }];
       const afterNodes = renderProjectConversationComposer(project, currentNodes);
       projectConversationModes[projectPath] = 'continue';
@@ -2532,20 +2533,48 @@ test('sidebar keeps solo composer active when nodes load after the user starts t
       projectConversationModes[projectPath] = 'flow';
       captureProjectConversationInputState();
       const flowMode = renderProjectConversationComposer(project, currentNodes);
+      projectConversationModes[projectPath] = 'solo';
+      const focusedInput = document.createElement('focused-project-input');
+      focusedInput.value = '粘贴前仍在输入';
+      focusedInput.setAttribute('data-conversation-mode', 'solo');
+      focusedInput.setAttribute('data-project-path', projectPath);
+      focusedInput.setAttribute('data-conversation-target-id', 'solo:' + projectPath);
+      focusedInput.closest = selector => selector === '[data-project-continue-composer]' ? {} : null;
+      globalThis.FileReader = class {
+        readAsDataURL() {
+          this.result = 'data:image/png;base64,aGVsbG8=';
+          this.onload();
+        }
+      };
+      document.activeElement = focusedInput;
+      portfolioList.innerHTML = 'before-paste';
+      portfolioList.querySelector = selector => selector === '[data-project-conversation-input]' ? focusedInput : null;
+      bindPastedImageAttachments(focusedInput, 'solo:' + projectPath, () => projectPath, 'solo:' + projectPath);
+      focusedInput.listeners.paste({
+        clipboardData: {
+          items: [{
+            kind: 'file',
+            type: 'image/png',
+            getAsFile: () => ({ name: 'screenshot.png', type: 'image/png' })
+          }]
+        },
+        preventDefault() {}
+      });
       return {
         beforeWasSolo: /data-conversation-mode="solo"/.test(beforeNodes),
         rememberedMode: 'solo',
-        rememberedDraft: projectSoloDrafts[projectPath],
+        rememberedDraft: rememberedDraftBeforePaste,
         afterStillSolo: /data-conversation-mode="solo"/.test(afterNodes),
         afterSoloButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="solo"/.test(afterNodes),
         afterContinueInput: /data-conversation-mode="continue"/.test(afterNodes),
         continueButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="continue"[^>]*aria-pressed="true"/.test(continueMode),
         flowButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="flow"[^>]*aria-pressed="true"/.test(flowMode),
-        flowButtonEnabled: !/data-project-conversation-mode="flow"[^>]*disabled/.test(flowMode)
+        flowButtonEnabled: !/data-project-conversation-mode="flow"[^>]*disabled/.test(flowMode),
+        pastedImagePendingRendered: /正在添加截图/.test(portfolioList.innerHTML)
       };
     })();
   `;
-  const { context } = runScriptWithMinimalDom(script, [
+  const { context, elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, [
     'tasks-list',
     'progress-bar',
     'progress-text',
@@ -2603,6 +2632,20 @@ test('sidebar keeps solo composer active when nodes load after the user starts t
   assert.equal(result.continueButtonActive, true);
   assert.equal(result.flowButtonActive, true);
   assert.equal(result.flowButtonEnabled, true);
+  assert.equal(result.pastedImagePendingRendered, true);
+
+  await new Promise(resolve => setImmediate(resolve));
+  const saveMessage = postedMessages.find(message => message.command === 'attachment.save');
+  assert.ok(saveMessage);
+
+  dispatchMessage({
+    command: 'pastedAttachmentsSaved',
+    targetId: 'solo:/workspace/app',
+    requestId: saveMessage.requestId,
+    files: ['.solopreneur/attachments/solo-workspace-app/screenshot.png']
+  });
+  assert.match(elements['portfolio-list'].innerHTML, /screenshot\.png/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /正在添加截图/);
 });
 
 test('daily review prompt switches modes by engineering rhythm and signals', () => {

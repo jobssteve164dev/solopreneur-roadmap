@@ -5100,6 +5100,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderPortfolio(portfolio, selectedProjectPath);
     }
 
+    function renderPortfolioAfterAttachmentUpdate(portfolio, selectedProjectPath) {
+      pendingAsyncPortfolioRender = null;
+      renderPortfolio(portfolio, selectedProjectPath);
+    }
+
     function flushPendingAsyncPortfolioRender() {
       if (isConversationCardInteractionActive() || isProjectComposerInteractionActive() || !pendingAsyncPortfolioRender) return;
       const pending = pendingAsyncPortfolioRender;
@@ -7733,7 +7738,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
               projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
             }
-            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           }
           break;
 
@@ -7743,12 +7748,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           if (message.targetId && String(message.targetId).startsWith('solo:')) {
             projectSoloFiles[message.targetId] = mergeAttachmentFiles(projectSoloFiles[message.targetId] || [], message.files || []);
-            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           } else if (message.targetId) {
             const input = portfolioList.querySelector('[data-project-conversation-input]');
             projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
             projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
-            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           }
           break;
 
@@ -8067,7 +8072,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           } else {
             pendingPastedAttachments[targetId].delete(state.requestId);
           }
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
         }
       );
     }
