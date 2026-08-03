@@ -472,7 +472,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
       ? '修复安全风险'
       : baseSummary.delivery.failedWorkflowRuns > 0
         ? '修复发布检查'
-        : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : 'Initialize roadmap')),
+        : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : '生成初始路线图')),
     reusableSignals: options.includeReusableSignals ? countReusableSignals(project.path, options.globalDataPath || '') : 0,
     issuePressure: inferIssuePressure(baseSummary.issues),
     stageGap: stageSummary.gap,

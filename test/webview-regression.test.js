@@ -1327,6 +1327,20 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
   ));
   postedMessages.length = 0;
 
+  const newProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-new-project-card-'));
+  const [newProjectSummary] = require(path.join(projectRoot, 'out/projectPortfolio.js'))
+    .buildProjectPortfolioSummaries([{ name: '新项目', path: newProjectRoot }]);
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: '新项目', path: newProjectRoot }],
+      selectedProjectPath: newProjectRoot,
+      portfolio: [newProjectSummary]
+    }
+  });
+  assert.match(elements['portfolio-list'].innerHTML, /下一步: 生成初始路线图/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /Initialize roadmap/);
+
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {
@@ -3177,6 +3191,18 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }
   }, 'strategyPyramid'), false);
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: {} }, 'strategyPyramid'), false);
+});
+
+test('new project portfolio shows generating the initial roadmap as its next action', () => {
+  const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
+  const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-new-project-'));
+
+  const [summary] = projectPortfolio.buildProjectPortfolioSummaries([
+    { name: 'New Project', path: projectRootA }
+  ]);
+
+  assert.equal(summary.totalNodes, 0);
+  assert.equal(summary.globalNextAction, '生成初始路线图');
 });
 
 test('project investment analytics aggregate local run effort for portfolio consumers', () => {
