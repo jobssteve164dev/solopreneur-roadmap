@@ -2990,6 +2990,65 @@ test('sidebar conversation snapshots share one in-flight database read and only 
   );
 });
 
+test('terminal status refresh supersedes a stale running conversation snapshot', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const postedMessages = [];
+  const snapshotResolvers = [];
+  let snapshotLoads = 0;
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'app', path: '/workspace/app' }],
+        selectedProjectPath: '/workspace/app'
+      }),
+      getProjectConversationSnapshot: () => {
+        snapshotLoads += 1;
+        return new Promise((resolve) => snapshotResolvers.push(resolve));
+      }
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+
+  const staleLoad = provider.sendProjectConversationSnapshot('/workspace/app', true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const terminalRefresh = provider.refreshProjectConversationSnapshotAfterStatusChange('/workspace/app');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(snapshotLoads, 2);
+  snapshotResolvers[0]({
+    solo: [{ id: 7, nodeId: '__solo__', status: 'Running', summary: 'Still running' }],
+    project: [],
+    flow: []
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(postedMessages.length, 0);
+
+  snapshotResolvers[1]({
+    solo: [{ id: 7, nodeId: '__solo__', status: 'Completed', summary: 'Finished' }],
+    project: [],
+    flow: []
+  });
+  await Promise.all([staleLoad, terminalRefresh]);
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(postedMessages[0].command, 'sidebarProjectConversationSnapshotLoaded');
+  assert.equal(postedMessages[0].soloConversations[0].status, 'Completed');
+});
+
 test('forced project refresh paints the valid local conversation snapshot before fresh loading finishes', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -7581,6 +7640,66 @@ test('step conversations can start independently while dependencies or other run
   assert.ok(fs.existsSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '42', 'run-agent.sh')));
   assert.ok(fs.readFileSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '41', 'run-agent.sh'), 'utf8').includes('.solopreneur/agent-status/41.json'));
   assert.ok(fs.readFileSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '42', 'run-agent.sh'), 'utf8').includes('.solopreneur/agent-status/42.json'));
+});
+
+test('task sentinel refreshes the settled project conversation snapshot after persisting terminal status', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-sentinel-sidebar-refresh-'));
+  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '61');
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  fs.writeFileSync(outputFilePath, 'Solo task finished.\n', 'utf8');
+  fs.writeFileSync(changesFilePath, '', 'utf8');
+  fs.writeFileSync(touchedFilesPath, '', 'utf8');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    agentCli: 'codex',
+    command: 'codex exec',
+    executionLogId: 61,
+    userMessage: '完成任务',
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    startedAt: '2026-08-03T00:00:00.000Z'
+  }), 'utf8');
+  const events = [];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 61, nodeId: '__solo__', output: 'Agent conversation started.', status: 'Running' }],
+    getAgentExecutions: () => [],
+    updateAgentExecution: (_id, _agentCli, _command, _output, status) => {
+      events.push(['persist', status]);
+      return true;
+    },
+    logAgentExecution: () => 61
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange(projectPath) {
+      events.push(['refresh', projectPath]);
+    },
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  assert.deepEqual(events, [
+    ['persist', 'Completed'],
+    ['refresh', projectRoot]
+  ]);
 });
 
 test('finishing one parallel step conversation keeps the node running without rewriting that conversation status', async () => {

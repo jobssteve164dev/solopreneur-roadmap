@@ -8777,6 +8777,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       sendNodesToWebview();
       postNodeConversations(nodeId);
     }
+    if (workspaceRoot) {
+      await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
+    }
     refreshSidebarProjectCards();
 
     // Send Telegram Notification

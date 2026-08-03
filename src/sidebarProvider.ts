@@ -520,14 +520,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public async sendProjectConversationSnapshot(projectPath: string, force = false) {
+  public async sendProjectConversationSnapshot(projectPath: string, force = false, supersedeInFlight = false) {
     const requestId = ++this._conversationSnapshotRequest;
     let claimedSnapshotLoad: Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }> | null = null;
     this._latestConversationSnapshotRequest.set(projectPath, requestId);
     try {
       if (!this._view || !this._getProjectConversationSnapshot || !projectPath) return;
       const globalDataPath = this._getSettings().globalDataPath;
-      const cached = readCachedConversationSnapshot(globalDataPath, projectPath);
+      const cached = supersedeInFlight ? null : readCachedConversationSnapshot(globalDataPath, projectPath);
       if (cached) {
         if (this._latestConversationSnapshotRequest.get(projectPath) === requestId) {
           this.postProjectConversationSnapshot(projectPath, cached);
@@ -535,7 +535,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!force) return;
       }
       let snapshotLoad = this._conversationSnapshotLoads.get(projectPath);
-      if (!snapshotLoad || (force && Date.now() - snapshotLoad.startedAt > 2_000)) {
+      if (!snapshotLoad || supersedeInFlight || (force && Date.now() - snapshotLoad.startedAt > 2_000)) {
         snapshotLoad = {
           promise: this._getProjectConversationSnapshot(projectPath),
           startedAt: Date.now()
@@ -556,6 +556,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         this._conversationSnapshotLoads.delete(projectPath);
       }
     }
+  }
+
+  public async refreshProjectConversationSnapshotAfterStatusChange(projectPath: string): Promise<void> {
+    await this.sendProjectConversationSnapshot(projectPath, true, true);
   }
 
   private postProjectConversationSnapshot(projectPath: string, snapshot: { solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }): void {
