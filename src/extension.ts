@@ -393,7 +393,7 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
   if (typeof vscode.window.onDidCloseTerminal === 'function') {
     context.subscriptions.push(vscode.window.onDidCloseTerminal((terminal) => {
-      void handleAgentTerminalClosed(terminal.name);
+      void handleAgentTerminalClosed(terminal.name, terminal.exitStatus?.reason);
     }));
   }
 
@@ -5607,7 +5607,13 @@ function launchAgentConversationTerminal(input: {
   return terminal;
 }
 
-async function handleAgentTerminalClosed(terminalName: string): Promise<boolean> {
+async function handleAgentTerminalClosed(
+  terminalName: string,
+  exitReason?: vscode.TerminalExitReason
+): Promise<boolean> {
+  if (exitReason === vscode.TerminalExitReason.Shutdown) {
+    return false;
+  }
   const matched = [...agentTerminalNamesByConversationId.entries()]
     .find(([, name]) => name === terminalName);
   if (!matched) {
@@ -6436,7 +6442,6 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   }
 
   const terminal = findActiveAgentTerminal(conversationId);
-  terminal?.dispose();
   const isContinuationRun = isContinuationRunKind(String(runningStatus?.runKind || ''))
     || /Agent continuation started\.|Continuation mode:/i.test(String(conversation.output || ''));
   const failureReason = 'Stopped by user.';
@@ -6456,8 +6461,10 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
       ...(isContinuationRun ? {} : { failureCode: 'stopped_by_user', failureReason }),
       finishedAt
     }), 'utf8');
-    await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
     agentTerminalNamesByConversationId.delete(Number(conversationId));
+    agentTerminalProjectRootsByConversationId.delete(Number(conversationId));
+    terminal?.dispose();
+    await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
     return;
   }
 
@@ -6474,6 +6481,8 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     isContinuationRun ? 'Recorded' : 'Failed'
   );
   agentTerminalNamesByConversationId.delete(Number(conversationId));
+  agentTerminalProjectRootsByConversationId.delete(Number(conversationId));
+  terminal?.dispose();
   sendNodesToWebview();
   postNodeConversations(nodeId);
   if (!isContinuationRun) {

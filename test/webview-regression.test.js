@@ -273,6 +273,7 @@ function loadCompiledModule(relativePath, exportPatch) {
             }
           },
           ConfigurationTarget: { Global: 1 },
+          TerminalExitReason: { Unknown: 0, Shutdown: 1, Process: 2, User: 3, Extension: 4 },
           ViewColumn: { One: 1 },
           ThemeIcon: class ThemeIcon {},
           ThemeColor: class ThemeColor {}
@@ -818,7 +819,7 @@ test('attachment picker candidates are local project files and skip run artifact
   assert.ok(files.every((file) => !path.isAbsolute(file)));
 });
 
-test('sidebar webview runtime script parses and opens settings panel', () => {
+test('sidebar webview runtime script parses and opens settings panel', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     ''
@@ -1556,11 +1557,17 @@ test('sidebar webview runtime script parses and opens settings panel', () => {
     target: elements['project-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === '/workspace/second'),
     stopPropagation() {}
   });
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(
     postedMessages.filter((message) => message.command === 'conversation.getProjectSnapshot' && message.projectPath === '/workspace/second').length,
-    0
+    1
   );
   assert.equal(postedMessages.filter((message) => message.command === 'project.select' && message.projectPath === '/workspace/second').length, 1);
+  assert.ok(
+    postedMessages.findIndex((message) => message.command === 'project.select' && message.projectPath === '/workspace/second')
+      < postedMessages.findIndex((message) => message.command === 'conversation.getProjectSnapshot' && message.projectPath === '/workspace/second'),
+    'the host must start selecting the project before the direct snapshot convergence request'
+  );
   assert.equal(
     postedMessages.filter((message) => message.command === 'conversation.getHistory' || message.command === 'conversation.getProjectHistory').length,
     0
@@ -8899,7 +8906,8 @@ test('stopping an Agent run records the user decision on the active conversation
     'out/extension.js',
     [
       'module.exports.__stopAgentRun = stopAgentRun;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot, terminal) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); };'
     ].join('\n')
   );
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stop-run-'));
@@ -8917,6 +8925,7 @@ test('stopping an Agent run records the user decision on the active conversation
   }), 'utf8');
   let updatedStatus = '';
   let updatedOutput = '';
+  let terminalDisposed = false;
   extensionModule.__setRuntimeForTest({
     getNodes: () => [{ id: '3', title: '完善体验', status: 'Running' }],
     updateNode: () => {},
@@ -8928,12 +8937,61 @@ test('stopping an Agent run records the user decision on the active conversation
     },
     logAgentExecution: () => 11
   }, tempRoot);
+  extensionModule.__setAgentTerminalForTest(11, 'solomap stop test', tempRoot, {
+    name: 'solomap stop test',
+    dispose() { terminalDisposed = true; }
+  });
 
   await extensionModule.__stopAgentRun('3', 11);
 
+  assert.equal(terminalDisposed, true);
   assert.equal(updatedStatus, 'Failed');
   assert.match(updatedOutput, /Failure category: stopped_by_user/);
   assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Task stopped by user/);
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const stopBody = extensionSource.slice(
+    extensionSource.indexOf('async function stopAgentRun('),
+    extensionSource.indexOf('\nasync function handleRunAgent(', extensionSource.indexOf('async function stopAgentRun('))
+  );
+  assert.ok(
+    stopBody.indexOf('agentTerminalNamesByConversationId.delete') < stopBody.indexOf('terminal?.dispose()'),
+    'the close listener must lose ownership before the stop action disposes the terminal'
+  );
+});
+
+test('window reload keeps a running Agent conversation recoverable', async () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  assert.match(extensionSource, /handleAgentTerminalClosed\(terminal\.name, terminal\.exitStatus\?\.reason\)/);
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-window-reload-'));
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '51.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Running',
+    executionLogId: 51,
+    startedAt: '2026-08-03T00:00:00.000Z'
+  }), 'utf8');
+  let executionUpdated = false;
+  extensionModule.__setRuntimeForTest({
+    getAgentExecutions: () => [{ id: 51, nodeId: '__solo__', status: 'Running' }],
+    updateAgentExecution: () => { executionUpdated = true; return true; }
+  }, tempRoot);
+  extensionModule.__setAgentTerminalForTest(51, 'solomap reload test', tempRoot);
+
+  const handled = await extensionModule.__handleAgentTerminalClosed('solomap reload test', 1);
+
+  assert.equal(handled, false);
+  assert.equal(executionUpdated, false);
+  assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Running');
 });
 
 test('stopping a continuation records it without marking the task failed', async () => {
