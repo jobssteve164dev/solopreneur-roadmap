@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.415 - 2026-08-03
+
+### Changed
+- SoloMap pre-session auto-backup [2026-08-03T08:13:16.966Z] (1e6784e)
+
+### Fixed
+- restore initial roadmap next action (e004c85)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.414 - 2026-08-03
 
 ### Changed
