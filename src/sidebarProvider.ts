@@ -412,6 +412,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     options: { includeExternal: boolean; projectPaths?: string[] }
   ): void {
     const requestId = ++this._corePortfolioRequest;
+    const sourceProjectSignature = buildSidebarProjectSignature(projects);
     const requestedPaths = new Set((options.projectPaths || []).filter(Boolean));
     const needsCompletePortfolio = stalePortfolio.length < projects.length;
     const ordered = [
@@ -423,8 +424,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!this._view || requestId !== this._corePortfolioRequest) return;
       if (index >= ordered.length) {
         const portfolio = projects.map((project) => summaries.get(project.path)).filter(Boolean) as ProjectPortfolioSummary[];
+        const currentProjectSignature = buildSidebarProjectSignature(projects);
+        if (currentProjectSignature !== sourceProjectSignature) {
+          console.warn('SoloMap sidebar project sources changed during core snapshot collection; rebuilding the snapshot.');
+          this.scheduleCorePortfolio(projects, selectedProjectPath, globalDataPath, [], {
+            includeExternal: options.includeExternal,
+            projectPaths: []
+          });
+          return;
+        }
         if (portfolio.length === projects.length) {
-          writeSidebarPortfolioSnapshot(globalDataPath, buildSidebarProjectSignature(projects), portfolio);
+          writeSidebarPortfolioSnapshot(globalDataPath, sourceProjectSignature, portfolio);
         }
         if (options.includeExternal) {
           this._projectLoader.scheduleAll(projects, selectedProjectPath, portfolio);

@@ -4,7 +4,7 @@ import { createHash } from 'crypto';
 import { AgentConversation } from './db/types';
 import { ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
 
-const cacheVersion = 1;
+const cacheVersion = 2;
 const cacheFileName = 'sidebar-core-snapshot-v1.json';
 const conversationCacheDirectoryName = 'conversations';
 const conversationCacheFilePattern = /^sidebar-conversation-[a-f0-9]{40}-v1\.json$/;

@@ -53,6 +53,7 @@ test('sidebar core snapshot restores a complete cached portfolio until roadmap f
     writeSidebarPortfolioSnapshot(fixture.cachePath, signature, portfolio);
 
     const cached = readSidebarCoreSnapshot(fixture.cachePath);
+    assert.equal(cached.version, 2);
     assert.equal(cached.projectSignature, signature);
     assert.deepEqual(cached.portfolio, portfolio);
 

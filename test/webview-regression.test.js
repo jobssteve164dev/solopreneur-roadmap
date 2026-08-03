@@ -2953,6 +2953,88 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
   assert.equal(postedMessages[0].projects.portfolio[1].recommendedNodeTitle, 'Keep other');
 });
 
+test('sidebar core snapshot restarts when a new project roadmap appears during collection', async (t) => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-sidebar-roadmap-race-'));
+  const projectPath = path.join(root, 'new-project');
+  const otherProjectPath = path.join(root, 'other-project');
+  const globalDataPath = path.join(root, 'global');
+  t.after(() => {
+    for (const filePath of [
+      path.join(globalDataPath, 'sidebar-core-snapshot-v1.json'),
+      path.join(projectPath, '.solopreneur', 'roadmap.csv'),
+      path.join(otherProjectPath, '.solopreneur', 'roadmap.csv')
+    ]) {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    for (const directoryPath of [
+      path.join(projectPath, '.solopreneur'),
+      path.join(otherProjectPath, '.solopreneur'),
+      projectPath,
+      otherProjectPath,
+      path.join(globalDataPath, 'conversations'),
+      globalDataPath,
+      root
+    ]) {
+      if (fs.existsSync(directoryPath)) fs.rmdirSync(directoryPath);
+    }
+  });
+  fs.mkdirSync(projectPath, { recursive: true });
+  fs.mkdirSync(path.join(otherProjectPath, '.solopreneur'), { recursive: true });
+  fs.mkdirSync(globalDataPath, { recursive: true });
+  fs.writeFileSync(
+    path.join(otherProjectPath, '.solopreneur', 'roadmap.csv'),
+    'id,title,status\n1,Keep other,Pending\n',
+    'utf8'
+  );
+  const projects = [
+    { name: 'New Project', path: projectPath },
+    { name: 'Other Project', path: otherProjectPath }
+  ];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: projectPath })
+    }
+  );
+  let roadmapCreated = false;
+  let resolveComplete;
+  const completed = new Promise((resolve) => { resolveComplete = resolve; });
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        if (!roadmapCreated && message.projects?.updatedProjectPaths?.[0] === projectPath) {
+          roadmapCreated = true;
+          const solopreneurPath = path.join(projectPath, '.solopreneur');
+          fs.mkdirSync(solopreneurPath, { recursive: true });
+          fs.writeFileSync(
+            path.join(solopreneurPath, 'roadmap.csv'),
+            'id,title,status\n1,生成初始路线图,Pending\n',
+            'utf8'
+          );
+        }
+        return Promise.resolve(true);
+      }
+    }
+  };
+  provider._projectLoader.scheduleAll = () => resolveComplete();
+
+  provider.sendProjects();
+  await Promise.race([completed, new Promise((resolve) => setTimeout(resolve, 500))]);
+
+  const cached = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'))
+    .readSidebarCoreSnapshot(globalDataPath);
+  assert.equal(roadmapCreated, true);
+  assert.equal(cached.portfolio.find((project) => project.path === projectPath).totalNodes, 1);
+  assert.equal(cached.portfolio.find((project) => project.path === projectPath).globalNextAction, '生成初始路线图');
+});
+
 test('sidebar conversation snapshots share one in-flight database read and only the latest request commits', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
