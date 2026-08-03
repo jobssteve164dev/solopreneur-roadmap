@@ -6,6 +6,7 @@ import { readLearningSummary } from './learningLedger';
 import { SolopreneurSettings } from './pluginContracts';
 import { buildProjectPortfolioSummaries, commonParent, getDailyWorkRhythm, getLocalDateKey, normalizeGlobalDataPath, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
 import { GlobalEngineeringSnapshot, ensureGlobalEngineeringStore } from './globalEngineeringStore';
+import { sendTextWhenTerminalReady } from './terminalCompatibility';
 
 export interface DailyReviewTodo {
   title: string;
@@ -465,6 +466,6 @@ export function startDailyReviewAgent(settings: SolopreneurSettings, projects: S
   }
   const terminal = vscode.window.createTerminal(terminalOpts);
   terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
   return artifact;
 }

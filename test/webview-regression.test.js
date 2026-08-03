@@ -375,6 +375,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './tokenUsage') {
           return require(path.join(projectRoot, 'out/tokenUsage.js'));
         }
+        if (id === './terminalCompatibility') {
+          return require(path.join(projectRoot, 'out/terminalCompatibility.js'));
+        }
         if (id === './conversationPresentation') {
           return require(path.join(projectRoot, 'out/conversationPresentation.js'));
         }
@@ -5165,11 +5168,11 @@ test('agent launch path uses one terminal-first startup component', () => {
     'startup component must register the conversation before creating its terminal'
   );
   assert.ok(
-    launcherBody.indexOf('terminal.show(true)') < launcherBody.indexOf('terminal.sendText(input.command)'),
+    launcherBody.indexOf('terminal.show(true)') < launcherBody.indexOf('sendTextWhenTerminalReady(terminal, input.command)'),
     'startup component must show the terminal before sending the command'
   );
   assert.ok(
-    launcherBody.indexOf('terminal.sendText(input.command)') < launcherBody.indexOf('postNodeConversations(input.refreshNodeId)'),
+    launcherBody.indexOf('sendTextWhenTerminalReady(terminal, input.command)') < launcherBody.indexOf('postNodeConversations(input.refreshNodeId)'),
     'startup component must refresh conversation history after command dispatch'
   );
 

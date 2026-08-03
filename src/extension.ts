@@ -224,6 +224,7 @@ import {
   updateStoredAgentSession
 } from './continuation';
 import { extractRunTokenUsage } from './tokenUsage';
+import { sendTextWhenTerminalReady } from './terminalCompatibility';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
@@ -5572,7 +5573,7 @@ function revealAgentStartupTerminal(workspaceRoot: string, label: string): void 
   reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   activeAgentTerminalName = terminal.name;
   terminal.show(true);
-  terminal.sendText(`printf '%s\\n' ${shellQuote('SoloMap 正在准备本地对话…')}`);
+  void sendTextWhenTerminalReady(terminal, `printf '%s\\n' ${shellQuote('SoloMap 正在准备本地对话…')}`);
 }
 
 function launchAgentConversationTerminal(input: {
@@ -5599,7 +5600,7 @@ function launchAgentConversationTerminal(input: {
   if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
   const terminal = createAgentTerminal(input.workspaceRoot, input.label, input.conversationId);
   terminal.show(true);
-  terminal.sendText(input.command);
+  void sendTextWhenTerminalReady(terminal, input.command);
   if (input.refreshNodeId) {
     postNodeConversations(input.refreshNodeId);
   }
@@ -5722,7 +5723,7 @@ async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Prom
 
   const terminal = createAgentTerminal(maintenanceRoot, `cli-upgrade-${runId.slice(-6)}`);
   terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
   postAgentCliUpgradeResult(true, 'Agent 已开始检查并升级所有已安装的 Agent CLI，进度可在终端中查看。', true);
 
   const startedAt = Date.now();
@@ -5789,7 +5790,7 @@ async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSk
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
   const terminal = createAgentTerminal(maintenanceRoot, `skill-${runId.slice(-6)}`);
   terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
   vscode.window.showInformationMessage('SoloMap skill install started. The Agent terminal will complete the package install.');
 
   const startedAt = Date.now();
@@ -5854,7 +5855,7 @@ async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpI
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
   const terminal = createAgentTerminal(maintenanceRoot, `mcp-${runId.slice(-6)}`);
   terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
   vscode.window.showInformationMessage('SoloMap MCP connector install started. The Agent terminal will complete the controlled install.');
 
   const startedAt = Date.now();
@@ -5993,7 +5994,7 @@ async function handleInstallSolomapEnhancement(context: vscode.ExtensionContext,
   postEnhancementInstallResult(context, true, `正在安装执行增强：${builtin.title}`);
   const terminal = createAgentTerminal(maintenanceRoot, `enhance-${enhancementId.slice(0, 8)}`);
   terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
 
   const startedAt = Date.now();
   const poller = setInterval(() => {
@@ -6092,7 +6093,7 @@ async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContex
   postEnhancementInstallResult(context, true, `正在卸载执行增强：${builtin.title}`);
   const terminal = createAgentTerminal(maintenanceRoot, `enhance-uninstall-${enhancementId.slice(0, 6)}`);
   terminal.show(true);
-  terminal.sendText(`bash ${shellQuote(runScriptPath)}`);
+  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
 
   const startedAt = Date.now();
   const poller = setInterval(() => {

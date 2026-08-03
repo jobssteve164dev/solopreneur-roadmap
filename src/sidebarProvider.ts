@@ -38,6 +38,7 @@ import {
   shellQuote
 } from './agentCli';
 import { ensureSolomapMaintenanceWorkspace } from './solomapGlobal';
+import { sendTextWhenTerminalReady } from './terminalCompatibility';
 
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
@@ -594,20 +595,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
     terminal.show(true);
     if (action === 'github-auth') {
-      terminal.sendText('gh auth login');
+      void sendTextWhenTerminalReady(terminal, 'gh auth login');
       return;
     }
     if (action === 'github-install') {
-      terminal.sendText('gh --version || echo "Install GitHub CLI from https://cli.github.com/"');
+      void sendTextWhenTerminalReady(terminal, 'gh --version || echo "Install GitHub CLI from https://cli.github.com/"');
       return;
     }
     if (action === 'agent-install') {
-      terminal.sendText(buildAgentInstallCommand(cliPath || 'agy'));
+      void sendTextWhenTerminalReady(terminal, buildAgentInstallCommand(cliPath || 'agy'));
       return;
     }
     if (action === 'agent-check') {
       const command = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
-      terminal.sendText(`${shellQuote(command)} --version`);
+      void sendTextWhenTerminalReady(terminal, `${shellQuote(command)} --version`);
     }
   }
 
