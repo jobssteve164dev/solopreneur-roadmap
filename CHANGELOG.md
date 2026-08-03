@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.417 - 2026-08-03
+
+### Changed
+- fix sidebar pasted attachment rendering (df4cb5e)
+
+### Docs
+- enforce async state consistency (c41a1fe)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.416 - 2026-08-03
 
 ### Fixed
