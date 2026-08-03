@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.418 - 2026-08-03
+
+### Changed
+- fix conversation card lifecycle races (d255fc5)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.417 - 2026-08-03
 
 ### Changed
