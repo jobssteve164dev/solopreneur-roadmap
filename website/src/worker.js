@@ -2,8 +2,10 @@ import {
   assertSameOrigin,
   clearSessionCookie,
   createSessionCookie,
+  linkPassportProductUser,
   passportHeadlessRequest,
   readSession,
+  resolvePassportProductUserId,
   safeReturnTo
 } from "./headlessAuth.js";
 import {
@@ -55,6 +57,8 @@ const PASSPORT_ACCOUNT_URL = `${PASSPORT_ISSUER}/passport/account`;
 const SOLOMAP_OIDC_CLIENT_ID = "solomap-vscode";
 const SOLOMAP_PRO_PLAN_ID = "solomap_pro_early_access_yearly";
 const SOLOMAP_PRO_DEVICE_LIMIT = 5;
+const GOOGLE_LOGIN_STATE_COOKIE = "__Host-solomap_google_oauth";
+const LOCAL_GOOGLE_LOGIN_STATE_COOKIE = "solomap_google_oauth";
 const SITEMAP_LASTMOD = "2026-08-02";
 
 const securityHeaders = {
@@ -939,7 +943,8 @@ async function resolveCollaborationAccountCreator(request, env) {
   const session = await readSession(request, env);
   if (session && (session.id || session.email)) {
     const stableId = base64UrlEncode(await sha256(String(session.id || session.email)));
-    return { subjectId: `account:${stableId}`, tier: "account" };
+    const access = await resolvePassportAccessForUser(env, { email: session.email, userId: session.id });
+    return { subjectId: `account:${stableId}`, tier: access.allowed ? "pro" : "account" };
   }
   const authorization = String(request.headers.get("authorization") || "");
   const grant = authorization.replace(/^Bearer\s+/i, "");
@@ -1065,6 +1070,50 @@ async function checkPassportAccessForUser(env, userinfo) {
     entitlements: [],
     deviceLimit: getProDeviceLimit(env)
   };
+}
+
+async function resolvePassportAccessForUser(env, userinfo) {
+  try {
+    return await checkPassportAccessForUser(env, userinfo);
+  } catch (error) {
+    console.error("Unable to verify SoloMap Pro access", error);
+    return {
+      allowed: false,
+      reason: "passport_access_unavailable",
+      email: String(userinfo.email || ""),
+      userId: String(userinfo.userId || userinfo.sub || ""),
+      entitlements: [],
+      deviceLimit: getProDeviceLimit(env)
+    };
+  }
+}
+
+function readCookie(request, names) {
+  const accepted = new Set(names);
+  for (const part of String(request.headers.get("cookie") || "").split(";")) {
+    const [name, ...value] = part.trim().split("=");
+    if (accepted.has(name)) return value.join("=");
+  }
+  return "";
+}
+
+function googleLoginStateCookie(request, value, maxAge = 600) {
+  const secure = new URL(request.url).protocol === "https:";
+  return [
+    `${secure ? GOOGLE_LOGIN_STATE_COOKIE : LOCAL_GOOGLE_LOGIN_STATE_COOKIE}=${value}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    secure ? "Secure" : null,
+    `Max-Age=${maxAge}`,
+    maxAge > 0 ? null : `Expires=${new Date(0).toUTCString()}`
+  ].filter(Boolean).join("; ");
+}
+
+function redirectWithCookies(location, cookies = []) {
+  const headers = new Headers({ location, "cache-control": "no-store" });
+  for (const cookie of cookies) headers.append("set-cookie", cookie);
+  return new Response(null, { status: 302, headers });
 }
 
 function buildPassportFallbackPage(callback) {
@@ -1594,9 +1643,11 @@ async function buildPassportAuthorizeRedirect(request, env, payload) {
   const url = new URL(request.url);
   const verifier = randomString(48);
   const challenge = base64UrlEncode(await sha256(verifier));
+  const oidcNonce = randomString(32);
   const state = await signState(env, {
     ...payload,
     verifier,
+    oidcNonce,
     issuedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString()
   });
@@ -1604,11 +1655,38 @@ async function buildPassportAuthorizeRedirect(request, env, payload) {
   authorizeUrl.searchParams.set("client_id", env.SOLOMAP_PASSPORT_OIDC_CLIENT_ID || SOLOMAP_OIDC_CLIENT_ID);
   authorizeUrl.searchParams.set("redirect_uri", `${url.origin}/api/passport/oidc/callback`);
   authorizeUrl.searchParams.set("response_type", "code");
-  authorizeUrl.searchParams.set("scope", "openid profile email offline_access");
+  authorizeUrl.searchParams.set("scope", payload.identityProvider === "google" ? "openid profile email" : "openid profile email offline_access");
   authorizeUrl.searchParams.set("code_challenge", challenge);
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
+  authorizeUrl.searchParams.set("nonce", oidcNonce);
   authorizeUrl.searchParams.set("state", state);
+  if (payload.identityProvider === "google") authorizeUrl.searchParams.set("identity_provider", "google");
+  if (payload.mode === "web") {
+    return redirectWithCookies(authorizeUrl.toString(), [googleLoginStateCookie(request, oidcNonce)]);
+  }
   return Response.redirect(authorizeUrl.toString(), 302);
+}
+
+async function handleGoogleLoginStart(request, env) {
+  const url = new URL(request.url);
+  const locale = url.searchParams.get("lang") === "zh" ? "zh" : "en";
+  const returnTo = safeReturnTo(url.searchParams.get("return_to"), locale === "zh" ? "/zh/workbench" : "/workbench");
+  return buildPassportAuthorizeRedirect(request, env, {
+    mode: "web",
+    identityProvider: "google",
+    locale,
+    returnTo
+  });
+}
+
+function googleLoginFailure(request, state, error = "google_login_failed") {
+  const url = new URL(request.url);
+  const localePath = state?.locale === "zh" ? "/zh" : "";
+  const returnTo = safeReturnTo(state?.returnTo, state?.locale === "zh" ? "/zh/workbench" : "/workbench");
+  const loginUrl = new URL(`${localePath}/login`, url.origin);
+  loginUrl.searchParams.set("error", error);
+  loginUrl.searchParams.set("return_to", returnTo);
+  return redirectWithCookies(loginUrl.toString(), [googleLoginStateCookie(request, "", 0)]);
 }
 
 async function handlePassportStart(request, env) {
@@ -1686,33 +1764,90 @@ async function handlePassportOidcCallback(request, env) {
   const code = String(url.searchParams.get("code") || "");
   const state = await verifyState(env, String(url.searchParams.get("state") || ""));
   if (!code || !state) {
+    if (state?.mode === "web" || url.searchParams.has("error")) return googleLoginFailure(request, state);
     return htmlResponse(buildPassportFallbackPage(""), 400);
   }
-  if (state.mode !== "device" && !isAllowedVsCodeCallback(state.callback)) {
+  if (state.mode === "web") {
+    const stateCookie = readCookie(request, [GOOGLE_LOGIN_STATE_COOKIE, LOCAL_GOOGLE_LOGIN_STATE_COOKIE]);
+    if (!state.oidcNonce || stateCookie !== state.oidcNonce || state.identityProvider !== "google") {
+      return googleLoginFailure(request, state, "google_login_state_invalid");
+    }
+  } else if (state.mode !== "device" && !isAllowedVsCodeCallback(state.callback)) {
     return htmlResponse(buildPassportFallbackPage(""), 400);
   }
-  const tokenResponse = await fetch(env.SOLOMAP_PASSPORT_TOKEN_URL || PASSPORT_OIDC_TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: env.SOLOMAP_PASSPORT_OIDC_CLIENT_ID || SOLOMAP_OIDC_CLIENT_ID,
-      code,
-      redirect_uri: `${url.origin}/api/passport/oidc/callback`,
-      code_verifier: state.verifier
-    }).toString()
-  });
+  let tokenResponse;
+  try {
+    tokenResponse = await fetch(env.SOLOMAP_PASSPORT_TOKEN_URL || PASSPORT_OIDC_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: env.SOLOMAP_PASSPORT_OIDC_CLIENT_ID || SOLOMAP_OIDC_CLIENT_ID,
+        code,
+        redirect_uri: `${url.origin}/api/passport/oidc/callback`,
+        code_verifier: state.verifier
+      }).toString()
+    });
+  } catch (error) {
+    console.error("Passport OIDC token exchange failed", error);
+    if (state.mode === "web") return googleLoginFailure(request, state);
+    return htmlResponse(buildPassportFallbackPage(""), 502);
+  }
   if (!tokenResponse.ok) {
+    if (state.mode === "web") return googleLoginFailure(request, state);
     return htmlResponse(buildPassportFallbackPage(""), 401);
   }
   const token = await tokenResponse.json();
-  const userinfoResponse = await fetch(env.SOLOMAP_PASSPORT_USERINFO_URL || PASSPORT_OIDC_USERINFO_URL, {
-    headers: { authorization: `Bearer ${token.access_token || ""}` }
-  });
+  let userinfoResponse;
+  try {
+    userinfoResponse = await fetch(env.SOLOMAP_PASSPORT_USERINFO_URL || PASSPORT_OIDC_USERINFO_URL, {
+      headers: { authorization: `Bearer ${token.access_token || ""}` }
+    });
+  } catch (error) {
+    console.error("Passport OIDC userinfo request failed", error);
+    if (state.mode === "web") return googleLoginFailure(request, state);
+    return htmlResponse(buildPassportFallbackPage(""), 502);
+  }
   if (!userinfoResponse.ok) {
+    if (state.mode === "web") return googleLoginFailure(request, state);
     return htmlResponse(buildPassportFallbackPage(""), 401);
   }
   const userinfo = await userinfoResponse.json();
+  if (state.mode === "web") {
+    const email = String(userinfo.email || "").trim().toLowerCase();
+    const passportUserId = String(userinfo.sub || "").trim();
+    if (!passportUserId || !email || userinfo.email_verified !== true) {
+      return googleLoginFailure(request, state, "google_identity_invalid");
+    }
+    try {
+      const productUserId = await resolvePassportProductUserId(env, email, passportUserId);
+      if (!productUserId) return googleLoginFailure(request, state, "google_identity_invalid");
+      const link = await linkPassportProductUser(env, {
+        id: productUserId,
+        email,
+        metadata: { identityProvider: "google", passportUserId }
+      });
+      if (String(link.userId || "") !== passportUserId || String(link.productUid || link.product_uid || "") !== productUserId) {
+        throw new Error("Passport product link does not match the authenticated Google identity");
+      }
+      const access = await resolvePassportAccessForUser(env, { email, userId: productUserId });
+      const sessionCookie = await createSessionCookie(request, env, {
+        id: productUserId,
+        email,
+        name: String(userinfo.name || ""),
+        allowed: access.allowed,
+        entitlements: access.entitlements,
+        accessCheckedAt: new Date().toISOString()
+      });
+      return redirectWithCookies(new URL(safeReturnTo(state.returnTo), url.origin).toString(), [
+        sessionCookie,
+        googleLoginStateCookie(request, "", 0)
+      ]);
+    } catch (error) {
+      console.error("SoloMap Google login callback failed", error);
+      return googleLoginFailure(request, state);
+    }
+  }
   const access = await checkPassportAccessForUser(env, userinfo);
   if (!access.allowed) {
     return createPassportCheckoutRedirect(request, env, state, userinfo, access);
@@ -4646,14 +4781,14 @@ async function buildLegacyWorkbenchPage(request, env) {
 function authCopy(locale) {
   return locale === "zh" ? {
     loginTitle: "登录 SoloMap", registerTitle: "创建 SoloMap 账号", loginLead: "回到你的个人项目工作台。", registerLead: "一个账号，管理订阅、设备与官网工作台。",
-    name: "你的名字", email: "邮箱", password: "密码", passwordHint: "至少 8 个字符", login: "登录", register: "创建账号", forgot: "忘记密码？", noAccount: "还没有账号？", hasAccount: "已有账号？", create: "立即注册", back: "返回登录",
+    name: "你的名字", email: "邮箱", password: "密码", passwordHint: "至少 8 个字符", login: "登录", register: "创建账号", google: "使用 Google 继续", or: "或使用邮箱", forgot: "忘记密码？", noAccount: "还没有账号？", hasAccount: "已有账号？", create: "立即注册", back: "返回登录",
     verifyTitle: "查收验证邮件", verifyText: "验证链接已发送到你的邮箱。完成验证后即可登录 SoloMap。", resetTitle: "重设密码", resetLead: "输入注册邮箱，我们会发送密码重设链接。", newPasswordLead: "设置一个新的登录密码。", sendReset: "发送重设邮件", savePassword: "保存新密码", resetSent: "如果该账号存在，重设邮件已经发出。", passwordSaved: "密码已更新，现在可以登录。",
-    genericError: "操作没有完成，请稍后重试。", emailUnverified: "请先完成邮箱验证，再登录。", submitting: "正在处理…"
+    genericError: "操作没有完成，请稍后重试。", emailUnverified: "请先完成邮箱验证，再登录。", googleError: "Google 登录没有完成，请重试。", submitting: "正在处理…"
   } : {
     loginTitle: "Sign in to SoloMap", registerTitle: "Create your SoloMap account", loginLead: "Return to your personal project workbench.", registerLead: "One account for your subscription, devices, and web workbench.",
-    name: "Your name", email: "Email", password: "Password", passwordHint: "At least 8 characters", login: "Sign in", register: "Create account", forgot: "Forgot password?", noAccount: "New to SoloMap?", hasAccount: "Already have an account?", create: "Create one", back: "Back to sign in",
+    name: "Your name", email: "Email", password: "Password", passwordHint: "At least 8 characters", login: "Sign in", register: "Create account", google: "Continue with Google", or: "or use email", forgot: "Forgot password?", noAccount: "New to SoloMap?", hasAccount: "Already have an account?", create: "Create one", back: "Back to sign in",
     verifyTitle: "Check your inbox", verifyText: "We sent a verification link to your email. Verify it, then sign in to SoloMap.", resetTitle: "Reset your password", resetLead: "Enter your account email and we will send a reset link.", newPasswordLead: "Choose a new password for your account.", sendReset: "Send reset email", savePassword: "Save new password", resetSent: "If the account exists, a reset email has been sent.", passwordSaved: "Your password has been updated. You can now sign in.",
-    genericError: "We could not complete that action. Please try again.", emailUnverified: "Verify your email before signing in.", submitting: "Working…"
+    genericError: "We could not complete that action. Please try again.", emailUnverified: "Verify your email before signing in.", googleError: "Google sign-in did not complete. Please try again.", submitting: "Working…"
   };
 }
 
@@ -4665,15 +4800,17 @@ function buildAuthPage(request, mode) {
   const isRegister = mode === "register";
   const isForgot = mode === "forgot";
   const isReset = mode === "reset";
+  const showGoogle = !isForgot && !isReset;
   const returnTo = safeReturnTo(url.searchParams.get("return_to"), locale === "zh" ? "/zh/workbench" : "/workbench");
+  const initialError = url.searchParams.has("error") ? copy.googleError : "";
   const pageTitle = isRegister ? copy.registerTitle : isForgot || isReset ? copy.resetTitle : copy.loginTitle;
   const lead = isRegister ? copy.registerLead : isForgot ? copy.resetLead : isReset ? copy.newPasswordLead : copy.loginLead;
   const endpoint = isRegister ? "register" : isForgot ? "forgot-password" : isReset ? "reset-password" : "login";
   return `<!doctype html><html lang="${t.lang}"><head>
   ${buildHead({ ...t, meta: { ...t.meta, title: pageTitle, description: lead, ogDescription: lead } }, url.origin, url.pathname, locale === "zh" ? url.pathname.replace(/^\/zh/, "") || "/" : `/zh${url.pathname}`)}
   ${buildStyles()}<style>
-  .auth-main{min-height:calc(100dvh - 160px);display:grid;place-items:center;padding:56px 20px}.auth-shell{width:min(100%,440px)}.auth-brand{display:flex;justify-content:center;margin-bottom:24px}.auth-card{padding:32px;border:1px solid var(--border);border-radius:20px;background:var(--glass-bg);box-shadow:0 24px 70px rgba(0,0,0,.28)}.auth-card h1{font-size:30px;margin:0 0 8px}.auth-lead{color:var(--muted);margin:0 0 28px}.auth-field{margin-bottom:18px}.auth-field label{display:block;margin-bottom:7px;font-size:14px;font-weight:650}.auth-field input{box-sizing:border-box;width:100%;min-height:48px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.035);color:var(--fg);font:inherit}.auth-field input:focus{outline:3px solid rgba(0,240,255,.18);border-color:var(--accent)}.auth-help{display:block;margin-top:6px;color:var(--muted);font-size:12px}.auth-submit{width:100%;min-height:48px;border:0;border-radius:10px;background:var(--accent);color:#071014;font:inherit;font-weight:750;cursor:pointer}.auth-submit:disabled{opacity:.65;cursor:wait}.auth-message{display:none;margin:0 0 16px;padding:12px 14px;border-radius:10px;font-size:14px}.auth-message.error{display:block;color:#ffb4bf;background:rgba(255,68,96,.1);border:1px solid rgba(255,68,96,.25)}.auth-message.success{display:block;color:#96f5d7;background:rgba(0,220,160,.1);border:1px solid rgba(0,220,160,.25)}.auth-switch{text-align:center;color:var(--muted);margin:20px 0 0}.auth-switch a,.auth-links a{color:var(--accent)}.auth-links{text-align:right;margin:-8px 0 18px;font-size:13px}@media(max-width:520px){.auth-main{padding:28px 16px}.auth-card{padding:24px}}
-  </style></head><body>${buildHeader(t, locale, url.pathname)}<main class="auth-main"><div class="auth-shell"><section class="auth-card"><h1>${escapeHtml(pageTitle)}</h1><p class="auth-lead">${escapeHtml(lead)}</p><div id="auth-message" class="auth-message" role="status" aria-live="polite"></div><form id="auth-form">
+  .auth-main{min-height:calc(100dvh - 160px);display:grid;place-items:center;padding:56px 20px}.auth-shell{width:min(100%,440px)}.auth-brand{display:flex;justify-content:center;margin-bottom:24px}.auth-card{padding:32px;border:1px solid var(--border);border-radius:20px;background:var(--glass-bg);box-shadow:0 24px 70px rgba(0,0,0,.28)}.auth-card h1{font-size:30px;margin:0 0 8px}.auth-lead{color:var(--muted);margin:0 0 28px}.auth-google{width:100%;min-height:48px;display:flex;align-items:center;justify-content:center;gap:10px;border:1px solid var(--border);border-radius:10px;background:#fff;color:#202124;font-weight:700;text-decoration:none}.auth-google:hover{background:#f7f8f8}.auth-google svg{width:20px;height:20px}.auth-divider{display:flex;align-items:center;gap:12px;margin:20px 0;color:var(--muted);font-size:12px}.auth-divider::before,.auth-divider::after{content:"";height:1px;flex:1;background:var(--border)}.auth-field{margin-bottom:18px}.auth-field label{display:block;margin-bottom:7px;font-size:14px;font-weight:650}.auth-field input{box-sizing:border-box;width:100%;min-height:48px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.035);color:var(--fg);font:inherit}.auth-field input:focus{outline:3px solid rgba(0,240,255,.18);border-color:var(--accent)}.auth-help{display:block;margin-top:6px;color:var(--muted);font-size:12px}.auth-submit{width:100%;min-height:48px;border:0;border-radius:10px;background:var(--accent);color:#071014;font:inherit;font-weight:750;cursor:pointer}.auth-submit:disabled{opacity:.65;cursor:wait}.auth-message{display:none;margin:0 0 16px;padding:12px 14px;border-radius:10px;font-size:14px}.auth-message.error{display:block;color:#ffb4bf;background:rgba(255,68,96,.1);border:1px solid rgba(255,68,96,.25)}.auth-message.success{display:block;color:#96f5d7;background:rgba(0,220,160,.1);border:1px solid rgba(0,220,160,.25)}.auth-switch{text-align:center;color:var(--muted);margin:20px 0 0}.auth-switch a,.auth-links a{color:var(--accent)}.auth-links{text-align:right;margin:-8px 0 18px;font-size:13px}@media(max-width:520px){.auth-main{padding:28px 16px}.auth-card{padding:24px}}
+  </style></head><body>${buildHeader(t, locale, url.pathname)}<main class="auth-main"><div class="auth-shell"><section class="auth-card"><h1>${escapeHtml(pageTitle)}</h1><p class="auth-lead">${escapeHtml(lead)}</p><div id="auth-message" class="auth-message${initialError ? " error" : ""}" role="status" aria-live="polite">${escapeHtml(initialError)}</div>${showGoogle ? `<a class="auth-google" href="/api/auth/google/start?lang=${locale}&amp;return_to=${encodeURIComponent(returnTo)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.5-.2-2.2H12v4.3h5.4a4.6 4.6 0 0 1-2 3v2.8h3.7c2.2-2 3.5-4.9 3.5-7.9Z"/><path fill="#34A853" d="M12 22c3.1 0 5.7-1 7.1-1.9l-3.7-2.8c-1 .7-2.3 1.1-3.4 1.1-3 0-5.5-2-6.4-4.8H1.8v2.9A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M5.6 13.6A6 6 0 0 1 5.3 12c0-.6.1-1.1.3-1.6V7.5H1.8A10 10 0 0 0 2 16.5l3.6-2.9Z"/><path fill="#EA4335" d="M12 5.6c1.7 0 3.2.6 4.4 1.7l3.3-3.2A10 10 0 0 0 1.8 7.5l3.8 2.9C6.5 7.6 9 5.6 12 5.6Z"/></svg><span>${escapeHtml(copy.google)}</span></a><div class="auth-divider"><span>${escapeHtml(copy.or)}</span></div>` : ""}<form id="auth-form">
   ${isRegister ? `<div class="auth-field"><label for="name">${escapeHtml(copy.name)}</label><input id="name" name="name" autocomplete="name" required></div>` : ""}
   ${isReset ? "" : `<div class="auth-field"><label for="email">${escapeHtml(copy.email)}</label><input id="email" name="email" type="email" autocomplete="email" required></div>`}
   ${isForgot ? "" : `<div class="auth-field"><label for="password">${escapeHtml(copy.password)}</label><input id="password" name="password" type="password" autocomplete="${isRegister || isReset ? "new-password" : "current-password"}" minlength="8" required>${isRegister || isReset ? `<span class="auth-help">${escapeHtml(copy.passwordHint)}</span>` : ""}</div>`}
@@ -4704,8 +4841,10 @@ async function buildPersonalWorkbenchPage(request, env, session) {
   const zh = locale === "zh";
   const name = session.name || session.email.split("@")[0];
   const pagePath = zh ? "/zh/workbench" : "/workbench";
+  const access = await resolvePassportAccessForUser(env, { email: session.email, userId: session.id });
+  const planLabel = access.allowed ? "SoloMap Pro" : (zh ? "免费账号" : "Free account");
   return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { ...t.meta, title: zh ? "SoloMap 个人工作台" : "SoloMap Personal Workbench", description: zh ? "查看并推进你的 SoloMap 项目。" : "See and move your SoloMap projects forward.", ogDescription: "SoloMap" } }, url.origin, pagePath, zh ? "/workbench" : "/zh/workbench")}${buildStyles()}${buildWorkbenchStyles()}
-</head><body>${buildHeader(t, locale, pagePath)}<div class="desk shell">${buildWorkbenchSidebar(locale, "projects")}<main class="desk-main"><header class="desk-top"><div><h1>${zh ? `你好，${escapeHtml(name)}` : `Welcome back, ${escapeHtml(name)}`}</h1><p>${zh ? "从这里查看你的项目，并继续下一步。" : "See your projects here and continue with the next step."}</p></div><a class="button secondary" href="${MARKETPLACE_URL}">${zh ? "打开 VS Code 插件" : "Open the VS Code extension"}</a></header><div class="desk-grid"><section class="desk-card empty-projects"><div><h2>${zh ? "你的项目会出现在这里" : "Your projects will appear here"}</h2><p>${zh ? "目前项目仍由 SoloMap 插件保存在你的本地工作区。先在 VS Code 中打开一个项目，创建路线图并开始推进。" : "For now, SoloMap keeps projects in your local workspace. Open a project in VS Code, create its roadmap, and start moving it forward."}</p><div class="desk-actions"><a class="button primary" href="${MARKETPLACE_URL}">${zh ? "安装或打开 SoloMap" : "Install or open SoloMap"}</a><a class="button ghost" href="${zh ? "/zh/docs" : "/docs"}">${zh ? "查看使用指南" : "Read the guide"}</a></div></div></section><aside class="desk-card"><h2>${zh ? "账号" : "Account"}</h2><div class="account-line"><div class="avatar">${escapeHtml(name.slice(0,1).toUpperCase())}</div><div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(session.email)}</span></div></div><button class="logout" id="logout" type="button">${zh ? "退出登录" : "Sign out"}</button><p class="boundary-note">${zh ? "官网当前只承载账号与个人工作台。插件中的项目数据仍保存在本地，不会自动上传。" : "The website currently hosts your account and personal workbench only. Project data in the extension stays local and is not uploaded automatically."}</p></aside></div></main></div>${buildFooter(t)}<script>document.getElementById('logout').addEventListener('click',async()=>{await fetch('/api/auth/logout',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});location.href='${zh ? "/zh/login" : "/login"}';});</script></body></html>`;
+</head><body>${buildHeader(t, locale, pagePath)}<div class="desk shell">${buildWorkbenchSidebar(locale, "projects")}<main class="desk-main"><header class="desk-top"><div><h1>${zh ? `你好，${escapeHtml(name)}` : `Welcome back, ${escapeHtml(name)}`}</h1><p>${zh ? "从这里查看你的项目，并继续下一步。" : "See your projects here and continue with the next step."}</p></div><a class="button secondary" href="${MARKETPLACE_URL}">${zh ? "打开 VS Code 插件" : "Open the VS Code extension"}</a></header><div class="desk-grid"><section class="desk-card empty-projects"><div><h2>${zh ? "你的项目会出现在这里" : "Your projects will appear here"}</h2><p>${zh ? "目前项目仍由 SoloMap 插件保存在你的本地工作区。先在 VS Code 中打开一个项目，创建路线图并开始推进。" : "For now, SoloMap keeps projects in your local workspace. Open a project in VS Code, create its roadmap, and start moving it forward."}</p><div class="desk-actions"><a class="button primary" href="${MARKETPLACE_URL}">${zh ? "安装或打开 SoloMap" : "Install or open SoloMap"}</a><a class="button ghost" href="${zh ? "/zh/docs" : "/docs"}">${zh ? "查看使用指南" : "Read the guide"}</a></div></div></section><aside class="desk-card"><h2>${zh ? "账号" : "Account"}</h2><div class="account-line"><div class="avatar">${escapeHtml(name.slice(0,1).toUpperCase())}</div><div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(session.email)}</span><span>${escapeHtml(planLabel)}</span></div></div><button class="logout" id="logout" type="button">${zh ? "退出登录" : "Sign out"}</button><p class="boundary-note">${zh ? "官网当前只承载账号与个人工作台。插件中的项目数据仍保存在本地，不会自动上传。" : "The website currently hosts your account and personal workbench only. Project data in the extension stays local and is not uploaded automatically."}</p></aside></div></main></div>${buildFooter(t)}<script>document.getElementById('logout').addEventListener('click',async()=>{await fetch('/api/auth/logout',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});location.href='${zh ? "/zh/login" : "/login"}';});</script></body></html>`;
 }
 
 async function handleHeadlessAuth(request, env, mode) {
@@ -4716,7 +4855,14 @@ async function handleHeadlessAuth(request, env, mode) {
     if (mode === "login") {
       const result = await passportHeadlessRequest(env, "auth/login", { email: body.email, password: body.password });
       if (result.needsEmailVerification || !result.user?.emailVerified) return jsonResponse({ ok: false, code: "email_not_verified", message: "Verify your email before signing in." }, 403);
-      return jsonResponse({ ok: true, user: result.user, returnTo: safeReturnTo(body.returnTo) }, 200, { "set-cookie": await createSessionCookie(request, env, result.user) });
+      const access = await resolvePassportAccessForUser(env, { email: result.user.email, userId: result.user.id });
+      const sessionUser = {
+        ...result.user,
+        allowed: access.allowed,
+        entitlements: access.entitlements,
+        accessCheckedAt: new Date().toISOString()
+      };
+      return jsonResponse({ ok: true, user: result.user, access: { allowed: access.allowed, entitlements: access.entitlements }, returnTo: safeReturnTo(body.returnTo) }, 200, { "set-cookie": await createSessionCookie(request, env, sessionUser) });
     }
     if (mode === "register") {
       const result = await passportHeadlessRequest(env, "auth/register", { email: body.email, password: body.password, name: body.name, appBaseUrl });
@@ -5509,9 +5655,21 @@ export default {
     const authApiMatch = url.pathname.match(/^\/api\/auth\/(login|register|forgot-password|verify-email|reset-password)$/);
     if (request.method === "POST" && authApiMatch) return handleHeadlessAuth(request, env, authApiMatch[1]);
 
+    if (request.method === "GET" && url.pathname === "/api/auth/google/start") {
+      return handleGoogleLoginStart(request, env);
+    }
+
     if (request.method === "GET" && url.pathname === "/api/auth/session") {
       const session = await readSession(request, env);
-      return jsonResponse({ authenticated: Boolean(session), user: session ? { id: session.id, email: session.email, name: session.name } : null, expiresAt: session?.expiresAt || null });
+      const access = session
+        ? await resolvePassportAccessForUser(env, { email: session.email, userId: session.id })
+        : { allowed: false, entitlements: [], reason: "login_required" };
+      return jsonResponse({
+        authenticated: Boolean(session),
+        user: session ? { id: session.id, email: session.email, name: session.name } : null,
+        access: { allowed: Boolean(access.allowed), entitlements: access.entitlements || [], reason: access.reason || "" },
+        expiresAt: session?.expiresAt || null
+      });
     }
 
     if (request.method === "POST" && url.pathname === "/api/auth/logout") {

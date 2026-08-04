@@ -4,17 +4,45 @@ const LOCAL_SESSION_COOKIE = "solomap_session";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export async function passportHeadlessRequest(env, path, body) {
+  return passportRequest(env, path, { method: "POST", body });
+}
+
+export async function resolvePassportProductUserId(env, email, fallbackUserId) {
+  const data = await passportRequest(env, "passport/lookup", {
+    method: "GET",
+    query: new URLSearchParams({ email: String(email || "").trim().toLowerCase() })
+  });
+  const productUid = Array.isArray(data.products)
+    ? data.products.map((item) => String(item?.productUid || item?.product_uid || "").trim()).find(Boolean)
+    : "";
+  return productUid || String(fallbackUserId || "").trim();
+}
+
+export async function linkPassportProductUser(env, user) {
+  return passportRequest(env, "passport/link", {
+    method: "POST",
+    body: {
+      email: String(user.email || "").trim().toLowerCase(),
+      product: "solomap",
+      productUid: String(user.id || "").trim(),
+      metadata: user.metadata || undefined
+    }
+  });
+}
+
+async function passportRequest(env, path, options = {}) {
   const secret = String(env.SOLOMAP_PASSPORT_PRODUCT_SECRET || "");
   if (!secret) throw authError(500, "auth_not_configured", "SoloMap 登录服务尚未配置完成");
   const baseUrl = String(env.SOLOMAP_PASSPORT_URL || DEFAULT_PASSPORT_URL).replace(/\/+$/, "");
-  const response = await fetch(`${baseUrl}/api/v1/${path}`, {
-    method: "POST",
+  const query = options.query?.toString();
+  const response = await fetch(`${baseUrl}/api/v1/${path}${query ? `?${query}` : ""}`, {
+    method: options.method || "GET",
     headers: {
       "content-type": "application/json",
       "x-szlk-product": "solomap",
       "x-szlk-secret": secret
     },
-    body: JSON.stringify(body)
+    body: options.body ? JSON.stringify(options.body) : undefined
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok || payload?.ok !== true || !payload.data) {
@@ -30,6 +58,9 @@ export async function createSessionCookie(request, env, user) {
     id: String(user.id || ""),
     email: String(user.email || ""),
     name: String(user.name || ""),
+    allowed: Boolean(user.allowed),
+    entitlements: Array.isArray(user.entitlements) ? user.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
+    accessCheckedAt: String(user.accessCheckedAt || ""),
     expiresAt
   }));
   const signature = encode(await hmac(String(env.SOLOMAP_PASSPORT_PRODUCT_SECRET || ""), payload));
