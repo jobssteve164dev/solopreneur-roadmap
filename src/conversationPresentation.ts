@@ -2,7 +2,8 @@ import { AgentConversation } from './db/types';
 import {
   ContinuableAgentConversation,
   extractContinuationParentConversationId,
-  hydrateConversationContinuations
+  hydrateConversationContinuations,
+  recoverInterruptedNativeSessionId
 } from './continuation';
 import { normalizeAgentConversationLifecycles } from './conversationLifecycle';
 
@@ -163,14 +164,22 @@ export function buildConversationPresentations(
   }).map((conversation) => {
     const output = String(conversation.output || '');
     const rollbackGitHash = extractRollbackGitHash(output);
-    const canContinue = conversation.status !== 'Running' && Boolean(conversation.resumableNativeSessionId);
+    const failureCategory = (output.match(/Failure category:\s*([^\n]+)/) || [])[1]?.trim() || '';
+    const wasStoppedByUser = conversation.status === 'Failed'
+      && (failureCategory === 'stopped_by_user' || failureCategory === 'terminal_closed');
+    const recoveredSessionId = wasStoppedByUser && !conversation.resumableNativeSessionId
+      ? recoverInterruptedNativeSessionId(workspaceRoot, nodeId, conversation)
+      : '';
+    const resumableNativeSessionId = conversation.resumableNativeSessionId || recoveredSessionId;
+    const canContinue = conversation.status !== 'Running' && Boolean(resumableNativeSessionId);
     return {
       ...conversation,
+      ...(resumableNativeSessionId ? { resumableNativeSessionId } : {}),
       continuationParentConversationId: extractContinuationParentConversationId(output),
       reviewParentConversationId: extractReviewParentConversationId(output),
       summary: extractSummary(output),
       conclusion: extractConclusion(output),
-      failureCategory: (output.match(/Failure category:\s*([^\n]+)/) || [])[1]?.trim() || '',
+      failureCategory,
       failureReason: extractSection(output, 'Failure reason'),
       durationMs: extractDurationMs(conversation, now),
       changedFiles: extractChangedFiles(output),
@@ -178,7 +187,7 @@ export function buildConversationPresentations(
       capabilities: {
         canContinue,
         canStop: conversation.status === 'Running',
-        canRetry: conversation.status === 'Failed' && !canContinue,
+        canRetry: conversation.status === 'Failed' && (!canContinue || wasStoppedByUser),
         canRollback: conversation.status !== 'Running' && Boolean(rollbackGitHash),
         canOpenTerminal: conversation.status === 'Running'
       }

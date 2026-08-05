@@ -275,6 +275,27 @@ export function readRunSessionId(workspaceRoot: string, nodeId: string, conversa
   }
 }
 
+export function recoverInterruptedNativeSessionId(
+  workspaceRoot: string,
+  nodeId: string,
+  conversation: AgentConversation | null
+): string {
+  if (!conversation || !workspaceRoot) {
+    return '';
+  }
+  const conversationId = Number(conversation.id || 0);
+  const runSessionId = readRunSessionId(workspaceRoot, nodeId, conversationId);
+  if (runSessionId) {
+    return runSessionId;
+  }
+  if (getContinuationAgentProvider(conversation.agentCli || '') === 'codex') {
+    return extractCodexSessionIdFromOutputText(
+      readRunTextFile(workspaceRoot, nodeId, conversationId, 'output.log')
+    );
+  }
+  return '';
+}
+
 export function resolveContinuationLeafConversationFromList(
   conversations: AgentConversation[],
   conversationId: number
@@ -379,13 +400,13 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
   const savedSessionId = extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '');
   const continuationSessionId = extractContinuationSessionIdFromExecutionOutput(conversation.output || '');
   const commandSessionId = extractNativeSessionIdFromConversation(conversation);
-  if (getContinuationAgentProvider(conversation.agentCli || '') !== 'codex' || !workspaceRoot) {
-    return savedSessionId || continuationSessionId || commandSessionId;
-  }
   const conversationId = Number(conversation.id || 0);
+  const runSessionId = workspaceRoot ? readRunSessionId(workspaceRoot, nodeId, conversationId) : '';
+  if (getContinuationAgentProvider(conversation.agentCli || '') !== 'codex' || !workspaceRoot) {
+    return runSessionId || savedSessionId || continuationSessionId || commandSessionId;
+  }
   const recordedCodexHome = readRunTextFile(workspaceRoot, nodeId, conversationId, 'codex-home.txt').trim();
   const codexHome = recordedCodexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const runSessionId = readRunSessionId(workspaceRoot, nodeId, conversationId);
   const outputText = readRunTextFile(workspaceRoot, nodeId, conversationId, 'output.log');
   const outputSessionId = extractCodexSessionIdFromOutputText(outputText);
   const candidates = [runSessionId, outputSessionId, savedSessionId, continuationSessionId, commandSessionId]

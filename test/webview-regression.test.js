@@ -2094,6 +2094,52 @@ test('failed resumable conversations continue instead of restarting in the full 
   assert.doesNotMatch(rendered, /data-retry-conversation-id="24"/);
 });
 
+test('manually stopped conversations recover their native session and keep both continue and retry actions', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
+  const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stopped-continuation-'));
+  const sessionId = '019ecd99-4325-7050-8e71-7def92359c9f';
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '25');
+  const codexHome = path.join(workspaceRoot, 'codex-home');
+  const transcriptPath = path.join(codexHome, 'sessions', `rollout-${sessionId}.jsonl`);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'codex-home.txt'), codexHome, 'utf8');
+  fs.writeFileSync(path.join(runDir, 'output.log'), `session id: ${sessionId}\nStopped before completion.\n`, 'utf8');
+  fs.writeFileSync(transcriptPath, JSON.stringify({ payload: { id: sessionId } }) + '\n', 'utf8');
+
+  const [conversation] = presentation.buildConversationPresentations(workspaceRoot, '__solo__', [{
+    id: 25,
+    nodeId: '__solo__',
+    status: 'Failed',
+    agentCli: 'codex',
+    command: 'codex exec',
+    output: [
+      'User supplement:',
+      '继续被终止的任务',
+      '',
+      'Failure category: terminal_closed',
+      '',
+      'Failure reason:',
+      'Agent terminal was closed before the task finished.'
+    ].join('\n')
+  }]);
+  const rendered = context.__renderConversationsForTest('__solo__', [conversation], 'empty');
+
+  assert.equal(conversation.resumableNativeSessionId, sessionId);
+  assert.equal(conversation.capabilities.canContinue, true);
+  assert.equal(conversation.capabilities.canRetry, true);
+  assert.match(rendered, /data-continue-native-conversation-id="25"/);
+  assert.match(rendered, /data-retry-conversation-id="25"/);
+});
+
 test('full roadmap conversation history recovers continuation parent from the resume command session', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
