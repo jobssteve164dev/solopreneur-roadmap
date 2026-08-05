@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.419 - 2026-08-05
+
+### Added
+- add Google account login (241f45b)
+
+### Fixed
+- keep continue action after manual terminal stop (03d497b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.418 - 2026-08-03
 
 ### Changed
