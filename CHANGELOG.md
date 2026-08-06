@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.420 - 2026-08-06
+
+### Added
+- read optional governed JSON entries (b0e83b1)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.419 - 2026-08-05
 
 ### Added
