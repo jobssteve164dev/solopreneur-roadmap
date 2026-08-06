@@ -14,6 +14,7 @@
 8. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
 9. [中文品牌命名与定位分析](./product/chinese-naming-analysis.zh.md)：关于项目中文命名的多维度头脑风暴与品牌定位思考。
 10. [独立开发者生态与协作网络战略](./product/solo-developer-ecosystem-strategy.zh.md)：理解本地项目如何在用户授权下连接协作者、能力、反馈和商业机会，以及私密房间、公共共创与官网中继的长期边界。
+11. [CloudMCP JSON 记忆目标适配边界](./architecture/cloudmcp-json-memory-adapter.zh.md)：理解 SoloMap 作为可配置本地记忆目标时，与 CloudMCP 本地代理唯一写入口之间的职责边界。
 
 ## UI 与交互基线
 

@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -11,6 +12,31 @@ const toolPath = path.join(projectRoot, 'resources', 'tools', 'solomap-memory.cj
 function write(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, 'utf8');
+}
+
+function sortJson(value) {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJson(value[key])]));
+}
+
+function writeJsonMemory(filePath, overrides = {}) {
+  const entry = {
+    schemaVersion: 1,
+    id: 'mem_json_test',
+    scopeId: 'memory_scope:project:demo-app',
+    layer: 'stable',
+    kind: 'project_fact',
+    status: 'active',
+    title: 'JSON startup boundary',
+    content: '侧边栏启动必须等待统一链路完成，再查询历史。',
+    tags: ['sidebar', 'startup'],
+    provenance: { evidenceRefs: ['test:json-memory'] },
+    validity: { validFrom: null, validUntil: null },
+    ...overrides
+  };
+  const canonicalHash = `sha256:${crypto.createHash('sha256').update(JSON.stringify(sortJson(entry))).digest('hex')}`;
+  write(filePath, `${JSON.stringify({ ...entry, canonicalHash }, null, 2)}\n`);
 }
 
 function runTool(workspace, globalRoot, query, extra = []) {
@@ -81,6 +107,49 @@ test('memory retrieve supports source filters and rejects generic queries', () =
   const generic = runTool(workspace, globalRoot, 'https://example.com SoloMap 项目记忆系统');
   assert.deepEqual(generic.payload.results, []);
   assert.match(generic.payload.message, /具体功能/);
+});
+
+test('memory retrieve optionally reads valid CloudMCP JSON without changing Markdown defaults', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-json-'));
+  const workspace = path.join(root, 'demo-app');
+  const globalRoot = path.join(root, '.solomap-global');
+  const memoryRoot = path.join(globalRoot, 'memory');
+  fs.mkdirSync(workspace, { recursive: true });
+  write(path.join(memoryRoot, 'projects', 'demo-app.md'), '# Legacy\n\n侧边栏启动统一链路。\n');
+  writeJsonMemory(path.join(memoryRoot, 'entries', 'mem_json_test.json'));
+  writeJsonMemory(path.join(memoryRoot, 'entries', 'mem_expired.json'), {
+    id: 'mem_expired',
+    title: 'Expired startup boundary',
+    content: '侧边栏启动使用已经过期的旧链路。',
+    validity: { validFrom: null, validUntil: '2020-01-01T00:00:00.000Z' }
+  });
+  write(path.join(memoryRoot, 'entries', 'mem_invalid.json'), JSON.stringify({
+    schemaVersion: 1,
+    id: 'mem_invalid',
+    scopeId: 'memory_scope:project:demo-app',
+    layer: 'stable',
+    kind: 'project_fact',
+    status: 'active',
+    title: 'Invalid hash startup boundary',
+    content: '侧边栏启动不应读取损坏条目。',
+    canonicalHash: 'sha256:invalid'
+  }));
+  writeJsonMemory(path.join(memoryRoot, 'entries', 'mem_candidate.json'), {
+    id: 'mem_candidate',
+    layer: 'candidate',
+    kind: 'observation',
+    title: 'Candidate startup observation',
+    content: '侧边栏启动候选观察尚未验证。'
+  });
+
+  const output = runTool(workspace, globalRoot, '侧边栏启动统一链路');
+  const jsonResult = output.payload.results.find((result) => result.format === 'json');
+  assert.ok(jsonResult);
+  assert.equal(jsonResult.memoryId, 'mem_json_test');
+  assert.doesNotMatch(JSON.stringify(output), /Expired startup boundary|Invalid hash startup boundary|Candidate startup observation/);
+
+  const candidates = runTool(workspace, globalRoot, '侧边栏启动候选观察', ['--sources', 'inbox']);
+  assert.equal(candidates.payload.results[0].memoryId, 'mem_candidate');
 });
 
 test('memory route returns exact write targets, structure, and guardrails without mutating files', () => {

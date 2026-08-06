@@ -3,6 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const SOURCE_ORDER = ['profile', 'rules', 'project', 'decisions', 'patterns', 'domains', 'inbox', 'active'];
 const ROUTE_ALIASES = {
@@ -94,10 +95,15 @@ function queryTokens(value, projectRoot) {
 }
 
 function parseSources(value) {
-  if (!value) return new Set(SOURCE_ORDER);
+  if (!value) {
+    const defaults = new Set(SOURCE_ORDER);
+    defaults.explicit = false;
+    return defaults;
+  }
   const requested = new Set(String(value).split(',').map((item) => item.trim().toLowerCase()).filter(Boolean));
   const invalid = [...requested].filter((item) => !SOURCE_ORDER.includes(item));
   if (invalid.length) throw new Error(`Unknown memory source: ${invalid.join(', ')}`);
+  requested.explicit = true;
   return requested;
 }
 
@@ -107,6 +113,70 @@ function markdownFiles(directory) {
     .filter((entry) => entry.isFile() && entry.name.endsWith('.md') && !entry.name.startsWith('_'))
     .map((entry) => path.join(directory, entry.name))
     .sort();
+}
+
+function sortValue(value) {
+  if (Array.isArray(value)) return value.map(sortValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortValue(value[key])]));
+}
+
+function memoryHash(entry) {
+  const { canonicalHash, ...withoutHash } = entry || {};
+  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(sortValue(withoutHash))).digest('hex')}`;
+}
+
+function sourceForMemoryKind(kind) {
+  return ({
+    preference: 'profile',
+    rule: 'rules',
+    project_fact: 'project',
+    decision: 'decisions',
+    pattern: 'patterns',
+    domain: 'domains',
+    observation: 'inbox',
+    handoff: 'active'
+  })[kind] || 'inbox';
+}
+
+function jsonMemoryEntries(memoryRoot, currentProjectSlug, sources) {
+  const entriesRoot = path.join(memoryRoot, 'entries');
+  if (!fs.existsSync(entriesRoot)) return [];
+  const now = Date.now();
+  return fs.readdirSync(entriesRoot, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+    .map((entry) => path.join(entriesRoot, entry.name))
+    .sort()
+    .map((filePath) => {
+      try {
+        return { filePath, entry: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .filter(({ entry }) => entry.schemaVersion === 1
+      && entry.status === 'active'
+      && entry.id
+      && entry.canonicalHash === memoryHash(entry)
+      && (entry.layer !== 'candidate' || (sources.explicit && sources.has('inbox')))
+      && (!entry.validity?.validUntil || new Date(entry.validity.validUntil).getTime() > now))
+    .filter(({ entry }) => {
+      const source = sourceForMemoryKind(entry.kind);
+      if (!sources.has(source)) return false;
+      if (!String(entry.scopeId || '').startsWith('memory_scope:project:')) return true;
+      return String(entry.scopeId).slice('memory_scope:project:'.length).toLowerCase() === currentProjectSlug;
+    })
+    .map(({ filePath, entry }) => ({
+      source: sourceForMemoryKind(entry.kind),
+      filePath,
+      heading: entry.title || entry.id,
+      lineStart: 1,
+      lineEnd: 1,
+      text: [entry.title, entry.content, ...(entry.tags || []), ...(entry.provenance?.evidenceRefs || [])].filter(Boolean).join('\n'),
+      memoryId: entry.id,
+      format: 'json'
+    }));
 }
 
 function sourceFiles(memoryRoot, currentProjectSlug, sources) {
@@ -182,6 +252,7 @@ function scoreChunk(chunk, tokens, query) {
   if (chunk.source === 'project') score += 3;
   if (chunk.source === 'decisions' || chunk.source === 'patterns') score += 2;
   if (chunk.source === 'inbox') score -= 2;
+  if (chunk.format === 'json') score += 4;
   return { score, matchedTerms: unique(matchedTerms, 8) };
 }
 
@@ -202,8 +273,12 @@ function retrieveMemory(memoryRoot, projectRoot, query, sources, limit) {
       message: '请使用具体功能、边界、决策、错误或目标查询；URL、项目名和“记忆系统”等泛化词不会作为相关性依据。'
     };
   }
-  const candidates = sourceFiles(memoryRoot, projectSlug(projectRoot), sources)
-    .flatMap(({ source, file }) => splitMarkdown(file, source))
+  const currentProjectSlug = projectSlug(projectRoot);
+  const candidates = [
+    ...jsonMemoryEntries(memoryRoot, currentProjectSlug, sources),
+    ...sourceFiles(memoryRoot, currentProjectSlug, sources)
+      .flatMap(({ source, file }) => splitMarkdown(file, source))
+  ]
     .map((chunk) => ({ chunk, ...scoreChunk(chunk, tokens, query) }))
     .filter((entry) => entry.matchedTerms.length > 0 && entry.score >= 6)
     .sort((a, b) => b.score - a.score
@@ -226,7 +301,9 @@ function retrieveMemory(memoryRoot, projectRoot, query, sources, limit) {
       relevance: entry.score,
       matchedTerms: entry.matchedTerms,
       reason: `${entry.chunk.source} 中的“${entry.chunk.heading}”命中：${entry.matchedTerms.join('、')}`,
-      summary
+      summary,
+      memoryId: entry.chunk.memoryId || null,
+      format: entry.chunk.format || 'markdown'
     });
     if (results.length >= limit) break;
   }
