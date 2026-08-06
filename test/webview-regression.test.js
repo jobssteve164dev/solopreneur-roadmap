@@ -35,6 +35,16 @@ test('settings maintenance tasks launch outside the current project', () => {
   assert.match(sidebarProvider, /cwd: maintenanceRoot/);
 });
 
+test('extension activation refreshes bundled global memory tools', () => {
+  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const activationStart = extension.indexOf('export async function activate(context: vscode.ExtensionContext)');
+  const activationEnd = extension.indexOf('\nasync function ensureActionProject', activationStart);
+  assert.ok(activationStart >= 0 && activationEnd > activationStart);
+  const activationBody = extension.slice(activationStart, activationEnd);
+  assert.match(activationBody, /const activationProjectRoot = getSelectedProjectPath\(context\) \|\| getWorkspaceRoot\(\)/);
+  assert.match(activationBody, /ensureSolomapMemoryStore\(activationProjectRoot, getPersistedSettings\(context\)\.globalDataPath\)/);
+});
+
 test('time plan panel delegates an optional request through the structured time-plan contract', () => {
   const webview = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarWebview.ts'), 'utf8');
   assert.match(webview, /id="agent-time-planner-input"/);

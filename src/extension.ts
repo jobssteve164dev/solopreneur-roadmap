@@ -306,6 +306,14 @@ export async function activate(context: vscode.ExtensionContext) {
   persistedSettingsCacheWorkspaceRoot = '';
   pendingPersistedSettings = null;
   persistedSettingsWriteQueue = Promise.resolve();
+  const activationProjectRoot = getSelectedProjectPath(context) || getWorkspaceRoot();
+  if (activationProjectRoot) {
+    try {
+      ensureSolomapMemoryStore(activationProjectRoot, getPersistedSettings(context).globalDataPath);
+    } catch (error) {
+      console.error('SoloMap global runtime refresh failed during activation:', error);
+    }
+  }
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('solopreneur')) {
