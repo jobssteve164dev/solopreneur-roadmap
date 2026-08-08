@@ -184,13 +184,10 @@ import {
   clearProEntitlements,
   createPassportAuthNonce,
   flowModeFeature,
-  grantContainsFeature,
   hasProEntitlement as hasProEntitlementForSettings,
   normalizeProAccountStatus,
-  passportGrantOfflineGraceMs,
   PassportGrantCache,
   PassportVerifyResult,
-  readLocalProEntitlements,
   strategyPyramidFeature,
   verifyPassportGrant as verifyPassportGrantWithFetch
 } from './proAccount';
@@ -1296,10 +1293,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     // VS Code configuration is the durable, user-visible source for automation.
     // globalState remains a fallback for installations created before the setting existed.
     automationTasks: normalizeAutomationSettings(config.get('automationTasks') || saved.automationTasks || {}),
-    proEntitlements: {
-      ...(saved.proEntitlements || {}),
-      ...readLocalProEntitlements()
-    },
+    proEntitlements: saved.proEntitlements || {},
     proAccount: normalizeProAccountStatus(saved.proAccount),
     enabledEnhancements: {},
     telegramEnabled: saved.telegramEnabled ?? config.get('telegramEnabled') ?? false,
@@ -1449,7 +1443,7 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
     userId: String(result.userId || ''),
     entitlements: Array.isArray(result.entitlements) ? result.entitlements.map((item) => String(item || '')).filter(Boolean) : [],
     deviceLimit: Number(result.deviceLimit || 0) || undefined,
-    expiresAt: String(result.expiresAt || new Date(Date.now() + passportGrantOfflineGraceMs).toISOString()),
+    expiresAt: String(result.expiresAt || ''),
     checkedAt: new Date().toISOString()
   };
   await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
@@ -1468,12 +1462,9 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
 }
 
 async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
-  const settings = getPersistedSettings(context);
-  if (hasProEntitlement(settings, 'strategyPyramid')) {
-    return true;
-  }
   const cached = await readPassportGrant(context);
   if (!cached) {
+    await clearStoredProAccess(context);
     return false;
   }
   const verified = await verifyPassportGrant(cached.grant);
@@ -1481,24 +1472,14 @@ async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promi
     await writePassportGrant(context, verified, cached.grant);
     return true;
   }
-  if (verified.authenticated) {
-    await writePassportGrant(context, verified, cached.grant);
-    return false;
-  }
-  if (grantContainsFeature(cached)) {
-    return true;
-  }
-  await clearStoredProAccess(context);
+  await writePassportGrant(context, verified, cached.grant);
   return false;
 }
 
 async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<boolean> {
-  const settings = getPersistedSettings(context);
-  if (hasProEntitlement(settings, flowModeFeature)) {
-    return true;
-  }
   const cached = await readPassportGrant(context);
   if (!cached) {
+    await clearStoredProAccess(context);
     return false;
   }
   const verified = await verifyPassportGrant(cached.grant);
@@ -1506,22 +1487,11 @@ async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<bool
     await writePassportGrant(context, verified, cached.grant);
     return true;
   }
-  if (verified.authenticated) {
-    await writePassportGrant(context, verified, cached.grant);
-    return false;
-  }
-  if (grantContainsFeature(cached)) {
-    return true;
-  }
-  await clearStoredProAccess(context);
+  await writePassportGrant(context, verified, cached.grant);
   return false;
 }
 
 async function refreshProAccountStatus(context: vscode.ExtensionContext): Promise<void> {
-  if (Object.keys(readLocalProEntitlements()).length > 0) {
-    await broadcastSettings(context);
-    return;
-  }
   const cached = await readPassportGrant(context);
   if (!cached) {
     if (!hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
@@ -1530,15 +1500,7 @@ async function refreshProAccountStatus(context: vscode.ExtensionContext): Promis
     return;
   }
   const verified = await verifyPassportGrant(cached.grant);
-  if (verified.authenticated || verified.allowed) {
-    await writePassportGrant(context, verified, cached.grant);
-    return;
-  }
-  if (!grantContainsFeature(cached)) {
-    await clearStoredProAccess(context);
-    return;
-  }
-  await broadcastSettings(context);
+  await writePassportGrant(context, verified, cached.grant);
 }
 
 async function beginPassportAuthorization(): Promise<void> {
@@ -3229,11 +3191,7 @@ async function handleOpenStrategyPyramid(context: vscode.ExtensionContext): Prom
 }
 
 async function hasLocalStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
-  if (hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
-    return true;
-  }
-  const cached = await readPassportGrant(context);
-  return cached ? grantContainsFeature(cached) : false;
+  return hasStrategyPyramidAccess(context);
 }
 
 async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {

@@ -7,6 +7,26 @@ async function loadWebsiteWorker() {
   return import(new URL('website/src/worker.js', projectRootUrl));
 }
 
+const testProPlan = {
+  planId: 'solomap_pro_catalog_plan',
+  label: 'SoloMap Pro Catalog Plan',
+  labelZh: 'SoloMap Pro 目录计划',
+  interval: 'year',
+  currency: 'usd',
+  amountCents: 3100,
+  featureKeys: ['strategy_pyramid'],
+  metadata: { deviceLimit: 5 }
+};
+const testCatalogPayload = { ok: true, data: { plans: [testProPlan] } };
+const testCatalogUrl = `data:application/json,${encodeURIComponent(JSON.stringify(testCatalogPayload))}`;
+
+function testCatalogResponse() {
+  return new Response(JSON.stringify(testCatalogPayload), {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  });
+}
+
 test('website Pro CTA uses dedicated subscription page before authorization', async () => {
   const worker = await loadWebsiteWorker();
   const response = await worker.default.fetch(new Request('https://solomap.app/'), { SITE_ORIGIN: 'https://solomap.app' });
@@ -24,6 +44,7 @@ test('homepage install buttons render refreshed marketplace download counts', as
   const originalFetch = global.fetch;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery') {
       assert.equal(init.method, 'POST');
       return new Response(JSON.stringify({
@@ -65,14 +86,16 @@ test('Pro subscription page carries signed upgrade state into Passport start', a
     new Request(`https://solomap.app/pro?mode=callback&auth_nonce=${'a'.repeat(32)}&callback=${encodeURIComponent(callback)}`),
     {
       SITE_ORIGIN: 'https://solomap.app',
-      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret'
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+      SOLOMAP_PASSPORT_CATALOG_URL: testCatalogUrl
     }
   );
   const html = await response.text();
   const href = html.match(/href="([^"]*\/api\/passport\/start\?upgrade_state=[^"]+)"/)?.[1] || '';
   const start = await worker.default.fetch(new Request(new URL(href, 'https://solomap.app').toString()), {
     SITE_ORIGIN: 'https://solomap.app',
-    SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret'
+    SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+    SOLOMAP_PASSPORT_CATALOG_URL: testCatalogUrl
   });
   const location = new URL(start.headers.get('location') || '');
 
@@ -83,6 +106,8 @@ test('Pro subscription page carries signed upgrade state into Passport start', a
   assert.match(html, /Reliable progress history/);
   assert.match(html, /Goal-driven autopilot/);
   assert.match(html, /Already subscribed\? Get activation code/);
+  assert.match(html, /\$31\.00/);
+  assert.match(html, /"price":"31\.00"/);
   assert.match(html, /VS Code Marketplace/);
   assert.match(html, /Privacy \/ Local-first note/);
   assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP|Planner|Builder|Verifier|scoring|micro execution|exchange code/);
@@ -100,7 +125,8 @@ test('Chinese Pro subscription page stays inside the website frame and explains 
     new Request(`https://solomap.app/zh/pro?mode=device&auth_nonce=${'b'.repeat(32)}`),
     {
       SITE_ORIGIN: 'https://solomap.app',
-      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret'
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+      SOLOMAP_PASSPORT_CATALOG_URL: testCatalogUrl
     }
   );
   const html = await response.text();
@@ -214,6 +240,7 @@ test('Passport OIDC callback signs an extension grant after upstream access chec
   const originalFetch = global.fetch;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       assert.equal(init.method, 'POST');
       return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -271,6 +298,7 @@ test('Pro upgrade callback returns a nonce-bound exchange code', async () => {
   const originalFetch = global.fetch;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
@@ -350,6 +378,7 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
   let checkoutCalls = 0;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
@@ -405,7 +434,7 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
     assert.equal(response.status, 302);
     assert.equal(response.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_solomap_pro');
     assert.equal(checkoutPayload.product, 'solomap');
-    assert.equal(checkoutPayload.planId, 'solomap_pro_early_access_yearly');
+    assert.equal(checkoutPayload.planId, testProPlan.planId);
     assert.equal(checkoutPayload.customerEmail, 'free@solomap.app');
     assert.equal(checkoutPayload.userId, 'passport-user-free');
     assert.equal(checkoutPayload.metadata.deviceLimit, 5);
@@ -426,8 +455,11 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
 test('Passport device auth returns a browser login URL and verifies the pasted grant', async () => {
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;
+  let accessAllowed = true;
+  let accessChecks = 0;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       assert.equal(init.method, 'POST');
       return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -437,13 +469,15 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
       return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      accessChecks += 1;
       return new Response(JSON.stringify({
         ok: true,
         data: {
-          allowed: true,
+          allowed: accessAllowed,
+          reason: accessAllowed ? 'feature_granted' : 'not_entitled',
           email: 'pro@solomap.app',
           userId: 'passport-user',
-          entitlements: ['strategy_pyramid']
+          entitlements: accessAllowed ? ['strategy_pyramid'] : []
         }
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
@@ -496,6 +530,20 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     assert.equal(verifyBody.allowed, true);
     assert.deepEqual(verifyBody.entitlements, ['strategy_pyramid']);
     assert.equal(verifyBody.deviceLimit, 5);
+    accessAllowed = false;
+    const revoked = await worker.default.fetch(
+      new Request('https://solomap.app/api/passport/verify', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ grant: verifyBody.grant || grant })
+      }),
+      env
+    );
+    const revokedBody = await revoked.json();
+    assert.equal(revokedBody.authenticated, true);
+    assert.equal(revokedBody.allowed, false);
+    assert.deepEqual(revokedBody.entitlements, []);
+    assert.ok(accessChecks >= 3);
   } finally {
     global.fetch = originalFetch;
   }
@@ -506,6 +554,7 @@ test('paid website users can recover an activation code from the Pro page', asyn
   const originalFetch = global.fetch;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       assert.equal(init.method, 'POST');
       return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -582,6 +631,7 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
   let checkoutCalls = 0;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
@@ -634,7 +684,7 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
 
     assert.equal(response.status, 302);
     assert.equal(response.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_solomap_device');
-    assert.equal(checkoutPayload.planId, 'solomap_pro_early_access_yearly');
+    assert.equal(checkoutPayload.planId, testProPlan.planId);
     assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/checkout\/success\?/);
     assert.ok(new URL(checkoutPayload.successUrl).searchParams.get('state'));
     const pending = await worker.default.fetch(new Request(checkoutPayload.successUrl), env);
@@ -646,7 +696,7 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
   }
 });
 
-test('Passport dev grant redirects to VS Code callback and verifies without exposing product secret', async () => {
+test('Passport dev grant flag cannot bypass Passport OIDC', async () => {
   const worker = await loadWebsiteWorker();
   const env = {
     SITE_ORIGIN: 'https://solomap.app',
@@ -658,28 +708,13 @@ test('Passport dev grant redirects to VS Code callback and verifies without expo
     new Request(`https://solomap.app/api/passport/start?callback=${encodeURIComponent(callback)}&email=pro%40solomap.app`),
     env
   );
-  const location = start.headers.get('location') || '';
-  const grant = new URL(location).searchParams.get('grant') || '';
+  const location = new URL(start.headers.get('location') || '');
 
   assert.equal(start.status, 302);
-  assert.match(location, /^vscode:\/\/SZLK\.solopreneur-roadmap\/passport\/callback/);
-  assert.ok(grant);
-  assert.doesNotMatch(location, /test-product-secret/);
-
-  const verified = await worker.default.fetch(
-    new Request('https://solomap.app/api/passport/verify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ product: 'solomap', feature: 'strategy_pyramid', grant })
-    }),
-    env
-  );
-  const body = await verified.json();
-
-  assert.equal(verified.status, 200);
-  assert.equal(body.allowed, true);
-  assert.equal(body.email, 'pro@solomap.app');
-  assert.ok(body.entitlements.includes('strategy_pyramid'));
+  assert.equal(location.origin, 'https://passport.szlk.ai');
+  assert.equal(location.pathname, '/api/oidc/authorize');
+  assert.equal(location.searchParams.get('client_id'), 'solomap-vscode');
+  assert.equal(location.searchParams.has('grant'), false);
 });
 
 test('GEO language redirection and Cookie preferences work correctly', async () => {
@@ -835,7 +870,11 @@ test('website headless auth renders product-owned forms and creates a protected 
   const env = { SITE_ORIGIN: 'https://solomap.app', SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret' };
   const originalFetch = global.fetch;
   global.fetch = async (input, init = {}) => {
-    assert.equal(String(input), 'https://passport.szlk.ai/api/v1/auth/login');
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({ ok: true, data: { allowed: false, reason: 'not_entitled', email: 'developer@solomap.app', userId: 'user-1', entitlements: [] } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    assert.equal(url, 'https://passport.szlk.ai/api/v1/auth/login');
     assert.equal(init.headers['x-szlk-product'], 'solomap');
     assert.equal(init.headers['x-szlk-secret'], 'test-product-secret');
     assert.deepEqual(JSON.parse(init.body), { email: 'developer@solomap.app', password: 'correct-password' });

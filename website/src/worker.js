@@ -52,11 +52,10 @@ const PASSPORT_OIDC_AUTHORIZE_URL = `${PASSPORT_ISSUER}/api/oidc/authorize`;
 const PASSPORT_OIDC_TOKEN_URL = `${PASSPORT_ISSUER}/api/oidc/token`;
 const PASSPORT_OIDC_USERINFO_URL = `${PASSPORT_ISSUER}/api/oidc/userinfo`;
 const PASSPORT_ACCESS_CHECK_URL = `${PASSPORT_ISSUER}/api/v1/entitlements/access-check`;
+const PASSPORT_BILLING_CATALOG_URL = `${PASSPORT_ISSUER}/api/v1/billing/catalog`;
 const PASSPORT_CHECKOUT_LINK_URL = `${PASSPORT_ISSUER}/api/v1/billing/checkout-link`;
 const PASSPORT_ACCOUNT_URL = `${PASSPORT_ISSUER}/passport/account`;
 const SOLOMAP_OIDC_CLIENT_ID = "solomap-vscode";
-const SOLOMAP_PRO_PLAN_ID = "solomap_pro_early_access_yearly";
-const SOLOMAP_PRO_DEVICE_LIMIT = 5;
 const GOOGLE_LOGIN_STATE_COOKIE = "__Host-solomap_google_oauth";
 const LOCAL_GOOGLE_LOGIN_STATE_COOKIE = "solomap_google_oauth";
 const SITEMAP_LASTMOD = "2026-08-02";
@@ -182,7 +181,6 @@ const content = {
         "Early access roadmap input"
       ],
       label: "Pro Early Access",
-      price: "$29/year",
       copy: "Get early access to the strategy cockpit and help shape the Pro roadmap. The Free core workflow stays available.",
       cta: "Join Pro Early Access"
     },
@@ -254,8 +252,8 @@ const content = {
       },
       proEntitlements: {
         title: "Your Pro Entitlements",
-        desc: "Active plan: Pro Early Access ($29/yr value, locked-in forever).",
-        limitMsg: "Active on 1 / 5 personal devices.",
+        desc: "Your current Pro plan and access are confirmed by your SoloMap account.",
+        limitMsg: "Your device allowance follows the current subscription plan.",
         recoverBtn: "Retrieve activation code",
         manageBtn: "Manage account in Passport"
       }
@@ -353,7 +351,6 @@ const content = {
         "Early Access 路线图共创"
       ],
       label: "Pro Early Access",
-      price: "$29/年",
       copy: "提前使用战略驾驶舱，并参与塑造 Pro 路线图。Free 核心工作流会继续保持可用。",
       cta: "加入 Pro Early Access"
     },
@@ -425,8 +422,8 @@ const content = {
       },
       proEntitlements: {
         title: "您的 Pro 权益管理",
-        desc: "当前计划：Pro Early Access（锁定年付首期 $29 优惠）。",
-        limitMsg: "已激活 1 / 5 台个人设备。",
+        desc: "当前 Pro 计划与使用权以 SoloMap 账户确认结果为准。",
+        limitMsg: "设备额度以当前订阅计划为准。",
         recoverBtn: "取回激活码",
         manageBtn: "前往 Passport 账户中心"
       }
@@ -678,13 +675,41 @@ function getDeviceAuthorizeUrl(requestUrl, deviceCode) {
   return url.toString();
 }
 
-function getProPlanId(env) {
-  return String(env.SOLOMAP_PRO_PLAN_ID || SOLOMAP_PRO_PLAN_ID);
+async function getPassportProPlan(env) {
+  if (!env.SOLOMAP_PASSPORT_PRODUCT_SECRET) throw new Error("missing_product_secret");
+  const response = await fetch(env.SOLOMAP_PASSPORT_CATALOG_URL || PASSPORT_BILLING_CATALOG_URL, {
+    headers: {
+      "accept": "application/json",
+      "x-szlk-product": SOLOMAP_PRODUCT,
+      "x-szlk-secret": env.SOLOMAP_PASSPORT_PRODUCT_SECRET
+    }
+  });
+  const body = await response.json().catch(() => ({}));
+  const data = body && typeof body === "object" && body.ok === true && body.data ? body.data : body;
+  const matches = Array.isArray(data?.plans) ? data.plans.filter((plan) =>
+    plan?.interval === "year"
+    && Array.isArray(plan?.featureKeys)
+    && plan.featureKeys.includes(STRATEGY_PYRAMID_FEATURE)
+  ) : [];
+  if (!response.ok || matches.length !== 1) throw new Error("passport_pro_plan_unavailable");
+  const plan = matches[0];
+  if (!plan.planId || !plan.currency || !Number.isFinite(Number(plan.amountCents))) {
+    throw new Error("passport_pro_plan_invalid");
+  }
+  return plan;
 }
 
-function getProDeviceLimit(env) {
-  const value = Number(env.SOLOMAP_PRO_DEVICE_LIMIT || SOLOMAP_PRO_DEVICE_LIMIT);
-  return Number.isFinite(value) && value >= 3 ? Math.floor(value) : SOLOMAP_PRO_DEVICE_LIMIT;
+function getProDeviceLimit(plan) {
+  const value = Number(plan?.metadata?.deviceLimit || plan?.metadata?.maxDevices || 0);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function formatProPrice(plan, locale) {
+  if (!plan) return locale === "zh" ? "暂不可订阅" : "Temporarily unavailable";
+  return new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US", {
+    style: "currency",
+    currency: String(plan.currency).toUpperCase()
+  }).format(Number(plan.amountCents) / 100);
 }
 
 function getPassportAccountUrl(env) {
@@ -811,15 +836,19 @@ async function issueSoloMapGrant(env, email = "pro-test@solomap.app", options = 
   if (!env.SOLOMAP_PASSPORT_PRODUCT_SECRET) {
     throw new Error("missing_product_secret");
   }
+  const entitlements = Object.prototype.hasOwnProperty.call(options, "entitlements") && Array.isArray(options.entitlements)
+    ? options.entitlements
+    : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"];
+  const plan = entitlements.includes(STRATEGY_PYRAMID_FEATURE)
+    ? await getPassportProPlan(env)
+    : null;
   const payload = {
     product: SOLOMAP_PRODUCT,
     feature: STRATEGY_PYRAMID_FEATURE,
     email,
     userId: options.userId || `passport:${email}`,
-    entitlements: Object.prototype.hasOwnProperty.call(options, "entitlements") && Array.isArray(options.entitlements)
-      ? options.entitlements
-      : [STRATEGY_PYRAMID_FEATURE, "solomap_pro"],
-    deviceLimit: getProDeviceLimit(env),
+    entitlements,
+    deviceLimit: getProDeviceLimit(plan),
     issuedAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString()
   };
@@ -861,7 +890,7 @@ async function verifySoloMapExchangeCode(env, code, expected = {}) {
   if (payload.mode === "device" && payload.deviceCode && String(expected.deviceCode || "") !== String(payload.deviceCode || "")) {
     return { allowed: false, reason: "device_mismatch" };
   }
-  const verified = await verifySignedGrant(env, String(payload.grant || ""));
+  const verified = await verifySignedGrantWithLiveAccess(env, String(payload.grant || ""));
   return {
     ...verified,
     grant: verified.allowed ? String(payload.grant || "") : ""
@@ -934,8 +963,29 @@ async function verifySignedGrant(env, grant) {
     email: String(payload.email || ""),
     userId: String(payload.userId || ""),
     entitlements,
-    deviceLimit: Number(payload.deviceLimit || payload.maxDevices || SOLOMAP_PRO_DEVICE_LIMIT),
+    deviceLimit: Number(payload.deviceLimit || payload.maxDevices || 0),
     expiresAt: String(payload.expiresAt || "")
+  };
+}
+
+async function verifySignedGrantWithLiveAccess(env, grant) {
+  const signed = await verifySignedGrant(env, grant);
+  if (!signed.authenticated || !signed.entitlements?.includes(STRATEGY_PYRAMID_FEATURE)) {
+    return signed;
+  }
+  const access = await resolvePassportAccessForUser(env, {
+    email: signed.email,
+    userId: signed.userId
+  });
+  return {
+    authenticated: true,
+    allowed: Boolean(access.allowed),
+    reason: String(access.reason || (access.allowed ? "allowed" : "access_denied")),
+    email: String(access.email || signed.email || ""),
+    userId: String(access.userId || signed.userId || ""),
+    entitlements: access.allowed ? signed.entitlements : [],
+    deviceLimit: Number(access.deviceLimit || signed.deviceLimit || 0),
+    expiresAt: String(signed.expiresAt || "")
   };
 }
 
@@ -949,7 +999,7 @@ async function resolveCollaborationAccountCreator(request, env) {
   const authorization = String(request.headers.get("authorization") || "");
   const grant = authorization.replace(/^Bearer\s+/i, "");
   if (!grant || grant === authorization) return null;
-  let verified = await verifySignedGrant(env, grant);
+  let verified = await verifySignedGrantWithLiveAccess(env, grant);
   if (!verified.authenticated && !verified.allowed) {
     const passportResult = await verifyGrantWithPassport(env, grant);
     if (passportResult) verified = passportResult;
@@ -1012,7 +1062,7 @@ async function verifyGrantWithPassport(env, grant) {
     email: String(data.email || ""),
     userId: String(data.userId || data.user_id || ""),
     entitlements: Array.isArray(data.entitlements) ? data.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
-    deviceLimit: Number(data.deviceLimit || data.device_limit || data.maxDevices || data.max_devices || SOLOMAP_PRO_DEVICE_LIMIT),
+    deviceLimit: Number(data.deviceLimit || data.device_limit || data.maxDevices || data.max_devices || 0),
     expiresAt: String(data.expiresAt || data.expires_at || "")
   };
 }
@@ -1050,13 +1100,14 @@ async function checkPassportAccessForUser(env, userinfo) {
         entitlements: []
       };
     }
+    const plan = await getPassportProPlan(env).catch(() => null);
     return {
       allowed: Boolean(data.allowed),
       reason: String(data.reason || ""),
       email: String(data.email || email),
       userId: String(data.userId || data.user_id || userId),
       entitlements: Array.isArray(data.entitlements) ? data.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
-      deviceLimit: Number(data.deviceLimit || data.device_limit || data.maxDevices || data.max_devices || getProDeviceLimit(env))
+      deviceLimit: Number(data.deviceLimit || data.device_limit || data.maxDevices || data.max_devices || getProDeviceLimit(plan))
     };
   }
   if (env.SOLOMAP_PASSPORT_REQUIRE_UPSTREAM === "1") {
@@ -1068,7 +1119,7 @@ async function checkPassportAccessForUser(env, userinfo) {
     email,
     userId,
     entitlements: [],
-    deviceLimit: getProDeviceLimit(env)
+    deviceLimit: 0
   };
 }
 
@@ -1083,7 +1134,7 @@ async function resolvePassportAccessForUser(env, userinfo) {
       email: String(userinfo.email || ""),
       userId: String(userinfo.userId || userinfo.sub || ""),
       entitlements: [],
-      deviceLimit: getProDeviceLimit(env)
+      deviceLimit: 0
     };
   }
 }
@@ -1170,7 +1221,7 @@ function buildPassportUpgradeUnavailablePage() {
 function buildDeviceGrantPage(grant, context = {}) {
   const escapedGrant = escapeHtml(grant);
   const email = String(context.email || "").trim();
-  const deviceLimit = Number(context.deviceLimit || SOLOMAP_PRO_DEVICE_LIMIT);
+  const deviceLimit = Number(context.deviceLimit || 0);
   const accountUrl = escapeHtml(String(context.accountUrl || PASSPORT_ACCOUNT_URL));
   const activationCopy = deviceLimit >= 3
     ? `你的 SoloMap Pro 可在最多 ${deviceLimit} 台个人设备上激活。`
@@ -1213,7 +1264,7 @@ function buildDeviceGrantPage(grant, context = {}) {
 </html>`;
 }
 
-function getProPageCopy(locale) {
+function getProPageCopy(locale, deviceLimit = 0) {
   if (locale === "en") {
     return {
       metaTitle: "SoloMap Pro - Strategy cockpit for solo founders",
@@ -1231,8 +1282,6 @@ function getProPageCopy(locale) {
         ["Build a stronger portfolio", "Connect product work, distribution, learning, skill leverage, and revenue into one operating view."]
       ],
       offerLabel: "Early Access",
-      price: "$29",
-      priceSuffix: "/ year",
       offerCopy: "Lock in the first Pro price while the one-person-company cockpit is shaped with early users.",
       offerNote: "Free keeps project movement available. Pro unlocks the business-level view for serious solo builders.",
       previewTitle: "What Pro unlocks now",
@@ -1275,7 +1324,7 @@ function getProPageCopy(locale) {
       faqItems: [
         ["Is my code sent to any servers if I subscribe to Pro?", "No. SoloMap Pro remains fully local-first. Your code, project memory, and strategic cockpit configurations never leave your machine."],
         ["How do I activate the Pro features after payment?", "After payment, SoloMap will guide you back to VS Code. If you use another machine later, open this page and get a fresh activation code from the same account."],
-        ["Can I use SoloMap Pro on multiple devices?", "Yes. You can authorize up to 5 devices (like your personal laptop and work desktop) with a single subscription."],
+        ["Can I use SoloMap Pro on multiple devices?", deviceLimit > 0 ? `Yes. Your current plan supports up to ${deviceLimit} personal devices.` : "Yes. The current device allowance is shown from your subscription plan when checkout is available."],
         ["What is the refund policy?", "We offer a 14-day refund policy. If SoloMap Pro doesn't help you build and manage your solo projects better, just request a refund and we'll issue it, no questions asked."]
       ]
     };
@@ -1296,8 +1345,6 @@ function getProPageCopy(locale) {
       ["经营复利组合", "把产品、分发、学习、能力杠杆和收入结构放到同一个判断面里。"]
     ],
     offerLabel: "Early Access",
-    price: "$29",
-    priceSuffix: "/ 年",
     offerCopy: "用首批价格解锁一人公司驾驶舱，并参与塑造独道 (SoloMap) Pro 的后续能力。",
     offerNote: "Free 保留项目推进主路径。Pro 解锁面向认真独立开发者的经营判断。",
     previewTitle: "现在 Pro 解锁什么",
@@ -1340,7 +1387,7 @@ function getProPageCopy(locale) {
     faqItems: [
       ["订阅 Pro 后，我的代码会被上传到服务器吗？", "不会。独道 (SoloMap) Pro 依然遵循绝对的本地优先原则。你的代码、项目记忆和战略驾驶舱数据仅保留在你的本地，绝不会上传。"],
       ["付款后如何激活 Pro 权益？", "付款成功后，网页会引导你回到 VS Code 完成激活。之后换电脑时，也可以回到这个页面，用同一个账户取回新的激活码。"],
-      ["我可以在多台设备上使用同一个订阅吗？", "可以。单个订阅支持激活最多 5 台你个人拥有的工作设备（如日常笔记本和工作台式机）。"],
+      ["我可以在多台设备上使用同一个订阅吗？", deviceLimit > 0 ? `可以。当前计划支持最多 ${deviceLimit} 台个人设备。` : "可以。结算可用时，页面会按当前订阅计划显示设备额度。"],
       ["有退款保证吗？", "有的。我们提供 14 天退款承诺。如果独道 (SoloMap) Pro 没有达到你的预期，你可以随时申请全额退款。"]
     ]
   };
@@ -1387,7 +1434,13 @@ async function buildProSubscriptionPage(request, env) {
   const origin = env.SITE_ORIGIN || url.origin;
   const locale = url.pathname.startsWith("/zh") ? "zh" : "en";
   const t = content[locale];
-  const copy = getProPageCopy(locale);
+  const proPlan = await getPassportProPlan(env).catch((error) => {
+    console.error("Unable to load SoloMap Pro catalog", error);
+    return null;
+  });
+  const copy = getProPageCopy(locale, getProDeviceLimit(proPlan));
+  const planPrice = formatProPrice(proPlan, locale);
+  const priceSuffix = proPlan ? (locale === "zh" ? "/ 年" : "/ year") : "";
   const pagePath = locale === "zh" ? "/zh/pro" : "/pro";
   const alternatePath = locale === "zh" ? "/pro" : "/zh/pro";
   const mode = normalizeAuthMode(url.searchParams.get("mode"));
@@ -1421,7 +1474,7 @@ async function buildProSubscriptionPage(request, env) {
     pagePath,
     alternatePath
   )}
-  ${buildProStructuredData(copy, origin, pagePath)}
+  ${buildProStructuredData(copy, origin, pagePath, proPlan)}
   ${buildStyles()}
 </head>
 <body>
@@ -1444,7 +1497,7 @@ async function buildProSubscriptionPage(request, env) {
         </div>
         <aside class="pro-offer" aria-label="${escapeHtml(copy.offerLabel)}">
           <span class="pro-offer-label">${escapeHtml(copy.offerLabel)}</span>
-          <div class="pro-price">${escapeHtml(copy.price)} <span>${escapeHtml(copy.priceSuffix)}</span></div>
+          <div class="pro-price">${escapeHtml(planPrice)} <span>${escapeHtml(priceSuffix)}</span></div>
           <p>${escapeHtml(copy.offerCopy)}</p>
           <a class="button primary" href="${escapeHtml(ctaHref)}">${escapeHtml(copy.primaryCta)}</a>
           <a class="button ghost" href="${escapeHtml(recoverHref)}">${escapeHtml(copy.recoverCta)}</a>
@@ -1567,6 +1620,13 @@ async function createPassportCheckoutRedirect(request, env, state, userinfo, acc
   const cancelUrl = `${requestUrl.origin}/#pro`;
   const customerEmail = String(access.email || userinfo.email || "").trim();
   const userId = String(access.userId || userinfo.sub || userinfo.userId || "").trim();
+  let proPlan;
+  try {
+    proPlan = await getPassportProPlan(env);
+  } catch (error) {
+    console.error("Unable to load SoloMap Pro checkout plan", error);
+    return htmlResponse(buildPassportUpgradeUnavailablePage(), 503);
+  }
   const response = await fetch(checkoutUrl, {
     method: "POST",
     headers: {
@@ -1576,7 +1636,7 @@ async function createPassportCheckoutRedirect(request, env, state, userinfo, acc
     },
     body: JSON.stringify({
       product: SOLOMAP_PRODUCT,
-      planId: getProPlanId(env),
+      planId: proPlan.planId,
       successUrl,
       cancelUrl,
       customerEmail,
@@ -1585,8 +1645,8 @@ async function createPassportCheckoutRedirect(request, env, state, userinfo, acc
       metadata: {
         feature: STRATEGY_PYRAMID_FEATURE,
         source: "solomap_pro_upgrade",
-        deviceLimit: getProDeviceLimit(env),
-        maxDevices: getProDeviceLimit(env)
+        deviceLimit: getProDeviceLimit(proPlan),
+        maxDevices: getProDeviceLimit(proPlan)
       }
     })
   });
@@ -1622,7 +1682,7 @@ async function handlePassportCheckoutSuccess(request, env) {
   if (state.mode === "device") {
     return htmlResponse(buildDeviceGrantPage(exchangeCode, {
       email: access.email || userinfo.email,
-      deviceLimit: getProDeviceLimit(env),
+      deviceLimit: access.deviceLimit || 0,
       accountUrl: getPassportAccountUrl(env)
     }), 200);
   }
@@ -1705,12 +1765,6 @@ async function handlePassportStart(request, env) {
   const callback = String(url.searchParams.get("callback") || "");
   if (callback && !isAllowedVsCodeCallback(callback)) {
     return jsonResponse({ ok: false, reason: "invalid_callback" }, 400);
-  }
-  if (callback && env.SOLOMAP_PASSPORT_DEV_GRANTS === "1") {
-    const grant = await issueSoloMapGrant(env, String(url.searchParams.get("email") || "pro-test@solomap.app"));
-    const callbackUrl = new URL(callback);
-    callbackUrl.searchParams.set("grant", grant);
-    return Response.redirect(callbackUrl.toString(), 302);
   }
   if (callback) {
     return buildPassportAuthorizeRedirect(request, env, { mode: "callback", callback });
@@ -1860,7 +1914,7 @@ async function handlePassportOidcCallback(request, env) {
   if (state.mode === "device") {
     return htmlResponse(buildDeviceGrantPage(exchangeCode, {
       email: access.email || userinfo.email,
-      deviceLimit: getProDeviceLimit(env),
+      deviceLimit: access.deviceLimit || 0,
       accountUrl: getPassportAccountUrl(env)
     }), 200);
   }
@@ -1899,7 +1953,7 @@ async function handlePassportDeviceVerify(request, env) {
     callback: payload.callback || ""
   });
   if (accountExchange) return jsonResponse(accountExchange);
-  return jsonResponse(await verifySignedGrant(env, grant));
+  return jsonResponse(await verifySignedGrantWithLiveAccess(env, grant));
 }
 
 async function handlePassportVerify(request, env) {
@@ -1932,7 +1986,7 @@ async function handlePassportVerify(request, env) {
     callback: payload.callback || ""
   });
   if (accountExchange) return jsonResponse(accountExchange);
-  const signedGrant = await verifySignedGrant(env, grant);
+  const signedGrant = await verifySignedGrantWithLiveAccess(env, grant);
   if (signedGrant.authenticated) return jsonResponse(signedGrant);
   const passportResult = await verifyGrantWithPassport(env, grant);
   if (passportResult) {
@@ -3645,7 +3699,7 @@ function buildStructuredData(t, origin, pagePath) {
   <script type="application/ld+json">${JSON.stringify(website)}</script>`;
 }
 
-function buildProStructuredData(copy, origin, pagePath) {
+function buildProStructuredData(copy, origin, pagePath, proPlan) {
   const pageUrl = absoluteUrl(pagePath, origin);
   const product = {
     "@context": "https://schema.org",
@@ -3658,13 +3712,13 @@ function buildProStructuredData(copy, origin, pagePath) {
     },
     url: pageUrl,
     image: SCREENSHOT_URL,
-    offers: {
+    ...(proPlan ? { offers: {
       "@type": "Offer",
-      price: "29",
-      priceCurrency: "USD",
+      price: (Number(proPlan.amountCents) / 100).toFixed(2),
+      priceCurrency: String(proPlan.currency).toUpperCase(),
       availability: "https://schema.org/InStock",
       url: pageUrl
-    }
+    } } : {})
   };
   const webpage = {
     "@context": "https://schema.org",
@@ -4209,7 +4263,7 @@ function resetStatsCacheForTest() {
   updateStatsPromise = null;
 }
 
-function buildPage(locale, origin, stats) {
+function buildPage(locale, origin, stats, proPlan = null) {
   const t = content[locale];
   return `<!doctype html>
 <html lang="${t.lang}">
@@ -4311,7 +4365,7 @@ function buildPage(locale, origin, stats) {
         </div>
         <aside class="price" aria-label="${escapeHtml(t.pro.label)}">
           <span>${escapeHtml(t.pro.label)}</span>
-          <strong>${escapeHtml(t.pro.price)}</strong>
+          <strong>${escapeHtml(formatProPrice(proPlan, locale))}</strong>
           <p>${escapeHtml(t.pro.copy)}</p>
           <div class="cta-row">
             <a class="button primary" href="${t.pathPrefix}/pro">${escapeHtml(t.pro.cta)}</a>
@@ -5818,8 +5872,16 @@ Sitemap: ${origin}/sitemap.xml
       return htmlResponse(buildNotFoundPage(route.locale, origin, route.pathname), 404, extraHeaders);
     }
 
-    const stats = await getStats(ctx);
-    return htmlResponse(buildPage(route.locale, origin, stats), route.status, extraHeaders);
+    const [stats, proPlan] = await Promise.all([
+      getStats(ctx),
+      env.SOLOMAP_PASSPORT_PRODUCT_SECRET
+        ? getPassportProPlan(env).catch((error) => {
+          console.error("Unable to load SoloMap Pro catalog for homepage", error);
+          return null;
+        })
+        : Promise.resolve(null)
+    ]);
+    return htmlResponse(buildPage(route.locale, origin, stats, proPlan), route.status, extraHeaders);
   }
 };
 

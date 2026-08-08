@@ -49,6 +49,7 @@
 - Solopreneur intentionally keeps project data inside the project folder under `.solopreneur/` so Git can manage it and the user can move between machines/IDEs without a Solopreneur backend. The extension must generate `.solopreneur/README.md` explaining the directory contents and deletion risk.
 - Local Agent CLI discovery must treat Antigravity as the `agy` CLI first, while still supporting `antigravity`, `antigravity-cli`, `codex`, and `codex-cli`. Roadmap step composer runs are non-interactive and must exit so SoloMap can mark the conversation finished: `agy` / `antigravity-cli` use `--print --add-dir=<workspace> <prompt>` without a SoloMap-imposed print timeout.
 - Antigravity/agy print mode can emit progress text while still returning a zero shell exit code. Solopreneur must not treat exit code alone as successful progress; a run needs project file changes or a completion decision before it can advance out of failure handling.
+- SoloMap Pro 的计划 ID、金额、币种、周期、设备额度与付费权益只由 SZLKPassport 目录和权益接口维护。官网按请求读取目录后展示并创建 Checkout；扩展只接受经官网向 Passport 实时校验后的授权结果，不再接受环境变量、本地 Pro 标记或校验失败时的离线付费旁路。
 
 ## CLI Orchestration Contract
 

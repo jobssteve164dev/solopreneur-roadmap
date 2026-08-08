@@ -3372,8 +3372,8 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     { id: '1', title: 'Failed step', status: 'Failed', stage: '产品与 MVP', dependencies: '' },
     { id: '2', title: 'Running step', status: 'Running', stage: '产品与 MVP', dependencies: '' }
   ]).title, 'Running step');
-  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
-  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { pro: true } }, 'strategyPyramid'), true);
+  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), true);
+  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { pro: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), true);
   assert.equal(sidebarModule.__hasProEntitlement({
     proEntitlements: { strategy_pyramid: true },
     proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }
@@ -4180,7 +4180,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   assert.match(proHtml, /data-project-index="0"/);
   assert.doesNotMatch(proHtml, /查看项目|data-open-project|解锁战略金字塔|升级 Pro|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid|snapshot|CSV|JSON|内部|配置|组件目的|来自 SoloMap 已确认|今日安排第|今天先跑/);
   assert.doesNotThrow(() => new vm.Script(extractLastScript(proHtml)));
-  assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategyPyramid'), true);
+  assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), true);
 });
 
 test('strategy pyramid snapshot aggregates portfolio signals and writes a reusable global view', () => {
@@ -5622,7 +5622,7 @@ test('agent command builder uses non-interactive task runs and native continuati
     }),
     '019eec98-c441-7a40-bc15-eaa1fb1f10dc'
   );
-  assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true } }, 'strategy_pyramid'), true);
+  assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategy_pyramid'), true);
   assert.equal(extensionModule.__hasProEntitlement({
     proEntitlements: { strategy_pyramid: true },
     proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }
