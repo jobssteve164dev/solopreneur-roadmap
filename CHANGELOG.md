@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.423 - 2026-08-08
+
+### Added
+- enforce Passport truth for SoloMap Pro (d5a71e1)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.422 - 2026-08-06
 
 ### Changed
