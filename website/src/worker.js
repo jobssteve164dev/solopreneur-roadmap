@@ -1,13 +1,13 @@
 import {
   assertSameOrigin,
+  bindPassportProductUser,
   clearSessionCookie,
   createSessionCookie,
-  linkPassportProductUser,
   passportHeadlessRequest,
   readSession,
-  resolvePassportProductUserId,
   safeReturnTo
 } from "./headlessAuth.js";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import {
   alternateLegalPath,
   findLegalRoute,
@@ -51,6 +51,7 @@ const PASSPORT_ISSUER = "https://passport.szlk.ai";
 const PASSPORT_OIDC_AUTHORIZE_URL = `${PASSPORT_ISSUER}/api/oidc/authorize`;
 const PASSPORT_OIDC_TOKEN_URL = `${PASSPORT_ISSUER}/api/oidc/token`;
 const PASSPORT_OIDC_USERINFO_URL = `${PASSPORT_ISSUER}/api/oidc/userinfo`;
+const PASSPORT_OIDC_JWKS_URL = `${PASSPORT_ISSUER}/api/oidc/jwks`;
 const PASSPORT_ACCESS_CHECK_URL = `${PASSPORT_ISSUER}/api/v1/entitlements/access-check`;
 const PASSPORT_BILLING_CATALOG_URL = `${PASSPORT_ISSUER}/api/v1/billing/catalog`;
 const PASSPORT_CHECKOUT_LINK_URL = `${PASSPORT_ISSUER}/api/v1/billing/checkout-link`;
@@ -1852,6 +1853,28 @@ async function handlePassportOidcCallback(request, env) {
     return htmlResponse(buildPassportFallbackPage(""), 401);
   }
   const token = await tokenResponse.json();
+  let idTokenClaims;
+  try {
+    const idToken = String(token.id_token || "");
+    if (!idToken || !state.oidcNonce) throw new Error("Passport OIDC identity token is incomplete");
+    const issuer = new URL(env.SOLOMAP_PASSPORT_AUTH_URL || PASSPORT_OIDC_AUTHORIZE_URL).origin;
+    const verified = await jwtVerify(
+      idToken,
+      createRemoteJWKSet(new URL(env.SOLOMAP_PASSPORT_JWKS_URL || PASSPORT_OIDC_JWKS_URL)),
+      {
+        issuer,
+        audience: env.SOLOMAP_PASSPORT_OIDC_CLIENT_ID || SOLOMAP_OIDC_CLIENT_ID
+      }
+    );
+    if (verified.payload.nonce !== state.oidcNonce) {
+      throw new Error("Passport OIDC nonce does not match");
+    }
+    idTokenClaims = verified.payload;
+  } catch (error) {
+    console.error("Passport OIDC ID token verification failed", error);
+    if (state.mode === "web") return googleLoginFailure(request, state, "google_identity_invalid");
+    return htmlResponse(buildPassportFallbackPage(""), 401);
+  }
   let userinfoResponse;
   try {
     userinfoResponse = await fetch(env.SOLOMAP_PASSPORT_USERINFO_URL || PASSPORT_OIDC_USERINFO_URL, {
@@ -1867,6 +1890,15 @@ async function handlePassportOidcCallback(request, env) {
     return htmlResponse(buildPassportFallbackPage(""), 401);
   }
   const userinfo = await userinfoResponse.json();
+  if (
+    String(userinfo.sub || "") !== String(idTokenClaims.sub || "")
+    || String(userinfo.email || "").trim().toLowerCase() !== String(idTokenClaims.email || "").trim().toLowerCase()
+    || userinfo.email_verified !== true
+    || idTokenClaims.email_verified !== true
+  ) {
+    if (state.mode === "web") return googleLoginFailure(request, state, "google_identity_invalid");
+    return htmlResponse(buildPassportFallbackPage(""), 401);
+  }
   if (state.mode === "web") {
     const email = String(userinfo.email || "").trim().toLowerCase();
     const passportUserId = String(userinfo.sub || "").trim();
@@ -1874,16 +1906,11 @@ async function handlePassportOidcCallback(request, env) {
       return googleLoginFailure(request, state, "google_identity_invalid");
     }
     try {
-      const productUserId = await resolvePassportProductUserId(env, email, passportUserId);
-      if (!productUserId) return googleLoginFailure(request, state, "google_identity_invalid");
-      const link = await linkPassportProductUser(env, {
-        id: productUserId,
+      const productUserId = await bindPassportProductUser(env, {
+        passportUserId,
         email,
         metadata: { identityProvider: "google", passportUserId }
       });
-      if (String(link.userId || "") !== passportUserId || String(link.productUid || link.product_uid || "") !== productUserId) {
-        throw new Error("Passport product link does not match the authenticated Google identity");
-      }
       const access = await resolvePassportAccessForUser(env, { email, userId: productUserId });
       const sessionCookie = await createSessionCookie(request, env, {
         id: productUserId,
@@ -1902,7 +1929,22 @@ async function handlePassportOidcCallback(request, env) {
       return googleLoginFailure(request, state);
     }
   }
-  const access = await checkPassportAccessForUser(env, userinfo);
+  let productUserId;
+  try {
+    productUserId = await bindPassportProductUser(env, {
+      passportUserId: String(userinfo.sub || ""),
+      email: String(userinfo.email || "").trim().toLowerCase(),
+      metadata: { identityProvider: "oidc", passportUserId: String(userinfo.sub || "") }
+    });
+  } catch (error) {
+    console.error("SoloMap device product link failed", error);
+    return htmlResponse(buildPassportFallbackPage(""), Number(error.status) || 409);
+  }
+  const access = await checkPassportAccessForUser(env, {
+    ...userinfo,
+    sub: productUserId,
+    userId: productUserId
+  });
   if (!access.allowed) {
     return createPassportCheckoutRedirect(request, env, state, userinfo, access);
   }
@@ -4909,9 +4951,15 @@ async function handleHeadlessAuth(request, env, mode) {
     if (mode === "login") {
       const result = await passportHeadlessRequest(env, "auth/login", { email: body.email, password: body.password });
       if (result.needsEmailVerification || !result.user?.emailVerified) return jsonResponse({ ok: false, code: "email_not_verified", message: "Verify your email before signing in." }, 403);
-      const access = await resolvePassportAccessForUser(env, { email: result.user.email, userId: result.user.id });
+      const productUserId = await bindPassportProductUser(env, {
+        passportUserId: result.user.id,
+        email: result.user.email,
+        metadata: { identityProvider: "password", passportUserId: result.user.id }
+      });
+      const access = await resolvePassportAccessForUser(env, { email: result.user.email, userId: productUserId });
       const sessionUser = {
         ...result.user,
+        id: productUserId,
         allowed: access.allowed,
         entitlements: access.entitlements,
         accessCheckedAt: new Date().toISOString()
@@ -4920,6 +4968,13 @@ async function handleHeadlessAuth(request, env, mode) {
     }
     if (mode === "register") {
       const result = await passportHeadlessRequest(env, "auth/register", { email: body.email, password: body.password, name: body.name, appBaseUrl });
+      if (!result.needsEmailVerification && result.user?.emailVerified) {
+        await bindPassportProductUser(env, {
+          passportUserId: result.user.id,
+          email: result.user.email,
+          metadata: { identityProvider: "password", passportUserId: result.user.id }
+        });
+      }
       return jsonResponse({ ok: true, needsEmailVerification: true, user: result.user });
     }
     if (mode === "forgot-password") {
@@ -4927,7 +4982,12 @@ async function handleHeadlessAuth(request, env, mode) {
       return jsonResponse({ ok: true });
     }
     if (mode === "verify-email") {
-      await passportHeadlessRequest(env, "auth/verify-email", { token: body.token });
+      const result = await passportHeadlessRequest(env, "auth/verify-email", { token: body.token });
+      await bindPassportProductUser(env, {
+        passportUserId: result.user?.id,
+        email: result.user?.email,
+        metadata: { identityProvider: "password", passportUserId: result.user?.id }
+      });
       return jsonResponse({ ok: true });
     }
     if (mode === "reset-password") {

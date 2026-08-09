@@ -9,6 +9,7 @@
     "test": "node --test test/*.test.js"
   },
   "devDependencies": {
+    "jose": "^6.2.8",
     "wrangler": "^4.0.0"
   },
   "overrides": {

@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import worker from "../src/worker.js";
+
+const oidcKeyPair = await generateKeyPair("ES256");
+const oidcPublicJwk = {
+  ...(await exportJWK(oidcKeyPair.publicKey)),
+  alg: "ES256",
+  kid: "test-key",
+  use: "sig"
+};
 
 const ctx = { waitUntil() {} };
 const env = {
@@ -31,6 +40,22 @@ function callbackRequest(authorizeUrl, stateCookie) {
   return new Request(`https://solomap.app/api/passport/oidc/callback?code=code-1&state=${encodeURIComponent(authorizeUrl.searchParams.get("state"))}`, {
     headers: { cookie: `__Host-solomap_google_oauth=${stateCookie}` }
   });
+}
+
+async function issueIdToken(authorizeUrl, claims = {}) {
+  return new SignJWT({
+    email: "paid@example.com",
+    email_verified: true,
+    nonce: authorizeUrl.searchParams.get("nonce"),
+    ...claims
+  })
+    .setProtectedHeader({ alg: "ES256", kid: "test-key" })
+    .setSubject(String(claims.sub || "passport-user-1"))
+    .setIssuer(authorizeUrl.origin)
+    .setAudience(authorizeUrl.searchParams.get("client_id"))
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(oidcKeyPair.privateKey);
 }
 
 test("login and registration pages offer a product-owned Google action with valid inline behavior", async () => {
@@ -70,9 +95,10 @@ test("a returning paid Google account reuses its product identity, links before 
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     calls.push({ url, init });
-    if (url.endsWith("/api/oidc/token")) return json({ access_token: "passport-access" });
+    if (url.endsWith("/api/oidc/token")) return json({ access_token: "passport-access", id_token: await issueIdToken(authorizeUrl) });
+    if (url.endsWith("/api/oidc/jwks")) return json({ keys: [oidcPublicJwk] });
     if (url.endsWith("/api/oidc/userinfo")) return json({ sub: "passport-user-1", email: "PAID@example.com", email_verified: true, name: "Paid Builder" });
-    if (url.includes("/api/v1/passport/lookup?")) return json({ ok: true, data: { products: [{ productUid: "solomap-user-1" }] } });
+    if (url.includes("/api/v1/passport/lookup?")) return json({ ok: true, data: { products: [{ product: "aif", productUid: "wrong-product-user" }, { product: "solomap", productUid: "solomap-user-1" }] } });
     if (url.endsWith("/api/v1/passport/link")) return json({ ok: true, data: { linked: true, userId: "passport-user-1", productUid: "solomap-user-1" } });
     if (url.endsWith("/api/v1/entitlements/access-check")) return json({ ok: true, data: { allowed: true, email: "paid@example.com", userId: "solomap-user-1", entitlements: ["strategy_pyramid", "solomap_pro"] } });
     throw new Error(`Unexpected fetch: ${url}`);
@@ -118,7 +144,8 @@ test("a new Google account links its stable Passport subject and signs in withou
   let linkedProductUid = "";
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
-    if (url.endsWith("/api/oidc/token")) return json({ access_token: "passport-access" });
+    if (url.endsWith("/api/oidc/token")) return json({ access_token: "passport-access", id_token: await issueIdToken(authorizeUrl, { sub: "passport-new-user", email: "new@example.com" }) });
+    if (url.endsWith("/api/oidc/jwks")) return json({ keys: [oidcPublicJwk] });
     if (url.endsWith("/api/oidc/userinfo")) return json({ sub: "passport-new-user", email: "new@example.com", email_verified: true, name: "New Builder" });
     if (url.includes("/api/v1/passport/lookup?")) return json({ ok: true, data: { products: [] } });
     if (url.endsWith("/api/v1/passport/link")) {
@@ -147,10 +174,16 @@ test("Google callbacks fail closed when state binding, verified email, or produc
   assert.doesNotMatch(missingCookie.headers.get("set-cookie"), /__Host-solomap_session=/);
 
   const originalFetch = globalThis.fetch;
-  for (const scenario of ["unverified", "link-conflict"]) {
+  for (const scenario of ["unverified", "nonce-mismatch", "link-conflict"]) {
     globalThis.fetch = async (input) => {
       const url = String(input);
-      if (url.endsWith("/api/oidc/token")) return json({ access_token: "passport-access" });
+      if (url.endsWith("/api/oidc/token")) return json({ access_token: "passport-access", id_token: await issueIdToken(authorizeUrl, {
+        sub: "passport-user",
+        email: "user@example.com",
+        email_verified: scenario !== "unverified",
+        ...(scenario === "nonce-mismatch" ? { nonce: "wrong-nonce" } : {})
+      }) });
+      if (url.endsWith("/api/oidc/jwks")) return json({ keys: [oidcPublicJwk] });
       if (url.endsWith("/api/oidc/userinfo")) return json({ sub: "passport-user", email: "user@example.com", email_verified: scenario !== "unverified" });
       if (url.includes("/api/v1/passport/lookup?")) return json({ ok: true, data: { products: [] } });
       if (url.endsWith("/api/v1/passport/link")) return json({ ok: false, error: { code: "product_identity_conflict", message: "Product identity is already linked" } }, 409);

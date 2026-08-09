@@ -27,6 +27,47 @@ function testCatalogResponse() {
   });
 }
 
+let oidcKeyPromise;
+async function oidcKeys() {
+  if (!oidcKeyPromise) {
+    oidcKeyPromise = import(new URL('website/node_modules/jose/dist/webapi/index.js', projectRootUrl)).then(async (jose) => {
+      const pair = await jose.generateKeyPair('ES256');
+      return {
+        jose,
+        privateKey: pair.privateKey,
+        publicJwk: { ...(await jose.exportJWK(pair.publicKey)), alg: 'ES256', kid: 'test-key', use: 'sig' }
+      };
+    });
+  }
+  return oidcKeyPromise;
+}
+
+async function passportTokenResponse(nonce, { sub = 'passport-user', email = 'pro@solomap.app' } = {}) {
+  const keys = await oidcKeys();
+  const idToken = await new keys.jose.SignJWT({ email, email_verified: true, nonce })
+    .setProtectedHeader({ alg: 'ES256', kid: 'test-key' })
+    .setSubject(sub)
+    .setIssuer('https://passport.szlk.ai')
+    .setAudience('solomap-vscode')
+    .setIssuedAt()
+    .setExpirationTime('5m')
+    .sign(keys.privateKey);
+  return new Response(JSON.stringify({ access_token: 'passport-token', id_token: idToken }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+async function passportJwksResponse() {
+  return new Response(JSON.stringify({ keys: [(await oidcKeys()).publicJwk] }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+function passportLookupResponse() {
+  return new Response(JSON.stringify({ ok: true, data: { products: [] } }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+function passportLinkResponse(init, passportUserId) {
+  const body = JSON.parse(init.body);
+  return new Response(JSON.stringify({ ok: true, data: { linked: true, userId: passportUserId, productUid: body.productUid } }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
 test('website Pro CTA uses dedicated subscription page before authorization', async () => {
   const worker = await loadWebsiteWorker();
   const response = await worker.default.fetch(new Request('https://solomap.app/'), { SITE_ORIGIN: 'https://solomap.app' });
@@ -238,17 +279,21 @@ test('Passport start accepts Code OSS extension callbacks through OIDC', async (
 test('Passport OIDC callback signs an extension grant after upstream access check', async () => {
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;
+  let oidcNonce = '';
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       assert.equal(init.method, 'POST');
-      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return passportTokenResponse(oidcNonce);
     }
+    if (url === 'https://passport.szlk.ai/api/oidc/jwks') return passportJwksResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
       assert.equal(init.headers.authorization, 'Bearer passport-token');
-      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app', email_verified: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (url.startsWith('https://passport.szlk.ai/api/v1/passport/lookup?')) return passportLookupResponse();
+    if (url === 'https://passport.szlk.ai/api/v1/passport/link') return passportLinkResponse(init, 'passport-user');
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
       const body = JSON.parse(init.body);
       assert.equal(body.product, 'solomap');
@@ -277,6 +322,7 @@ test('Passport OIDC callback signs an extension grant after upstream access chec
       env
     );
     const state = new URL(start.headers.get('location') || '').searchParams.get('state');
+    oidcNonce = new URL(start.headers.get('location') || '').searchParams.get('nonce') || '';
     const callback = await worker.default.fetch(
       new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
       env
@@ -296,15 +342,19 @@ test('Passport OIDC callback signs an extension grant after upstream access chec
 test('Pro upgrade callback returns a nonce-bound exchange code', async () => {
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;
+  let oidcNonce = '';
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
-      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return passportTokenResponse(oidcNonce);
     }
+    if (url === 'https://passport.szlk.ai/api/oidc/jwks') return passportJwksResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
-      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app', email_verified: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (url.startsWith('https://passport.szlk.ai/api/v1/passport/lookup?')) return passportLookupResponse();
+    if (url === 'https://passport.szlk.ai/api/v1/passport/link') return passportLinkResponse(init, 'passport-user');
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
       return new Response(JSON.stringify({
         ok: true,
@@ -333,6 +383,7 @@ test('Pro upgrade callback returns a nonce-bound exchange code', async () => {
     const href = (await pro.text()).match(/href="([^"]*\/api\/passport\/start\?upgrade_state=[^"]+)"/)?.[1] || '';
     const start = await worker.default.fetch(new Request(new URL(href, 'https://solomap.app').toString()), env);
     const state = new URL(start.headers.get('location') || '').searchParams.get('state');
+    oidcNonce = new URL(start.headers.get('location') || '').searchParams.get('nonce') || '';
     const callbackResponse = await worker.default.fetch(
       new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
       env
@@ -376,15 +427,19 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
   const originalFetch = global.fetch;
   let checkoutPayload = null;
   let checkoutCalls = 0;
+  let oidcNonce = '';
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
-      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return passportTokenResponse(oidcNonce, { sub: 'passport-user-free', email: 'free@solomap.app' });
     }
+    if (url === 'https://passport.szlk.ai/api/oidc/jwks') return passportJwksResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
-      return new Response(JSON.stringify({ sub: 'passport-user-free', email: 'free@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ sub: 'passport-user-free', email: 'free@solomap.app', email_verified: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (url.startsWith('https://passport.szlk.ai/api/v1/passport/lookup?')) return passportLookupResponse();
+    if (url === 'https://passport.szlk.ai/api/v1/passport/link') return passportLinkResponse(init, 'passport-user-free');
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
       return new Response(JSON.stringify({
         ok: true,
@@ -426,6 +481,7 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
       env
     );
     const state = new URL(start.headers.get('location') || '').searchParams.get('state');
+    oidcNonce = new URL(start.headers.get('location') || '').searchParams.get('nonce') || '';
     const response = await worker.default.fetch(
       new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
       env
@@ -457,17 +513,21 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
   const originalFetch = global.fetch;
   let accessAllowed = true;
   let accessChecks = 0;
+  let oidcNonce = '';
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       assert.equal(init.method, 'POST');
-      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return passportTokenResponse(oidcNonce);
     }
+    if (url === 'https://passport.szlk.ai/api/oidc/jwks') return passportJwksResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
       assert.equal(init.headers.authorization, 'Bearer passport-token');
-      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app', email_verified: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (url.startsWith('https://passport.szlk.ai/api/v1/passport/lookup?')) return passportLookupResponse();
+    if (url === 'https://passport.szlk.ai/api/v1/passport/link') return passportLinkResponse(init, 'passport-user');
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
       accessChecks += 1;
       return new Response(JSON.stringify({
@@ -497,6 +557,7 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     const authorize = await worker.default.fetch(new Request(startBody.loginUrl), env);
     const authorizeLocation = new URL(authorize.headers.get('location') || '');
     const state = authorizeLocation.searchParams.get('state');
+    oidcNonce = authorizeLocation.searchParams.get('nonce') || '';
     const callback = await worker.default.fetch(
       new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
       env
@@ -552,16 +613,20 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
 test('paid website users can recover an activation code from the Pro page', async () => {
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;
+  let oidcNonce = '';
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
       assert.equal(init.method, 'POST');
-      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return passportTokenResponse(oidcNonce);
     }
+    if (url === 'https://passport.szlk.ai/api/oidc/jwks') return passportJwksResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
-      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ sub: 'passport-user', email: 'pro@solomap.app', email_verified: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (url.startsWith('https://passport.szlk.ai/api/v1/passport/lookup?')) return passportLookupResponse();
+    if (url === 'https://passport.szlk.ai/api/v1/passport/link') return passportLinkResponse(init, 'passport-user');
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
       return new Response(JSON.stringify({
         ok: true,
@@ -590,6 +655,7 @@ test('paid website users can recover an activation code from the Pro page', asyn
     const deviceCode = new URL(recoverLocation).searchParams.get('device') || '';
     const authorize = await worker.default.fetch(new Request(recoverLocation), env);
     const state = new URL(authorize.headers.get('location') || '').searchParams.get('state');
+    oidcNonce = new URL(authorize.headers.get('location') || '').searchParams.get('nonce') || '';
     const callback = await worker.default.fetch(
       new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
       env
@@ -629,15 +695,19 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
   const originalFetch = global.fetch;
   let checkoutPayload = null;
   let checkoutCalls = 0;
+  let oidcNonce = '';
   global.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/token') {
-      return new Response(JSON.stringify({ access_token: 'passport-token' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return passportTokenResponse(oidcNonce, { sub: 'passport-user-free', email: 'free@solomap.app' });
     }
+    if (url === 'https://passport.szlk.ai/api/oidc/jwks') return passportJwksResponse();
     if (url === 'https://passport.szlk.ai/api/oidc/userinfo') {
-      return new Response(JSON.stringify({ sub: 'passport-user-free', email: 'free@solomap.app' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ sub: 'passport-user-free', email: 'free@solomap.app', email_verified: true }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
+    if (url.startsWith('https://passport.szlk.ai/api/v1/passport/lookup?')) return passportLookupResponse();
+    if (url === 'https://passport.szlk.ai/api/v1/passport/link') return passportLinkResponse(init, 'passport-user-free');
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
       return new Response(JSON.stringify({
         ok: true,
@@ -677,6 +747,7 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
     const startBody = await start.json();
     const authorize = await worker.default.fetch(new Request(startBody.loginUrl), env);
     const state = new URL(authorize.headers.get('location') || '').searchParams.get('state');
+    oidcNonce = new URL(authorize.headers.get('location') || '').searchParams.get('nonce') || '';
     const response = await worker.default.fetch(
       new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
       env
@@ -871,8 +942,23 @@ test('website headless auth renders product-owned forms and creates a protected 
   const originalFetch = global.fetch;
   global.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url.startsWith('https://passport.szlk.ai/api/v1/passport/lookup?')) {
+      return new Response(JSON.stringify({ ok: true, data: { products: [{ product: 'solomap', productUid: 'user-1' }] } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/passport/link') {
+      assert.deepEqual(JSON.parse(init.body), {
+        email: 'developer@solomap.app',
+        product: 'solomap',
+        productUid: 'user-1',
+        metadata: { identityProvider: 'password', passportUserId: 'user-1' }
+      });
+      return new Response(JSON.stringify({ ok: true, data: { linked: true, userId: 'user-1', productUid: 'user-1' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
       return new Response(JSON.stringify({ ok: true, data: { allowed: false, reason: 'not_entitled', email: 'developer@solomap.app', userId: 'user-1', entitlements: [] } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') {
+      return new Response(JSON.stringify({ ok: true, data: { plans: [] } }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     assert.equal(url, 'https://passport.szlk.ai/api/v1/auth/login');
     assert.equal(init.headers['x-szlk-product'], 'solomap');

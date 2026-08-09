@@ -13,7 +13,10 @@ export async function resolvePassportProductUserId(env, email, fallbackUserId) {
     query: new URLSearchParams({ email: String(email || "").trim().toLowerCase() })
   });
   const productUid = Array.isArray(data.products)
-    ? data.products.map((item) => String(item?.productUid || item?.product_uid || "").trim()).find(Boolean)
+    ? data.products
+      .filter((item) => String(item?.product || "").trim() === "solomap")
+      .map((item) => String(item?.productUid || item?.product_uid || "").trim())
+      .find(Boolean)
     : "";
   return productUid || String(fallbackUserId || "").trim();
 }
@@ -28,6 +31,30 @@ export async function linkPassportProductUser(env, user) {
       metadata: user.metadata || undefined
     }
   });
+}
+
+export async function bindPassportProductUser(env, user) {
+  const passportUserId = String(user.passportUserId || "").trim();
+  const productUserId = await resolvePassportProductUserId(
+    env,
+    user.email,
+    passportUserId,
+  );
+  if (!passportUserId || !productUserId) {
+    throw authError(502, "passport_identity_invalid", "Passport 身份信息不完整");
+  }
+  const link = await linkPassportProductUser(env, {
+    id: productUserId,
+    email: user.email,
+    metadata: user.metadata,
+  });
+  if (
+    String(link.userId || "") !== passportUserId
+    || String(link.productUid || link.product_uid || "") !== productUserId
+  ) {
+    throw authError(409, "passport_link_mismatch", "Passport 产品身份绑定不一致");
+  }
+  return productUserId;
 }
 
 async function passportRequest(env, path, options = {}) {
