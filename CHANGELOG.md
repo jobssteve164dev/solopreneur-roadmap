@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.424 - 2026-08-09
+
+### Fixed
+- verify and bind Passport identities before access (046214e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.423 - 2026-08-08
 
 ### Added
