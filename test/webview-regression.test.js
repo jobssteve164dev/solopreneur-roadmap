@@ -9396,7 +9396,15 @@ test('global prompt experience review uses a validated result instead of editing
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-prompt-review-'));
   const resultFile = path.join(tempRoot, 'result.json');
   const prompt = extensionModule.__buildGlobalPromptReviewPrompt('/workspace/project', tempRoot, 'Keep scope small.', resultFile);
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const handlerSource = extensionSource.slice(
+    extensionSource.indexOf('async function handleReviewGlobalPrompt('),
+    extensionSource.indexOf('function buildSoloContextIndex(')
+  );
 
+  assert.match(handlerSource, /const \{ maintenanceRoot, runsRoot \} = ensureSolomapMaintenanceWorkspace/);
+  assert.match(handlerSource, /const runDir = path\.join\(runsRoot, runId\)/);
+  assert.doesNotMatch(handlerSource, /path\.join\(globalRoot, 'runs'/);
   assert.match(prompt, /memory[\\/]profile\.md/);
   assert.match(prompt, /memory[\\/]operating-rules\.md/);
   assert.match(prompt, /不要修改任何记忆文件、项目文件、VS Code 配置或派生的 global-default-prompt\.md/);

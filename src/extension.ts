@@ -4174,7 +4174,7 @@ async function handleReviewGlobalPrompt(
   const workspaceRoot = getSkillInstallWorkspaceRoot(context);
   const settings = getPersistedSettings(context);
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
-  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
+  const { maintenanceRoot, runsRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
   const requestedAgentCli = (settings.cliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
   if (!commandExists(agentCli)) {
@@ -4192,7 +4192,7 @@ async function handleReviewGlobalPrompt(
 
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   const runId = `global-prompt-review-${Date.now()}`;
-  const runDir = path.join(globalRoot, 'runs', runId);
+  const runDir = path.join(runsRoot, runId);
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const outputFilePath = path.join(runDir, 'output.log');
   const resultFilePath = path.join(runDir, 'result.json');
