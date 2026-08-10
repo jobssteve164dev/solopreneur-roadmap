@@ -7,6 +7,11 @@ async function loadWebsiteWorker() {
   return import(new URL('website/src/worker.js', projectRootUrl));
 }
 
+async function sessionCookie(env, user) {
+  const { createSessionCookie } = await import(new URL('website/src/headlessAuth.js', projectRootUrl));
+  return (await createSessionCookie(new Request('https://solomap.app/login'), env, user)).split(';')[0];
+}
+
 const testProPlan = {
   planId: 'solomap_pro_catalog_plan',
   label: 'SoloMap Pro Catalog Plan',
@@ -575,13 +580,8 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     );
     const startBody = await start.json();
     const authorize = await worker.default.fetch(new Request(startBody.loginUrl), env);
-    const authorizeLocation = new URL(authorize.headers.get('location') || '');
-    const state = authorizeLocation.searchParams.get('state');
-    oidcNonce = authorizeLocation.searchParams.get('nonce') || '';
-    const callback = await worker.default.fetch(
-      new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
-      env
-    );
+    const cookie = await sessionCookie(env, { id: 'passport-user', email: 'pro@solomap.app' });
+    const callback = await worker.default.fetch(new Request(startBody.loginUrl, { headers: { cookie } }), env);
     const html = await callback.text();
     const grant = html.match(/<textarea id="code" readonly>([^<]+)<\/textarea>/)?.[1] || '';
     const verify = await worker.default.fetch(
@@ -599,13 +599,13 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     assert.equal(startBody.expiresIn, 1800);
     assert.match(startBody.loginUrl, /^https:\/\/solomap\.app\/api\/passport\/device\/authorize\?device=/);
     assert.equal(authorize.status, 302);
-    assert.equal(authorizeLocation.origin, 'https://passport.szlk.ai');
+    assert.equal(new URL(authorize.headers.get('location') || '').pathname, '/login');
     assert.equal(callback.status, 200);
     assert.match(html, /SoloMap Pro 已授权/);
     assert.match(html, /最多 5 台个人设备/);
     assert.match(html, /pro@solomap\.app/);
     assert.match(html, /打开账户页面/);
-    assert.match(html, /href="https:\/\/passport\.szlk\.ai\/passport\/account"/);
+    assert.match(html, /href="https:\/\/solomap\.app\/workbench"/);
     assert.ok(grant);
     assert.equal(verify.status, 200);
     assert.equal(verifyBody.allowed, true);
@@ -674,12 +674,8 @@ test('paid website users can recover an activation code from the Pro page', asyn
     const recoverLocation = recover.headers.get('location') || '';
     const deviceCode = new URL(recoverLocation).searchParams.get('device') || '';
     const authorize = await worker.default.fetch(new Request(recoverLocation), env);
-    const state = new URL(authorize.headers.get('location') || '').searchParams.get('state');
-    oidcNonce = new URL(authorize.headers.get('location') || '').searchParams.get('nonce') || '';
-    const callback = await worker.default.fetch(
-      new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
-      env
-    );
+    const cookie = await sessionCookie(env, { id: 'passport-user', email: 'pro@solomap.app' });
+    const callback = await worker.default.fetch(new Request(recoverLocation, { headers: { cookie } }), env);
     const accountHtml = await callback.text();
     const grant = accountHtml.match(/<textarea id="code" readonly>([^<]+)<\/textarea>/)?.[1] || '';
     const verified = await worker.default.fetch(
@@ -701,7 +697,7 @@ test('paid website users can recover an activation code from the Pro page', asyn
     assert.match(accountHtml, /SoloMap Pro 已授权/);
     assert.match(accountHtml, /复制下面的激活码/);
     assert.match(accountHtml, /最多 5 台个人设备/);
-    assert.match(accountHtml, /href="https:\/\/passport\.szlk\.ai\/passport\/account"/);
+    assert.match(accountHtml, /href="https:\/\/solomap\.app\/workbench"/);
     assert.ok(grant);
     assert.equal(verifiedBody.allowed, true);
     assert.equal(verifiedBody.deviceLimit, 5);
@@ -765,13 +761,8 @@ test('Passport device auth redirects unpaid users to Pro checkout and resumes de
       env
     );
     const startBody = await start.json();
-    const authorize = await worker.default.fetch(new Request(startBody.loginUrl), env);
-    const state = new URL(authorize.headers.get('location') || '').searchParams.get('state');
-    oidcNonce = new URL(authorize.headers.get('location') || '').searchParams.get('nonce') || '';
-    const response = await worker.default.fetch(
-      new Request(`https://solomap.app/api/passport/oidc/callback?code=auth-code&state=${encodeURIComponent(state || '')}`),
-      env
-    );
+    const cookie = await sessionCookie(env, { id: 'passport-user-free', email: 'free@solomap.app' });
+    const response = await worker.default.fetch(new Request(startBody.loginUrl, { headers: { cookie } }), env);
 
     assert.equal(response.status, 302);
     assert.equal(response.headers.get('location'), 'https://checkout.stripe.com/c/pay/cs_solomap_device');

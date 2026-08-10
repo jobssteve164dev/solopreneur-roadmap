@@ -55,7 +55,7 @@ const PASSPORT_OIDC_JWKS_URL = `${PASSPORT_ISSUER}/api/oidc/jwks`;
 const PASSPORT_ACCESS_CHECK_URL = `${PASSPORT_ISSUER}/api/v1/entitlements/access-check`;
 const PASSPORT_BILLING_CATALOG_URL = `${PASSPORT_ISSUER}/api/v1/billing/catalog`;
 const PASSPORT_CHECKOUT_LINK_URL = `${PASSPORT_ISSUER}/api/v1/billing/checkout-link`;
-const PASSPORT_ACCOUNT_URL = `${PASSPORT_ISSUER}/passport/account`;
+const PRODUCT_ACCOUNT_URL = "https://solomap.app/workbench";
 const SOLOMAP_OIDC_CLIENT_ID = "solomap-vscode";
 const GOOGLE_LOGIN_STATE_COOKIE = "__Host-solomap_google_oauth";
 const LOCAL_GOOGLE_LOGIN_STATE_COOKIE = "solomap_google_oauth";
@@ -765,7 +765,7 @@ function formatProPrice(plan, locale) {
 }
 
 function getPassportAccountUrl(env) {
-  return String(env.SOLOMAP_PASSPORT_ACCOUNT_URL || PASSPORT_ACCOUNT_URL);
+  return new URL("/workbench", env.SITE_ORIGIN || SITE_ORIGIN).toString();
 }
 
 async function getPassportCheckoutSuccessUrl(env, requestUrl, state, userinfo = {}) {
@@ -1277,7 +1277,7 @@ function buildDeviceGrantPage(grant, context = {}) {
   const escapedGrant = escapeHtml(grant);
   const email = String(context.email || "").trim();
   const deviceLimit = Number(context.deviceLimit || 0);
-  const accountUrl = escapeHtml(String(context.accountUrl || PASSPORT_ACCOUNT_URL));
+  const accountUrl = escapeHtml(String(context.accountUrl || PRODUCT_ACCOUNT_URL));
   const activationCopy = deviceLimit >= 3
     ? `你的 SoloMap Pro 可在最多 ${deviceLimit} 台个人设备上激活。`
     : "你的 SoloMap Pro 已可在多台个人设备上激活。";
@@ -1858,11 +1858,30 @@ async function handlePassportDeviceAuthorize(request, env) {
   if (!device || device.mode !== "device") {
     return htmlResponse(buildPassportFallbackPage(""), 400);
   }
-  return buildPassportAuthorizeRedirect(request, env, {
+  const state = {
     mode: "device",
     deviceCode,
     authNonce: device.authNonce || ""
+  };
+  const session = await readSession(request, env);
+  if (!session || (!session.id && !session.email)) {
+    const loginUrl = new URL("/login", url.origin);
+    loginUrl.searchParams.set("return_to", `${url.pathname}${url.search}`);
+    return Response.redirect(loginUrl.toString(), 302);
+  }
+  const userinfo = { email: String(session.email || ""), sub: String(session.id || ""), userId: String(session.id || "") };
+  const access = await resolvePassportAccessForUser(env, userinfo);
+  if (!access.allowed) return createPassportCheckoutRedirect(request, env, state, userinfo, access);
+  const grant = await issueSoloMapGrant(env, String(access.email || session.email || ""), {
+    userId: String(access.userId || session.id || ""),
+    entitlements: access.entitlements
   });
+  const code = state.authNonce ? await issueSoloMapExchangeCode(env, grant, state) : grant;
+  return htmlResponse(buildDeviceGrantPage(code, {
+    email: access.email || session.email,
+    deviceLimit: access.deviceLimit || 0,
+    accountUrl: getPassportAccountUrl(env)
+  }), 200);
 }
 
 async function handlePassportOidcCallback(request, env) {
