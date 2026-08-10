@@ -9385,6 +9385,33 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), 'Project growth data refreshed: 4 files, 3 modules.');
 });
 
+test('global prompt experience review uses a validated result instead of editing the generated prompt index', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__buildGlobalPromptReviewPrompt = buildGlobalPromptReviewPrompt;',
+      'module.exports.__readGlobalPromptReviewResult = readGlobalPromptReviewResult;'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-prompt-review-'));
+  const resultFile = path.join(tempRoot, 'result.json');
+  const prompt = extensionModule.__buildGlobalPromptReviewPrompt('/workspace/project', tempRoot, 'Keep scope small.', resultFile);
+
+  assert.match(prompt, /memory[\\/]profile\.md/);
+  assert.match(prompt, /memory[\\/]operating-rules\.md/);
+  assert.match(prompt, /不要修改任何记忆文件、项目文件、VS Code 配置或派生的 global-default-prompt\.md/);
+  assert.match(prompt, /Keep scope small\./);
+  assert.match(prompt, new RegExp(resultFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: '  Preserve user intent.  ' }), 'utf8');
+  const result = extensionModule.__readGlobalPromptReviewResult(resultFile);
+  assert.equal(result.ok, true);
+  assert.equal(result.globalPrompt, 'Preserve user intent.');
+  assert.equal(result.message, '默认指令已根据记忆复盘更新。');
+  fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: '   ' }), 'utf8');
+  assert.equal(extensionModule.__readGlobalPromptReviewResult(resultFile).ok, false);
+});
+
 test('concurrent settings patches serialize without restoring stale values', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',

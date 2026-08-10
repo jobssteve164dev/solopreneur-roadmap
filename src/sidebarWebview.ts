@@ -825,6 +825,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       color: var(--text-main);
     }
 
+    .settings-card-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .settings-card-title-action {
+      flex: 0 0 auto;
+      padding: 3px 7px;
+      font-size: 9px;
+    }
+
     .automation-select-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -4194,7 +4207,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
 
     <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-edit"></span><span id="settings-section-instructions">Instructions</span></div>
+      <div class="settings-card-title-row">
+        <div class="settings-card-title"><span class="codicon codicon-edit"></span><span id="settings-section-instructions">Instructions</span></div>
+        <button type="button" class="dependency-action-btn settings-card-title-action" id="btn-review-global-prompt"><span class="codicon codicon-history"></span><span id="text-review-global-prompt">Review experience</span></button>
+      </div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-global-prompt">Default Agent Instructions</label>
       <textarea class="settings-input settings-textarea" id="setting-global-prompt" placeholder="e.g. Keep changes minimal and run the narrowest relevant test."></textarea>
@@ -4429,6 +4445,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnOpenFeedback = document.getElementById('btn-open-feedback');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
+    const btnReviewGlobalPrompt = document.getElementById('btn-review-global-prompt');
     const cliTestBadge = document.getElementById('cli-test-badge');
     const btnRefreshAgentImpact = document.getElementById('btn-refresh-agent-impact');
     const agentImpactList = document.getElementById('agent-impact-list');
@@ -5578,6 +5595,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
+        reviewGlobalPrompt: '复盘经验',
+        reviewingGlobalPrompt: '复盘中...',
+        reviewGlobalPromptStarted: 'Agent 已开始复盘记忆，完成后会自动更新默认指令。',
+        reviewGlobalPromptUpdated: '默认指令已根据记忆复盘更新。',
         dependencies: '本地依赖状态',
         checkDependencies: '诊断',
         dependencyReady: '就绪',
@@ -6019,6 +6040,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',
+        reviewGlobalPrompt: 'Review experience',
+        reviewingGlobalPrompt: 'Reviewing...',
+        reviewGlobalPromptStarted: 'The Agent is reviewing memory and will update the default instructions when finished.',
+        reviewGlobalPromptUpdated: 'Default instructions updated from the memory review.',
         dependencies: 'Local readiness',
         checkDependencies: 'Diagnose',
         dependencyReady: 'Ready',
@@ -6213,6 +6238,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
+      setText('text-review-global-prompt', t('reviewGlobalPrompt'));
       setText('label-global-data-path', t('globalDataPath'));
       if (settingGlobalDataPath) settingGlobalDataPath.placeholder = t('globalDataPathPlaceholder');
       setText('help-global-data-path', t('globalDataPathHelp'));
@@ -7458,6 +7484,26 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           currentSettings = message.settings || currentSettings;
           break;
 
+        case 'globalPromptReviewStarted':
+          if (btnReviewGlobalPrompt) btnReviewGlobalPrompt.disabled = true;
+          if (cliTestBadge) {
+            cliTestBadge.style.display = 'block';
+            cliTestBadge.textContent = t('reviewGlobalPromptStarted');
+          }
+          break;
+
+        case 'globalPromptReviewCompleted':
+          if (btnReviewGlobalPrompt) btnReviewGlobalPrompt.disabled = false;
+          if (message.success && typeof message.globalPrompt === 'string') {
+            settingGlobalPrompt.value = message.globalPrompt;
+            settingsFormDirty = false;
+          }
+          if (cliTestBadge) {
+            cliTestBadge.style.display = 'block';
+            cliTestBadge.textContent = message.message || (message.success ? t('reviewGlobalPromptUpdated') : '');
+          }
+          break;
+
         case 'automationPlaySound':
           playAutomationTone();
           break;
@@ -7861,6 +7907,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
     });
+
+    if (btnReviewGlobalPrompt) {
+      btnReviewGlobalPrompt.addEventListener('click', () => {
+        btnReviewGlobalPrompt.disabled = true;
+        vscode.postMessage({
+          command: 'settings.reviewGlobalPrompt',
+          globalPrompt: settingGlobalPrompt.value.trim()
+        });
+      });
+    }
 
     // Test CLI connection
     btnTestCli.addEventListener('click', () => {
