@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.428 - 2026-08-10
+
+### Added
+- add global prompt experience review (f174eb6)
+
+### Fixed
+- install website test dependencies (9e9fbe6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.427 - 2026-08-10
 
 ### Fixed
