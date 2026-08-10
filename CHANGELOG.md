@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.426 - 2026-08-10
+
+### Fixed
+- centralize SoloMap plan entitlements (0cd1ab8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.425 - 2026-08-09
 
 ### Fixed
