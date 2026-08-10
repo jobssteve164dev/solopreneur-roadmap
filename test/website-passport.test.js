@@ -14,8 +14,28 @@ const testProPlan = {
   interval: 'year',
   currency: 'usd',
   amountCents: 3100,
-  featureKeys: ['strategy_pyramid'],
-  metadata: { deviceLimit: 5 }
+  featureKeys: ['strategy_pyramid', 'flow_mode', 'collaboration_pro'],
+  metadata: {
+    schemaVersion: 1,
+    deviceLimit: 5,
+    refundDays: 14,
+    customerDisplay: {
+      en: { name: 'SoloMap Pro Catalog Plan', billingSuffix: '/ year', offerLabel: 'Early Access', summary: 'Catalog-backed Pro benefits.' },
+      zh: { name: 'SoloMap Pro 目录计划', billingSuffix: '/ 年', offerLabel: '早鸟计划', summary: '由中央目录提供的 Pro 权益。' }
+    },
+    features: [
+      { key: 'strategy_pyramid', name: { en: 'Strategy Pyramid', zh: '战略金字塔' }, free: { en: 'Not included', zh: '不包含' }, paid: { en: 'Portfolio strategy.', zh: '项目组合战略。' } },
+      { key: 'flow_mode', name: { en: 'Flow Mode', zh: 'Flow Mode' }, free: { en: 'Not included', zh: '不包含' }, paid: { en: 'Goal-driven execution.', zh: '围绕目标持续执行。' } },
+      { key: 'collaboration_pro', name: { en: 'Co-create rooms', zh: '共创房间' }, free: { en: 'Account limits.', zh: '账号额度。' }, paid: { en: 'Higher limits.', zh: '更高额度。' } }
+    ],
+    quotas: {
+      collaboration: {
+        anonymous: { maxActiveRooms: 1, maxDailyRooms: 3, maxLifetimeHours: 2 },
+        account: { maxActiveRooms: 5, maxDailyRooms: 20, maxLifetimeHours: 24 },
+        paid: { maxActiveRooms: 20, maxDailyRooms: 100, maxLifetimeHours: 72 }
+      }
+    }
+  }
 };
 const testCatalogPayload = { ok: true, data: { plans: [testProPlan] } };
 const testCatalogUrl = `data:application/json,${encodeURIComponent(JSON.stringify(testCatalogPayload))}`;
@@ -493,8 +513,8 @@ test('Passport OIDC callback redirects unpaid extension users to Pro checkout', 
     assert.equal(checkoutPayload.planId, testProPlan.planId);
     assert.equal(checkoutPayload.customerEmail, 'free@solomap.app');
     assert.equal(checkoutPayload.userId, 'passport-user-free');
-    assert.equal(checkoutPayload.metadata.deviceLimit, 5);
-    assert.equal(checkoutPayload.metadata.maxDevices, 5);
+    assert.equal(checkoutPayload.metadata.catalogVersion, 1);
+    assert.equal(Object.hasOwn(checkoutPayload.metadata, 'deviceLimit'), false);
     assert.match(checkoutPayload.successUrl, /^https:\/\/solomap\.app\/api\/passport\/checkout\/success\?/);
     const successUrl = new URL(checkoutPayload.successUrl);
     assert.ok(successUrl.searchParams.get('state'));

@@ -333,12 +333,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     const account = settings?.proAccount || {};
     const expiresAtMs = account.expiresAt ? Date.parse(String(account.expiresAt)) : NaN;
     if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) return false;
-    const aliases: Record<string, string[]> = {
-      strategy_pyramid: ['strategy_pyramid', 'strategyPyramid'],
-      flow_mode: ['flow_mode', 'flowMode']
-    };
-    return Boolean(account.allowed || entitlements.pro || entitlements.solomap_pro ||
-      (aliases[feature] || [feature]).some((key) => entitlements[key]));
+    return Boolean(entitlements[feature]);
   }
 
   function renderProAccount(panel: Element | null, settings: any, t: (key: string) => string, language: string): void {

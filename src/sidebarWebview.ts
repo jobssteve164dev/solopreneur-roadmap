@@ -4574,10 +4574,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return account.allowed ? 'pro' : (account.authenticated ? 'account' : 'anonymous');
     }
 
-    function collaborationQuotaLabel(tier) {
-      if (tier === 'pro') return t('collaborationQuotaPro');
-      if (tier === 'account') return t('collaborationQuotaAccount');
-      return t('collaborationQuotaAnonymous');
+    function collaborationQuotaLabel(_tier) {
+      return t('collaborationQuotaCatalog');
     }
 
     function collaborationCreateErrorLabel(code) {
@@ -4836,7 +4834,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         projectPath: project.path,
         createdAt: now,
         lastActiveAt: now,
-        expiresAt: now + 72 * 60 * 60 * 1000,
+        expiresAt: now + 365 * 24 * 60 * 60 * 1000,
         authorId: collaborationRandomId(16),
         nickname: collaborationNickname
       };
@@ -5416,9 +5414,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationNamePlaceholder: '参与者会看到这个昵称',
         collaborationCreate: '发起共创',
         collaborationCreating: '正在创建…',
-        collaborationQuotaAnonymous: '匿名设备：同时 1 个，每日 3 个，最长 2 小时',
-        collaborationQuotaAccount: '登录账号：同时 5 个，每日 20 个，最长 24 小时',
-        collaborationQuotaPro: 'Pro 账号：同时 20 个，每日 100 个，最长 72 小时',
+        collaborationQuotaCatalog: '创建时会按当前账户计划载入房间额度',
         collaborationInviteCodeLabel: '加入已有共创',
         collaborationInviteCodePlaceholder: '粘贴邀请码',
         collaborationJoin: '加入',
@@ -5859,9 +5855,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationNamePlaceholder: 'Other participants will see this name',
         collaborationCreate: 'Start room',
         collaborationCreating: 'Creating…',
-        collaborationQuotaAnonymous: 'Anonymous device: 1 active, 3 daily, up to 2 hours',
-        collaborationQuotaAccount: 'Signed-in account: 5 active, 20 daily, up to 24 hours',
-        collaborationQuotaPro: 'Pro account: 20 active, 100 daily, up to 72 hours',
+        collaborationQuotaCatalog: 'Room limits are loaded from your current account plan when you start one',
         collaborationInviteCodeLabel: 'Join an existing room',
         collaborationInviteCodePlaceholder: 'Paste invite code',
         collaborationJoin: 'Join',

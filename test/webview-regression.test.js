@@ -3373,7 +3373,7 @@ test('sidebar project portfolio summaries prioritize failed and in-progress work
     { id: '2', title: 'Running step', status: 'Running', stage: '产品与 MVP', dependencies: '' }
   ]).title, 'Running step');
   assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), true);
-  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { pro: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), true);
+  assert.equal(sidebarModule.__hasProEntitlement({ proEntitlements: { pro: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), false);
   assert.equal(sidebarModule.__hasProEntitlement({
     proEntitlements: { strategy_pyramid: true },
     proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }

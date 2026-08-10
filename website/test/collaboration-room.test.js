@@ -54,9 +54,30 @@ function createDurableNamespace(ClassType) {
 }
 
 function createProtectedEnv() {
+  const catalog = {
+    ok: true,
+    data: {
+      plans: [{
+        planId: "solomap_pro_early_access_yearly",
+        interval: "year",
+        currency: "usd",
+        amountCents: 2900,
+        featureKeys: ["strategy_pyramid", "flow_mode", "collaboration_pro"],
+        metadata: {
+          deviceLimit: 5,
+          quotas: { collaboration: {
+            anonymous: { maxActiveRooms: 1, maxDailyRooms: 3, maxLifetimeHours: 2 },
+            account: { maxActiveRooms: 5, maxDailyRooms: 20, maxLifetimeHours: 24 },
+            paid: { maxActiveRooms: 20, maxDailyRooms: 100, maxLifetimeHours: 72 }
+          } }
+        }
+      }]
+    }
+  };
   return {
     SITE_ORIGIN: "https://solomap.app",
     SOLOMAP_PASSPORT_PRODUCT_SECRET: "test-collaboration-secret",
+    SOLOMAP_PASSPORT_CATALOG_URL: `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`,
     COLLABORATION_DEVICE_REGISTRATION_LIMITER: { async limit() { return { success: true }; } },
     COLLABORATION_ROOM_CREATE_LIMITER: { async limit() { return { success: true }; } },
     COLLABORATION_LOBBY_JOIN_LIMITER: { async limit() { return { success: true }; } },
@@ -66,6 +87,12 @@ function createProtectedEnv() {
     COLLABORATION_GLOBAL_QUOTA: createDurableNamespace(CollaborationQuota)
   };
 }
+
+const TEST_QUOTA_POLICY = {
+  anonymous: { tier: "anonymous", maxActiveRooms: 1, maxDailyRooms: 3, maxLifetimeMs: 2 * 60 * 60 * 1000 },
+  account: { tier: "account", maxActiveRooms: 5, maxDailyRooms: 20, maxLifetimeMs: 24 * 60 * 60 * 1000 },
+  paid: { tier: "paid", maxActiveRooms: 20, maxDailyRooms: 100, maxLifetimeMs: 72 * 60 * 60 * 1000 }
+};
 
 test("the public lobby rejects signed-out users and issues only hourly tickets to accounts", async () => {
   const env = createProtectedEnv();
@@ -81,7 +108,7 @@ test("the public lobby rejects signed-out users and issues only hourly tickets t
     method: "POST",
     headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.20" },
     body: JSON.stringify({ nickname: "  Solo  Builder  " })
-  }), env, { subjectId: "account:test-user", tier: "account" });
+  }), env, { subjectId: "account:test-user", tier: "account" }, TEST_QUOTA_POLICY);
   const result = await response.json();
   assert.equal(response.status, 200);
   assert.equal(result.ok, true);
@@ -258,6 +285,7 @@ test("the signed-in workbench co-create space keeps the lobby and private rooms 
 test("room creation validates credentials before allocating a Durable Object", async () => {
   let allocations = 0;
   const env = {
+    ...createProtectedEnv(),
     COLLABORATION_ROOM_CREATE_LIMITER: { async limit() { return { success: true }; } },
     COLLABORATION_ROOMS: {
       idFromName() { allocations += 1; return "id"; },
@@ -304,7 +332,7 @@ test("room creation forwards only room credentials and expiry to the room object
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
-  }), env, { subjectId: "account:test-user", tier: "account" });
+  }), env, { subjectId: "account:test-user", tier: "account" }, TEST_QUOTA_POLICY);
   assert.equal(response.status, 200);
   assert.equal(forwarded.id, "id:" + body.roomId);
   assert.equal(forwarded.url, "https://collaboration.internal/initialize");
@@ -389,7 +417,7 @@ test("account and Pro creators receive materially different room lifetimes", asy
       relayToken: "relayToken1234567890ABCDEFGHijklmnop",
       expiresAt: requestedExpiry
     })
-  }), accountEnv, { subjectId: "account:one", tier: "account" });
+  }), accountEnv, { subjectId: "account:one", tier: "account" }, TEST_QUOTA_POLICY);
   assert.equal(accountResponse.status, 200);
   const account = await accountResponse.json();
   assert.equal(account.quota.maxActiveRooms, 5);
@@ -405,7 +433,7 @@ test("account and Pro creators receive materially different room lifetimes", asy
       relayToken: "relayToken2234567890ABCDEFGHijklmnop",
       expiresAt: requestedExpiry
     })
-  }), proEnv, { subjectId: "pro:one", tier: "pro" });
+  }), proEnv, { subjectId: "pro:one", tier: "pro" }, TEST_QUOTA_POLICY);
   assert.equal(proResponse.status, 200);
   const pro = await proResponse.json();
   assert.equal(pro.quota.maxActiveRooms, 20);

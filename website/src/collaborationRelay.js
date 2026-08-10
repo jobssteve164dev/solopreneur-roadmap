@@ -1,7 +1,7 @@
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{20,64}$/;
 const RELAY_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
-const MAX_ROOM_LIFETIME_MS = 72 * 60 * 60 * 1000;
+const MAX_ROOM_RETENTION_MS = 365 * 24 * 60 * 60 * 1000;
 const MAX_MESSAGE_BYTES = 16 * 1024;
 const MAX_MESSAGES = 100;
 const MAX_CONNECTIONS = 12;
@@ -13,17 +13,11 @@ const DEVICE_CREDENTIAL_LIFETIME_MS = 180 * 24 * 60 * 60 * 1000;
 const DEVICE_CREDENTIAL_PATTERN = /^[A-Za-z0-9_-]{40,512}\.[A-Za-z0-9_-]{40,128}$/;
 const QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-const COLLABORATION_QUOTAS = Object.freeze({
-  anonymous: Object.freeze({ tier: "anonymous", maxActiveRooms: 1, maxDailyRooms: 3, maxLifetimeMs: 2 * 60 * 60 * 1000 }),
-  account: Object.freeze({ tier: "account", maxActiveRooms: 5, maxDailyRooms: 20, maxLifetimeMs: 24 * 60 * 60 * 1000 }),
-  pro: Object.freeze({ tier: "pro", maxActiveRooms: 20, maxDailyRooms: 100, maxLifetimeMs: MAX_ROOM_LIFETIME_MS })
-});
-
 const GLOBAL_ANONYMOUS_QUOTA = Object.freeze({
   tier: "anonymous-global",
   maxActiveRooms: 500,
   maxDailyRooms: 1500,
-  maxLifetimeMs: COLLABORATION_QUOTAS.anonymous.maxLifetimeMs
+  maxLifetimeMs: 2 * 60 * 60 * 1000
 });
 
 const MAX_DAILY_DEVICE_REGISTRATIONS = 2000;
@@ -214,7 +208,7 @@ function isValidCipherEnvelope(value) {
   return Number.isFinite(Number(value.createdAt));
 }
 
-export async function handleCollaborationDeviceRegistration(request, env) {
+export async function handleCollaborationDeviceRegistration(request, env, quotaPolicy) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: collaborationCorsHeaders() });
   }
@@ -235,14 +229,14 @@ export async function handleCollaborationDeviceRegistration(request, env) {
       ok: true,
       deviceCredential: await issueDeviceCredential(env),
       tier: "anonymous",
-      quota: COLLABORATION_QUOTAS.anonymous
+      quota: quotaPolicy.anonymous
     }, 200, collaborationCorsHeaders());
   } catch {
     return jsonResponse({ ok: false, error: "collaboration_unavailable" }, 503, collaborationCorsHeaders());
   }
 }
 
-export async function handleCollaborationRoomCreate(request, env, accountCreator = null) {
+export async function handleCollaborationRoomCreate(request, env, accountCreator = null, quotaPolicy = null) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: collaborationCorsHeaders() });
   }
@@ -282,7 +276,7 @@ export async function handleCollaborationRoomCreate(request, env, accountCreator
     const deviceCredential = authorization.replace(/^Device\s+/i, "");
     creator = await verifyDeviceCredential(env, deviceCredential);
   }
-  const quota = creator ? COLLABORATION_QUOTAS[creator.tier] : null;
+  const quota = creator ? quotaPolicy?.[creator.tier === "pro" ? "paid" : creator.tier] : null;
   if (!creator || !quota) {
     return jsonResponse({ ok: false, error: "device_registration_required" }, 401, collaborationCorsHeaders());
   }
@@ -538,7 +532,7 @@ export class CollaborationRoom {
     const relayToken = String(body.relayToken || "");
     const expiresAt = Number(body.expiresAt || 0);
     const now = Date.now();
-    if (!RELAY_TOKEN_PATTERN.test(relayToken) || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt > now + MAX_ROOM_LIFETIME_MS) {
+    if (!RELAY_TOKEN_PATTERN.test(relayToken) || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt > now + MAX_ROOM_RETENTION_MS) {
       return jsonResponse({ ok: false, error: "invalid_room" }, 400);
     }
     const existing = await this.state.storage.get("room");
@@ -636,7 +630,7 @@ export class CollaborationRoom {
       authorId: envelope.authorId,
       iv: envelope.iv,
       ciphertext: envelope.ciphertext,
-      createdAt: Math.max(receivedAt - MAX_ROOM_LIFETIME_MS, Math.min(authoredAt, receivedAt + 5 * 60 * 1000)),
+      createdAt: Math.max(receivedAt - MAX_ROOM_RETENTION_MS, Math.min(authoredAt, receivedAt + 5 * 60 * 1000)),
       receivedAt,
       sequence
     };
@@ -832,11 +826,10 @@ export class CollaborationLobby {
 }
 
 export const collaborationRelayInternals = {
-  COLLABORATION_QUOTAS,
   GLOBAL_ANONYMOUS_QUOTA,
   MAX_CONNECTIONS,
   MAX_MESSAGES,
-  MAX_ROOM_LIFETIME_MS,
+  MAX_ROOM_RETENTION_MS,
   LOBBY_MAX_CONNECTIONS,
   LOBBY_MAX_MESSAGES_PER_SESSION,
   currentLobbySession,

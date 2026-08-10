@@ -62,7 +62,7 @@ export function hasProEntitlement(
     return false;
   }
   const normalizedFeature = featureKey === 'strategyPyramid' ? strategyPyramidFeature : featureKey;
-  return Boolean(entitlements[normalizedFeature] || entitlements[featureKey] || entitlements.pro || entitlements.solomap_pro);
+  return Boolean(entitlements[normalizedFeature]);
 }
 
 export function clearProEntitlements(entitlements: Record<string, boolean> = {}): Record<string, boolean> {

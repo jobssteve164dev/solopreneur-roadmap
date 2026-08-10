@@ -1448,12 +1448,13 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
   };
   await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
   const saved = getPersistedSettings(context);
-  const proEntitlements = result.allowed ? {
-    ...(saved.proEntitlements || {}),
-    pro: true,
-    solomap_pro: true,
-    [strategyPyramidFeature]: true
-  } : clearProEntitlements(saved.proEntitlements || {});
+  const verifiedEntitlements = result.allowed && Array.isArray(result.entitlements)
+    ? result.entitlements.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const proEntitlements = clearProEntitlements(saved.proEntitlements || {});
+  for (const featureKey of verifiedEntitlements) {
+    proEntitlements[featureKey] = true;
+  }
   await updatePersistedSettings(context, {
     proEntitlements,
     proAccount: buildProAccountStatus(result)
@@ -1468,7 +1469,7 @@ async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promi
     return false;
   }
   const verified = await verifyPassportGrant(cached.grant);
-  if (verified.allowed) {
+  if (verified.allowed && verified.entitlements?.includes(strategyPyramidFeature)) {
     await writePassportGrant(context, verified, cached.grant);
     return true;
   }
@@ -1483,7 +1484,7 @@ async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<bool
     return false;
   }
   const verified = await verifyPassportGrant(cached.grant);
-  if (verified.allowed) {
+  if (verified.allowed && verified.entitlements?.includes(flowModeFeature)) {
     await writePassportGrant(context, verified, cached.grant);
     return true;
   }
