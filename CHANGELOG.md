@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.429 - 2026-08-10
+
+### Fixed
+- align prompt review maintenance runs (e595e95)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.428 - 2026-08-10
 
 ### Added
