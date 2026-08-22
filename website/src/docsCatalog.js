@@ -88,7 +88,7 @@ export const docsCatalog = {
           { title: "What stays local", copy: "SoloMap keeps the roadmap, project journal, step memory, Agent run records, and reusable local context in your workspace or configured local data directory." },
           { title: "What remains provider-dependent", copy: "When you run Codex, Claude Code, Cursor, or another Agent CLI, that tool follows its own authentication, model, network, privacy, and billing terms." },
           { title: "Why plain files matter", copy: "A CSV roadmap and readable records can be inspected, diffed, reviewed, backed up, and versioned with the project. Your workflow is not locked inside an opaque hosted board." },
-          { title: "What the website measures", copy: "The public website may record anonymous aggregate page and CTA events without cookies. It does not receive your repository, roadmap, prompt, or local Agent history from the extension." },
+          { title: "What the website measures", copy: "Only after you allow analytics, the public website records anonymous page visits with a first-party preference cookie and random browser identifier. It never receives your repository, roadmap, prompt, or local Agent history from the extension." },
           { title: "A practical backup rule", copy: "Commit project records you want to share with collaborators; keep secrets and private runtime data out of Git using the repository’s established ignore rules." }
         ],
         [
@@ -212,7 +212,7 @@ export const docsCatalog = {
         { title: "哪些内容保存在本地", copy: "SoloMap 会把路线图、项目日志、环节记忆、Agent 运行记录和可复用上下文保存在工作区或你配置的本地数据目录。" },
         { title: "哪些仍由服务商决定", copy: "运行 Codex、Claude Code、Cursor 或其他 Agent CLI 时，登录、模型、网络、隐私和计费仍遵循对应工具自己的规则。" },
         { title: "为什么可读文件重要", copy: "CSV 路线图和可读记录可以检查、diff、评审、备份并随项目版本化，不会被锁进不透明的托管看板。" },
-        { title: "官网会衡量什么", copy: "官网可以在不使用 Cookie 的前提下记录匿名汇总的页面与 CTA 事件；插件不会把你的仓库、路线图、提示词或本地 Agent 历史发给官网。" },
+        { title: "官网会衡量什么", copy: "只有在你允许统计后，官网才会使用第一方偏好 Cookie 与随机浏览器标识记录匿名页面访问；插件不会把你的仓库、路线图、提示词或本地 Agent 历史发给官网。" },
         { title: "实用备份规则", copy: "需要协作的项目记录可以提交到 Git；密钥与私有运行数据应遵循仓库既有忽略规则，不要提交。" }
       ], [["SoloMap 完全离线吗？", "核心项目记录在本地，但你选择的 Agent CLI 可能需要联网；应用市场安装和可选官网账号能力也使用网络服务。"], ["路线图能检查或迁移吗？", "可以。路线图是可读的本地文件，可以随项目文件夹一起迁移。"]], ["getting-started", "resume-ai-coding-projects", "compare/solomap-vs-task-managers"]),
       "agents/codex": page("Integrate", "在 SoloMap 中使用 Codex CLI", "把 Codex 配置为 SoloMap 的本地 Agent，检测命令、执行路线图环节，并让结果与项目证据保持关联。", "从真正需要执行的路线图环节启动 Codex", "SoloMap 不替代 Codex；它为 Codex 提供边界清晰的项目环节、可见执行路径和可长期续接的本地交接。", [

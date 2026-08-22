@@ -32,6 +32,16 @@ import {
   handleCollaborationSocket
 } from "./collaborationRelay.js";
 import { docsCatalog } from "./docsCatalog.js";
+import {
+  BlogProjection,
+  getActiveBlogProjection,
+  handleBlogLifecycle
+} from "./blogProjection.js";
+import {
+  AnalyticsOutbox,
+  buildAnalyticsClientScript,
+  handleAnalyticsEvent
+} from "./analyticsOutbox.js";
 
 const SITE_ORIGIN = "https://solomap.app";
 const MARKETPLACE_URL = "https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap";
@@ -104,6 +114,7 @@ const content = {
       product: "Product",
       pro: "Pro",
       docs: "Docs",
+      blog: "OPC Blog",
       github: "GitHub",
       install: "Install"
     },
@@ -219,7 +230,7 @@ const content = {
       items: [
         "Your AI provider usage depends on the local Agent CLI you choose.",
         "GitHub data is used when you connect or refresh GitHub-backed signals.",
-        "The public website records anonymous aggregate page and outbound CTA events without advertising or tracking cookies; it does not receive your repository, roadmap, prompts, or local Agent history.",
+        "If you allow analytics, the public website records anonymous page visits using a first-party preference cookie and random browser identifier; it never receives your repository, roadmap, prompts, or local Agent history.",
         "Feedback is sent only when you open or submit a feedback issue yourself."
       ]
     },
@@ -274,6 +285,7 @@ const content = {
       product: "产品",
       pro: "Pro",
       docs: "文档",
+      blog: "OPC Blog",
       github: "GitHub",
       install: "安装"
     },
@@ -389,7 +401,7 @@ const content = {
       items: [
         "AI 服务的使用取决于你选择的本地 Agent CLI。",
         "GitHub 数据只在你连接或刷新相关信号时使用。",
-        "官网会在不使用广告或追踪 Cookie 的前提下记录匿名汇总的页面与外链 CTA 事件；它不会接收你的仓库、路线图、提示词或本地 Agent 历史。",
+        "只有在你允许统计后，官网才会使用第一方偏好 Cookie 与随机浏览器标识记录匿名页面访问；它不会接收你的仓库、路线图、提示词或本地 Agent 历史。",
         "反馈只会在你主动打开或提交反馈 Issue 时发送。"
       ]
     },
@@ -3507,6 +3519,33 @@ function buildStyles() {
       margin: 10px 0 0;
       font-size: 15px;
     }
+    .blog-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+    .blog-card { display: flex; min-height: 250px; flex-direction: column; justify-content: space-between; gap: 24px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .blog-card:hover { border-color: rgba(73, 214, 208, 0.55); transform: translateY(-2px); }
+    .blog-card h3 { margin: 10px 0 0; font-size: 24px; line-height: 1.12; }
+    .blog-card p { color: var(--muted); }
+    .blog-meta { color: var(--muted); font-size: 13px; }
+    .blog-category { color: var(--cyan); font-size: 13px; font-weight: 760; text-transform: uppercase; letter-spacing: .04em; }
+    .blog-page { padding: 72px 0 92px; }
+    .blog-intro { max-width: 800px; margin-bottom: 38px; }
+    .blog-intro h1 { font-size: clamp(42px, 7vw, 76px); }
+    .blog-intro p { color: var(--soft); font-size: 19px; }
+    .blog-empty { padding: 36px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--soft); }
+    .article-shell { width: min(820px, calc(100% - 40px)); margin: 0 auto; padding: 64px 0 96px; }
+    .article-header h1 { max-width: none; font-size: clamp(38px, 6vw, 68px); line-height: 1.02; }
+    .article-header .lead { color: var(--soft); font-size: 20px; line-height: 1.65; }
+    .article-body { margin-top: 44px; color: var(--soft); font-size: 18px; line-height: 1.78; }
+    .article-body h2 { margin: 46px 0 14px; color: var(--ink); font-size: 30px; line-height: 1.18; }
+    .article-body h3 { margin: 34px 0 10px; color: var(--ink); font-size: 23px; }
+    .article-body a { color: var(--cyan); text-decoration: underline; text-underline-offset: 3px; }
+    .article-body code { padding: 2px 6px; border-radius: 5px; background: rgba(255,255,255,.07); }
+    .article-body pre { overflow-x: auto; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: #0b0d0f; }
+    .article-body blockquote { margin: 26px 0; padding: 4px 0 4px 20px; border-left: 3px solid var(--cyan); color: var(--muted); }
+    .consent-banner { position: fixed; right: 18px; bottom: 18px; z-index: 100; width: min(390px, calc(100% - 36px)); padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: #1a1714; box-shadow: 0 18px 60px rgba(0,0,0,.48); }
+    .consent-banner p { margin: 0 0 14px; color: var(--soft); font-size: 14px; }
+    .consent-banner div { display: flex; justify-content: flex-end; gap: 8px; }
+    .consent-banner button { min-height: 38px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
+    .consent-banner button.primary { border-color: var(--cyan); background: var(--cyan); color: #11100e; font-weight: 760; }
     @media (max-width: 920px) {
       .links a:not(.install-link):not(.language-link) { display: none; }
       .hero { min-height: auto; padding-top: 44px; }
@@ -3524,6 +3563,7 @@ function buildStyles() {
       .grid-3,
       .grid-4,
       .docs-grid,
+      .blog-grid,
       .docs-body,
       .faq-list,
       .feature-list,
@@ -3890,6 +3930,7 @@ function buildHeader(t, locale, currentPath) {
         <a href="${productHref}">${escapeHtml(t.nav.product)}</a>
         <a href="${proHref}">${escapeHtml(t.nav.pro)}</a>
         <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
+        <a href="${t.pathPrefix}/blog">${escapeHtml(t.nav.blog)}</a>
         <a href="/go/github">${escapeHtml(t.nav.github)}</a>
         <a class="workbench-link" href="${locale === "zh" ? "/zh/workbench" : "/workbench"}">${locale === "zh" ? "工作台" : "Workbench"}</a>
         <a class="language-link" href="${alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
@@ -3920,6 +3961,7 @@ function buildFooter(t) {
             <li><a href="${t.homePath}#product">${escapeHtml(t.nav.product)}</a></li>
             <li><a href="${t.pathPrefix}/pro">${escapeHtml(t.nav.pro)}</a></li>
             <li><a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a></li>
+            <li><a href="${t.pathPrefix}/blog">${escapeHtml(t.nav.blog)}</a></li>
             <li><a href="${t.homePath}#install">${isZh ? "安装插件" : "Install extension"}</a></li>
           </ul>
         </div>
@@ -3954,7 +3996,7 @@ function buildFooter(t) {
         </div>
       </div>
     </div>
-  </footer>`;
+  </footer>${buildAnalyticsClientScript(isZh ? "zh" : "en")}`;
 }
 function buildHtmlSitemapPage(locale, origin) {
   const t = content[locale];
@@ -3989,6 +4031,7 @@ function buildHtmlSitemapPage(locale, origin) {
     <ul>
       <li><a href="${t.homePath}"><strong>${isZh ? "SoloMap 首页" : "SoloMap Home"}</strong></a></li>
       <li><a href="${t.pathPrefix}/pro"><strong>SoloMap Pro ${isZh ? "订阅页" : "Subscription"}</strong></a></li>
+      <li><a href="${t.pathPrefix}/blog"><strong>OPC Blog</strong></a></li>
       <li><a href="${t.privacyPath}"><strong>${isZh ? "本地优先说明" : "Local-first Note"}</strong></a></li>
       ${legalRoutes.map((route) => `<li><a href="${legalPath(route.slug, locale)}"><strong>${escapeHtml(route.label[locale])}</strong></a></li>`).join("")}
       <li><a href="${legalPath(legalSupplementRoute.slug, locale)}"><strong>${escapeHtml(legalSupplementRoute.label[locale])}</strong></a></li>
@@ -4048,11 +4091,11 @@ function buildPrivacyPolicyPage(locale, origin) {
     </ul>
 
     <h2>5. Cookies 政策声明</h2>
-    <p>我们仅使用必要的、功能性的 Cookie，其有效期最长为 1 年：</p>
+    <p>我们不使用第三方广告 Cookie 或跨站追踪。官网使用以下第一方 Cookie：</p>
     <ul>
       <li><code>lang_pref</code>：用于记录您的偏好语言（中/英文），为您提供无缝的本地化访问体验，避免重复跳转。</li>
       <li>SZLK Passport 登录会话：用于在您跳转至 Passport 并返回时维持安全的临时校验会话。</li>
-      <li>我们不使用任何第三方的广告追踪 Cookie，也不进行跨站行为轨迹追踪。</li>
+      <li><code>solomap_analytics_consent</code>：保存你的统计选择，最长 180 天。只有在你允许后，官网才会使用随机第一方浏览器标识记录匿名页面访问。</li>
     </ul>
 
     <h2>6. 变更与联系方式</h2>
@@ -4094,10 +4137,11 @@ function buildPrivacyPolicyPage(locale, origin) {
     </ul>
 
     <h2>5. Cookies and Web Technologies</h2>
-    <p>We do not use any tracking or advertising cookies. The only cookies we store are valid up to 1 year:</p>
+    <p>We do not use third-party advertising or cross-site tracking cookies. We use these first-party cookies:</p>
     <ul>
       <li><code>lang_pref</code>: To remember your localized language preference (English/Chinese) and ensure seamless redirection.</li>
       <li>SZLK Passport session parameters: Temporary cookies required for OIDC authentication.</li>
+      <li><code>solomap_analytics_consent</code>: Stores your analytics choice for up to 180 days. If allowed, a random first-party browser identifier is used only for anonymous page analytics.</li>
     </ul>
 
     <h2>6. Updates and Contact</h2>
@@ -4375,8 +4419,11 @@ function resetStatsCacheForTest() {
   updateStatsPromise = null;
 }
 
-function buildPage(locale, origin, stats, proPlan = null) {
+function buildPage(locale, origin, stats, proPlan = null, blogPosts = []) {
   const t = content[locale];
+  const latestBlogPosts = blogPosts.filter((post) => post.locale === locale)
+    .sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt))
+    .slice(0, 3);
   return `<!doctype html>
 <html lang="${t.lang}">
 <head>
@@ -4495,6 +4542,16 @@ function buildPage(locale, origin, stats, proPlan = null) {
         <div class="docs-grid">
           ${renderDocCards(t, ["getting-started", "ai-coding-project-roadmap", "resume-ai-coding-projects"].map((slug) => [slug, docsContent[locale].pages[slug]]), locale)}
         </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="homepage-blog">
+      <div class="shell">
+        <div class="section-head">
+          <div><span class="eyebrow">OPC Blog</span><h2 id="homepage-blog">${locale === "zh" ? "把一个人的产品，做成可持续的生意。" : "Turn a solo product into a durable business."}</h2></div>
+          <p>${locale === "zh" ? "关于 AI 协作、产品交付、自然增长和一人公司经营的实战文章。" : "Field guides on AI collaboration, shipping, organic growth, and running a one-person company."}</p>
+        </div>
+        ${latestBlogPosts.length ? `<div class="blog-grid">${renderBlogCards(latestBlogPosts, locale)}</div>` : `<div class="blog-empty">${locale === "zh" ? "第一批 OPC 实战文章正在准备中。" : "The first OPC field guides are being prepared."} <a href="${blogPath(locale)}">${locale === "zh" ? "进入 OPC Blog" : "Visit the OPC Blog"} →</a></div>`}
       </div>
     </section>
 
@@ -5325,6 +5382,122 @@ function buildNotFoundPage(locale, origin, requestedPath) {
   return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { title, description, ogDescription: description, noindex: true } }, origin, requestedPath)}${buildStyles()}</head><body>${buildHeader(t, locale, requestedPath)}<main id="main-content" class="privacy-page"><p class="eyebrow">404</p><h1>${locale === "zh" ? "这里没有你要找的页面" : "This page does not exist"}</h1><p>${escapeHtml(description)}</p><div class="cta-row"><a class="button primary" href="${t.homePath}">${locale === "zh" ? "返回首页" : "Return home"}</a><a class="button ghost" href="${t.docsPath}">${locale === "zh" ? "查看文档" : "Browse docs"}</a></div></main>${buildFooter(t)}</body></html>`;
 }
 
+function blogPath(locale, slug = "") {
+  return `${locale === "zh" ? "/zh" : ""}/blog${slug ? `/${slug}` : ""}`;
+}
+
+function renderInlineMarkdown(value) {
+  const source = String(value || "");
+  let cursor = 0;
+  let output = "";
+  const linkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+  for (const match of source.matchAll(linkPattern)) {
+    output += escapeHtml(source.slice(cursor, match.index));
+    const href = String(match[2] || "").trim();
+    output += /^(?:https?:\/\/|\/)/.test(href)
+      ? `<a href="${escapeHtml(href)}"${href.startsWith("http") ? ' target="_blank" rel="noopener noreferrer"' : ""}>${escapeHtml(match[1])}</a>`
+      : escapeHtml(match[0]);
+    cursor = match.index + match[0].length;
+  }
+  output += escapeHtml(source.slice(cursor));
+  return output
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderMarkdown(markdown) {
+  const lines = String(markdown || "").replace(/\r/g, "").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let list = [];
+  let code = [];
+  let inCode = false;
+  const flushParagraph = () => {
+    if (paragraph.length) blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (list.length) blocks.push(`<ul>${list.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`);
+    list = [];
+  };
+  for (const line of lines) {
+    if (/^```/.test(line)) {
+      flushParagraph(); flushList();
+      if (inCode) { blocks.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`); code = []; }
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) { code.push(line); continue; }
+    const heading = line.match(/^(#{2,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph(); flushList();
+      const level = heading[1].length;
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      continue;
+    }
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (bullet) { flushParagraph(); list.push(bullet[1]); continue; }
+    if (/^>\s?/.test(line)) {
+      flushParagraph(); flushList();
+      blocks.push(`<blockquote>${renderInlineMarkdown(line.replace(/^>\s?/, ""))}</blockquote>`);
+      continue;
+    }
+    if (!line.trim()) { flushParagraph(); flushList(); continue; }
+    paragraph.push(line.trim());
+  }
+  flushParagraph(); flushList();
+  if (code.length) blocks.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+  return blocks.join("\n");
+}
+
+function formatBlogDate(value, locale) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
+    year: "numeric", month: "long", day: "numeric", timeZone: "UTC"
+  }).format(date);
+}
+
+function renderBlogCards(posts, locale, limit = posts.length) {
+  return posts.slice(0, limit).map((post) => `<a class="blog-card" href="${blogPath(locale, post.slug)}">
+    <div><span class="blog-category">${escapeHtml(post.categoryLabel)}</span><h3>${escapeHtml(post.title)}</h3><p>${escapeHtml(post.description)}</p></div>
+    <span class="blog-meta">${escapeHtml(formatBlogDate(post.publishedAt, locale))} · ${post.readingTime} ${locale === "zh" ? "分钟阅读" : "min read"}</span>
+  </a>`).join("");
+}
+
+function buildBlogIndexPage(locale, origin, posts) {
+  const t = content[locale];
+  const localized = posts.filter((post) => post.locale === locale)
+    .sort((left, right) => Date.parse(right.publishedAt) - Date.parse(left.publishedAt));
+  const title = locale === "zh" ? "OPC Blog：一个人把产品做成生意 | SoloMap" : "OPC Blog: Build a One-Person Company | SoloMap";
+  const description = locale === "zh"
+    ? "面向独立开发者的实战文章：用 AI Agent 构建、发布、获客，并持续经营一人公司。"
+    : "Practical guides for solo developers using AI agents to build, ship, find customers, and run a one-person company.";
+  const path = blogPath(locale);
+  const structured = {
+    "@context": "https://schema.org", "@type": "Blog", name: "SoloMap OPC Blog", url: `${origin}${path}`,
+    description, blogPost: localized.map((post) => ({ "@type": "BlogPosting", headline: post.title, url: post.canonicalUrl, datePublished: post.publishedAt }))
+  };
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { ...t.meta, title, description, ogDescription: description } }, origin, path)}<script type="application/ld+json">${JSON.stringify(structured)}</script>${buildStyles()}</head>
+  <body>${buildHeader(t, locale, path)}<main id="main-content" class="blog-page shell"><div class="blog-intro"><span class="eyebrow">OPC Blog</span><h1>${locale === "zh" ? "一个人做产品，也要让市场找得到你。" : "Build alone. Get discovered."}</h1><p>${escapeHtml(description)}</p></div>
+  ${localized.length ? `<div class="blog-grid">${renderBlogCards(localized, locale)}</div>` : `<div class="blog-empty">${locale === "zh" ? "第一批实战文章正在准备中。你可以先从 SoloMap 文档开始。" : "The first field guides are being prepared. Start with the SoloMap docs in the meantime."} <a href="${t.docsPath}">${locale === "zh" ? "查看文档" : "Browse docs"} →</a></div>`}</main>${buildFooter(t)}</body></html>`;
+}
+
+function buildBlogArticlePage(locale, origin, post, posts) {
+  const t = content[locale];
+  const path = blogPath(locale, post.slug);
+  const alternate = posts.find((candidate) => candidate.translationKey && candidate.translationKey === post.translationKey && candidate.locale !== locale);
+  const metadata = { ...t.meta, title: post.seoTitle || post.title, description: post.description, ogDescription: post.description, keywords: post.seoKeywords.join(", ") };
+  const structured = {
+    "@context": "https://schema.org", "@type": "BlogPosting", headline: post.title, description: post.description,
+    datePublished: post.publishedAt, dateModified: post.updatedAt, mainEntityOfPage: post.canonicalUrl,
+    author: { "@type": "Organization", name: post.author }, publisher: { "@type": "Organization", name: "SoloMap", url: origin },
+    image: post.ogImageUrl || `${origin}/solomap-social-card.png`, keywords: post.tags.join(", ")
+  };
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: metadata }, origin, path)}${alternate ? `<link rel="alternate" hreflang="${alternate.locale === "zh" ? "zh-Hans" : "en"}" href="${escapeHtml(alternate.canonicalUrl)}">` : ""}<script type="application/ld+json">${JSON.stringify(structured)}</script>${buildStyles()}</head>
+  <body>${buildHeader(t, locale, path)}<main id="main-content" class="article-shell"><nav class="docs-breadcrumbs"><a href="${t.homePath}">SoloMap</a> / <a href="${blogPath(locale)}">OPC Blog</a></nav><article><header class="article-header"><span class="blog-category">${escapeHtml(post.categoryLabel)}</span><h1>${escapeHtml(post.title)}</h1><p class="lead">${escapeHtml(post.description)}</p><div class="blog-meta">${escapeHtml(post.author)} · ${escapeHtml(formatBlogDate(post.publishedAt, locale))} · ${post.readingTime} ${locale === "zh" ? "分钟阅读" : "min read"}</div></header><div class="article-body">${renderMarkdown(post.contentMarkdown)}</div></article><section class="docs-related"><a href="${blogPath(locale)}">← ${locale === "zh" ? "返回 OPC Blog" : "Back to OPC Blog"}</a></section></main>${buildFooter(t)}</body></html>`;
+}
+
 function resolveRoute(pathname) {
   const legalRoute = findLegalRoute(pathname);
   if (legalRoute) {
@@ -5341,6 +5514,16 @@ function resolveRoute(pathname) {
   }
   if (pathname === "/zh/sitemap" || pathname === "/zh/sitemap/") {
     return { type: "sitemap-html", locale: "zh", status: 200 };
+  }
+  if (pathname === "/blog" || pathname === "/blog/") {
+    return { type: "blog-index", locale: "en", status: 200 };
+  }
+  if (pathname === "/zh/blog" || pathname === "/zh/blog/") {
+    return { type: "blog-index", locale: "zh", status: 200 };
+  }
+  const blogMatch = pathname.match(/^\/(zh\/)?blog\/([^/]+)$/);
+  if (blogMatch) {
+    return { type: "blog-article", locale: blogMatch[1] ? "zh" : "en", slug: blogMatch[2], status: 200 };
   }
   if (pathname === "/docs" || pathname === "/docs/") {
     return { type: "docs-index", locale: "en", status: 200 };
@@ -5377,10 +5560,20 @@ function resolveRoute(pathname) {
   return { type: "not-found", locale: pathname.startsWith("/zh") ? "zh" : "en", status: 404, pathname };
 }
 
-function buildSitemap(origin) {
+function buildSitemap(origin, blogPosts = []) {
+  const blogFamilies = new Map();
+  for (const post of blogPosts) {
+    const key = post.translationKey || `${post.locale}:${post.slug}`;
+    const family = blogFamilies.get(key) || { priority: "0.7", changefreq: "monthly", lastmod: post.updatedAt.slice(0, 10) };
+    family[post.locale] = blogPath(post.locale, post.slug);
+    family.lastmod = [family.lastmod, post.updatedAt.slice(0, 10)].sort().at(-1);
+    blogFamilies.set(key, family);
+  }
   const pairs = [
     { en: "/", zh: "/zh", priority: "1.0", changefreq: "weekly" },
     { en: "/pro", zh: "/zh/pro", priority: "0.9", changefreq: "weekly" },
+    { en: "/blog", zh: "/zh/blog", priority: "0.8", changefreq: "weekly" },
+    ...blogFamilies.values(),
     { en: "/docs", zh: "/zh/docs", priority: "0.7", changefreq: "monthly" },
     ...Object.keys(docsContent.en.pages).map((slug) => ({
       en: `/docs/${slug}`,
@@ -5399,18 +5592,15 @@ function buildSitemap(origin) {
   ];
   const renderUrl = (loc, pair) => `  <url>
     <loc>${escapeHtml(absoluteUrl(loc, origin))}</loc>
-    <lastmod>${SITEMAP_LASTMOD}</lastmod>
+    <lastmod>${pair.lastmod || SITEMAP_LASTMOD}</lastmod>
     <changefreq>${pair.changefreq}</changefreq>
     <priority>${pair.priority}</priority>
-    <xhtml:link rel="alternate" hreflang="en" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
-    <xhtml:link rel="alternate" hreflang="zh-CN" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
-    <xhtml:link rel="alternate" hreflang="x-default" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />
+    ${pair.en ? `<xhtml:link rel="alternate" hreflang="en" href="${escapeHtml(absoluteUrl(pair.en, origin))}" />` : ""}
+    ${pair.zh ? `<xhtml:link rel="alternate" hreflang="zh-Hans" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />
+    <xhtml:link rel="alternate" hreflang="zh-CN" href="${escapeHtml(absoluteUrl(pair.zh, origin))}" />` : ""}
+    <xhtml:link rel="alternate" hreflang="x-default" href="${escapeHtml(absoluteUrl(pair.en || pair.zh, origin))}" />
   </url>`;
-  const urls = pairs.flatMap((pair) => [
-    renderUrl(pair.en, pair),
-    renderUrl(pair.zh, pair)
-  ]).join("\n");
+  const urls = pairs.flatMap((pair) => [pair.en, pair.zh].filter(Boolean).map((loc) => renderUrl(loc, pair))).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="/sitemap.xsl"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
@@ -5576,6 +5766,8 @@ SoloMap is a local-first roadmap and strategy cockpit for AI-built projects in V
 - Website: ${origin}/
 - Chinese website: ${origin}/zh
 - Docs: ${origin}/docs
+- OPC Blog: ${origin}/blog
+- Chinese OPC Blog: ${origin}/zh/blog
 - SoloMap method: ${origin}/docs/solomap-method
 - Portfolio method: ${origin}/docs/portfolio-method
 - Micro execution loop: ${origin}/docs/micro-execution-loop
@@ -5601,18 +5793,9 @@ const outboundDestinations = {
   feedback: FEEDBACK_URL
 };
 
-function handleOutboundRedirect(request, env, eventName) {
+function handleOutboundRedirect(request, eventName) {
   const destination = outboundDestinations[eventName];
   if (!destination) return null;
-  try {
-    env.SITE_ANALYTICS?.writeDataPoint({
-      blobs: ["outbound_click", eventName],
-      doubles: [1],
-      indexes: [eventName]
-    });
-  } catch (error) {
-    console.warn("Unable to record anonymous site event", error);
-  }
   return new Response(null, {
     status: 302,
     headers: {
@@ -5621,18 +5804,6 @@ function handleOutboundRedirect(request, env, eventName) {
       "cache-control": "no-store"
     }
   });
-}
-
-function recordAnonymousPageView(env, pathname, routeType) {
-  try {
-    env.SITE_ANALYTICS?.writeDataPoint({
-      blobs: ["page_view", pathname, routeType],
-      doubles: [1],
-      indexes: [pathname.slice(0, 96)]
-    });
-  } catch (error) {
-    console.warn("Unable to record anonymous page view", error);
-  }
 }
 
 // 检查并处理多语言重定向及 Cookie 同步
@@ -5763,8 +5934,17 @@ export default {
 
     const outboundMatch = request.method === "GET" ? url.pathname.match(/^\/go\/([a-z-]+)$/) : null;
     if (outboundMatch) {
-      const response = handleOutboundRedirect(request, env, outboundMatch[1]);
+      const response = handleOutboundRedirect(request, outboundMatch[1]);
       if (response) return response;
+    }
+
+    if (url.pathname === "/api/blog/lifecycle" && request.method === "POST") {
+      return handleBlogLifecycle(request, env);
+    }
+
+    if (url.pathname === "/api/analytics/events" && request.method === "POST") {
+      try { assertSameOrigin(request); } catch (error) { return jsonResponse({ error: "Invalid request origin" }, 403); }
+      return handleAnalyticsEvent(request, env);
     }
 
     const redirectRes = handleLocaleRedirect(request, env, origin);
@@ -5966,7 +6146,8 @@ Sitemap: ${origin}/sitemap.xml
     }
 
     if (url.pathname === "/sitemap.xml") {
-      return textResponse(buildSitemap(origin), "application/xml; charset=utf-8");
+      const projection = await getActiveBlogProjection(env).catch(() => ({ posts: [] }));
+      return textResponse(buildSitemap(origin, projection.posts), "application/xml; charset=utf-8");
     }
 
     if (url.pathname === "/sitemap.xsl") {
@@ -5974,10 +6155,6 @@ Sitemap: ${origin}/sitemap.xml
     }
 
     const route = resolveRoute(url.pathname);
-    if (request.method === "GET" && route.status === 200) {
-      recordAnonymousPageView(env, url.pathname, route.type);
-    }
-
     if (route.type === "sitemap-html") {
       return htmlResponse(buildHtmlSitemapPage(route.locale, origin), route.status, extraHeaders);
     }
@@ -6004,21 +6181,35 @@ Sitemap: ${origin}/sitemap.xml
     if (route.type === "doc") {
       return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status, extraHeaders);
     }
+    if (route.type === "blog-index" || route.type === "blog-article") {
+      const projection = await getActiveBlogProjection(env).catch((error) => {
+        console.error("Unable to read Blog projection", error);
+        return { posts: [] };
+      });
+      if (route.type === "blog-index") return htmlResponse(buildBlogIndexPage(route.locale, origin, projection.posts), 200, extraHeaders);
+      const post = projection.posts.find((item) => item.locale === route.locale && item.slug === route.slug);
+      if (!post) return htmlResponse(buildNotFoundPage(route.locale, origin, url.pathname), 404, extraHeaders);
+      return htmlResponse(buildBlogArticlePage(route.locale, origin, post, projection.posts), 200, extraHeaders);
+    }
     if (route.type === "not-found") {
       return htmlResponse(buildNotFoundPage(route.locale, origin, route.pathname), 404, extraHeaders);
     }
 
-    const [stats, proPlan] = await Promise.all([
+    const [stats, proPlan, projection] = await Promise.all([
       getStats(ctx),
       env.SOLOMAP_PASSPORT_PRODUCT_SECRET
         ? getPassportProPlan(env).catch((error) => {
           console.error("Unable to load SoloMap Pro catalog for homepage", error);
           return null;
         })
-        : Promise.resolve(null)
+        : Promise.resolve(null),
+      getActiveBlogProjection(env).catch((error) => {
+        console.error("Unable to read Blog projection for homepage", error);
+        return { posts: [] };
+      })
     ]);
-    return htmlResponse(buildPage(route.locale, origin, stats, proPlan), route.status, extraHeaders);
+    return htmlResponse(buildPage(route.locale, origin, stats, proPlan, projection.posts), route.status, extraHeaders);
   }
 };
 
-export { CollaborationLobby, CollaborationQuota, CollaborationRoom, resetStatsCacheForTest };
+export { AnalyticsOutbox, BlogProjection, CollaborationLobby, CollaborationQuota, CollaborationRoom, resetStatsCacheForTest };

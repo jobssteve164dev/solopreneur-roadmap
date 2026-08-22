@@ -248,8 +248,8 @@ test("the signed-in workbench co-create space keeps the lobby and private rooms 
   assert.doesNotMatch(html, /indexedDB|72 \* 60 \* 60|parseInviteCode|crypto\.subtle/);
   assert.equal(env.COLLABORATION_ROOMS.allocations, 0);
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-  assert.equal(scripts.length, 1);
-  assert.doesNotThrow(() => new vm.Script(scripts[0][1]));
+  assert.equal(scripts.length, 2);
+  for (const script of scripts) assert.doesNotThrow(() => new vm.Script(script[1]));
 
   const roomsResponse = await worker.fetch(
     new Request("https://solomap.app/zh/workbench/collaboration?view=rooms", { headers: { cookie } }),
@@ -267,8 +267,8 @@ test("the signed-in workbench co-create space keeps the lobby and private rooms 
   assert.match(roomsHtml, /crypto\.subtle\.decrypt/);
   assert.match(roomsHtml, /if \(joinAnother\) joinAnother\.hidden = false/);
   const roomScripts = [...roomsHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)];
-  assert.equal(roomScripts.length, 1);
-  assert.doesNotThrow(() => new vm.Script(roomScripts[0][1]));
+  assert.equal(roomScripts.length, 2);
+  for (const script of roomScripts) assert.doesNotThrow(() => new vm.Script(script[1]));
   assert.equal(env.COLLABORATION_ROOMS.allocations, 0);
 
   const lobbySessionResponse = await worker.fetch(new Request("https://solomap.app/api/collaboration/lobby/session", {

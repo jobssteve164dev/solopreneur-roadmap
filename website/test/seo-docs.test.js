@@ -66,12 +66,10 @@ test("canonical host, trailing slashes, and outbound CTAs use explicit redirects
   assert.equal(slash.status, 301);
   assert.equal(slash.headers.get("location"), "https://solomap.app/docs");
 
-  const points = [];
-  const outbound = await get("/go/marketplace", { SITE_ANALYTICS: { writeDataPoint(point) { points.push(point); } } });
+  const outbound = await get("/go/marketplace");
   assert.equal(outbound.status, 302);
   assert.match(outbound.headers.get("location"), /marketplace\.visualstudio\.com/);
   assert.equal(outbound.headers.get("cache-control"), "no-store");
-  assert.equal(points[0].blobs[1], "marketplace");
 });
 
 test("sitemap, social metadata, and llms index include the expanded docs system", async () => {

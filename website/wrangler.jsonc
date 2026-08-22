@@ -26,12 +26,6 @@
     "binding": "ASSETS",
     "run_worker_first": true
   },
-  "analytics_engine_datasets": [
-    {
-      "binding": "SITE_ANALYTICS",
-      "dataset": "solomap_site_events"
-    }
-  ],
   "vars": {
     "SITE_ORIGIN": "https://solomap.app"
   },
@@ -52,6 +46,14 @@
       {
         "name": "COLLABORATION_LOBBY",
         "class_name": "CollaborationLobby"
+      },
+      {
+        "name": "BLOG_PROJECTION",
+        "class_name": "BlogProjection"
+      },
+      {
+        "name": "ANALYTICS_OUTBOX",
+        "class_name": "AnalyticsOutbox"
       }
     ]
   },
@@ -72,6 +74,13 @@
       "tag": "collaboration-lobby-v1",
       "new_sqlite_classes": [
         "CollaborationLobby"
+      ]
+    },
+    {
+      "tag": "blog-and-analytics-v1",
+      "new_sqlite_classes": [
+        "BlogProjection",
+        "AnalyticsOutbox"
       ]
     }
   ],
