@@ -2145,9 +2145,16 @@ function chinesePathFor(pagePath) {
   return `/zh${pagePath === "/" ? "" : pagePath}`;
 }
 
-function buildHead(t, origin, pagePath) {
+function buildHead(t, origin, pagePath, alternatePagePath) {
   const locale = t.lang === "zh-Hans" ? "zh_CN" : "en_US";
   const imageUrl = absoluteUrl("/solomap-social-card.png", origin);
+  const isZh = t.lang === "zh-Hans";
+  const englishPath = alternatePagePath === false
+    ? (isZh ? null : pagePath)
+    : (isZh && typeof alternatePagePath === "string" ? alternatePagePath : englishPathFor(pagePath));
+  const chinesePath = alternatePagePath === false
+    ? (isZh ? pagePath : null)
+    : (!isZh && typeof alternatePagePath === "string" ? alternatePagePath : chinesePathFor(pagePath));
   return `<meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#11100e">
@@ -2157,10 +2164,10 @@ function buildHead(t, origin, pagePath) {
   ${t.meta.keywords ? `<meta name="keywords" content="${escapeHtml(t.meta.keywords)}">` : ""}
   <link rel="icon" href="${LOGO_URL}" type="image/svg+xml">
   <link rel="canonical" href="${absoluteUrl(pagePath, origin)}">
-  <link rel="alternate" hreflang="en" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
-  <link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
-  <link rel="alternate" hreflang="zh-CN" href="${absoluteUrl(chinesePathFor(pagePath), origin)}">
-  <link rel="alternate" hreflang="x-default" href="${absoluteUrl(englishPathFor(pagePath), origin)}">
+  ${englishPath ? `<link rel="alternate" hreflang="en" href="${absoluteUrl(englishPath, origin)}">` : ""}
+  ${chinesePath ? `<link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePath, origin)}">
+  <link rel="alternate" hreflang="zh-CN" href="${absoluteUrl(chinesePath, origin)}">` : ""}
+  <link rel="alternate" hreflang="x-default" href="${absoluteUrl(englishPath || chinesePath || pagePath, origin)}">
   <meta property="og:title" content="${escapeHtml(t.meta.title)}">
   <meta property="og:description" content="${escapeHtml(t.meta.ogDescription)}">
   <meta property="og:image" content="${imageUrl}">
@@ -3913,7 +3920,7 @@ function buildProStructuredData(copy, origin, pagePath, proPlan) {
   <script type="application/ld+json">${JSON.stringify(breadcrumb)}</script>`;
 }
 
-function buildHeader(t, locale, currentPath) {
+function buildHeader(t, locale, currentPath, languagePath = null) {
   const productHref = currentPath === t.homePath ? "#product" : `${t.homePath}#product`;
   const proHref = currentPath === "/pro" || currentPath === "/zh/pro"
     ? currentPath
@@ -3933,7 +3940,7 @@ function buildHeader(t, locale, currentPath) {
         <a href="${t.pathPrefix}/blog">${escapeHtml(t.nav.blog)}</a>
         <a href="/go/github">${escapeHtml(t.nav.github)}</a>
         <a class="workbench-link" href="${locale === "zh" ? "/zh/workbench" : "/workbench"}">${locale === "zh" ? "工作台" : "Workbench"}</a>
-        <a class="language-link" href="${alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
+        <a class="language-link" href="${languagePath || alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
         <a class="install-link" href="/go/marketplace">${escapeHtml(t.nav.install)}</a>
       </div>
     </nav>
@@ -5494,8 +5501,9 @@ function buildBlogArticlePage(locale, origin, post, posts) {
     author: { "@type": "Organization", name: post.author }, publisher: { "@type": "Organization", name: "SoloMap", url: origin },
     image: post.ogImageUrl || `${origin}/solomap-social-card.png`, keywords: post.tags.join(", ")
   };
-  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: metadata }, origin, path)}${alternate ? `<link rel="alternate" hreflang="${alternate.locale === "zh" ? "zh-Hans" : "en"}" href="${escapeHtml(alternate.canonicalUrl)}">` : ""}<script type="application/ld+json">${JSON.stringify(structured)}</script>${buildStyles()}</head>
-  <body>${buildHeader(t, locale, path)}<main id="main-content" class="article-shell"><nav class="docs-breadcrumbs"><a href="${t.homePath}">SoloMap</a> / <a href="${blogPath(locale)}">OPC Blog</a></nav><article><header class="article-header"><span class="blog-category">${escapeHtml(post.categoryLabel)}</span><h1>${escapeHtml(post.title)}</h1><p class="lead">${escapeHtml(post.description)}</p><div class="blog-meta">${escapeHtml(post.author)} · ${escapeHtml(formatBlogDate(post.publishedAt, locale))} · ${post.readingTime} ${locale === "zh" ? "分钟阅读" : "min read"}</div></header><div class="article-body">${renderMarkdown(post.contentMarkdown)}</div></article><section class="docs-related"><a href="${blogPath(locale)}">← ${locale === "zh" ? "返回 OPC Blog" : "Back to OPC Blog"}</a></section></main>${buildFooter(t)}</body></html>`;
+  const alternatePath = alternate ? new URL(alternate.canonicalUrl).pathname : false;
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: metadata }, origin, path, alternatePath)}<script type="application/ld+json">${JSON.stringify(structured)}</script>${buildStyles()}</head>
+  <body>${buildHeader(t, locale, path, alternate ? blogPath(alternate.locale, alternate.slug) : blogPath(locale === "zh" ? "en" : "zh"))}<main id="main-content" class="article-shell"><nav class="docs-breadcrumbs"><a href="${t.homePath}">SoloMap</a> / <a href="${blogPath(locale)}">OPC Blog</a></nav><article><header class="article-header"><span class="blog-category">${escapeHtml(post.categoryLabel)}</span><h1>${escapeHtml(post.title)}</h1><p class="lead">${escapeHtml(post.description)}</p><div class="blog-meta">${escapeHtml(post.author)} · ${escapeHtml(formatBlogDate(post.publishedAt, locale))} · ${post.readingTime} ${locale === "zh" ? "分钟阅读" : "min read"}</div></header><div class="article-body">${renderMarkdown(post.contentMarkdown)}</div></article><section class="docs-related"><a href="${blogPath(locale)}">← ${locale === "zh" ? "返回 OPC Blog" : "Back to OPC Blog"}</a></section></main>${buildFooter(t)}</body></html>`;
 }
 
 function resolveRoute(pathname) {

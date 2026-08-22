@@ -62,6 +62,8 @@ test("homepage, Blog index, article, and sitemap use one read-only projection", 
   assert.match(articleHtml, /<h2>Start with one outcome<\/h2>/);
   assert.match(articleHtml, /"@type":"BlogPosting"/);
   assert.match(articleHtml, /version-1|A practical roadmap/);
+  assert.doesNotMatch(articleHtml, /rel="alternate" hreflang="zh-Hans"/);
+  assert.match(articleHtml, /class="language-link" href="\/zh\/blog\?lang=zh"/);
   const scripts = [...articleHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   for (const script of scripts) assert.doesNotThrow(() => new vm.Script(script[1]));
 
