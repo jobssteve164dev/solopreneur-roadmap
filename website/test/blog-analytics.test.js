@@ -69,7 +69,10 @@ test("homepage, Blog index, article, and sitemap use one read-only projection", 
 
   const missing = await worker.fetch(new Request("https://solomap.app/blog/not-published"), env, ctx);
   assert.equal(missing.status, 404);
-  assert.match(await missing.text(), /noindex,nofollow/);
+  const missingHtml = await missing.text();
+  assert.match(missingHtml, /noindex,nofollow/);
+  assert.doesNotMatch(missingHtml, /rel="canonical"|property="og:|hreflang=/);
+  assert.doesNotMatch(missingHtml, /version-1|sha256:content|A practical roadmap/);
 
   const sitemap = await worker.fetch(new Request("https://solomap.app/sitemap.xml"), env, ctx);
   assert.equal(sitemap.status, 200);

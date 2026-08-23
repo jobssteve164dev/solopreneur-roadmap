@@ -3920,7 +3920,7 @@ function buildProStructuredData(copy, origin, pagePath, proPlan) {
   <script type="application/ld+json">${JSON.stringify(breadcrumb)}</script>`;
 }
 
-function buildHeader(t, locale, currentPath, languagePath = null) {
+function buildHeader(t, locale, currentPath, languagePath = null, includeHreflang = true) {
   const productHref = currentPath === t.homePath ? "#product" : `${t.homePath}#product`;
   const proHref = currentPath === "/pro" || currentPath === "/zh/pro"
     ? currentPath
@@ -3940,7 +3940,7 @@ function buildHeader(t, locale, currentPath, languagePath = null) {
         <a href="${t.pathPrefix}/blog">${escapeHtml(t.nav.blog)}</a>
         <a href="/go/github">${escapeHtml(t.nav.github)}</a>
         <a class="workbench-link" href="${locale === "zh" ? "/zh/workbench" : "/workbench"}">${locale === "zh" ? "工作台" : "Workbench"}</a>
-        <a class="language-link" href="${languagePath || alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}" hreflang="${locale === "en" ? "zh-Hans" : "en"}">${escapeHtml(t.alternateLabel)}</a>
+        <a class="language-link" href="${languagePath || alternatePathFor(currentPath, locale)}?lang=${locale === "en" ? "zh" : "en"}"${includeHreflang ? ` hreflang="${locale === "en" ? "zh-Hans" : "en"}"` : ""}>${escapeHtml(t.alternateLabel)}</a>
         <a class="install-link" href="/go/marketplace">${escapeHtml(t.nav.install)}</a>
       </div>
     </nav>
@@ -5389,6 +5389,20 @@ function buildNotFoundPage(locale, origin, requestedPath) {
   return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { title, description, ogDescription: description, noindex: true } }, origin, requestedPath)}${buildStyles()}</head><body>${buildHeader(t, locale, requestedPath)}<main id="main-content" class="privacy-page"><p class="eyebrow">404</p><h1>${locale === "zh" ? "这里没有你要找的页面" : "This page does not exist"}</h1><p>${escapeHtml(description)}</p><div class="cta-row"><a class="button primary" href="${t.homePath}">${locale === "zh" ? "返回首页" : "Return home"}</a><a class="button ghost" href="${t.docsPath}">${locale === "zh" ? "查看文档" : "Browse docs"}</a></div></main>${buildFooter(t)}</body></html>`;
 }
 
+function buildRetiredBlogNotFoundPage(locale, requestedPath) {
+  const t = content[locale];
+  const title = locale === "zh" ? "文章不存在 | SoloMap" : "Article not found | SoloMap";
+  const description = locale === "zh" ? "这篇文章不存在或已下线。你可以返回 OPC Blog 查看最新内容。" : "This article is unavailable. Browse the OPC Blog for the latest articles.";
+  return `<!doctype html><html lang="${t.lang}"><head><meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#11100e">
+  <title>${escapeHtml(title)}</title>
+  <meta name="description" content="${escapeHtml(description)}">
+  <meta name="robots" content="noindex,nofollow">
+  <link rel="icon" href="${LOGO_URL}" type="image/svg+xml">
+  ${buildStyles()}</head><body>${buildHeader(t, locale, requestedPath, blogPath(locale === "zh" ? "en" : "zh"), false)}<main id="main-content" class="privacy-page"><p class="eyebrow">404</p><h1>${locale === "zh" ? "这篇文章暂时不可用" : "This article is unavailable"}</h1><p>${escapeHtml(description)}</p><div class="cta-row"><a class="button primary" href="${blogPath(locale)}">${locale === "zh" ? "返回 OPC Blog" : "Back to OPC Blog"}</a><a class="button ghost" href="${t.homePath}">${locale === "zh" ? "返回首页" : "Return home"}</a></div></main>${buildFooter(t)}</body></html>`;
+}
+
 function blogPath(locale, slug = "") {
   return `${locale === "zh" ? "/zh" : ""}/blog${slug ? `/${slug}` : ""}`;
 }
@@ -6196,7 +6210,7 @@ Sitemap: ${origin}/sitemap.xml
       });
       if (route.type === "blog-index") return htmlResponse(buildBlogIndexPage(route.locale, origin, projection.posts), 200, extraHeaders);
       const post = projection.posts.find((item) => item.locale === route.locale && item.slug === route.slug);
-      if (!post) return htmlResponse(buildNotFoundPage(route.locale, origin, url.pathname), 404, extraHeaders);
+      if (!post) return htmlResponse(buildRetiredBlogNotFoundPage(route.locale, url.pathname), 404, extraHeaders);
       return htmlResponse(buildBlogArticlePage(route.locale, origin, post, projection.posts), 200, extraHeaders);
     }
     if (route.type === "not-found") {
