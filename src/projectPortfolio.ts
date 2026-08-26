@@ -102,6 +102,28 @@ export interface ProjectPortfolioBuildOptions {
   coreOnly?: boolean;
 }
 
+export function applyProjectRegistryToPortfolio(
+  projects: SolopreneurProject[],
+  portfolio: ProjectPortfolioSummary[]
+): ProjectPortfolioSummary[] {
+  const summariesByPath = new Map((portfolio || []).map((summary) => [summary.path, summary]));
+  const merged: ProjectPortfolioSummary[] = [];
+  for (const project of projects || []) {
+    const summary = summariesByPath.get(project.path);
+    if (!summary) {
+      continue;
+    }
+    merged.push({
+      ...summary,
+      name: project.name,
+      globalPriority: project.priority || inferGlobalPriority(summary),
+      projectType: project.type || detectProjectType(summary.nodes || []),
+      pinnedAt: project.pinnedAt || ''
+    });
+  }
+  return merged;
+}
+
 function emptyFoundationAssessment(): ProjectFoundationAssessment {
   return { complete: false, missingCount: 0, missing: [], items: [], message: '' };
 }

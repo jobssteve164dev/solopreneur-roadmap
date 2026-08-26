@@ -8682,6 +8682,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function shouldShowPortfolioProject(project) {
+      if (activePortfolioFilter === 'frozen') {
+        return project.globalPriority === 'P99';
+      }
+      if (project.globalPriority === 'P99') {
+        return false;
+      }
       if (activePortfolioFilter === 'failed') {
         return Number(project.failedNodes || 0) > 0;
       }
@@ -8690,9 +8696,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
       if (activePortfolioFilter === 'active') {
         return project.overallStatus === 'Running' || project.overallStatus === 'In Progress' || Number(project.failedNodes || 0) > 0;
-      }
-      if (activePortfolioFilter === 'frozen') {
-        return project.globalPriority === 'P99';
       }
       return true;
     }

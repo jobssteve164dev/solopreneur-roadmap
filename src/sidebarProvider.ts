@@ -22,6 +22,7 @@ import {
   getSupportedAgentStatuses
 } from './sidebarDependencies';
 import {
+  applyProjectRegistryToPortfolio,
   buildProjectPortfolioSummary,
   ProjectPortfolioSummary,
   SolopreneurProject
@@ -396,11 +397,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     globalDataPath: string,
     recentConversationSnapshot: { solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] } | null = null
   ): void {
-    this._latestPortfolio = portfolio;
-    const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, portfolio);
+    const currentPortfolio = applyProjectRegistryToPortfolio(projects, portfolio);
+    this._latestPortfolio = currentPortfolio;
+    const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, currentPortfolio);
     this._view?.webview.postMessage({
       command: 'projectsLoaded',
-      projects: { projects, selectedProjectPath, portfolio, globalStore, recentConversationSnapshot }
+      projects: { projects, selectedProjectPath, portfolio: currentPortfolio, globalStore, recentConversationSnapshot }
     });
   }
 
@@ -419,20 +421,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       ...projects.filter((project) => project.path === selectedProjectPath),
       ...projects.filter((project) => project.path !== selectedProjectPath)
     ].filter((project) => needsCompletePortfolio || requestedPaths.size === 0 || requestedPaths.has(project.path));
-    const summaries = new Map(stalePortfolio.map((summary) => [summary.path, summary]));
+    const currentStalePortfolio = applyProjectRegistryToPortfolio(projects, stalePortfolio);
+    const summaries = new Map(currentStalePortfolio.map((summary) => [summary.path, summary]));
     const loadNext = (index: number) => {
       if (!this._view || requestId !== this._corePortfolioRequest) return;
+      const currentProjectState = this._getProjects();
+      const currentProjectSignature = buildSidebarProjectSignature(currentProjectState.projects);
+      if (currentProjectSignature !== sourceProjectSignature) {
+        console.warn('SoloMap sidebar project sources changed during core snapshot collection; rebuilding the snapshot.');
+        this.scheduleCorePortfolio(
+          currentProjectState.projects,
+          currentProjectState.selectedProjectPath,
+          globalDataPath,
+          this._latestPortfolio,
+          { includeExternal: options.includeExternal, projectPaths: [] }
+        );
+        return;
+      }
       if (index >= ordered.length) {
         const portfolio = projects.map((project) => summaries.get(project.path)).filter(Boolean) as ProjectPortfolioSummary[];
-        const currentProjectSignature = buildSidebarProjectSignature(projects);
-        if (currentProjectSignature !== sourceProjectSignature) {
-          console.warn('SoloMap sidebar project sources changed during core snapshot collection; rebuilding the snapshot.');
-          this.scheduleCorePortfolio(projects, selectedProjectPath, globalDataPath, [], {
-            includeExternal: options.includeExternal,
-            projectPaths: []
-          });
-          return;
-        }
         if (portfolio.length === projects.length) {
           writeSidebarPortfolioSnapshot(globalDataPath, sourceProjectSignature, portfolio);
         }
@@ -463,7 +470,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         reusableSignals: previous.reusableSignals,
         investment: previous.investment
       } : core);
-      const portfolio = projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[];
+      const portfolio = applyProjectRegistryToPortfolio(
+        projects,
+        projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[]
+      );
       this._latestPortfolio = portfolio;
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, portfolio);
       this._view?.webview.postMessage({

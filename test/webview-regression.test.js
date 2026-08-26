@@ -2934,9 +2934,113 @@ test('project priority supports freezing and the sidebar can filter frozen proje
   assert.match(roadmapSource, /\{ value: 'P99', label: 'P99 冻结' \}/);
   assert.match(sidebarSource, /filterFrozen: '冻结'/);
   assert.match(sidebarSource, /filterFrozen: 'Frozen'/);
-  assert.match(sidebarSource, /activePortfolioFilter === 'frozen'[\s\S]*?project\.globalPriority === 'P99'/);
+  assert.match(sidebarSource, /activePortfolioFilter === 'frozen'[\s\S]*?return project\.globalPriority === 'P99'[\s\S]*?if \(project\.globalPriority === 'P99'\) \{\s*return false/);
   assert.match(sidebarSource, /\{ key: 'frozen', label: t\('filterFrozen'\) \}/);
   assert.match(sidebarSource, /\.global-priority\.P99/);
+});
+
+test('project registry settings override every stale portfolio card before a progressive refresh reaches it', () => {
+  const { applyProjectRegistryToPortfolio } = require(path.join(projectRoot, 'out/projectPortfolio.js'));
+  const projects = [
+    { name: 'Top', path: '/workspace/top', priority: 'P1' },
+    {
+      name: 'Bottom renamed',
+      path: '/workspace/bottom',
+      type: 'tool',
+      priority: 'P99',
+      pinnedAt: '2026-08-26T10:00:00.000Z'
+    }
+  ];
+  const portfolio = [
+    { name: 'Top', path: '/workspace/top', globalPriority: 'P1', projectType: 'core_product', pinnedAt: '' },
+    { name: 'Bottom old', path: '/workspace/bottom', globalPriority: 'P2', projectType: 'archive', pinnedAt: '' }
+  ];
+
+  const merged = applyProjectRegistryToPortfolio(projects, portfolio);
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(merged.map((project) => ({
+      name: project.name,
+      path: project.path,
+      globalPriority: project.globalPriority,
+      projectType: project.projectType,
+      pinnedAt: project.pinnedAt
+    })))),
+    [
+      { name: 'Top', path: '/workspace/top', globalPriority: 'P1', projectType: 'core_product', pinnedAt: '' },
+      {
+        name: 'Bottom renamed',
+        path: '/workspace/bottom',
+        globalPriority: 'P99',
+        projectType: 'tool',
+        pinnedAt: '2026-08-26T10:00:00.000Z'
+      }
+    ]
+  );
+});
+
+test('sidebar discards a progressive portfolio scan when project settings change before the bottom card is reached', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let projects = [
+    { name: 'Top', path: '/workspace/top' },
+    { name: 'Bottom old', path: '/workspace/bottom', priority: 'P2' }
+  ];
+  const postedMessages = [];
+  let sourceChanged = false;
+  let scanCompleted = false;
+  let resolveCompleted;
+  const completed = new Promise((resolve) => { resolveCompleted = resolve; });
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/top' })
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        if (!sourceChanged && message.projects?.updatedProjectPaths?.[0] === '/workspace/top') {
+          sourceChanged = true;
+          projects = [
+            { name: 'Top', path: '/workspace/top' },
+            {
+              name: 'Bottom renamed',
+              path: '/workspace/bottom',
+              type: 'tool',
+              priority: 'P99',
+              pinnedAt: '2026-08-26T10:00:00.000Z'
+            }
+          ];
+        }
+        return Promise.resolve(true);
+      }
+    }
+  };
+  provider._projectLoader.scheduleAll = () => {
+    scanCompleted = true;
+    resolveCompleted();
+  };
+
+  provider.sendProjects();
+  let timeout;
+  await Promise.race([
+    completed,
+    new Promise((resolve) => { timeout = setTimeout(resolve, 1000); })
+  ]);
+  clearTimeout(timeout);
+
+  assert.equal(sourceChanged, true);
+  assert.equal(scanCompleted, true);
+  const bottomUpdates = postedMessages.filter((message) => message.projects?.updatedProjectPaths?.[0] === '/workspace/bottom');
+  assert.equal(bottomUpdates.length, 1);
+  assert.equal(bottomUpdates[0].projects.projects[1].name, 'Bottom renamed');
+  assert.equal(bottomUpdates[0].projects.portfolio[1].name, 'Bottom renamed');
+  assert.equal(bottomUpdates[0].projects.portfolio[1].globalPriority, 'P99');
+  assert.equal(bottomUpdates[0].projects.portfolio[1].pinnedAt, '2026-08-26T10:00:00.000Z');
 });
 
 test('local project actions use local refresh instead of external portfolio refresh', () => {
