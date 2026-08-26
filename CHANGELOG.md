@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.430 - 2026-08-26
+
+### Added
+- configure OpenCode providers securely (22bd113)
+- add governed OPC blog and analytics (3316e7c)
+
+### Fixed
+- strip article metadata from retired URLs (f2b2c01)
+- emit only valid blog alternates (c19ff3f)
+
+### Docs
+- design deep OpenCode adapter (b58bbd6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.429 - 2026-08-10
 
 ### Fixed
