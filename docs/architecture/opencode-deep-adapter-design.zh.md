@@ -15,7 +15,7 @@
 - 查看 OpenCode 当前是否可用。
 - 查看 OpenCode 已识别的供应商和模型。
 - 在同一个 OpenCode CLI 下切换供应商和模型。
-- 打开 OpenCode 官方登录流程连接供应商。
+- 直接录入、替换或移除当前供应商的 API Key。
 - 使用结构化事件跟踪任务、会话和失败原因。
 - 继续由独立安装的 OpenCode 获取上游更新和新增供应商能力。
 
@@ -29,7 +29,7 @@
 2. 不改变现有 `cliPath`、`reviewerCliPath`、路线图 `agentCli` 和历史会话的含义。
 3. 不把 OpenCode 的供应商心智强加给其他 CLI；非 OpenCode 路径不出现 OpenCode 专属字段或提示。
 4. 不 fork、vendor、复制或修改 OpenCode 源码，不导入其内部模块。
-5. 不由 SoloMap 保存、代理或回显供应商 API Key、OAuth Token 和其他凭据。
+5. API Key 只能进入 VS Code SecretStorage；不得进入项目文件、普通设置、日志、运行记录、终端命令或回传给 Webview。OAuth Token 仍由 OpenCode 自己管理。
 6. 不覆盖用户的 OpenCode 全局配置、项目配置、插件、Agent、MCP、Skills 或权限规则。
 7. OpenCode 适配失败时只影响 OpenCode 增强能力，不得阻断其他 CLI。
 8. 上游更新不能中断已启动任务；任务运行期间不触发安装或升级。
@@ -42,14 +42,14 @@
 - `src/agentCli.ts` 已识别 `opencode`、`open-code` 和 `open-code-cli`，并能生成 `opencode run --model ...` 与原生 session 续接命令。
 - `src/sidebarDependencies.ts` 已把 OpenCode 列为受支持 CLI，并提供 `npm install -g opencode-ai` 安装入口。
 - `src/agentModels.ts` 已调用 `opencode models`，但把返回值作为单层文本模型列表处理。
-- `SolopreneurSettings.agentModelPreferences` 已按 Agent family 保存模型偏好；OpenCode 当前可以在该 map 下保存完整的 `provider/model`，无需新增一份供应商权威状态。
+- `SolopreneurSettings.agentModelPreferences` 已按 Agent family 保存模型偏好；OpenCode 模型继续使用完整的 `provider/model`。
 - `.solopreneur/step-sessions/<nodeId>.json` 已按 CLI family 保存 session ID，OpenCode 具有独立 session 槽位。
 - OpenCode 当前没有可验证的只读复核命令；`buildReadOnlyAgentCommandForPromptFile` 对 OpenCode 返回空命令。
-- OpenCode 相关逻辑仍散落在 CLI family 条件分支中，尚不存在负责版本、供应商、事件和能力探测的专用适配器。
+- 首版已新增 `src/openCodeAdapter.ts`，负责供应商规范化、SecretStorage key 名和 OpenCode 终端凭据环境；版本、事件和能力探测仍属于后续增量。
 
 ### Inference
 
-当前代码已具备最小兼容运行能力，适合通过增量适配器升级，而不需要重写通用 Agent 执行框架。供应商可以从完整模型 ID 派生，若再独立持久化 `provider` 字段，会产生两份可能冲突的用户选择。
+当前代码已具备最小兼容运行能力，适合通过增量适配器升级，而不需要重写通用 Agent 执行框架。首版单独保存 `openCodeProvider`，让用户在尚未选定具体模型时也能确定 API Key 的归属；模型一旦明确，运行时始终以 `provider/model` 中的供应商为准，避免错误注入。
 
 ## 目标架构
 
@@ -164,29 +164,33 @@ Anthropic
 默认模型
 Claude Sonnet 4
 
-连接状态
-已连接                           [管理连接]
+API Key
+已安全保存                      [替换] [移除]
 ```
 
-当切换到其他 CLI 时，`模型供应商` 和 OpenCode 连接状态从界面移除；该 CLI 原有模型选择保持原样。
+当切换到其他 CLI 时，`模型供应商` 和 OpenCode API Key 设置从界面移除；该 CLI 原有模型选择保持原样。
 
-供应商不是独立持久化真相。默认模型仍写入：
+首次使用且尚未添加项目时，新手引导在现有 Agent 就绪区提供“安装 OpenCode”动作，复用既有 Agent 安装终端并执行官方 npm 包安装命令。它不替代其他 Agent 的安装入口，也不把 OpenCode 自动设为默认 CLI；安装完成后，用户仍在统一设置页自主选择 OpenCode 并配置供应商。
+
+默认模型仍写入：
 
 ```ts
 agentModelPreferences.opencode = 'anthropic/claude-sonnet-4';
 ```
 
-界面从第一个 `/` 前的内容派生供应商。选择新供应商后，如果旧模型不属于该供应商，界面先选择该供应商的 `Auto` 或首个可用模型，并通过现有设置补丁只更新 `agentModelPreferences.opencode`；缺失字段不得清空其他 CLI 的模型偏好。
+`openCodeProvider` 只保存供应商选择，不保存凭据。界面从第一个 `/` 前的内容校验模型归属；选择新供应商后，如果旧模型不属于该供应商，界面选择该供应商的首个可用模型或 `Auto`，并通过现有设置补丁只更新 `agentModelPreferences.opencode`；缺失字段不得清空其他 CLI 的模型偏好。
 
 ### 供应商目录
 
 供应商列表由 `opencode models` 返回的完整模型 ID 分组得到，不能在 SoloMap 内维护静态供应商名单。这样 OpenCode 上游新增供应商后，SoloMap 只需刷新目录即可显示。
 
-`opencode auth list` 只用于标记连接状态。连接状态失败、超时或无法解析时显示“尚未确认”，不能把供应商从模型目录删除，也不能阻止用户打开官方连接流程。
+密钥是否存在只以 SecretStorage 的布尔状态返回界面。状态读取失败不能把供应商从模型目录删除，也不能影响其他 CLI。
 
 ### 凭据操作
 
-用户点击“管理连接”后，SoloMap 创建可见终端并在终端进程就绪后运行 OpenCode 官方登录命令。凭据输入只发生在 OpenCode 终端中，Webview 不提供 Key 输入框，不通过 postMessage、日志或设置持久化传递凭据。
+用户在 OpenCode 条件设置中输入 API Key。Key 通过一次 Webview 消息交给 Extension Host 后立即写入按供应商隔离的 VS Code SecretStorage；Webview 只收到“已配置 / 未配置”，保存成功后清空输入框。
+
+OpenCode 当前公开 CLI 没有稳定的非交互式 API Key 写入参数，因此首版不改写其 `auth.json`。启动 OpenCode 专属终端时，Extension Host 从 SecretStorage 读取当前供应商的 Key，并通过 OpenCode 支持的 `OPENCODE_AUTH_CONTENT` 只注入该终端进程。Key 不拼进 shell 命令，也不写入 `run-agent.sh`、`command.txt` 或项目目录；非 OpenCode 终端不接收该环境变量。
 
 ## 模型目录契约
 
@@ -290,25 +294,26 @@ SoloMap 不把 OpenCode `--auto` 等同于无条件全权限，也不修改用�
 
 ## 数据与兼容策略
 
-首版不做 schema 迁移：
+首版不做破坏性 schema 迁移：
 
 - `cliPath` 继续保存默认主 CLI。
 - `reviewerCliPath` 继续保存复核 CLI。
 - `agentModelPreferences` 继续按 family 保存模型；OpenCode 值使用完整 `provider/model`。
+- `openCodeProvider` 保存当前供应商标识；API Key 本体只保存在 SecretStorage，设置快照只携带 `openCodeApiKeyConfigured` 布尔值。
 - 路线图 `agentCli` 列保持不变。
 - 历史 conversation、execution、step session 和 run digest 不批量重写。
 
-新增的 OpenCode 能力、版本和供应商连接状态属于可重新探测的派生状态，优先放在内存缓存；若为冷启动体验增加磁盘缓存，必须带可执行路径、版本、读取时间和完整快照版本，且不能成为凭据或配置真相。
+新增的 OpenCode 能力、版本和模型目录属于可重新探测的派生状态，优先放在内存缓存；若为冷启动体验增加磁盘缓存，必须带可执行路径、版本、读取时间和完整快照版本，且不能成为凭据或配置真相。
 
 ## 代码落点
 
 第一轮实现应保持小步增量：
 
-1. 新增 `src/agentAdapters/openCodeAdapter.ts`：探测、模型归一、登录计划、运行计划和事件解析。
+1. 首版新增 `src/openCodeAdapter.ts`：供应商规范化、SecretStorage key 与专属终端环境；后续再增量补入探测、运行计划和事件解析。
 2. `src/agentModels.ts`：OpenCode 分支委托 adapter，返回既有 `AgentModelCatalog`，不改变其他 family 策略。
 3. `src/agentCli.ts`：只把 OpenCode 命令构造委托 adapter；其他 CLI 分支保持字节级输出不变。
-4. `src/pluginContracts.ts` 与设置持久化：原则上不新增 provider 字段，继续使用 `agentModelPreferences.opencode`。
-5. `src/webviewSharedRuntime.ts`、`src/sidebarWebview.ts`、`src/roadmapWebview.ts`：仅在 OpenCode 被选中时派生供应商分组和连接动作；所有已有 CLI 选项、默认值和 per-conversation 选择保持不变。
+4. `src/pluginContracts.ts` 与设置持久化：新增 `openCodeProvider` 和运行时布尔状态，不新增任何明文 key 字段。
+5. `src/sidebarWebview.ts`：仅在 OpenCode 被选中时显示供应商、API Key 和模型选择；所有已有 CLI 选项、默认值和 per-conversation 选择保持不变。
 6. `src/continuation.ts` 与运行结算路径：优先消费结构化 session 和终态事件，同时保留历史记录读取兼容。
 7. `src/sidebarDependencies.ts`：保留现有安装动作，增加能力状态但不替 SoloMap 触发自动升级。
 
@@ -327,7 +332,7 @@ SoloMap 不把 OpenCode `--auto` 等同于无条件全权限，也不修改用�
 ### OpenCode 集成测试
 
 - `probe → models → 选择 provider/model → run → 捕获 session → resume` 完整链路。
-- 用户连接多个供应商后可切换，切换不会覆盖凭据或 `opencode.json`。
+- 用户配置多个供应商后可切换，切换不会覆盖其他供应商的 SecretStorage 凭据或 `opencode.json`。
 - 用户在模型加载期间切换 CLI，迟到 OpenCode 目录不能重置当前选择。
 - 运行中 OpenCode 可执行文件发生升级时，当前进程完成；下一次运行重新探测。
 - 扩展重载、终端关闭、取消和失败后不重复执行 prompt。
@@ -350,8 +355,8 @@ Codex、Claude、Cursor、Copilot、Agy / Antigravity、自定义 CLI 至少逐�
 
 - 选择非 OpenCode CLI 时看不到供应商设置，也没有多余说明。
 - 选择 OpenCode 后可直接完成“连接供应商 → 选择模型 → 启动任务”。
-- 凭据不会出现在 Webview、日志、运行记录和项目文件中。
-- 冷启动不等待 OpenCode 探测；模型和连接状态在后台收敛且不重置用户选择。
+- API Key 保存后不会回传到 Webview，也不会出现在普通设置、日志、运行记录、终端命令和项目文件中。
+- 冷启动不等待 OpenCode 探测；模型目录和 Key 布尔状态在后台收敛且不重置用户选择。
 - 从发送动作开始 5 秒内终端可见并确认正式 Agent 命令已经接收。
 
 ## 分阶段交付
@@ -362,10 +367,10 @@ Codex、Claude、Cursor、Copilot、Agy / Antigravity、自定义 CLI 至少逐�
 - 抽出 OpenCode 专用 adapter，但保持当前可见行为。
 - 为 OpenCode 路径、版本、模型与命令增加最窄测试。
 
-### 阶段 O2：供应商与模型体验
+### 阶段 O2：供应商与模型体验（首版已落地）
 
 - 把 `provider/model` 目录映射为条件式两级选择。
-- 接入连接状态和官方登录终端动作。
+- 接入供应商级 SecretStorage API Key 保存、替换、移除和专属终端注入。
 - 验证设置补丁不会覆盖其他 CLI 偏好。
 
 ### 阶段 O3：结构化运行与 Session
@@ -386,10 +391,9 @@ Codex、Claude、Cursor、Copilot、Agy / Antigravity、自定义 CLI 至少逐�
 这项设计完成实施的判定不是“OpenCode 能跑一次”，而是同时满足：
 
 - 用户仍可原样选择并使用所有旧 CLI。
-- OpenCode 用户可以在 SoloMap 内完成供应商连接状态确认、供应商切换和模型选择。
+- OpenCode 用户可以在 SoloMap 内完成供应商切换、API Key 配置和模型选择。
 - OpenCode 任务使用公开结构化协议，session 与终态不依赖自然语言文本猜测。
 - OpenCode 上游可以独立升级，SoloMap 通过能力探测适配，不维护上游源码。
-- SoloMap 不保存供应商凭据，不覆盖 OpenCode 配置。
+- SoloMap 只在 VS Code SecretStorage 保存供应商 API Key，不把明文写入普通设置或项目，也不覆盖 OpenCode 配置。
 - 设置、运行、续聊、取消、复核和异步加载均通过正向与负向验证。
 - 所有最终命令、事件组合和用户界面都经过真实生成物与真实运行环境检查。
-

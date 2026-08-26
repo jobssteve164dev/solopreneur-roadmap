@@ -18,6 +18,8 @@ export interface SolomapEnhancementStatus {
 export interface SolopreneurSettings {
   cliPath: string;
   agentModelPreferences?: Record<string, string>;
+  openCodeProvider?: string;
+  openCodeApiKeyConfigured?: boolean;
   language: string;
   globalPrompt: string;
   globalDataPath: string;

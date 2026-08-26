@@ -4097,6 +4097,24 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       </div>
     </div>
 
+    <div class="settings-field" id="setting-opencode-panel" style="display:none;">
+      <label class="settings-lbl-title" id="label-opencode-provider">OpenCode Provider</label>
+      <div class="solo-select settings-select" id="setting-opencode-provider" data-solo-select data-value="">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>Select a provider</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox"></div>
+      </div>
+      <label class="settings-lbl-title" id="label-opencode-api-key" for="setting-opencode-api-key" style="margin-top:6px;">API Key</label>
+      <div style="display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:5px;">
+        <input type="password" class="settings-input" id="setting-opencode-api-key" autocomplete="new-password" spellcheck="false" placeholder="Paste a new API key">
+        <button type="button" class="settings-action-btn test-btn" id="btn-toggle-opencode-api-key" aria-label="Show API key" title="Show API key"><span class="codicon codicon-eye"></span></button>
+        <button type="button" class="settings-action-btn test-btn" id="btn-remove-opencode-api-key">Remove</button>
+      </div>
+      <div id="opencode-api-key-status" style="font-size:8.5px; color:var(--text-muted); margin-top:3px;" aria-live="polite"></div>
+    </div>
+
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-agent-model">Default Model</label>
       <div class="solo-select settings-select" id="setting-agent-model-select" data-solo-select data-value="auto">
@@ -4419,6 +4437,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const settingCliSelect = document.getElementById('setting-cli-select');
     const settingAgentModelSelect = document.getElementById('setting-agent-model-select');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
+    const settingOpenCodePanel = document.getElementById('setting-opencode-panel');
+    const settingOpenCodeProvider = document.getElementById('setting-opencode-provider');
+    const settingOpenCodeApiKey = document.getElementById('setting-opencode-api-key');
+    const btnToggleOpenCodeApiKey = document.getElementById('btn-toggle-opencode-api-key');
+    const btnRemoveOpenCodeApiKey = document.getElementById('btn-remove-opencode-api-key');
+    const openCodeApiKeyStatus = document.getElementById('opencode-api-key-status');
     const settingLanguage = document.getElementById('setting-language');
     const settingGlobalPrompt = document.getElementById('setting-global-prompt');
     const settingGlobalDataPath = document.getElementById('setting-global-data-path');
@@ -4517,6 +4541,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let currentFeedbackType = 'not_working';
     let currentCliPath = 'agy';
     let currentSettings = {};
+    let openCodeApiKeyRemovalRequested = false;
     let settingsFormDirty = false;
     let settingsSavePending = false;
     let settingsRequestSeq = 0;
@@ -5276,6 +5301,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         onboardingStepType: '选择这个项目更像哪一类',
         onboardingStepRoadmap: '在“生成初始路线图”里输入目标，让 Agent 产出第一版路线图',
         onboardingAction: '添加第一个项目',
+        installOpenCode: '安装 OpenCode',
         globalDataPath: '跨项目数据目录',
         globalDataPathPlaceholder: '例如：/home/ubuntu/project/.solomap-global',
         globalDataPathHelp: '保存跨项目组合、依赖、学习候选和指标；可填 .solomap-global 目录路径，或填其父目录。',
@@ -5721,6 +5747,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         onboardingStepType: 'Choose what kind of project it is',
         onboardingStepRoadmap: 'Use "Generate Initial Roadmap" to describe the goal and let the Agent create the first roadmap',
         onboardingAction: 'Add first project',
+        installOpenCode: 'Install OpenCode',
         globalDataPath: 'Global Data Directory',
         globalDataPathPlaceholder: 'e.g. /home/ubuntu/project/.solomap-global',
         globalDataPathHelp: 'Stores cross-project portfolio, dependencies, learning candidates, and metrics. Use the .solomap-global path or its parent directory.',
@@ -6231,6 +6258,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('label-language', t('language'));
       setText('label-cli-path', t('cliPath'));
       setText('help-cli-path', t('cliPathHelp'));
+      setText('label-opencode-provider', currentLanguage === 'zh' ? 'OpenCode 供应商' : 'OpenCode Provider');
+      setText('label-opencode-api-key', 'API Key');
+      if (settingOpenCodeApiKey) settingOpenCodeApiKey.placeholder = currentLanguage === 'zh' ? '粘贴新的 API Key' : 'Paste a new API key';
+      if (btnToggleOpenCodeApiKey) {
+        const reveal = settingOpenCodeApiKey && settingOpenCodeApiKey.type === 'password';
+        btnToggleOpenCodeApiKey.setAttribute('aria-label', currentLanguage === 'zh' ? (reveal ? '显示 API Key' : '隐藏 API Key') : (reveal ? 'Show API key' : 'Hide API key'));
+        btnToggleOpenCodeApiKey.setAttribute('title', btnToggleOpenCodeApiKey.getAttribute('aria-label'));
+      }
+      renderOpenCodeApiKeyStatus();
       setText('label-agent-model', currentLanguage === 'zh' ? '默认模型' : 'Default Model');
       setText('help-agent-model', currentLanguage === 'zh'
         ? '默认跟随当前 Agent 系列的自动模型；固定后会优先使用该模型。'
@@ -6518,6 +6554,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       settingCliPathCustom.style.display = selected === 'custom' ? 'block' : 'none';
       currentCliPath = selected === 'custom' ? getEffectiveSettingCliPath() : selected || 'agy';
       ensureAgentModelsLoaded(currentCliPath, 'settings');
+      syncOpenCodeSettings();
       syncSettingAgentModelSelect();
     });
     if (settingCliPathCustom) {
@@ -6525,6 +6562,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (getSoloSelectValue(settingCliSelect) !== 'custom') return;
         currentCliPath = getEffectiveSettingCliPath();
         ensureAgentModelsLoaded(currentCliPath, 'settings');
+        syncOpenCodeSettings();
         syncSettingAgentModelSelect();
       };
       settingCliPathCustom.addEventListener('input', refreshCustomCliModels);
@@ -6535,6 +6573,37 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (!family) return;
       agentModelPreferenceMap[family] = value || 'auto';
     });
+    bindSoloSelect(settingOpenCodeProvider, (value) => {
+      currentSettings.openCodeProvider = value || '';
+      currentSettings.openCodeApiKeyConfigured = false;
+      openCodeApiKeyRemovalRequested = false;
+      if (settingOpenCodeApiKey) settingOpenCodeApiKey.value = '';
+      syncSettingAgentModelSelect();
+      renderOpenCodeApiKeyStatus();
+      if (value) vscode.postMessage({ command: 'settings.openCodeKeyStatus', openCodeProvider: value });
+    });
+    if (btnToggleOpenCodeApiKey && settingOpenCodeApiKey) {
+      btnToggleOpenCodeApiKey.addEventListener('click', () => {
+        const reveal = settingOpenCodeApiKey.type === 'password';
+        settingOpenCodeApiKey.type = reveal ? 'text' : 'password';
+        btnToggleOpenCodeApiKey.setAttribute('aria-label', reveal ? 'Hide API key' : 'Show API key');
+        btnToggleOpenCodeApiKey.setAttribute('title', reveal ? 'Hide API key' : 'Show API key');
+        const icon = btnToggleOpenCodeApiKey.querySelector('.codicon');
+        if (icon) icon.className = reveal ? 'codicon codicon-eye-closed' : 'codicon codicon-eye';
+      });
+      settingOpenCodeApiKey.addEventListener('input', () => {
+        if (settingOpenCodeApiKey.value.trim()) openCodeApiKeyRemovalRequested = false;
+      });
+    }
+    if (btnRemoveOpenCodeApiKey) {
+      btnRemoveOpenCodeApiKey.addEventListener('click', () => {
+        openCodeApiKeyRemovalRequested = true;
+        currentSettings.openCodeApiKeyConfigured = false;
+        if (settingOpenCodeApiKey) settingOpenCodeApiKey.value = '';
+        renderOpenCodeApiKeyStatus();
+        settingsFormDirty = true;
+      });
+    }
     bindSoloSelect(settingReviewerCliSelect, () => {
       const selected = getSoloSelectValue(settingReviewerCliSelect);
       if (settingReviewerCliPathCustom) {
@@ -6607,7 +6676,70 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function syncSettingAgentModelSelect() {
       if (!settingAgentModelSelect) return;
       const agentCli = getEffectiveSettingCliPath();
-      setSoloSelectOptions(settingAgentModelSelect, getAgentModelOptions(agentCli), getStoredModelPreference(agentCli));
+      let options = getAgentModelOptions(agentCli);
+      let selectedModel = getStoredModelPreference(agentCli);
+      if (getAgentFamilyKey(agentCli) === 'opencode') {
+        const provider = getSoloSelectValue(settingOpenCodeProvider);
+        if (provider) {
+          const providerModels = options.filter(option => option.value !== 'auto' && String(option.value || '').startsWith(provider + '/'));
+          options = providerModels.length > 0 ? providerModels : options.filter(option => option.value === 'auto');
+          if (selectedModel === 'auto' || !String(selectedModel).startsWith(provider + '/')) {
+            selectedModel = (options[0] || { value: 'auto' }).value;
+            agentModelPreferenceMap.opencode = selectedModel;
+          }
+        }
+      }
+      setSoloSelectOptions(settingAgentModelSelect, options, selectedModel);
+    }
+
+    function getOpenCodeProviderOptions() {
+      const currentProvider = String((currentSettings && currentSettings.openCodeProvider) || getSoloSelectValue(settingOpenCodeProvider) || '').trim();
+      const catalog = getAgentModelCatalog('opencode');
+      const providers = new Set();
+      (catalog.models || []).forEach(option => {
+        const value = String(option.value || '');
+        const separator = value.indexOf('/');
+        if (separator > 0) providers.add(value.slice(0, separator));
+      });
+      if (currentProvider) providers.add(currentProvider);
+      return [
+        { value: '', label: currentLanguage === 'zh' ? '请选择供应商' : 'Select a provider' },
+        ...Array.from(providers).sort().map(provider => ({ value: provider, label: provider }))
+      ];
+    }
+
+    function renderOpenCodeApiKeyStatus() {
+      if (!openCodeApiKeyStatus || !btnRemoveOpenCodeApiKey) return;
+      const provider = getSoloSelectValue(settingOpenCodeProvider);
+      if (settingOpenCodeApiKey) settingOpenCodeApiKey.disabled = !provider;
+      if (btnToggleOpenCodeApiKey) btnToggleOpenCodeApiKey.disabled = !provider;
+      if (!provider) {
+        openCodeApiKeyStatus.textContent = currentLanguage === 'zh' ? '先选择供应商，再填写 API Key。' : 'Select a provider before entering an API key.';
+        btnRemoveOpenCodeApiKey.disabled = true;
+        btnRemoveOpenCodeApiKey.textContent = currentLanguage === 'zh' ? '移除' : 'Remove';
+        return;
+      }
+      const configured = Boolean(currentSettings && currentSettings.openCodeApiKeyConfigured) && !openCodeApiKeyRemovalRequested;
+      openCodeApiKeyStatus.textContent = configured
+        ? (currentLanguage === 'zh' ? '已安全保存。留空不会覆盖现有密钥。' : 'Saved securely. Leave blank to keep the current key.')
+        : (currentLanguage === 'zh' ? '尚未保存密钥。' : 'No API key saved yet.');
+      btnRemoveOpenCodeApiKey.disabled = !configured;
+      btnRemoveOpenCodeApiKey.textContent = currentLanguage === 'zh' ? '移除' : 'Remove';
+    }
+
+    function syncOpenCodeSettings() {
+      if (!settingOpenCodePanel || !settingOpenCodeProvider) return;
+      const isOpenCode = getAgentFamilyKey(getEffectiveSettingCliPath()) === 'opencode';
+      settingOpenCodePanel.style.display = isOpenCode ? 'block' : 'none';
+      if (!isOpenCode) return;
+      const storedModel = String(agentModelPreferenceMap.opencode || '');
+      const modelProvider = storedModel.includes('/') ? storedModel.split('/')[0] : '';
+      const selectedProvider = String((currentSettings && currentSettings.openCodeProvider) || getSoloSelectValue(settingOpenCodeProvider) || modelProvider || '');
+      const providerOptions = getOpenCodeProviderOptions();
+      setSoloSelectOptions(settingOpenCodeProvider, providerOptions, selectedProvider);
+      const effectiveProvider = getSoloSelectValue(settingOpenCodeProvider);
+      if (effectiveProvider) currentSettings.openCodeProvider = effectiveProvider;
+      renderOpenCodeApiKeyStatus();
     }
 
     function getEffectiveSettingCliPath() {
@@ -7346,10 +7478,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function buildSettingsUpdatePayload(automationTasks) {
-      return {
+      const payload = {
         command: 'settings.update',
         cliPath: getEffectiveSettingCliPath(),
         agentModelPreferences: agentModelPreferenceMap,
+        openCodeProvider: getSoloSelectValue(settingOpenCodeProvider) || (currentSettings && currentSettings.openCodeProvider) || '',
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
@@ -7357,6 +7490,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
         automationTasks
       };
+      if (settingOpenCodeApiKey && settingOpenCodeApiKey.value.trim()) {
+        payload.openCodeApiKey = settingOpenCodeApiKey.value.trim();
+      }
+      if (openCodeApiKeyRemovalRequested) {
+        payload.openCodeRemoveApiKey = true;
+      }
+      return payload;
     }
 
     function setFocusTimerEnabled(enabled) {
@@ -7463,6 +7603,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
           if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          syncOpenCodeSettings();
           syncSettingAgentModelSelect();
           ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
@@ -7482,6 +7623,20 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           settingsSavePending = false;
           settingsFormDirty = false;
           currentSettings = message.settings || currentSettings;
+          openCodeApiKeyRemovalRequested = false;
+          if (settingOpenCodeApiKey) {
+            settingOpenCodeApiKey.value = '';
+            settingOpenCodeApiKey.type = 'password';
+          }
+          syncOpenCodeSettings();
+          break;
+
+        case 'openCodeApiKeyStatusLoaded':
+          if (message.openCodeProvider === getSoloSelectValue(settingOpenCodeProvider)) {
+            currentSettings.openCodeApiKeyConfigured = Boolean(message.configured);
+            openCodeApiKeyRemovalRequested = false;
+            renderOpenCodeApiKeyStatus();
+          }
           break;
 
         case 'globalPromptReviewStarted':
@@ -7515,6 +7670,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         case 'agentModelsLoaded': {
           const catalog = message.catalog || getAutoOnlyModelCatalog(message.targetId || '');
           agentModelCatalogs[String(catalog.family || getAgentFamilyKey(message.agentCli || currentCliPath || 'agy')).toLowerCase()] = catalog;
+          syncOpenCodeSettings();
           syncSettingAgentModelSelect();
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
@@ -9326,16 +9482,23 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
 
     function renderOnboardingPanel() {
+      const openCodeStatus = lastDependencyStatus && Array.isArray(lastDependencyStatus.supportedAgents)
+        ? lastDependencyStatus.supportedAgents.find(agent => agent.family === 'opencode')
+        : null;
+      const openCodeInstallAction = !openCodeStatus || !openCodeStatus.installed
+        ? '<button class="dependency-action-btn" data-first-run-opencode-install><span class="codicon codicon-cloud-download"></span>' + escapeHtml(t('installOpenCode')) + '</button>'
+        : '';
       const setup = lastDependencyStatus
         ? '<div class="onboarding-agent-summary">' +
           '<div class="onboarding-kicker"><span class="codicon codicon-checklist"></span>' + escapeHtml(t('firstRunReadiness')) + '</div>' +
           '<div class="agent-readiness-panel">' + renderAgentReadinessRows(lastDependencyStatus, true) + '</div>' +
           '<div class="dependency-actions" style="margin-top: 8px;">' +
+          openCodeInstallAction +
           '<button class="dependency-action-btn" data-first-run-check><span class="codicon codicon-search"></span>' + escapeHtml(t('checkDependencies')) + '</button>' +
           '<button class="dependency-action-btn" data-first-run-github><span class="codicon codicon-github"></span>' + escapeHtml(t('openGithubAuth')) + '</button>' +
           '</div>' +
           '</div>'
-        : '<div class="onboarding-agent-summary"><button class="dependency-action-btn" data-first-run-check><span class="codicon codicon-search"></span>' + escapeHtml(t('checkDependencies')) + '</button></div>';
+        : '<div class="onboarding-agent-summary"><div class="dependency-actions">' + openCodeInstallAction + '<button class="dependency-action-btn" data-first-run-check><span class="codicon codicon-search"></span>' + escapeHtml(t('checkDependencies')) + '</button></div></div>';
       const panel = SoloMapWebview.renderOnboardingPanel(t);
       return panel.endsWith('</div>') ? panel.slice(0, -6) + setup + '</div>' : panel + setup;
     }
@@ -9925,6 +10088,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         bindAgentReadinessActions(portfolioList);
         portfolioList.querySelectorAll('[data-first-run-check]').forEach(button => {
           button.addEventListener('click', () => requestDependencyCheck());
+        });
+        portfolioList.querySelectorAll('[data-first-run-opencode-install]').forEach(button => {
+          button.addEventListener('click', () => {
+            vscode.postMessage({ command: 'openDependencyAction', action: 'agent-install', cliPath: 'opencode' });
+          });
         });
         portfolioList.querySelectorAll('[data-first-run-github]').forEach(button => {
           button.addEventListener('click', () => {

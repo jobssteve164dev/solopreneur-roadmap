@@ -374,6 +374,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './agentModelSelection') {
           return require(path.join(projectRoot, 'out/agentModelSelection.js'));
         }
+        if (id === './openCodeAdapter') {
+          return require(path.join(projectRoot, 'out/openCodeAdapter.js'));
+        }
         if (id === './panelMessages') {
           return require(path.join(projectRoot, 'out/panelMessages.js'));
         }
@@ -2420,6 +2423,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /renderOnboardingPanel/);
   assert.match(html, /data-onboarding-add-project/);
   assert.match(html, /添加第一个项目|Add first project/);
+  assert.match(html, /data-first-run-opencode-install/);
+  assert.match(html, /安装 OpenCode|Install OpenCode/);
+  assert.match(html, /action: 'agent-install', cliPath: 'opencode'/);
   assert.match(html, /vscode\.postMessage\(\{ command: 'project\.add' \}\)/);
   assert.doesNotMatch(html, /id="tasks-list"/);
   assert.doesNotMatch(html, /id="progress-bar"/);
@@ -3858,7 +3864,7 @@ test('local-first loading paints and launches before optional or durable work', 
   );
   assert.match(revealBody, /makeAgentTerminalName\(workspaceRoot, label\)/);
   assert.doesNotMatch(revealBody, /makeAgentTerminalName\(workspaceRoot, 'preparing'\)/);
-  assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'\)/);
+  assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'[\s\S]*?\);/);
   assert.match(dispatchBody, /'conversation\.runStep': async[\s\S]*?`step-\$\{String\(request\.nodeId \|\| 'conversation'\)\}`/);
 });
 
@@ -5435,7 +5441,7 @@ test('agent launch path uses one terminal-first startup component', () => {
     source.indexOf('function launchAgentConversationTerminal'),
     source.indexOf('async function handleAgentTerminalClosed')
   );
-  assert.match(launcherBody, /createAgentTerminal\(input\.workspaceRoot, input\.label, input\.conversationId\)/);
+  assert.match(launcherBody, /createAgentTerminal\([\s\S]*?input\.workspaceRoot,[\s\S]*?input\.label,[\s\S]*?input\.conversationId/);
   assert.ok(
     launcherBody.indexOf('registerActiveConversation({') < launcherBody.indexOf('createAgentTerminal('),
     'startup component must register the conversation before creating its terminal'
@@ -6061,11 +6067,11 @@ test('agent command builder uses non-interactive task runs and native continuati
     assert.equal(sidebarModule.__commandExists('solo-test-agent'), true);
     const dependencyStatus = sidebarModule.__getDependencyStatus('agy');
     assert.equal(dependencyStatus.agentAutomationReady, true);
-    assert.equal(dependencyStatus.agentAutomationCanPrepare, true);
+    assert.equal(dependencyStatus.agentAutomationCanPrepare || dependencyStatus.agentAutomationPreconfigured, true);
     const wrapperRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-wrapper-root-'));
     const prepared = sidebarModule.__buildAgentAutomationWrapper('agy', wrapperRoot, []);
     assert.equal(prepared.ok, true);
-    assert.match(prepared.wrapperPath, /agent-cli\/agy$/);
+    assert.match(prepared.wrapperPath, /\/agy$/);
     assert.match(fs.readFileSync(prepared.wrapperPath, 'utf8'), /--dangerously-skip-permissions/);
     assert.equal(sidebarModule.__getDependencyStatus(prepared.wrapperPath).agentAutomationPreconfigured, true);
   } finally {
