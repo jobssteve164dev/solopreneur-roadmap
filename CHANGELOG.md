@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.431 - 2026-08-26
+
+### Changed
+- fix sidebar frozen project refresh (b7a978a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.430 - 2026-08-26
 
 ### Added
