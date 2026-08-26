@@ -7,14 +7,15 @@
 1. [单项目方法论](./methodology/methodology.zh.md)：理解 SoloMap 如何把项目推进成可执行路线图。
 2. [项目生命周期工程文档体系方法论](./methodology/project-lifecycle-engineering-docs.zh.md)：理解项目解释性文档应该如何产出和维护。
 3. [跨 Agent Harness 设计](./architecture/cross-agent-harness.zh.md)：理解 memory、skill、MCP connector 和外部增强能力如何服务项目生命周期。
-4. [内置 Harness 增强能力挂载指导](./architecture/curated-harness-enhancements.zh.md)：理解 rtk、CodeGraph、caveman 等调研能力如何作为内置增强开关进入 SoloMap。
-5. [Harness Enhancement Adapter 设计指导](./architecture/harness-enhancement-adapter-guidelines.zh.md)：理解外部增强能力如何统一治理，同时保留不同底层接入方式。
-6. [Agent 协作机制产品边界](./architecture/agent-collaboration-boundary.zh.md)：理解主副 Agent 协作如何进入任务闭环，同时避免把内部编排负担暴露给用户。
-7. [Agent Task Flow 方法论](./methodology/agent-task-flow-methodology.zh.md)：理解 SoloMap 如何从 Agent 启动器升级为可复核、可续推、可验收的任务流。
-8. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
-9. [中文品牌命名与定位分析](./product/chinese-naming-analysis.zh.md)：关于项目中文命名的多维度头脑风暴与品牌定位思考。
-10. [独立开发者生态与协作网络战略](./product/solo-developer-ecosystem-strategy.zh.md)：理解本地项目如何在用户授权下连接协作者、能力、反馈和商业机会，以及私密房间、公共共创与官网中继的长期边界。
-11. [CloudMCP JSON 记忆目标适配边界](./architecture/cloudmcp-json-memory-adapter.zh.md)：理解 SoloMap 作为可配置本地记忆目标时，与 CloudMCP 本地代理唯一写入口之间的职责边界。
+4. [OpenCode 深度适配设计](./architecture/opencode-deep-adapter-design.zh.md)：理解如何在完整保留多 CLI 用户选择的前提下，为 OpenCode 增加供应商切换、结构化运行和上游独立更新能力。
+5. [内置 Harness 增强能力挂载指导](./architecture/curated-harness-enhancements.zh.md)：理解 rtk、CodeGraph、caveman 等调研能力如何作为内置增强开关进入 SoloMap。
+6. [Harness Enhancement Adapter 设计指导](./architecture/harness-enhancement-adapter-guidelines.zh.md)：理解外部增强能力如何统一治理，同时保留不同底层接入方式。
+7. [Agent 协作机制产品边界](./architecture/agent-collaboration-boundary.zh.md)：理解主副 Agent 协作如何进入任务闭环，同时避免把内部编排负担暴露给用户。
+8. [Agent Task Flow 方法论](./methodology/agent-task-flow-methodology.zh.md)：理解 SoloMap 如何从 Agent 启动器升级为可复核、可续推、可验收的任务流。
+9. [下一阶段功能规划](./roadmap/next-feature-plan.zh.md)：查看仍在推进的产品能力。
+10. [中文品牌命名与定位分析](./product/chinese-naming-analysis.zh.md)：关于项目中文命名的多维度头脑风暴与品牌定位思考。
+11. [独立开发者生态与协作网络战略](./product/solo-developer-ecosystem-strategy.zh.md)：理解本地项目如何在用户授权下连接协作者、能力、反馈和商业机会，以及私密房间、公共共创与官网中继的长期边界。
+12. [CloudMCP JSON 记忆目标适配边界](./architecture/cloudmcp-json-memory-adapter.zh.md)：理解 SoloMap 作为可配置本地记忆目标时，与 CloudMCP 本地代理唯一写入口之间的职责边界。
 
 ## UI 与交互基线
 
