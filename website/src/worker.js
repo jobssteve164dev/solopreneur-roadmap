@@ -111,7 +111,7 @@ const content = {
     alternateDocsPath: "/zh/docs",
     alternatePrivacyPath: "/zh/privacy-local-first",
     nav: {
-      product: "Product",
+      product: "Working agreement",
       pro: "Pro",
       docs: "Docs",
       blog: "OPC Blog",
@@ -119,71 +119,74 @@ const content = {
       install: "Install"
     },
     meta: {
-      title: "AI Coding Agent Roadmap for Solo Developers | SoloMap",
-      description: "Plan AI coding work, run local Agent CLIs from roadmap steps, and resume projects from verified local context in VS Code.",
-      ogDescription: "Keep AI coding projects moving with a local-first roadmap, Agent execution, and durable project context in VS Code.",
-      keywords: "solomap, vscode extension, local-first roadmap, ai coding agents, indie hackers, solo founders, strategy cockpit, portfolio management, cursor ide, claude code"
+      title: "Human-AI Agent Working Agreement for VS Code | SoloMap",
+      description: "Define outcomes, boundaries, authority, evidence, and project memory so AI coding agents stay aligned across sessions in your local VS Code workspace.",
+      ogDescription: "Turn goals, boundaries, evidence, and project memory into a local-first working agreement shared by you and every AI coding Agent.",
+      keywords: "human agent working agreement, ai agent workflow, local-first agent collaboration, cross-session project memory, vscode extension, ai coding agents, solomap"
     },
     hero: {
-      eyebrow: "Local-first VS Code extension",
-      title: "Let AI Agents Code. Let SoloMap Steer.",
-      copy: "The local-first strategy cockpit for solo developers building with AI. Turn chaos into structured roadmaps and keep your agents on track.",
-      support: "Let AI agents execute. Let SoloMap keep the direction clear.",
+      eyebrow: "A local-first working agreement for AI Agents",
+      title: "Give every Agent a clear way to work with you.",
+      copy: "SoloMap turns your intent into a shared working agreement: the outcome, boundaries, authority, evidence, and project memory every Agent needs to move work forward.",
+      support: "Change agents or start a new session without losing what matters.",
       primaryCta: "Install from VS Code Marketplace",
       secondaryCta: "Get it on Open VSX",
       githubCta: "View on GitHub",
       proofLabel: "Product highlights",
-      proof: ["Open source under MIT", "Works with your local Agent CLI", "Roadmap stored as readable local files"],
-      trustBadge: "Available on VS Code Marketplace and Open VSX",
-      screenshotLabel: "Illustrated SoloMap workflow",
-      screenshotAlt: "Illustrated SoloMap workflow from roadmap step to Agent run and verified handoff"
+      proof: ["You keep final judgment", "Works with your local Agent CLI", "Evidence before done"],
+      trustBadge: "Open source. Local-first. Built for VS Code.",
+      screenshotLabel: "Illustrated human-Agent working agreement",
+      screenshotAlt: "Illustration of a human defining an outcome and boundaries, an Agent acting, and evidence deciding the next project state"
     },
     problem: {
-      title: "AI can write code. It does not keep your product on track.",
-      lead: "SoloMap keeps plans, Agent runs, next actions, and project memory in the place where you already work.",
+      title: "A prompt starts the work. It does not define the relationship.",
+      lead: "Without a shared agreement, every new Agent session has to guess what matters, what it may change, and when the work is actually done.",
       cards: [
-        ["Scattered context", "Project plans, AI chats, terminal output, TODOs, and code changes stop living as disconnected fragments."],
-        ["Clear next step", "Come back days later and see what needs attention without rereading every chat and file."],
-        ["Beyond only Build", "Roadmaps can keep Sell, Learn, Improve, feedback, and delivery signals visible while code keeps moving."]
+        ["Intent drifts", "The goal gets reinterpreted across chats until the Agent is solving a different problem."],
+        ["Authority stays implicit", "The Agent has to infer what it may change, what must stay untouched, and when to stop."],
+        ["Done becomes a claim", "A confident reply can look complete even when the real result has not been checked."]
       ]
     },
     workflow: {
-      title: "From idea to shipped progress, without losing the thread.",
-      lead: "Four actions are enough to start with one real project.",
+      title: "Four actions make Agent work reliable across sessions.",
+      lead: "The agreement stays simple enough to use on a real task, but strong enough to survive a model or session change.",
       steps: [
-        ["Add your local project", "Choose a workspace folder and let SoloMap create the project operating surface there."],
-        ["Create a roadmap", "Describe the outcome and get a set of executable steps you can revise as reality changes."],
-        ["Run your AI agent", "Start your local Agent CLI from the right roadmap step with the context already attached."],
-        ["Come back and continue", "See today's priorities, project status, and recent progress when you reopen VS Code."]
+        ["Define the outcome", "Say what must become true and how you will recognize a useful result."],
+        ["Set boundaries and authority", "Make clear what the Agent may change, what it must protect, and where your approval is required."],
+        ["Let your Agent act", "Run the local Agent CLI you already use with the right project context attached."],
+        ["Accept evidence and continue", "Review the real result, decide whether it is done, and leave the next session a verified starting point."]
       ]
     },
     answer: {
-      title: "What is SoloMap?",
-      lead: "SoloMap is a local-first VS Code extension that helps indie developers turn AI-built projects into clear roadmaps, executable agent runs, and visible next actions. It does not replace coding agents; it gives them a product direction layer so solo builders can keep building, selling, learning, and improving without losing context.",
-      comparisonTitle: "SoloMap vs. AI coding tools",
+      title: "SoloMap is the working agreement around the Agent.",
+      lead: "It does not replace your coding Agent or make product decisions for you. It keeps your outcome, boundaries, authority, evidence, and project memory together so each Agent can act from the same verified state.",
+      comparisonTitle: "A working agreement and an Agent chat solve different problems",
+      comparisonColumns: ["Decision", "SoloMap working agreement", "Agent chat alone"],
       comparison: [
-        ["What it manages", "Project direction, roadmap steps, AI run context, progress memory", "Code generation, edits, chat, review, and terminal execution"],
-        ["Where it works", "Inside the user's existing VS Code workspace", "Usually inside an IDE, terminal, hosted chat, or agent runtime"],
-        ["Best use", "Knowing what to do next and keeping a solo product moving", "Completing a specific coding or editing task"],
-        ["Data posture", "Core workflow is local-first by default", "Depends on the selected AI provider and tool"]
+        ["Center of control", "Your outcome and final judgment", "The current conversation"],
+        ["Outcome and boundary", "Explicit and reusable across runs", "Restated or inferred in each session"],
+        ["Agent authority", "Clear before the run begins", "Often discovered while the Agent is acting"],
+        ["Completion", "Accepted from reviewable evidence", "Usually reported in the Agent reply"],
+        ["Continuity", "Resumes from verified project memory", "Depends on available chat context"],
+        ["Agent choice", "Bring the local Agent CLI you prefer", "Bound to the tool hosting the conversation"]
       ],
       modules: [
-        ["Choose SoloMap if", "you already use AI agents but keep losing the product thread between plans, chats, code changes, and follow-up work."],
-        ["Choose a coding agent if", "your immediate need is to write, modify, review, or explain code inside one task."],
-        ["Use both when", "you want the agent to execute while SoloMap keeps the project roadmap, memory, and next step visible."]
+        ["You decide", "the outcome, boundaries, approval points, and whether the evidence is good enough."],
+        ["The Agent acts", "inside that agreement using the coding tool you already trust."],
+        ["Evidence moves the project", "so the next session starts from what was verified, not from what was merely claimed."]
       ]
     },
     trust: {
-      title: "Local-first by default.",
-      copy: "SoloMap's core workflow does not require a hosted backend. Roadmaps, task records, and project memory stay in your workspace first.",
+      title: "Your working agreement stays with your project.",
+      copy: "SoloMap keeps the core project truth in your local workspace. The website does not become a cloud copy of your roadmap, prompts, or Agent history.",
       items: [
-        "Your project roadmap and memory stay with your local project.",
-        "You bring the AI Agent CLI you already use.",
-        "GitHub signals are pulled when you connect or refresh them."
+        "Outcomes, evidence, and project memory stay with the local project.",
+        "You choose which local Agent CLI performs the work.",
+        "External signals are connected or shared only when you decide."
       ]
     },
     pro: {
-      title: "Free moves one project forward. Pro helps run your one-person company.",
+      title: "Free establishes one project agreement. Pro helps you choose across projects.",
       features: [
         "Strategy cockpit",
         "Portfolio tradeoff view",
@@ -197,8 +200,8 @@ const content = {
       cta: "Join Pro Early Access"
     },
     install: {
-      title: "Try SoloMap with one project first.",
-      lead: "If it helps you keep momentum, tell us what the strategy cockpit should show next.",
+      title: "Start with one real Agent task.",
+      lead: "Choose a project, define what done means, and let SoloMap carry that agreement into the next Agent run.",
       marketplace: "VS Code Marketplace",
       openVsx: "Open VSX",
       ios: "iOS app",
@@ -211,11 +214,12 @@ const content = {
     faq: {
       title: "SoloMap FAQ",
       items: [
-        ["Is SoloMap an AI coding agent?", "No. SoloMap is the roadmap and strategy layer around the coding agents you already use."],
-        ["Does SoloMap require a hosted backend?", "No. The core workflow keeps roadmap state, task records, and project memory in the local workspace by default."],
-        ["Who should use SoloMap?", "SoloMap is for indie developers and solo founders building products with AI agents inside VS Code."],
-        ["What problem does SoloMap solve?", "It keeps project direction, next actions, and AI execution history visible so solo builders do not lose momentum between coding sessions."],
-        ["Can SoloMap work with different agent CLIs?", "Yes. SoloMap is designed around bringing your own local Agent CLI rather than forcing one hosted coding agent."]
+        ["Is SoloMap an AI coding Agent?", "No. SoloMap is the local-first working agreement around the coding Agents you already use."],
+        ["What is a human-Agent working agreement?", "It is a shared definition of the outcome, boundaries, Agent authority, completion evidence, and project memory needed to work reliably across sessions."],
+        ["Does SoloMap replace prompts or task lists?", "No. Prompts can start a run and task lists can track work. SoloMap connects them to durable project intent, evidence, and a verified next state."],
+        ["Who decides when work is done?", "You do. SoloMap keeps your completion criteria and the Agent's evidence together so the decision is not based on the Agent's claim alone."],
+        ["Can SoloMap work with different Agent CLIs?", "Yes. You bring the local Agent CLI you prefer, while SoloMap preserves the working agreement around it."],
+        ["Does SoloMap require a hosted backend?", "No. The core workflow keeps roadmap state, task records, evidence, and project memory in the local workspace by default."]
       ]
     },
     footer: {
@@ -282,7 +286,7 @@ const content = {
     alternateDocsPath: "/docs",
     alternatePrivacyPath: "/privacy-local-first",
     nav: {
-      product: "产品",
+      product: "工作协议",
       pro: "Pro",
       docs: "文档",
       blog: "OPC Blog",
@@ -290,71 +294,74 @@ const content = {
       install: "安装"
     },
     meta: {
-      title: "独道 (SoloMap) - 给 AI Agent 项目的本地优先路线图与战略驾驶舱",
-      description: "独道 (SoloMap) 是给使用 AI Agent 构建产品的独立开发者准备的本地优先路线图与战略驾驶舱。",
-      ogDescription: "让 AI Agent 负责执行，让独道负责不丢方向。",
-      keywords: "独道, SoloMap, VS Code插件, 本地优先路线图, AI Agent, 独立开发, 独立创始人, 战略驾驶舱, 项目管理, 个人商业, 独立变现"
+      title: "独道 SoloMap - 人与 AI Agent 的本地优先工作协议",
+      description: "把目标、边界、授权、完成证据和项目记忆变成人与 AI Agent 可持续复用的工作协议，让不同 Agent 在 VS Code 中围绕同一项目事实协作。",
+      ogDescription: "让目标、边界、证据和项目记忆跨 Agent、跨会话保持一致。",
+      keywords: "人与Agent工作协议, AI Agent协作, 本地优先, 跨会话项目记忆, VS Code插件, AI编码Agent, 独道, SoloMap"
     },
     hero: {
-      eyebrow: "本地优先的 VS Code 插件",
-      title: "AI 负责编写代码，独道负责掌控方向。",
-      copy: "为独立开发者与个人创业者打造的本地优先战略驾驶舱。把想法变成路线图，让 Agent 奔跑在正确的道路上。",
-      support: "把产品想法、路线图、Agent 执行历史和下一步动作放回你的本地工作区。",
+      eyebrow: "人与 AI Agent 的本地优先工作协议",
+      title: "让每一个 Agent，都按你的目标工作。",
+      copy: "独道把你的意图变成一份可执行的工作约定：结果是什么、什么不能改、Agent 可以做什么、完成要拿出什么证据、下一次从哪里继续。",
+      support: "换 Agent、换模型、换会话，项目仍围绕同一事实继续。",
       primaryCta: "从 VS Code Marketplace 安装",
       secondaryCta: "在 Open VSX 获取",
       githubCta: "查看 GitHub",
       proofLabel: "产品亮点",
-      proof: ["MIT 开源", "接入你的本地 Agent CLI", "路线图保存为可读本地文件"],
-      trustBadge: "已上架 VS Code Marketplace 与 Open VSX",
-      screenshotLabel: "SoloMap 工作流程示意",
-      screenshotAlt: "从路线图环节到 Agent 执行和验证交接的 SoloMap 工作流程示意"
+      proof: ["最终判断权在你", "接入你的本地 Agent CLI", "先有证据，再算完成"],
+      trustBadge: "MIT 开源・本地优先・为 VS Code 打造",
+      screenshotLabel: "人与 Agent 工作约定示意",
+      screenshotAlt: "用户定义结果与边界、Agent 执行、再由证据决定项目下一状态的流程示意"
     },
     problem: {
-      title: "AI 能写代码，但不会自动帮你经营项目方向。",
-      lead: "独道 (SoloMap) 把计划、Agent 执行、下一步动作和项目记忆留在你真正工作的地方。",
+      title: "一句 Prompt 能启动工作，却不能定义协作关系。",
+      lead: "没有共同约定时，每次新会话都在重新猜测：什么最重要、哪些可以改、做到什么才算完成。",
       cards: [
-        ["上下文散落", "项目计划、AI 对话、终端输出、TODO 和代码修改不再散落在不同地方。"],
-        ["下一步清楚", "几天后重新打开项目，也能立刻看见当前该处理什么。"],
-        ["不只停在 Build", "路线图持续提醒 Sell、Learn、Improve、反馈和交付信号，不让项目只是在改代码。"]
+        ["目标逐轮漂移", "意图在多次对话中被反复解释，最后 Agent 解决的已经是另一个问题。"],
+        ["授权边界隐形", "Agent 只能边做边猜：哪些可以改、哪些必须保护、什么时候应该停。"],
+        ["完成只剩自述", "一句自信的“已完成”很像结果，却可能还没有经过真实验证。"]
       ]
     },
     workflow: {
-      title: "从想法到真实推进，不丢掉上下文。",
-      lead: "从一个真实项目开始，只需要四个动作。",
+      title: "四个动作，让 Agent 协作能跨会话继续。",
+      lead: "这份约定足够简单，可以直接用在真实任务上；也足够稳定，换模型或换会话也不丢。",
       steps: [
-        ["添加本地项目", "选择一个工作区文件夹，让独道 (SoloMap) 在那里建立项目推进界面。"],
-        ["生成路线图", "描述目标，得到一组可执行、可调整的路线图环节。"],
-        ["运行你的 AI Agent", "从正确的路线图环节启动本地 Agent CLI，并自动带上上下文。"],
-        ["回来继续推进", "下次打开 VS Code 时，直接看到今日安排、项目状态和最近进展。"]
+        ["说清结果", "说明什么必须变成现实，以及你如何判断结果真正有用。"],
+        ["划定边界与授权", "明确 Agent 可以改什么、必须保护什么、哪些节点需要你确认。"],
+        ["让 Agent 执行", "使用你已经信任的本地 Agent CLI，带上正确的项目上下文开始行动。"],
+        ["用证据决定完成", "检查真实结果，由你决定是否完成，再给下一次会话留下已验证的起点。"]
       ]
     },
     answer: {
-      title: "独道 (SoloMap) 是什么？",
-      lead: "独道 (SoloMap) 是一个本地优先的 VS Code 插件，帮助独立开发者把 AI Agent 项目整理成清晰路线图、可执行 Agent 任务和可继续推进的下一步。它不替代编码 Agent，而是给编码 Agent 外层补上产品方向，让一个人也能持续 Build、Sell、Learn、Improve。",
-      comparisonTitle: "独道与 AI 编码工具的区别",
+      title: "独道是 Agent 外层的工作约定。",
+      lead: "它不替代编码 Agent，也不替你做产品判断。它把目标、边界、授权、证据和项目记忆放在一起，让每个 Agent 都从同一个已验证状态开始。",
+      comparisonTitle: "工作约定与只靠 Agent 对话，解决的是不同问题",
+      comparisonColumns: ["决策点", "SoloMap 工作约定", "只靠 Agent 对话"],
       comparison: [
-        ["管理对象", "项目方向、路线图环节、Agent 执行上下文、推进记忆", "代码生成、编辑、问答、审查和终端执行"],
-        ["工作位置", "用户已有的 VS Code 本地工作区", "通常在 IDE、终端、托管聊天或 Agent 运行环境中"],
-        ["最适合", "知道下一步做什么，并让一个产品持续推进", "完成一个具体编码、修改或解释任务"],
-        ["数据姿态", "核心工作流默认本地优先", "取决于用户选择的 AI provider 和工具"]
+        ["控制中心", "你定义的目标与最终判断", "当前这一次对话"],
+        ["目标与边界", "明确记录，可在多次执行中复用", "每次会话重新说明或由 Agent 猜测"],
+        ["Agent 授权", "执行前已经清楚", "常在 Agent 行动时才逐步确认"],
+        ["完成判断", "根据可复查证据由你接受", "通常由 Agent 在回复中宣布"],
+        ["跨会话续接", "从已验证的项目记忆继续", "取决于当前能获得的聊天上下文"],
+        ["Agent 选择", "带上你信任的本地 Agent CLI", "受当前对话工具约束"]
       ],
       modules: [
-        ["选择独道，如果", "你已经在用 AI Agent，但项目计划、对话、代码修改和后续动作总是散落。"],
-        ["选择编码 Agent，如果", "你当前只需要完成一个具体的写代码、改代码、解释代码或审查任务。"],
-        ["两者一起用，当", "你希望 Agent 负责执行，同时独道保持路线图、项目记忆和下一步动作清楚可见。"]
+        ["你负责判断", "目标、边界、确认节点，以及证据是否足够。"],
+        ["Agent 负责行动", "在这份约定内，使用你已经信任的编码工具执行。"],
+        ["证据决定状态", "下一次会话从已经验证的事实继续，而不是从一句自述继续。"]
       ]
     },
     trust: {
-      title: "默认本地优先。",
-      copy: "独道 (SoloMap) 的核心工作流不要求托管后端。路线图、任务记录和项目记忆优先留在你的本地工作区。",
+      title: "工作约定跟随你的本地项目。",
+      copy: "独道把核心项目事实留在你的本地工作区。官网不会变成路线图、提示词或 Agent 历史的云端副本。",
       items: [
-        "项目路线图和记忆跟随你的本地项目保存。",
-        "你继续使用自己已经安装的 AI Agent CLI。",
-        "GitHub 信号只在你连接或刷新时拉取。"
+        "目标、证据和项目记忆跟随本地项目。",
+        "你决定由哪一个本地 Agent CLI 执行。",
+        "只有在你决定时，才连接或对外共享信号。"
       ]
     },
     pro: {
-      title: "Free 帮你推进一个项目；Pro 帮你经营一人公司。",
+      title: "Free 建立一个项目的协作约定；Pro 帮你判断多个项目。",
       features: [
         "战略驾驶舱",
         "多项目取舍判断",
@@ -368,8 +375,8 @@ const content = {
       cta: "加入 Pro Early Access"
     },
     install: {
-      title: "先用一个项目试试独道 (SoloMap)。",
-      lead: "如果它帮你保持推进，请告诉我们金字塔战略驾驶舱下一步应该看见什么。",
+      title: "从一个真实 Agent 任务开始。",
+      lead: "选一个项目，说清什么才算完成，让独道把这份约定带进下一次 Agent 执行。",
       marketplace: "VS Code Marketplace",
       openVsx: "Open VSX",
       ios: "iOS 应用",
@@ -382,11 +389,12 @@ const content = {
     faq: {
       title: "独道 (SoloMap) 常见问题",
       items: [
-        ["独道 (SoloMap) 是 AI 编码 Agent 吗？", "不是。独道 (SoloMap) 是你已有编码 Agent 外层的路线图和战略层。"],
-        ["独道 (SoloMap) 必须使用托管后端吗？", "不需要。核心工作流默认把路线图状态、任务记录和项目记忆保存在本地工作区。"],
-        ["谁适合使用独道 (SoloMap)？", "独道 (SoloMap) 适合在 VS Code 中用 AI Agent 构建产品的独立开发者和 solo founder。"],
-        ["独道 (SoloMap) 解决什么问题？", "它让项目方向、下一步动作和 AI 执行历史保持可见，避免一个人做产品时在多次编码会话之间丢掉节奏。"],
-        ["独道 (SoloMap) 能配合不同 Agent CLI 吗？", "可以。独道 (SoloMap) 的设计是带上你自己的本地 Agent CLI，而不是强迫你使用某一个托管编码 Agent。"]
+        ["独道是 AI 编码 Agent 吗？", "不是。独道是你已有编码 Agent 外层的本地优先工作约定。"],
+        ["什么是人与 Agent 的工作约定？", "它是双方共用的结果、边界、Agent 授权、完成证据和项目记忆，让协作能够跨会话继续。"],
+        ["独道会取代 Prompt 或任务清单吗？", "不会。Prompt 可以启动一次执行，任务清单可以记录待办；独道把它们连到可持续的项目意图、证据和已验证状态。"],
+        ["谁决定任务是否真正完成？", "你。独道把你的完成标准与 Agent 提供的证据放在一起，不让结论只依赖 Agent 的自述。"],
+        ["独道能配合不同 Agent CLI 吗？", "可以。你选择自己信任的本地 Agent CLI，独道负责保留它外层的工作约定。"],
+        ["独道必须使用托管后端吗？", "不需要。核心工作流默认把路线图状态、任务记录、证据和项目记忆保存在本地工作区。"]
       ]
     },
     footer: {
@@ -2826,7 +2834,7 @@ function buildStyles() {
       color: var(--ink);
       font-size: 12px;
       line-height: 1.25;
-      white-space: nowrap;
+      white-space: normal;
     }
     .ok { color: var(--green); }
     .warn { color: #f0c46b; }
@@ -2942,10 +2950,23 @@ function buildStyles() {
       color: var(--soft);
       font-size: 14px;
     }
-    .comparison-table tr:first-child th { border-top: 0; }
+    .comparison-table thead th {
+      border-top: 0;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .comparison-table tbody tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.018);
+    }
     .comparison-table th {
       color: var(--ink);
       background: rgba(255, 255, 255, 0.04);
+    }
+    .comparison-table .solomap-col {
+      background: rgba(73, 214, 208, 0.075);
+      color: var(--ink);
     }
     .module-list {
       display: grid;
@@ -3553,6 +3574,184 @@ function buildStyles() {
     .consent-banner div { display: flex; justify-content: flex-end; gap: 8px; }
     .consent-banner button { min-height: 38px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
     .consent-banner button.primary { border-color: var(--cyan); background: var(--cyan); color: #11100e; font-weight: 760; }
+
+    /* Homepage V2: human-Agent working agreement */
+    .protocol-home {
+      background:
+        radial-gradient(circle at 76% 9%, rgba(73, 214, 208, 0.08), transparent 29rem),
+        radial-gradient(circle at 12% 34%, rgba(201, 47, 56, 0.055), transparent 30rem),
+        var(--bg);
+    }
+    .protocol-home .topbar {
+      background: rgba(17, 16, 14, 0.9);
+    }
+    .protocol-home .protocol-hero {
+      position: relative;
+      min-height: auto;
+      padding: 92px 0 84px;
+      overflow: hidden;
+    }
+    .protocol-home .protocol-hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      opacity: .24;
+      background-image:
+        linear-gradient(rgba(246, 240, 232, .055) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(246, 240, 232, .055) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.9), transparent 86%);
+    }
+    .protocol-home .hero-grid {
+      grid-template-columns: minmax(0, .88fr) minmax(460px, 1.12fr);
+      gap: 58px;
+    }
+    .protocol-home .hero-copy-stack { min-width: 0; }
+    .protocol-home .eyebrow {
+      border-radius: 4px;
+      padding: 7px 10px;
+      background: rgba(73, 214, 208, .065);
+      letter-spacing: .025em;
+    }
+    .protocol-home h1,
+    .protocol-home h2 {
+      text-wrap: balance;
+    }
+    .protocol-home h1 {
+      max-width: 660px;
+      font-size: clamp(48px, 6.2vw, 78px);
+      line-height: .98;
+      letter-spacing: -.045em;
+    }
+    .protocol-home .hero-copy {
+      max-width: 650px;
+      font-size: clamp(18px, 1.5vw, 21px);
+      line-height: 1.62;
+    }
+    .protocol-home .cn-line {
+      max-width: 620px;
+      line-height: 1.65;
+    }
+    .protocol-home .button {
+      min-height: 48px;
+      transition: transform .2s ease, border-color .2s ease, background .2s ease, box-shadow .2s ease;
+    }
+    .protocol-home .button.primary {
+      border-color: var(--cyan);
+      background: var(--cyan);
+      color: #07110f;
+      box-shadow: 0 10px 28px rgba(73, 214, 208, .18);
+    }
+    .protocol-home .button.primary:hover {
+      box-shadow: 0 14px 34px rgba(73, 214, 208, .26);
+    }
+    .protocol-home .proof { gap: 8px; }
+    .protocol-home .proof span {
+      border-radius: 4px;
+      background: rgba(255, 255, 255, .025);
+    }
+    .protocol-home .trust-badge {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 16px;
+      color: var(--cyan);
+      font-size: 14px;
+      font-weight: 700;
+    }
+    .protocol-home .trust-badge::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 4px rgba(165, 214, 109, .1);
+    }
+    .protocol-home .product-preview {
+      border-color: rgba(73, 214, 208, .25);
+      border-radius: 6px;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, .46), 0 0 0 1px rgba(73, 214, 208, .035);
+    }
+    .protocol-home .project-chip:first-of-type {
+      border-color: rgba(165, 214, 109, .48);
+      background: rgba(165, 214, 109, .08);
+    }
+    .protocol-home .section { padding: 92px 0; }
+    .protocol-home .protocol-problem {
+      background: rgba(8, 9, 9, .28);
+    }
+    .protocol-home .protocol-loop {
+      background: linear-gradient(180deg, rgba(73, 214, 208, .025), transparent 72%);
+    }
+    .protocol-home .section-head {
+      grid-template-columns: minmax(0, .64fr) minmax(320px, .36fr);
+      gap: 54px;
+      margin-bottom: 38px;
+    }
+    .protocol-home .section-head p {
+      line-height: 1.7;
+    }
+    .protocol-home .card {
+      min-height: 190px;
+      border-radius: 4px;
+      padding: 26px;
+      background: rgba(26, 23, 20, .82);
+    }
+    .protocol-home .card h3 { font-size: 19px; }
+    .protocol-home .card p { font-size: 16px; line-height: 1.65; }
+    .protocol-home .step { padding-top: 66px; }
+    .protocol-home .step::before {
+      top: 24px;
+      left: 26px;
+      border-radius: 4px;
+      background: rgba(73, 214, 208, .12);
+      color: var(--cyan);
+    }
+    .protocol-home .answer-block {
+      grid-template-columns: minmax(0, .38fr) minmax(0, .62fr);
+      gap: 28px;
+    }
+    .protocol-home .answer-copy,
+    .protocol-home .module-list div,
+    .protocol-home .trust-copy,
+    .protocol-home .trust-list div,
+    .protocol-home .price,
+    .protocol-home .install-panel {
+      border-radius: 4px;
+    }
+    .protocol-home .answer-copy { padding: 30px; }
+    .protocol-home .answer-copy p { line-height: 1.7; }
+    .protocol-home .module-list div { padding: 18px; }
+    .protocol-home .module-list p { line-height: 1.6; }
+    .protocol-home .comparison-table {
+      border-radius: 4px;
+      table-layout: fixed;
+    }
+    .protocol-home .comparison-table caption {
+      max-width: 640px;
+      margin-bottom: 16px;
+      font-size: 20px;
+      line-height: 1.35;
+    }
+    .protocol-home .comparison-table th,
+    .protocol-home .comparison-table td {
+      padding: 17px 16px;
+      line-height: 1.55;
+    }
+    .protocol-home .comparison-table th:first-child { width: 23%; }
+    .protocol-home .comparison-table th:nth-child(2),
+    .protocol-home .comparison-table th:nth-child(3) { width: 38.5%; }
+    .protocol-home .trust-band { gap: 20px; }
+    .protocol-home .trust-copy,
+    .protocol-home .price {
+      background: rgba(73, 214, 208, .055);
+      border-color: rgba(73, 214, 208, .3);
+    }
+    .protocol-home .install-panel {
+      border-color: rgba(73, 214, 208, .28);
+      background: linear-gradient(135deg, rgba(73, 214, 208, .07), rgba(23, 20, 17, .96) 56%);
+    }
     @media (max-width: 920px) {
       .links a:not(.install-link):not(.language-link) { display: none; }
       .hero { min-height: auto; padding-top: 44px; }
@@ -3589,6 +3788,10 @@ function buildStyles() {
       .product-preview { min-height: 520px; }
       .preview-body { grid-template-columns: 1fr; }
       .preview-side { display: none; }
+      .protocol-home .protocol-hero { padding: 64px 0 68px; }
+      .protocol-home .hero-grid { grid-template-columns: 1fr; gap: 48px; }
+      .protocol-home .section { padding: 72px 0; }
+      .protocol-home .section-head { gap: 18px; }
       .footer-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 32px;
@@ -3617,17 +3820,38 @@ function buildStyles() {
       .comparison-table tr,
       .comparison-table th,
       .comparison-table td { display: block; width: 100%; }
-      .comparison-table tr { border-top: 1px solid var(--line); }
-      .comparison-table tr:first-child { border-top: 0; }
+      .comparison-table { border: 0; background: transparent; }
+      .comparison-table thead { display: none; }
+      .comparison-table tbody { display: grid; gap: 12px; }
+      .comparison-table tr { overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
       .comparison-table th,
-      .comparison-table td { border-top: 0; padding: 10px 14px; }
-      .comparison-table th { padding-top: 14px; }
+      .comparison-table td { border-top: 0; padding: 12px 14px; }
+      .comparison-table th { padding-top: 15px; padding-bottom: 15px; }
+      .comparison-table td { border-top: 1px solid var(--line); }
+      .comparison-table td::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 760;
+        letter-spacing: .04em;
+        text-transform: uppercase;
+      }
       .comparison-table td:last-child { padding-bottom: 14px; }
       .product-preview { min-height: 500px; }
       .preview-main { padding: 14px; }
-      .roadmap-strip,
+      .roadmap-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .next-actions { grid-template-columns: 1fr; }
       .roadmap-step { min-height: 86px; }
+      .consent-banner {
+        position: relative;
+        right: auto;
+        bottom: auto;
+        width: min(100% - 28px, 520px);
+        margin: 14px auto 0;
+      }
+      .consent-banner button { min-height: 44px; }
       .footer-grid { grid-template-columns: 1fr; gap: 28px; }
       footer { padding: 44px 0 28px; }
     }
@@ -3661,11 +3885,11 @@ function renderListItems(items, tagName) {
   return items.map((item) => `<${tagName}>${escapeHtml(item)}</${tagName}>`).join("");
 }
 
-function renderComparisonRows(rows) {
+function renderComparisonRows(rows, columns) {
   return rows.map(([dimension, solomap, codingAgent]) => `<tr>
               <th scope="row">${escapeHtml(dimension)}</th>
-              <td>${escapeHtml(solomap)}</td>
-              <td>${escapeHtml(codingAgent)}</td>
+              <td class="solomap-col" data-label="${escapeHtml(columns[1])}">${escapeHtml(solomap)}</td>
+              <td data-label="${escapeHtml(columns[2])}">${escapeHtml(codingAgent)}</td>
             </tr>`).join("");
 }
 
@@ -3723,30 +3947,32 @@ function renderFaqItems(items) {
 function renderHeroPreview(locale) {
   const labels = locale === "zh"
     ? {
-        title: "产品流程演示",
-        side: "当前项目",
-        activeProject: "我的产品",
-        build: "定义结果",
-        sell: "交给 Agent",
-        learn: "验证证据",
-        improve: "留下交接",
-        terminal: "当前环节",
-        nextBuild: ["用户结果明确", "边界已确认", "完成标准可验证"],
-        nextSell: ["Agent 正在执行", "改动保持可见", "不越过当前环节"],
-        nextLearn: ["检查真实改动", "运行相关验证", "记录下一步"]
+        title: "人 ↔ Agent 工作约定",
+        side: "你的 Agent",
+        activeProject: "Codex",
+        agreement: "工作约定",
+        build: "结果",
+        sell: "边界",
+        learn: "行动",
+        improve: "证据",
+        terminal: "约定已就绪",
+        nextBuild: ["结果由你定义", "边界和授权已明确", "完成标准可验证"],
+        nextSell: ["Agent 在约定内执行", "改动与输出可见", "需要时把判断交回给你"],
+        nextLearn: ["证据可以复查", "你决定是否完成", "下次从已验证状态继续"]
       }
     : {
-        title: "Product workflow illustration",
-        side: "Current project",
-        activeProject: "My product",
-        build: "Define outcome",
-        sell: "Run Agent",
-        learn: "Verify evidence",
-        improve: "Leave handoff",
-        terminal: "Active step",
-        nextBuild: ["User outcome is clear", "Boundary is explicit", "Done can be verified"],
-        nextSell: ["Agent is executing", "Changes stay visible", "Scope stays bounded"],
-        nextLearn: ["Inspect real changes", "Run relevant checks", "Record the next step"]
+        title: "Human ↔ Agent working agreement",
+        side: "Your agents",
+        activeProject: "Codex",
+        agreement: "Working agreement",
+        build: "Outcome",
+        sell: "Boundary",
+        learn: "Action",
+        improve: "Evidence",
+        terminal: "Agreement ready",
+        nextBuild: ["You define the outcome", "Boundaries and authority are explicit", "Done can be verified"],
+        nextSell: ["The Agent acts inside the agreement", "Changes and output stay visible", "Judgment returns to you when needed"],
+        nextLearn: ["Evidence is reviewable", "You decide whether it is done", "The next run starts from verified state"]
       };
 
   return `<figure class="product-preview">
@@ -3758,11 +3984,11 @@ function renderHeroPreview(locale) {
             <aside class="preview-side">
               <strong>${escapeHtml(labels.side)}</strong>
               <div class="project-chip">${escapeHtml(labels.activeProject)}</div>
-              <div class="project-chip">${locale === "zh" ? "第二个实验" : "Second experiment"}</div>
-              <div class="project-chip">${locale === "zh" ? "维护任务" : "Maintenance"}</div>
+              <div class="project-chip">Claude Code</div>
+              <div class="project-chip">Cursor Agent</div>
             </aside>
             <div class="preview-main">
-              <strong>Roadmap</strong>
+              <strong>${escapeHtml(labels.agreement)}</strong>
               <div class="roadmap-strip">
                 <div class="roadmap-step step-build"><span>01</span><b>${escapeHtml(labels.build)}</b></div>
                 <div class="roadmap-step step-sell"><span>02</span><b>${escapeHtml(labels.sell)}</b></div>
@@ -3774,7 +4000,7 @@ function renderHeroPreview(locale) {
                   <strong>${escapeHtml(labels.terminal)}</strong>
                   <div class="terminal-line"><span class="info">${locale === "zh" ? "目标" : "Outcome"}</span> ${locale === "zh" ? "新用户能在五分钟内开始第一个项目" : "A new user can start a first project in five minutes"}</div>
                   <div class="terminal-line"><span class="ok">${locale === "zh" ? "边界" : "Boundary"}</span> ${locale === "zh" ? "只处理安装、登记与首次执行" : "Setup, registration, and first run only"}</div>
-                  <div class="terminal-line"><span class="warn">${locale === "zh" ? "验证" : "Check"}</span> ${locale === "zh" ? "在真实 VS Code 流程中完成一次运行" : "Complete one run in the real VS Code flow"}</div>
+                  <div class="terminal-line"><span class="warn">${locale === "zh" ? "授权" : "Authority"}</span> ${locale === "zh" ? "可修改引导流程，发布前需用户确认" : "May change onboarding; user approves before release"}</div>
                 </div>
                 <div class="terminal-group phase-2">
                   <strong>${locale === "zh" ? "本地 Agent 执行" : "Local Agent run"}</strong>
@@ -3783,10 +4009,10 @@ function renderHeroPreview(locale) {
                   <div class="terminal-line"><span class="warn">${locale === "zh" ? "状态" : "State"}</span> ${locale === "zh" ? "等待验证，不提前标记完成" : "Awaiting verification before completion"}</div>
                 </div>
                 <div class="terminal-group phase-3">
-                  <strong>${locale === "zh" ? "验证与续接" : "Evidence and handoff"}</strong>
+                  <strong>${locale === "zh" ? "证据与继续" : "Evidence and continuity"}</strong>
                   <div class="terminal-line"><span class="ok">${locale === "zh" ? "证据" : "Evidence"}</span> ${locale === "zh" ? "真实流程已运行，结果可复查" : "Real flow ran and the result is reviewable"}</div>
-                  <div class="terminal-line"><span class="ok">${locale === "zh" ? "结果" : "Result"}</span> ${locale === "zh" ? "当前环节闭环" : "Current step closed"}</div>
-                  <div class="terminal-line"><span class="info">${locale === "zh" ? "下一步" : "Next"}</span> ${locale === "zh" ? "从已验证状态继续" : "Continue from verified state"}</div>
+                  <div class="terminal-line"><span class="ok">${locale === "zh" ? "判断" : "Decision"}</span> ${locale === "zh" ? "用户接受当前结果" : "User accepts the current result"}</div>
+                  <div class="terminal-line"><span class="info">${locale === "zh" ? "记忆" : "Memory"}</span> ${locale === "zh" ? "下次从已验证状态继续" : "Next run continues from verified state"}</div>
                 </div>
               </div>
               <div class="next-actions-container">
@@ -3950,8 +4176,8 @@ function buildHeader(t, locale, currentPath, languagePath = null, includeHreflan
 function buildFooter(t) {
   const isZh = t.lang === "zh-Hans";
   const desc = isZh 
-    ? "给 AI Agent 项目的本地优先路线图与战略驾驶舱。把想法变成路线图，让 Agent 执行，不丢方向。" 
-    : "Local-first roadmap and strategy cockpit for AI-built projects. Turn ideas into roadmaps and let agents execute.";
+    ? "人与 AI Agent 的本地优先工作协议。让目标、边界、证据与项目记忆跨会话保持一致。"
+    : "A local-first working agreement for you and your AI Agents. Keep outcomes, boundaries, evidence, and project memory aligned across sessions.";
   return `<footer>
     <div class="shell">
       <div class="footer-grid">
@@ -4438,13 +4664,13 @@ function buildPage(locale, origin, stats, proPlan = null, blogPosts = []) {
   ${buildStructuredData(t, origin, t.homePath)}
   ${buildStyles()}
 </head>
-<body>
+<body class="protocol-home">
   ${buildHeader(t, locale, t.homePath)}
 
   <main id="main-content">
-    <section class="hero">
+    <section class="hero protocol-hero">
       <div class="shell hero-grid">
-        <div>
+        <div class="hero-copy-stack">
           <div class="eyebrow">${escapeHtml(t.hero.eyebrow)}</div>
           <h1>${escapeHtml(t.hero.title)}</h1>
           <p class="hero-copy">${escapeHtml(t.hero.copy)}</p>
@@ -4457,13 +4683,13 @@ function buildPage(locale, origin, stats, proPlan = null, blogPosts = []) {
           <div class="proof" aria-label="${escapeHtml(t.hero.proofLabel)}">
             ${renderListItems(t.hero.proof, "span")}
           </div>
-          ${t.hero.trustBadge ? `<div class="trust-badge" style="margin-top: 16px; font-size: 14px; color: var(--cyan); font-weight: 700; display: flex; align-items: center; gap: 6px;">${escapeHtml(t.hero.trustBadge)}</div>` : ""}
+          ${t.hero.trustBadge ? `<div class="trust-badge">${escapeHtml(t.hero.trustBadge)}</div>` : ""}
         </div>
         ${renderHeroPreview(locale)}
       </div>
     </section>
 
-    <section class="section" id="product">
+    <section class="section protocol-problem" id="product">
       <div class="shell">
         <div class="section-head">
           <h2>${escapeHtml(t.problem.title)}</h2>
@@ -4475,7 +4701,7 @@ function buildPage(locale, origin, stats, proPlan = null, blogPosts = []) {
       </div>
     </section>
 
-    <section class="section">
+    <section class="section protocol-loop">
       <div class="shell">
         <div class="section-head">
           <h2>${escapeHtml(t.workflow.title)}</h2>
@@ -4487,7 +4713,7 @@ function buildPage(locale, origin, stats, proPlan = null, blogPosts = []) {
       </div>
     </section>
 
-    <section class="section">
+    <section class="section protocol-answer">
       <div class="shell answer-block">
         <div>
           <div class="answer-copy">
@@ -4500,8 +4726,13 @@ function buildPage(locale, origin, stats, proPlan = null, blogPosts = []) {
         </div>
         <table class="comparison-table">
           <caption>${escapeHtml(t.answer.comparisonTitle)}</caption>
+          <thead>
+            <tr>
+              ${t.answer.comparisonColumns.map((column, index) => `<th scope="col"${index === 1 ? ' class="solomap-col"' : ""}>${escapeHtml(column)}</th>`).join("")}
+            </tr>
+          </thead>
           <tbody>
-            ${renderComparisonRows(t.answer.comparison)}
+            ${renderComparisonRows(t.answer.comparison, t.answer.comparisonColumns)}
           </tbody>
         </table>
       </div>
@@ -5755,13 +5986,13 @@ function buildSitemapXsl() {
 function buildLlmsTxt(origin) {
   return `# SoloMap
 
-SoloMap is a local-first VS Code extension for indie developers and solo founders building products with AI agents.
+SoloMap is a local-first working agreement for people building products with AI coding agents in VS Code.
 
-SoloMap helps users keep product direction, roadmap steps, AI agent execution history, project memory, and next actions visible inside their existing workspace. It does not replace coding agents; it gives them a product roadmap and strategy layer.
+SoloMap keeps outcomes, boundaries, Agent authority, completion evidence, project memory, and next actions visible inside the existing workspace. It does not replace coding Agents; it gives people and their chosen Agents a shared, verifiable way to work across sessions.
 
 ## Best short description
 
-SoloMap is a local-first roadmap and strategy cockpit for AI-built projects in VS Code.
+SoloMap is a local-first human-Agent working agreement for AI-built projects in VS Code.
 
 ## Who it is for
 
@@ -5771,11 +6002,12 @@ SoloMap is a local-first roadmap and strategy cockpit for AI-built projects in V
 
 ## What SoloMap does
 
-- Turns a product goal into executable roadmap steps
-- Starts local AI Agent CLI work from the right roadmap context
-- Keeps project memory and task records in the workspace by default
-- Shows next actions when the user returns to a project
-- Supports Free core workflow and Pro Early Access for strategy cockpit features
+- Turns an intended outcome into explicit boundaries, Agent authority, and completion criteria
+- Starts local AI Agent CLI work from the right verified project context
+- Keeps evidence, project memory, and task records in the workspace by default
+- Lets the user decide completion from reviewable evidence rather than an Agent claim
+- Carries the verified next state across Agent tools and sessions
+- Supports the Free core workflow and Pro Early Access for multi-project decisions
 
 ## What SoloMap is not
 
