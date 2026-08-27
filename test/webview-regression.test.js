@@ -1064,6 +1064,9 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     };
     globalThis.__getCurrentPortfolio = () => currentProjects.portfolio;
     globalThis.__resetActiveProjectPath = () => { activeProjectPath = ''; currentProjects.selectedProjectPath = ''; };
+    globalThis.__setActivePortfolioFilter = (value) => { activePortfolioFilter = value; };
+    globalThis.__getActivePortfolioFilter = () => activePortfolioFilter;
+    globalThis.__activateProjectInSidebar = activateProjectInSidebar;
   `);
 
   context.__renderGlobalFocus([], '');
@@ -1706,6 +1709,48 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="solo"/);
   assert.match(elements['portfolio-list'].innerHTML, /data-project-conversation-mode="flow"/);
   assert.match(elements['portfolio-list'].innerHTML, /项目路线图|Open roadmap/);
+
+  const frozenPortfolio = [{
+    name: 'Frozen',
+    path: '/workspace/frozen',
+    globalPriority: 'P99',
+    totalNodes: 1,
+    pendingNodes: 1,
+    overallStatus: 'Pending',
+    nodes: []
+  }, {
+    name: 'Active',
+    path: '/workspace/active',
+    globalPriority: 'P1',
+    totalNodes: 1,
+    pendingNodes: 1,
+    overallStatus: 'Pending',
+    nodes: []
+  }];
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: frozenPortfolio,
+      selectedProjectPath: '/workspace/active',
+      portfolio: frozenPortfolio
+    }
+  });
+  context.__setActivePortfolioFilter('frozen');
+  context.__activateProjectInSidebar('/workspace/frozen', true);
+  assert.equal(context.__getActivePortfolioFilter(), 'frozen');
+  assert.match(elements['portfolio-list'].innerHTML, /data-select-project-path="\/workspace\/frozen"/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-select-project-path="\/workspace\/active"/);
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: frozenPortfolio,
+      selectedProjectPath: '/workspace/frozen',
+      portfolio: frozenPortfolio
+    }
+  });
+  assert.equal(context.__getActivePortfolioFilter(), 'frozen');
+  assert.match(elements['portfolio-list'].innerHTML, /data-select-project-path="\/workspace\/frozen"/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-select-project-path="\/workspace\/active"/);
 });
 
 test('sidebar resolve survives persisted state and startup data failures', async () => {

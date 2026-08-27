@@ -10187,7 +10187,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]') || event.target.closest('[data-delivery-action-panel]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
           if (projectPath === currentProjects.selectedProjectPath) return;
-          activateProjectInSidebar(projectPath);
+          activateProjectInSidebar(projectPath, true);
           vscode.postMessage({
             command: 'project.select',
             projectPath
@@ -10582,7 +10582,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       restoreProjectConversationInputState(preservedComposerState);
     }
 
-    function activateProjectInSidebar(projectPath) {
+    function activateProjectInSidebar(projectPath, preservePortfolioFilter = false) {
       if (!projectPath) return;
       if (projectPath !== activeProjectPath) {
         currentNodes = [];
@@ -10592,7 +10592,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       sidebarSoloConversations = sidebarSoloConversationsByProject[projectPath] || [];
       setSoloSelectValue(projectSelect, projectPath);
       updateScheduledTasksTarget();
-      activePortfolioFilter = 'all';
+      if (!preservePortfolioFilter) {
+        activePortfolioFilter = 'all';
+      }
       renderPortfolioFilters();
       renderGlobalFocus(currentProjects.portfolio, projectPath);
       renderPortfolio(currentProjects.portfolio, projectPath);
