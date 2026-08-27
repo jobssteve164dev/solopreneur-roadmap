@@ -14,6 +14,14 @@ test('OpenCode adapter normalizes providers and stores provider-scoped secret na
   assert.equal(adapter.getOpenCodeApiKeySecretKey('openrouter'), 'solomap.opencode.apiKey.openrouter');
 });
 
+test('OpenCode adapter provides an immediate provider baseline without CLI discovery', () => {
+  const providers = adapter.getDefaultOpenCodeProviderOptions();
+  assert.ok(providers.length >= 10);
+  assert.deepEqual(providers.find(provider => provider.value === 'openai'), { value: 'openai', label: 'OpenAI' });
+  assert.deepEqual(providers.find(provider => provider.value === 'anthropic'), { value: 'anthropic', label: 'Anthropic' });
+  assert.deepEqual(providers.find(provider => provider.value === 'openrouter'), { value: 'openrouter', label: 'OpenRouter' });
+});
+
 test('OpenCode adapter injects only the selected provider key into OpenCode terminals', () => {
   const env = adapter.buildOpenCodeTerminalEnvironment(
     'opencode',

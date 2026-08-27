@@ -563,6 +563,8 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
     { value: 'opencode', label: 'opencode' },
     { value: 'custom', label: 'Custom...' }
   ]);
+  wireSoloSelect(elements['setting-agent-model-select'], []);
+  wireSoloSelect(elements['setting-opencode-provider'], []);
   wireSoloSelect(elements['project-select'], []);
   wireSoloSelect(elements['project-type-select'], [
     { value: 'core_product', label: '核心产品' },
@@ -998,7 +1000,14 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'settings-panel',
     'setting-language',
     'setting-cli-select',
+    'setting-agent-model-select',
     'setting-clipath-custom',
+    'setting-opencode-panel',
+    'setting-opencode-provider',
+    'setting-opencode-api-key',
+    'btn-toggle-opencode-api-key',
+    'btn-remove-opencode-api-key',
+    'opencode-api-key-status',
     'setting-global-prompt',
     'setting-global-data-path',
     'pro-account-panel',
@@ -1045,6 +1054,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
       currentSettings = { ...(currentSettings || {}), cliPath };
       applySettingCliPath(cliPath);
     };
+    globalThis.__syncOpenCodeSettingsForTest = syncOpenCodeSettings;
     globalThis.__renderContinueComposerWithRunningSolo = () => {
       const projectPath = '/workspace/second';
       sidebarSoloConversations = [{ id: 99, nodeId: '__solo__', status: 'Running' }];
@@ -1171,6 +1181,23 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   elements['btn-toggle-settings'].listeners.click();
   assert.equal(elements['settings-panel'].style.display, 'block');
   assert.equal(elements['dependency-panel'].style.display, '');
+  context.__setCurrentCliForTest('opencode');
+  context.__syncOpenCodeSettingsForTest();
+  assert.equal(elements['setting-opencode-panel'].style.display, 'block');
+  assert.ok(elements['setting-opencode-provider'].__options.some(option => option.getAttribute('data-solo-option-value') === 'openai' && option.textContent === 'OpenAI'));
+  assert.ok(elements['setting-opencode-provider'].__options.some(option => option.getAttribute('data-solo-option-value') === 'anthropic'));
+  dispatchMessage({
+    command: 'agentModelsLoaded',
+    agentCli: 'opencode',
+    catalog: {
+      family: 'opencode',
+      command: 'opencode',
+      models: [{ value: 'upstream-new/model-1', label: 'upstream-new/model-1' }],
+      selectedValue: 'auto',
+      supportsDiscovery: true
+    }
+  });
+  assert.ok(elements['setting-opencode-provider'].__options.some(option => option.getAttribute('data-solo-option-value') === 'upstream-new'));
   elements['setting-language'].listeners.click({
     target: elements['setting-language'].__options[1],
     stopPropagation() {}

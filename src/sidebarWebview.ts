@@ -1,5 +1,6 @@
 import * as path from 'path';
 import type * as vscode from 'vscode';
+import { getDefaultOpenCodeProviderOptions } from './openCodeAdapter';
 import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
 
 function joinExtensionUri(extensionUri: vscode.Uri, ...segments: string[]): vscode.Uri {
@@ -49,6 +50,7 @@ export function getSidebarFallbackHtml(message: string): string {
 export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const codiconsUri = webview.asWebviewUri(joinExtensionUri(extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
     const wordmarkUri = webview.asWebviewUri(joinExtensionUri(extensionUri, 'resources', 'logo_with_text.svg'));
+    const defaultOpenCodeProviders = JSON.stringify(getDefaultOpenCodeProviderOptions());
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6695,16 +6697,20 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function getOpenCodeProviderOptions() {
       const currentProvider = String((currentSettings && currentSettings.openCodeProvider) || getSoloSelectValue(settingOpenCodeProvider) || '').trim();
       const catalog = getAgentModelCatalog('opencode');
-      const providers = new Set();
+      const providers = new Map(${defaultOpenCodeProviders}.map(option => [option.value, option.label]));
       (catalog.models || []).forEach(option => {
         const value = String(option.value || '');
         const separator = value.indexOf('/');
-        if (separator > 0) providers.add(value.slice(0, separator));
+        if (separator > 0) {
+          const provider = value.slice(0, separator);
+          if (!providers.has(provider)) providers.set(provider, provider);
+        }
       });
-      if (currentProvider) providers.add(currentProvider);
+      if (currentProvider && !providers.has(currentProvider)) providers.set(currentProvider, currentProvider);
       return [
         { value: '', label: currentLanguage === 'zh' ? '请选择供应商' : 'Select a provider' },
-        ...Array.from(providers).sort().map(provider => ({ value: provider, label: provider }))
+        ...Array.from(providers, ([value, label]) => ({ value, label }))
+          .sort((a, b) => a.label.localeCompare(b.label))
       ];
     }
 

@@ -8,6 +8,34 @@ export interface OpenCodeSecretStore {
   delete(key: string): Thenable<void>;
 }
 
+export interface OpenCodeProviderOption {
+  value: string;
+  label: string;
+}
+
+const defaultOpenCodeProviderOptions: OpenCodeProviderOption[] = [
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'cerebras', label: 'Cerebras' },
+  { value: 'cohere', label: 'Cohere' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'fireworks-ai', label: 'Fireworks AI' },
+  { value: 'google', label: 'Google' },
+  { value: 'groq', label: 'Groq' },
+  { value: 'minimax', label: 'MiniMax' },
+  { value: 'mistral', label: 'Mistral' },
+  { value: 'moonshotai', label: 'Moonshot AI' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'perplexity', label: 'Perplexity' },
+  { value: 'togetherai', label: 'Together AI' },
+  { value: 'xai', label: 'xAI' },
+  { value: 'zai', label: 'Z.AI' }
+];
+
+export function getDefaultOpenCodeProviderOptions(): OpenCodeProviderOption[] {
+  return defaultOpenCodeProviderOptions.map((option) => ({ ...option }));
+}
+
 export function normalizeOpenCodeProvider(value: unknown): string {
   const provider = String(value || '').trim().toLowerCase();
   return /^[a-z0-9][a-z0-9._-]*$/.test(provider) ? provider : '';
