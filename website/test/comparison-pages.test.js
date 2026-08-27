@@ -47,7 +47,9 @@ test("every comparison page is localized, canonical, sourced, and structured", a
 });
 
 test("comparison routes enforce intent instead of duplicating pages under both folders", async () => {
-  assert.equal((await get("/alternatives/solomap-vs-codex")).status, 404);
+  const misplaced = await get("/alternatives/solomap-vs-codex");
+  assert.equal(misplaced.status, 404);
+  assert.equal(misplaced.headers.get("cache-control"), "no-store");
   assert.equal((await get("/compare/claude-code")).status, 404);
 });
 

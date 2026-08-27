@@ -645,7 +645,7 @@ function htmlResponse(body, status = 200, extraHeaders = {}) {
     headers: {
       ...securityHeaders,
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=300",
+      "cache-control": status >= 400 ? "no-store" : "public, max-age=300",
       ...extraHeaders
     }
   });
