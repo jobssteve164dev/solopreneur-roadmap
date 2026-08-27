@@ -2,7 +2,7 @@
   "name": "solopreneur-roadmap",
   "displayName": "SoloMap - AI Coding Agent Roadmap",
   "description": "AI coding agent cockpit for solo developers. Run Claude Code, Codex, Cursor Agent and other local agents, keep sessions organized, and turn scattered AI chats into a Git-friendly project roadmap. / 面向独立开发者的 AI 编码智能体驾驶舱：运行 Claude Code、Codex、Cursor Agent 等本地智能体，整理会话，并把零散 AI 对话沉淀为 Git 友好的项目路线图。",
-  "version": "0.0.432",
+  "version": "0.0.433",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
   "repository": {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.433 - 2026-08-27
+
+### Changed
+- fix OpenCode provider options loading (d7e7667)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.432 - 2026-08-26
 
 - Maintenance release.
