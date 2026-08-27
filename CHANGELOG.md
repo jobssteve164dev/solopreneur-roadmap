@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.434 - 2026-08-27
+
+### Added
+- launch SEO comparison corridor (80cf99b)
+
+### Changed
+- Add working agreement milestones to homepage (6f1db34)
+- Redesign homepage around human-Agent working agreements (fdd220d)
+
+### Fixed
+- keep frozen filter when selecting project cards (45fdb88)
+- avoid caching retired routes (9d542f1)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.433 - 2026-08-27
 
 ### Changed
