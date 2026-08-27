@@ -43,6 +43,25 @@ test("the comparison matrix has explicit desktop headers and mobile card labels"
   assert.match(html, /\.comparison-table thead \{ display: none; \}/);
 });
 
+test("the protocol milestone component distinguishes achieved, current, next, and final vision", async () => {
+  const cases = [
+    ["/", "Where the working agreement stands today.", "A durable protocol for human-Agent work."],
+    ["/zh", "这份工作协议，现在走到哪里。", "一套可持续的人与 Agent 工作协议。"]
+  ];
+
+  for (const [path, heading, vision] of cases) {
+    const { html } = await homepage(path);
+    assert.match(html, /<section class="section protocol-progress" id="progress">/);
+    assert.match(html, new RegExp(`<h2>${heading}</h2>`));
+    assert.match(html, /<ol class="milestone-list" aria-label=/);
+    assert.equal((html.match(/class="milestone-item milestone-achieved"/g) || []).length, 2);
+    assert.equal((html.match(/class="milestone-item milestone-current" aria-current="step"/g) || []).length, 1);
+    assert.equal((html.match(/class="milestone-item milestone-next"/g) || []).length, 1);
+    assert.match(html, new RegExp(`<h3>${vision}</h3>`));
+    assert.match(html, /\.protocol-home \.section-head \{ grid-template-columns: 1fr; gap: 18px; \}/);
+  }
+});
+
 test("generated homepage inline scripts are valid JavaScript and place mobile consent in document flow", async () => {
   const { html } = await homepage("/");
   const scripts = [...html.matchAll(/<script(?![^>]*application\/ld\+json)[^>]*>([\s\S]*?)<\/script>/g)]

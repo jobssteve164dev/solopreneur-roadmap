@@ -176,6 +176,25 @@ const content = {
         ["Evidence moves the project", "so the next session starts from what was verified, not from what was merely claimed."]
       ]
     },
+    milestones: {
+      title: "Where the working agreement stands today.",
+      lead: "SoloMap is moving from reliable local execution toward a portable agreement that can survive changes of Agent, session, and project.",
+      ariaLabel: "SoloMap working agreement milestones",
+      statusLabels: {
+        achieved: "Achieved",
+        current: "Current stage",
+        next: "Next"
+      },
+      items: [
+        ["achieved", "Local project truth", "Roadmaps, next actions, and project memory stay beside the code in your local workspace."],
+        ["achieved", "Verifiable Agent execution", "Start your chosen local Agent from a roadmap step, then keep completion criteria, run history, handoff, and evidence."],
+        ["current", "One agreement across sessions", "We are bringing outcome, boundaries, authority, evidence, and memory into one consistent interaction across Agent runs."],
+        ["next", "Agreement portability across Agents", "Carry the same verified agreement into the Agent CLI you choose without rebuilding project context each time."]
+      ],
+      visionLabel: "Final vision",
+      visionTitle: "A durable protocol for human-Agent work.",
+      visionCopy: "Whichever Agent, project, or session you use, define the outcome and boundaries once; the Agent acts within them, delivers evidence, and the project continues from verified state."
+    },
     trust: {
       title: "Your working agreement stays with your project.",
       copy: "SoloMap keeps the core project truth in your local workspace. The website does not become a cloud copy of your roadmap, prompts, or Agent history.",
@@ -350,6 +369,25 @@ const content = {
         ["Agent 负责行动", "在这份约定内，使用你已经信任的编码工具执行。"],
         ["证据决定状态", "下一次会话从已经验证的事实继续，而不是从一句自述继续。"]
       ]
+    },
+    milestones: {
+      title: "这份工作协议，现在走到哪里。",
+      lead: "SoloMap 正从可靠的本地执行，走向一份能跨 Agent、跨会话、跨项目成立的工作约定。",
+      ariaLabel: "SoloMap 工作协议达成里程碑",
+      statusLabels: {
+        achieved: "已达成",
+        current: "当前阶段",
+        next: "下一阶段"
+      },
+      items: [
+        ["achieved", "本地项目事实", "路线图、下一步动作和项目记忆留在本地工作区，与代码一起延续。"],
+        ["achieved", "可验证的 Agent 执行", "从路线图环节启动你选择的本地 Agent，并保留完成标准、执行记录、交接和证据。"],
+        ["current", "跨会话的一份工作约定", "我们正在把目标、边界、授权、证据和记忆统一成多次 Agent 执行中的一致交互。"],
+        ["next", "工作约定跨 Agent 迁移", "换用你选择的 Agent CLI 时，仍可带上同一份已验证约定，不必每次重建项目背景。"]
+      ],
+      visionLabel: "最终愿景",
+      visionTitle: "一套可持续的人与 Agent 工作协议。",
+      visionCopy: "无论使用哪个 Agent、在哪个项目或会话中，你都用同一种方式定义目标与边界；Agent 在授权内行动、用证据交付，项目从已验证状态继续。"
     },
     trust: {
       title: "工作约定跟随你的本地项目。",
@@ -3742,6 +3780,115 @@ function buildStyles() {
     .protocol-home .comparison-table th:first-child { width: 23%; }
     .protocol-home .comparison-table th:nth-child(2),
     .protocol-home .comparison-table th:nth-child(3) { width: 38.5%; }
+    .protocol-home .protocol-progress {
+      background: linear-gradient(180deg, rgba(8, 9, 9, .24), rgba(73, 214, 208, .025));
+    }
+    .protocol-home .milestone-list {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .protocol-home .milestone-list::before {
+      content: "";
+      position: absolute;
+      top: 28px;
+      left: 8%;
+      right: 8%;
+      height: 1px;
+      background: linear-gradient(90deg, var(--green) 0 43%, var(--cyan) 43% 70%, var(--line) 70% 100%);
+    }
+    .protocol-home .milestone-item {
+      position: relative;
+      min-width: 0;
+      min-height: 252px;
+      padding: 78px 22px 24px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: rgba(26, 23, 20, .78);
+    }
+    .protocol-home .milestone-marker {
+      position: absolute;
+      top: 8px;
+      left: 22px;
+      display: grid;
+      width: 40px;
+      height: 40px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      background: var(--bg);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .08em;
+    }
+    .protocol-home .milestone-status {
+      display: inline-block;
+      margin-bottom: 12px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+    .protocol-home .milestone-item h3 {
+      margin: 0 0 10px;
+      font-size: 20px;
+      line-height: 1.25;
+    }
+    .protocol-home .milestone-item p {
+      margin: 0;
+      color: var(--soft);
+      font-size: 15px;
+      line-height: 1.65;
+    }
+    .protocol-home .milestone-achieved .milestone-marker {
+      border-color: rgba(165, 214, 109, .72);
+      color: var(--green);
+      box-shadow: 0 0 0 5px rgba(165, 214, 109, .08);
+    }
+    .protocol-home .milestone-achieved .milestone-status { color: var(--green); }
+    .protocol-home .milestone-current {
+      border-color: rgba(73, 214, 208, .7);
+      background: linear-gradient(180deg, rgba(73, 214, 208, .1), rgba(26, 23, 20, .88) 62%);
+      box-shadow: 0 18px 52px rgba(0, 0, 0, .24);
+    }
+    .protocol-home .milestone-current .milestone-marker {
+      border-color: var(--cyan);
+      background: var(--cyan);
+      color: #07110f;
+      box-shadow: 0 0 0 6px rgba(73, 214, 208, .12);
+    }
+    .protocol-home .milestone-current .milestone-status { color: var(--cyan); }
+    .protocol-home .milestone-next { border-style: dashed; }
+    .protocol-home .vision-panel {
+      display: grid;
+      grid-template-columns: minmax(180px, .26fr) minmax(0, .74fr);
+      gap: 34px;
+      align-items: center;
+      margin-top: 18px;
+      padding: 30px;
+      border: 1px solid rgba(73, 214, 208, .3);
+      border-radius: 4px;
+      background: linear-gradient(110deg, rgba(201, 47, 56, .075), rgba(73, 214, 208, .08));
+    }
+    .protocol-home .vision-label {
+      color: var(--cyan);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .protocol-home .vision-panel h3 {
+      margin: 0 0 9px;
+      font-size: clamp(24px, 2.7vw, 34px);
+      line-height: 1.12;
+    }
+    .protocol-home .vision-panel p { margin: 0; color: var(--soft); line-height: 1.68; }
     .protocol-home .trust-band { gap: 20px; }
     .protocol-home .trust-copy,
     .protocol-home .price {
@@ -3791,7 +3938,11 @@ function buildStyles() {
       .protocol-home .protocol-hero { padding: 64px 0 68px; }
       .protocol-home .hero-grid { grid-template-columns: 1fr; gap: 48px; }
       .protocol-home .section { padding: 72px 0; }
-      .protocol-home .section-head { gap: 18px; }
+      .protocol-home .section-head { grid-template-columns: 1fr; gap: 18px; }
+      .protocol-home .milestone-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .protocol-home .milestone-list::before { display: none; }
+      .protocol-home .milestone-item { min-height: 232px; }
+      .protocol-home .vision-panel { grid-template-columns: 1fr; gap: 12px; }
       .footer-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 32px;
@@ -3839,6 +3990,10 @@ function buildStyles() {
         text-transform: uppercase;
       }
       .comparison-table td:last-child { padding-bottom: 14px; }
+      .protocol-home .milestone-list { grid-template-columns: 1fr; gap: 10px; }
+      .protocol-home .milestone-item { min-height: 0; padding: 68px 20px 22px; }
+      .protocol-home .milestone-marker { left: 20px; }
+      .protocol-home .vision-panel { padding: 22px 20px; }
       .product-preview { min-height: 500px; }
       .preview-main { padding: 14px; }
       .roadmap-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -3898,6 +4053,15 @@ function renderModules(modules) {
             <strong>${escapeHtml(title)}</strong>
             <p>${escapeHtml(copy)}</p>
           </div>`).join("");
+}
+
+function renderMilestones(milestones) {
+  return milestones.items.map(([status, title, copy], index) => `<li class="milestone-item milestone-${status}"${status === "current" ? ' aria-current="step"' : ""}>
+            <div class="milestone-marker" aria-hidden="true">${String(index + 1).padStart(2, "0")}</div>
+            <span class="milestone-status">${escapeHtml(milestones.statusLabels[status])}</span>
+            <h3>${escapeHtml(title)}</h3>
+            <p>${escapeHtml(copy)}</p>
+          </li>`).join("");
 }
 
 function renderDocCards(t, entries, locale) {
@@ -4735,6 +4899,25 @@ function buildPage(locale, origin, stats, proPlan = null, blogPosts = []) {
             ${renderComparisonRows(t.answer.comparison, t.answer.comparisonColumns)}
           </tbody>
         </table>
+      </div>
+    </section>
+
+    <section class="section protocol-progress" id="progress">
+      <div class="shell">
+        <div class="section-head">
+          <h2>${escapeHtml(t.milestones.title)}</h2>
+          <p>${escapeHtml(t.milestones.lead)}</p>
+        </div>
+        <ol class="milestone-list" aria-label="${escapeHtml(t.milestones.ariaLabel)}">
+          ${renderMilestones(t.milestones)}
+        </ol>
+        <div class="vision-panel">
+          <span class="vision-label">${escapeHtml(t.milestones.visionLabel)}</span>
+          <div>
+            <h3>${escapeHtml(t.milestones.visionTitle)}</h3>
+            <p>${escapeHtml(t.milestones.visionCopy)}</p>
+          </div>
+        </div>
       </div>
     </section>
 
