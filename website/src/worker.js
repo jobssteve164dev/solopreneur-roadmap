@@ -32,6 +32,7 @@ import {
   handleCollaborationSocket
 } from "./collaborationRelay.js";
 import { docsCatalog } from "./docsCatalog.js";
+import { comparisonCatalog } from "./comparisonCatalog.js";
 import {
   BlogProjection,
   getActiveBlogProjection,
@@ -112,6 +113,7 @@ const content = {
     alternatePrivacyPath: "/zh/privacy-local-first",
     nav: {
       product: "Working agreement",
+      compare: "Compare",
       pro: "Pro",
       docs: "Docs",
       blog: "OPC Blog",
@@ -306,6 +308,7 @@ const content = {
     alternatePrivacyPath: "/privacy-local-first",
     nav: {
       product: "工作协议",
+      compare: "对比",
       pro: "Pro",
       docs: "文档",
       blog: "OPC Blog",
@@ -4310,6 +4313,71 @@ function buildProStructuredData(copy, origin, pagePath, proPlan) {
   <script type="application/ld+json">${JSON.stringify(breadcrumb)}</script>`;
 }
 
+function comparisonPath(locale, slug = "") {
+  return `${locale === "zh" ? "/zh" : ""}/compare${slug ? `/${slug}` : ""}`;
+}
+
+function alternativePath(locale, slug = "") {
+  return `${locale === "zh" ? "/zh" : ""}/alternatives${slug ? `/${slug}` : ""}`;
+}
+
+function comparisonPagePath(locale, slug, kind) {
+  return kind === "alternative" ? alternativePath(locale, slug) : comparisonPath(locale, slug);
+}
+
+function comparisonLocale(locale) {
+  return comparisonCatalog[locale] || comparisonCatalog.en;
+}
+
+function buildComparisonStyles() {
+  return `<style>
+    .compare-page{padding:70px 0 96px}.compare-hero{max-width:900px;margin-bottom:42px}.compare-hero h1{margin:12px 0 18px;max-width:900px;font-size:clamp(42px,7vw,78px);line-height:.98;letter-spacing:-.04em;text-wrap:balance}.compare-hero p{max-width:780px;margin:0;color:var(--soft);font-size:19px;line-height:1.65}.compare-kicker{color:var(--cyan);font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.compare-section{margin-top:50px}.compare-section>h2{margin-bottom:8px;font-size:30px}.compare-section>p{max-width:760px;margin:0 0 22px;color:var(--muted)}
+    .compare-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.compare-card{display:flex;min-height:220px;flex-direction:column;justify-content:space-between;gap:24px;padding:23px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}.compare-card:hover,.compare-card:focus-visible{border-color:rgba(73,214,208,.62);transform:translateY(-2px)}.compare-card h3{margin:8px 0 10px;font-size:24px;line-height:1.12}.compare-card p{margin:0;color:var(--muted);font-size:16px}.compare-card span:last-child{color:var(--cyan);font-weight:760}
+    .compare-breadcrumbs{margin-bottom:28px;color:var(--muted);font-size:14px}.compare-breadcrumbs a,.compare-page a{color:var(--cyan)}.compare-verdict{margin:34px 0;padding:26px;border:1px solid rgba(73,214,208,.38);border-radius:10px;background:rgba(73,214,208,.065)}.compare-verdict h2{margin:0 0 10px;font-size:22px}.compare-verdict p{margin:0;color:var(--soft);font-size:18px;line-height:1.65}.choice-grid,.scenario-list{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.choice-card,.compare-panel{padding:22px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}.choice-card h3,.compare-panel h3{margin:0 0 10px;font-size:21px}.choice-card p,.compare-panel p{margin:0;color:var(--muted)}
+    .decision-wrap{overflow-x:auto;margin-top:18px;border:1px solid var(--line);border-radius:10px}.decision-table{width:100%;border-collapse:collapse;background:var(--panel)}.decision-table th,.decision-table td{padding:17px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:16px;line-height:1.55}.decision-table th{color:var(--ink);background:rgba(255,255,255,.035)}.decision-table td{color:var(--soft)}.decision-table tr:last-child td{border-bottom:0}.honest-limit{border-left:3px solid #e2b657}.faq-list{display:grid;gap:10px}.faq-list details{padding:18px 20px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}.faq-list summary{cursor:pointer;color:var(--ink);font-weight:760}.faq-list p{margin:12px 0 0;color:var(--muted)}.source-list{padding-left:20px;color:var(--muted)}.source-list li{margin:8px 0}.reviewed{color:var(--muted);font-size:14px}.compare-cta{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-top:50px;padding:28px;border:1px solid var(--line);border-radius:10px;background:#171411}.compare-cta h2{margin:0 0 8px;font-size:26px}.compare-cta p{margin:0;color:var(--muted)}
+    @media(max-width:820px){.compare-grid,.choice-grid,.scenario-list{grid-template-columns:1fr}.compare-card{min-height:0}.compare-cta{align-items:flex-start;flex-direction:column}}@media(max-width:560px){.compare-page{padding-top:44px}.compare-hero h1{font-size:clamp(38px,12vw,54px)}.decision-wrap{overflow:visible;border:0}.decision-table,.decision-table tbody,.decision-table tr,.decision-table td{display:block;width:100%}.decision-table thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}.decision-table tr{margin-bottom:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}.decision-table td{display:grid;grid-template-columns:minmax(95px,.36fr) 1fr;gap:12px;border-bottom:1px solid var(--line)}.decision-table td::before{content:attr(data-label);color:var(--muted);font-size:13px;font-weight:760}}
+  </style>`;
+}
+
+function renderComparisonCards(locale, entries) {
+  const copy = locale === "zh" ? { read: "查看对比", guide: "查看指南" } : { read: "Read comparison", guide: "Read guide" };
+  return entries.map(([slug, page]) => `<a class="compare-card" href="${comparisonPagePath(locale, slug, page.kind)}"><span><span class="compare-kicker">${escapeHtml(page.category)}</span><h3>${escapeHtml(page.heading)}</h3><p>${escapeHtml(page.description)}</p></span><span>${page.kind === "alternative" ? copy.guide : copy.read} →</span></a>`).join("");
+}
+
+function buildComparisonHubPage(locale, origin, alternativesOnly = false) {
+  const t = content[locale];
+  const catalog = comparisonLocale(locale);
+  const hub = alternativesOnly ? catalog.alternativesHub : catalog.hub;
+  const path = alternativesOnly ? alternativePath(locale) : comparisonPath(locale);
+  const entries = Object.entries(catalog.pages);
+  const direct = entries.filter(([, page]) => page.kind === "comparison");
+  const alternatives = entries.filter(([, page]) => page.kind === "alternative");
+  const shown = alternativesOnly ? alternatives : direct;
+  const itemList = shown.map(([slug, page], index) => ({ "@type": "ListItem", position: index + 1, name: page.heading, url: absoluteUrl(comparisonPagePath(locale, slug, page.kind), origin) }));
+  const structured = [
+    { "@context": "https://schema.org", "@type": "CollectionPage", name: hub.heading, description: hub.description, url: absoluteUrl(path, origin), mainEntity: { "@type": "ItemList", itemListElement: itemList } },
+    { "@context": "https://schema.org", "@type": "BreadcrumbList", itemListElement: [{ "@type": "ListItem", position: 1, name: "SoloMap", item: origin }, { "@type": "ListItem", position: 2, name: alternativesOnly ? "Alternatives" : "Compare", item: absoluteUrl(path, origin) }] }
+  ];
+  const meta = { ...t.meta, title: hub.title, description: hub.description, ogDescription: hub.description };
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta }, origin, path)}${structured.map((item) => `<script type="application/ld+json">${JSON.stringify(item)}</script>`).join("")}${buildStyles()}${buildComparisonStyles()}</head><body>${buildHeader(t, locale, path)}<main id="main-content" class="compare-page shell"><nav class="compare-breadcrumbs"><a href="${t.homePath}">SoloMap</a> / ${alternativesOnly ? (locale === "zh" ? "替代方案" : "Alternatives") : (locale === "zh" ? "对比" : "Compare")}</nav><header class="compare-hero"><span class="compare-kicker">${alternativesOnly ? "Alternatives" : "Compare"}</span><h1>${escapeHtml(hub.heading)}</h1><p>${escapeHtml(hub.lead)}</p></header><section class="compare-section"><h2>${escapeHtml(alternativesOnly ? catalog.hub.alternativeTitle : catalog.hub.directTitle)}</h2><p>${escapeHtml(alternativesOnly ? catalog.hub.alternativeLead : catalog.hub.directLead)}</p><div class="compare-grid">${renderComparisonCards(locale, shown)}</div></section>${alternativesOnly ? "" : `<section class="compare-section"><h2>${escapeHtml(catalog.hub.alternativeTitle)}</h2><p>${escapeHtml(catalog.hub.alternativeLead)}</p><div class="compare-grid">${renderComparisonCards(locale, alternatives)}</div><p style="margin-top:18px"><a href="${alternativePath(locale)}">${locale === "zh" ? "查看全部替代方案" : "Browse all alternative guides"} →</a></p></section>`}</main>${buildFooter(t)}</body></html>`;
+}
+
+function buildComparisonDetailPage(locale, slug, origin) {
+  const t = content[locale];
+  const catalog = comparisonLocale(locale);
+  const page = catalog.pages[slug];
+  const path = comparisonPagePath(locale, slug, page.kind);
+  const parentPath = page.kind === "alternative" ? alternativePath(locale) : comparisonPath(locale);
+  const parentLabel = page.kind === "alternative" ? (locale === "zh" ? "替代方案" : "Alternatives") : (locale === "zh" ? "对比" : "Compare");
+  const alternate = comparisonPagePath(locale === "zh" ? "en" : "zh", slug, page.kind);
+  const metadata = { ...t.meta, title: page.title, description: page.description, ogDescription: page.description };
+  const faq = { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: page.faq.map(([question, answer]) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) };
+  const article = { "@context": "https://schema.org", "@type": "TechArticle", headline: page.heading, description: page.description, dateModified: page.reviewedAt, mainEntityOfPage: absoluteUrl(path, origin), author: { "@type": "Organization", name: "SoloMap" }, publisher: { "@type": "Organization", name: "SoloMap", url: origin } };
+  const breadcrumb = { "@context": "https://schema.org", "@type": "BreadcrumbList", itemListElement: [{ "@type": "ListItem", position: 1, name: "SoloMap", item: origin }, { "@type": "ListItem", position: 2, name: parentLabel, item: absoluteUrl(parentPath, origin) }, { "@type": "ListItem", position: 3, name: page.heading, item: absoluteUrl(path, origin) }] };
+  const related = page.related.map((relatedSlug) => [relatedSlug, catalog.pages[relatedSlug]]).filter(([, item]) => item);
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: metadata }, origin, path, alternate)}<script type="application/ld+json">${JSON.stringify(article)}</script><script type="application/ld+json">${JSON.stringify(faq)}</script><script type="application/ld+json">${JSON.stringify(breadcrumb)}</script>${buildStyles()}${buildComparisonStyles()}</head><body>${buildHeader(t, locale, path, alternate)}<main id="main-content" class="compare-page shell"><nav class="compare-breadcrumbs"><a href="${t.homePath}">SoloMap</a> / <a href="${parentPath}">${parentLabel}</a></nav><header class="compare-hero"><span class="compare-kicker">${escapeHtml(page.category)}</span><h1>${escapeHtml(page.heading)}</h1><p>${escapeHtml(page.subheading)}</p></header><section class="compare-verdict"><h2>${locale === "zh" ? "快速结论" : "Quick verdict"}</h2><p>${escapeHtml(page.verdict)}</p></section><section class="compare-section"><h2>${locale === "zh" ? "谁应该选择什么" : "Who should choose what"}</h2><div class="choice-grid">${page.choices.map(([title, body]) => `<article class="choice-card"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(body)}</p></article>`).join("")}</div></section><section class="compare-section"><h2>${locale === "zh" ? "逐项比较" : "Side-by-side comparison"}</h2><div class="decision-wrap"><table class="decision-table"><thead><tr>${page.columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead><tbody>${page.rows.map((row) => `<tr>${row.map((cell, index) => `<td data-label="${escapeHtml(page.columns[index])}">${escapeHtml(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section><section class="compare-section"><h2>${escapeHtml(page.scenarioTitle)}</h2><div class="scenario-list">${page.scenarios.map(([title, body]) => `<article class="compare-panel"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(body)}</p></article>`).join("")}</div></section><section class="compare-section compare-panel honest-limit"><h2>${locale === "zh" ? "需要诚实说明的边界" : "The honest limitation"}</h2><p>${escapeHtml(page.limitation)}</p></section><section class="compare-section"><h2>${locale === "zh" ? "常见问题" : "Frequently asked questions"}</h2><div class="faq-list">${page.faq.map(([question, answer]) => `<details><summary>${escapeHtml(question)}</summary><p>${escapeHtml(answer)}</p></details>`).join("")}</div></section><section class="compare-section"><h2>${locale === "zh" ? "官方来源" : "Official sources"}</h2><p class="reviewed">${locale === "zh" ? "最近复核" : "Last reviewed"}: ${escapeHtml(page.reviewedAt)}</p><ul class="source-list">${page.sources.map(([label, url]) => `<li><a href="${escapeHtml(url)}" rel="noopener">${escapeHtml(label)}</a></li>`).join("")}</ul></section><section class="compare-section"><h2>${locale === "zh" ? "继续比较" : "Related comparisons"}</h2><div class="compare-grid">${renderComparisonCards(locale, related)}</div></section><section class="compare-cta"><div><h2>${locale === "zh" ? "让下一次 Agent 执行从明确约定开始。" : "Start the next Agent run with a clear agreement."}</h2><p>${locale === "zh" ? "在本地项目中定义目标、边界、授权与完成证据。" : "Define the outcome, boundaries, authority, and completion evidence in your local project."}</p></div><a class="button primary" href="/go/marketplace">${locale === "zh" ? "安装 SoloMap" : "Install SoloMap"}</a></section></main>${buildFooter(t)}</body></html>`;
+}
+
 function buildHeader(t, locale, currentPath, languagePath = null, includeHreflang = true) {
   const productHref = currentPath === t.homePath ? "#product" : `${t.homePath}#product`;
   const proHref = currentPath === "/pro" || currentPath === "/zh/pro"
@@ -4326,6 +4394,7 @@ function buildHeader(t, locale, currentPath, languagePath = null, includeHreflan
       <div class="links">
         <a href="${productHref}">${escapeHtml(t.nav.product)}</a>
         <a href="${proHref}">${escapeHtml(t.nav.pro)}</a>
+        <a href="${comparisonPath(locale)}">${escapeHtml(t.nav.compare)}</a>
         <a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a>
         <a href="${t.pathPrefix}/blog">${escapeHtml(t.nav.blog)}</a>
         <a href="/go/github">${escapeHtml(t.nav.github)}</a>
@@ -4357,6 +4426,7 @@ function buildFooter(t) {
           <ul>
             <li><a href="${t.homePath}#product">${escapeHtml(t.nav.product)}</a></li>
             <li><a href="${t.pathPrefix}/pro">${escapeHtml(t.nav.pro)}</a></li>
+            <li><a href="${comparisonPath(isZh ? "zh" : "en")}">${escapeHtml(t.nav.compare)}</a></li>
             <li><a href="${t.docsPath}">${escapeHtml(t.nav.docs)}</a></li>
             <li><a href="${t.pathPrefix}/blog">${escapeHtml(t.nav.blog)}</a></li>
             <li><a href="${t.homePath}#install">${isZh ? "安装插件" : "Install extension"}</a></li>
@@ -4375,6 +4445,7 @@ function buildFooter(t) {
           <h2>${isZh ? "网站地图与导航" : "Sitemap & Docs"}</h2>
           <ul>
             <li><a href="${t.pathPrefix}/sitemap">${isZh ? "网站地图" : "Sitemap"}</a></li>
+            <li><a href="${alternativePath(isZh ? "zh" : "en")}">${isZh ? "替代方案" : "Alternatives"}</a></li>
             <li><a href="${t.docsPath}/solomap-method">${isZh ? "SoloMap 方法" : "SoloMap Method"}</a></li>
             <li><a href="${t.docsPath}/portfolio-method">${isZh ? "项目组合方法" : "Portfolio Method"}</a></li>
             <li><a href="${t.docsPath}/micro-execution-loop">${isZh ? "Agent 执行循环" : "Micro Execution Loop"}</a></li>
@@ -4404,6 +4475,7 @@ function buildHtmlSitemapPage(locale, origin) {
     const href = `${t.docsPath}/${slug}`;
     return `<li><a href="${href}"><strong>${escapeHtml(doc.heading)}</strong> - ${escapeHtml(doc.lead)}</a></li>`;
   }).join("");
+  const comparisonList = Object.entries(comparisonLocale(locale).pages).map(([slug, page]) => `<li><a href="${comparisonPagePath(locale, slug, page.kind)}"><strong>${escapeHtml(page.heading)}</strong> - ${escapeHtml(page.description)}</a></li>`).join("");
 
   return `<!doctype html>
 <html lang="${t.lang}">
@@ -4432,6 +4504,13 @@ function buildHtmlSitemapPage(locale, origin) {
       <li><a href="${t.privacyPath}"><strong>${isZh ? "本地优先说明" : "Local-first Note"}</strong></a></li>
       ${legalRoutes.map((route) => `<li><a href="${legalPath(route.slug, locale)}"><strong>${escapeHtml(route.label[locale])}</strong></a></li>`).join("")}
       <li><a href="${legalPath(legalSupplementRoute.slug, locale)}"><strong>${escapeHtml(legalSupplementRoute.label[locale])}</strong></a></li>
+    </ul>
+
+    <h2 style="margin-top: 32px;">${isZh ? "产品对比与替代方案" : "Product Comparisons & Alternatives"}</h2>
+    <ul>
+      <li><a href="${comparisonPath(locale)}"><strong>${isZh ? "对比中心" : "Comparison Center"}</strong></a></li>
+      <li><a href="${alternativePath(locale)}"><strong>${isZh ? "替代方案中心" : "Alternatives Center"}</strong></a></li>
+      ${comparisonList}
     </ul>
 
     <h2 style="margin-top: 32px;">${isZh ? "产品指南与文档" : "Product Guides & Documentation"}</h2>
@@ -5957,6 +6036,17 @@ function resolveRoute(pathname) {
   if (pathname === "/zh/blog" || pathname === "/zh/blog/") {
     return { type: "blog-index", locale: "zh", status: 200 };
   }
+  if (pathname === "/compare" || pathname === "/compare/") return { type: "compare-index", locale: "en", status: 200 };
+  if (pathname === "/zh/compare" || pathname === "/zh/compare/") return { type: "compare-index", locale: "zh", status: 200 };
+  if (pathname === "/alternatives" || pathname === "/alternatives/") return { type: "alternatives-index", locale: "en", status: 200 };
+  if (pathname === "/zh/alternatives" || pathname === "/zh/alternatives/") return { type: "alternatives-index", locale: "zh", status: 200 };
+  const comparisonMatch = pathname.match(/^\/(zh\/)?(compare|alternatives)\/([^/]+)$/);
+  if (comparisonMatch) {
+    const locale = comparisonMatch[1] ? "zh" : "en";
+    const page = comparisonLocale(locale).pages[comparisonMatch[3]];
+    const expectedKind = comparisonMatch[2] === "alternatives" ? "alternative" : "comparison";
+    if (page && page.kind === expectedKind) return { type: "comparison-detail", locale, slug: comparisonMatch[3], status: 200 };
+  }
   const blogMatch = pathname.match(/^\/(zh\/)?blog\/([^/]+)$/);
   if (blogMatch) {
     return { type: "blog-article", locale: blogMatch[1] ? "zh" : "en", slug: blogMatch[2], status: 200 };
@@ -6010,6 +6100,15 @@ function buildSitemap(origin, blogPosts = []) {
     { en: "/pro", zh: "/zh/pro", priority: "0.9", changefreq: "weekly" },
     { en: "/blog", zh: "/zh/blog", priority: "0.8", changefreq: "weekly" },
     ...blogFamilies.values(),
+    { en: "/compare", zh: "/zh/compare", priority: "0.9", changefreq: "monthly", lastmod: "2026-08-27" },
+    { en: "/alternatives", zh: "/zh/alternatives", priority: "0.8", changefreq: "monthly", lastmod: "2026-08-27" },
+    ...Object.entries(comparisonCatalog.en.pages).map(([slug, page]) => ({
+      en: comparisonPagePath("en", slug, page.kind),
+      zh: comparisonPagePath("zh", slug, page.kind),
+      priority: page.kind === "comparison" ? "0.8" : "0.7",
+      changefreq: "monthly",
+      lastmod: page.reviewedAt
+    })),
     { en: "/docs", zh: "/zh/docs", priority: "0.7", changefreq: "monthly" },
     ...Object.keys(docsContent.en.pages).map((slug) => ({
       en: `/docs/${slug}`,
@@ -6205,6 +6304,12 @@ SoloMap is a local-first human-Agent working agreement for AI-built projects in 
 - Docs: ${origin}/docs
 - OPC Blog: ${origin}/blog
 - Chinese OPC Blog: ${origin}/zh/blog
+- Comparison center: ${origin}/compare
+- Alternatives center: ${origin}/alternatives
+- SoloMap vs Claude Code: ${origin}/compare/solomap-vs-claude-code
+- SoloMap vs Codex: ${origin}/compare/solomap-vs-codex
+- SoloMap vs Cursor: ${origin}/compare/solomap-vs-cursor
+- AI coding project management alternatives: ${origin}/alternatives/ai-coding-project-management
 - SoloMap method: ${origin}/docs/solomap-method
 - Portfolio method: ${origin}/docs/portfolio-method
 - Micro execution loop: ${origin}/docs/micro-execution-loop
@@ -6617,6 +6722,12 @@ Sitemap: ${origin}/sitemap.xml
     }
     if (route.type === "doc") {
       return htmlResponse(buildDocPage(route.locale, route.slug, origin), route.status, extraHeaders);
+    }
+    if (route.type === "compare-index" || route.type === "alternatives-index") {
+      return htmlResponse(buildComparisonHubPage(route.locale, origin, route.type === "alternatives-index"), route.status, extraHeaders);
+    }
+    if (route.type === "comparison-detail") {
+      return htmlResponse(buildComparisonDetailPage(route.locale, route.slug, origin), route.status, extraHeaders);
     }
     if (route.type === "blog-index" || route.type === "blog-article") {
       const projection = await getActiveBlogProjection(env).catch((error) => {
