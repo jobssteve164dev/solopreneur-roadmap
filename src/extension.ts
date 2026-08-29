@@ -51,6 +51,7 @@ import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
 import { readCachedConversationSnapshot } from './sidebarSnapshotCache';
+import { pruneProjectOutputLogs, pruneProjectsOutputLogs } from './outputLogRetention';
 import {
   buildCrossAgentHandoffInstructions,
   buildExecutionExperiencePrompt,
@@ -555,6 +556,12 @@ export async function activate(context: vscode.ExtensionContext) {
   void ensureSyncEngine(context);
   setTimeout(() => {
     recordLocalUsageEvent(context, 'activation');
+    const retentionResults = pruneProjectsOutputLogs(getProjects(context).map((project) => project.path));
+    for (const result of retentionResults) {
+      if (result.errors.length > 0) {
+        console.error(`SoloMap failed to clean some output logs for ${result.projectPath}:`, result.errors);
+      }
+    }
     migrateLegacyActiveConversations(context);
     ensureActiveConversationPoller(context);
     startTelegramRemoteService(context);
@@ -9051,6 +9058,12 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     agentTerminalNamesByConversationId.delete(Number(executionLogId || 0));
+    if (workspaceRoot) {
+      const retentionResult = pruneProjectOutputLogs(workspaceRoot);
+      if (retentionResult.errors.length > 0) {
+        console.error(`SoloMap failed to clean some output logs for ${workspaceRoot}:`, retentionResult.errors);
+      }
+    }
     setTimeout(() => {
       const currentStatus = readAgentStatus(normalizedStatusFilePath);
       const belongsToProcessedRun = currentStatus

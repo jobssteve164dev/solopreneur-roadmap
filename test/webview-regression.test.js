@@ -43,6 +43,7 @@ test('extension activation refreshes bundled global memory tools', () => {
   const activationBody = extension.slice(activationStart, activationEnd);
   assert.match(activationBody, /const activationProjectRoot = getSelectedProjectPath\(context\) \|\| getWorkspaceRoot\(\)/);
   assert.match(activationBody, /ensureSolomapMemoryStore\(activationProjectRoot, getPersistedSettings\(context\)\.globalDataPath\)/);
+  assert.match(activationBody, /pruneProjectsOutputLogs\(getProjects\(context\)\.map\(\(project\) => project\.path\)\)/);
 });
 
 test('time plan panel delegates an optional request through the structured time-plan contract', () => {
@@ -313,6 +314,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         }
         if (id === './localDiagnostics') {
           return require(path.join(projectRoot, 'out/localDiagnostics.js'));
+        }
+        if (id === './outputLogRetention') {
+          return require(path.join(projectRoot, 'out/outputLogRetention.js'));
         }
         if (id === './externalDataLoader') {
           return require(path.join(projectRoot, 'out/externalDataLoader.js'));
