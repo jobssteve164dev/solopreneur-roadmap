@@ -4632,11 +4632,26 @@ test('strategy pyramid Pro upgrade supports device auth code entry', async () =>
   extensionModule.__vscodeTestState.nextInformationChoices = ['使用登录码'];
   extensionModule.__vscodeTestState.nextInputBoxValue = 'signed-device-code';
   extensionModule.__vscodeTestState.fetchImpl = async (url, options = {}) => {
-    if (String(url).endsWith('/api/passport/verify')) {
+    if (String(url).endsWith('/api/passport/device/start')) {
+      const body = JSON.parse(options.body);
+      assert.equal(body.intent, 'pro');
+      assert.match(body.authNonce, /^[A-Za-z0-9_-]{24,160}$/);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          deviceCode: 'signed-device-session',
+          loginUrl: 'https://solomap.app/api/passport/device/authorize?device=signed-device-session'
+        })
+      };
+    }
+    if (String(url).endsWith('/api/passport/device/verify')) {
       const body = JSON.parse(options.body);
       assert.equal(body.product, 'solomap');
       assert.equal(body.feature, 'strategy_pyramid');
       assert.equal(body.code, 'signed-device-code');
+      assert.equal(body.deviceCode, 'signed-device-session');
       assert.match(body.authNonce, /^[A-Za-z0-9_-]{24,160}$/);
       return {
         ok: true,
@@ -4680,11 +4695,78 @@ test('strategy pyramid Pro upgrade supports device auth code entry', async () =>
   await extensionModule.__handleManageProAuthorization(context, 'login');
 
   assert.equal(extensionModule.__vscodeTestState.openedExternal.length, 1);
-  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /\/pro\?/);
-  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /mode=device/);
-  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /auth_nonce=/);
-  assert.match(extensionModule.__vscodeTestState.inputBoxOptions.prompt, /粘贴网页上显示的授权码/);
+  assert.match(extensionModule.__vscodeTestState.openedExternal[0], /\/api\/passport\/device\/authorize\?device=signed-device-session/);
+  assert.match(extensionModule.__vscodeTestState.inputBoxOptions.prompt, /粘贴网页上显示的登录码/);
   assert.ok([...storedSecrets.values()].some((value) => String(value).includes('final-device-grant')));
+});
+
+test('SoloMap account login uses a device code and accepts a free signed-in account', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__beginAccountAuthorization = beginAccountAuthorization;'
+  );
+  extensionModule.__vscodeTestState.nextInputBoxValue = 'account-login-code';
+  extensionModule.__vscodeTestState.fetchImpl = async (url, options = {}) => {
+    const body = JSON.parse(options.body);
+    if (String(url).endsWith('/api/passport/device/start')) {
+      assert.equal(body.intent, 'account');
+      assert.match(body.authNonce, /^[A-Za-z0-9_-]{24,160}$/);
+      assert.equal(Object.hasOwn(body, 'callback'), false);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          deviceCode: 'account-device-session',
+          loginUrl: 'https://solomap.app/api/passport/device/authorize?device=account-device-session'
+        })
+      };
+    }
+    if (String(url).endsWith('/api/passport/device/verify')) {
+      assert.equal(body.deviceCode, 'account-device-session');
+      assert.equal(body.code, 'account-login-code');
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          authenticated: true,
+          allowed: false,
+          grant: 'free-account-grant',
+          email: 'free@solomap.app',
+          userId: 'free-user',
+          entitlements: ['base_access'],
+          expiresAt: '2099-01-01T00:00:00.000Z'
+        })
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const storedSecrets = new Map();
+  const context = {
+    extensionUri: createUri(projectRoot),
+    extensionPath: projectRoot,
+    subscriptions: [],
+    secrets: {
+      get() { return Promise.resolve(undefined); },
+      store(key, value) {
+        storedSecrets.set(key, value);
+        return Promise.resolve();
+      }
+    },
+    globalState: {
+      get() { return {}; },
+      update() { return Promise.resolve(); }
+    }
+  };
+
+  await extensionModule.__beginAccountAuthorization(context);
+
+  assert.deepEqual(extensionModule.__vscodeTestState.openedExternal, [
+    'https://solomap.app/api/passport/device/authorize?device=account-device-session'
+  ]);
+  assert.match(extensionModule.__vscodeTestState.inputBoxOptions.prompt, /登录码/);
+  assert.ok([...storedSecrets.values()].some((value) => String(value).includes('free-account-grant')));
+  assert.match(extensionModule.__vscodeTestState.informationMessages.at(-1).message, /已登录 SoloMap/);
 });
 
 test('passport callback verifies and stores a user grant before unlocking Pro', async () => {

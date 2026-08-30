@@ -633,6 +633,72 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
   }
 });
 
+test('account device login signs in free users without a VS Code callback', async () => {
+  const worker = await loadWebsiteWorker();
+  const originalFetch = global.fetch;
+  global.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          allowed: false,
+          reason: 'feature_not_granted',
+          email: 'free@solomap.app',
+          userId: 'free-user'
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const env = {
+      SITE_ORIGIN: 'https://solomap.app',
+      SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+      SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
+    };
+    const authNonce = 'd'.repeat(32);
+    const start = await worker.default.fetch(new Request('https://solomap.app/api/passport/device/start', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ intent: 'account', authNonce })
+    }), env);
+    const startBody = await start.json();
+    const loginUrl = new URL(startBody.loginUrl);
+    const cookie = await sessionCookie(env, { id: 'free-user', email: 'free@solomap.app' });
+    const authorize = await worker.default.fetch(new Request(loginUrl, { headers: { cookie } }), env);
+    const html = await authorize.text();
+    const code = html.match(/<textarea id="code" readonly>([^<]+)<\/textarea>/)?.[1] || '';
+    const verify = await worker.default.fetch(new Request('https://solomap.app/api/passport/device/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        authNonce,
+        deviceCode: startBody.deviceCode,
+        code
+      })
+    }), env);
+    const verified = await verify.json();
+
+    assert.equal(start.status, 200);
+    assert.equal(loginUrl.protocol, 'https:');
+    assert.equal(loginUrl.pathname, '/api/passport/device/authorize');
+    assert.equal(loginUrl.searchParams.has('callback'), false);
+    assert.equal(authorize.status, 200);
+    assert.match(html, /SoloMap 登录完成/);
+    assert.match(html, /复制下面的登录码/);
+    assert.match(html, /免费账号/);
+    assert.ok(code);
+    assert.equal(verify.status, 200);
+    assert.equal(verified.authenticated, true);
+    assert.equal(verified.allowed, false);
+    assert.deepEqual(verified.entitlements, ['base_access']);
+    assert.ok(verified.grant);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('paid website users can recover an activation code from the Pro page', async () => {
   const worker = await loadWebsiteWorker();
   const originalFetch = global.fetch;

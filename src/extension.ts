@@ -194,7 +194,8 @@ import {
   unregisterActiveConversation
 } from './activeConversationLedger';
 import {
-  buildPassportAccountUrl,
+  buildPassportDeviceStartUrl,
+  buildPassportDeviceVerifyUrl,
   buildPassportProUrl,
   buildProAccountStatus,
   clearProEntitlements,
@@ -202,6 +203,8 @@ import {
   flowModeFeature,
   hasProEntitlement as hasProEntitlementForSettings,
   normalizeProAccountStatus,
+  passportProduct,
+  PassportDeviceStartResult,
   PassportGrantCache,
   PassportVerifyResult,
   strategyPyramidFeature,
@@ -1146,7 +1149,7 @@ async function handleSharedWebviewAction(
     },
     'agent.upgradeAll': async () => handleUpgradeAllAgentClis(context),
     'account.login': async () => {
-      await beginAccountAuthorization();
+      await beginAccountAuthorization(context);
       await broadcastSettings(context);
     },
     'account.logout': async () => {
@@ -1596,23 +1599,44 @@ async function beginPassportAuthorization(): Promise<void> {
   await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('callback', authNonce, buildPassportCallbackUri())));
 }
 
-async function beginAccountAuthorization(): Promise<void> {
-  const authNonce = createPassportAuthNonce();
-  pendingPassportAuthNonce = authNonce;
-  pendingPassportAuthIntent = 'account';
-  await vscode.env.openExternal(vscode.Uri.parse(buildPassportAccountUrl(authNonce, buildPassportCallbackUri())));
+async function beginAccountAuthorization(context: vscode.ExtensionContext): Promise<void> {
+  await beginPassportDeviceAuthorization(context, 'account');
 }
 
-async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext): Promise<void> {
+async function beginPassportDeviceAuthorization(
+  context: vscode.ExtensionContext,
+  intent: 'account' | 'pro' = 'pro'
+): Promise<void> {
   const authNonce = createPassportAuthNonce();
-  pendingPassportAuthNonce = authNonce;
-  pendingPassportAuthIntent = 'pro';
 
-  await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('device', authNonce)));
+  let session: PassportDeviceStartResult;
+  try {
+    const response = await fetch(buildPassportDeviceStartUrl(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        product: passportProduct,
+        feature: strategyPyramidFeature,
+        authNonce,
+        intent
+      })
+    });
+    session = await response.json() as PassportDeviceStartResult;
+    if (!response.ok || !session.ok || !session.deviceCode || !session.loginUrl) {
+      vscode.window.showWarningMessage(intent === 'account' ? '无法开始 SoloMap 登录。' : '无法开始 SoloMap Pro 登录。');
+      return;
+    }
+  } catch (error) {
+    console.warn('Failed to start SoloMap device authorization:', error);
+    vscode.window.showWarningMessage(intent === 'account' ? '无法开始 SoloMap 登录。' : '无法开始 SoloMap Pro 登录。');
+    return;
+  }
+
+  await vscode.env.openExternal(vscode.Uri.parse(session.loginUrl));
   const code = await vscode.window.showInputBox({
-    title: 'SoloMap Pro',
-    prompt: '登录完成后，粘贴网页上显示的授权码。',
-    placeHolder: '粘贴授权码',
+    title: intent === 'account' ? '登录 SoloMap' : 'SoloMap Pro',
+    prompt: '登录完成后，粘贴网页上显示的登录码。',
+    placeHolder: '粘贴登录码',
     ignoreFocusOut: true
   });
   const normalizedCode = String(code || '').trim();
@@ -1620,18 +1644,33 @@ async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext
     return;
   }
   try {
-    const result = await verifyPassportGrant(normalizedCode, { authNonce });
-    if (!result.allowed) {
-      vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
+    const response = await fetch(buildPassportDeviceVerifyUrl(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        product: passportProduct,
+        feature: strategyPyramidFeature,
+        authNonce,
+        deviceCode: session.deviceCode,
+        code: normalizedCode
+      })
+    });
+    const result = await response.json() as PassportVerifyResult;
+    const accepted = intent === 'account' ? Boolean(result.authenticated) : Boolean(result.allowed);
+    if (!response.ok || !accepted) {
+      vscode.window.showWarningMessage(intent === 'account' ? 'SoloMap 登录未完成。' : 'SoloMap Pro 授权未通过。');
       return;
     }
-    pendingPassportAuthNonce = null;
     await writePassportGrant(context, result, result.grant || normalizedCode);
-    vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
-    await openStrategyPyramidPanel(context);
+    if (intent === 'account') {
+      vscode.window.showInformationMessage(result.allowed ? '已登录 SoloMap，Pro 权限已恢复。' : '已登录 SoloMap。');
+    } else {
+      vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
+      await openStrategyPyramidPanel(context);
+    }
   } catch (error) {
-    console.warn('Failed to verify SoloMap Pro device authorization:', error);
-    vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
+    console.warn('Failed to verify SoloMap device authorization:', error);
+    vscode.window.showWarningMessage(intent === 'account' ? 'SoloMap 登录未完成。' : 'SoloMap Pro 授权未通过。');
   }
 }
 

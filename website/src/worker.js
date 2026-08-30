@@ -1006,7 +1006,7 @@ async function verifySoloMapExchangeCode(env, code, expected = {}) {
   const verified = await verifySignedGrantWithLiveAccess(env, String(payload.grant || ""));
   return {
     ...verified,
-    grant: verified.allowed ? String(payload.grant || "") : ""
+    grant: verified.authenticated ? String(payload.grant || "") : ""
   };
 }
 
@@ -1357,15 +1357,24 @@ function buildDeviceGrantPage(grant, context = {}) {
   const email = String(context.email || "").trim();
   const deviceLimit = Number(context.deviceLimit || 0);
   const accountUrl = escapeHtml(String(context.accountUrl || PRODUCT_ACCOUNT_URL));
-  const activationCopy = deviceLimit >= 3
-    ? `你的 SoloMap Pro 可在最多 ${deviceLimit} 台个人设备上激活。`
-    : "你的 SoloMap Pro 已可在多台个人设备上激活。";
+  const accountLogin = context.intent === "account";
+  const proActive = Boolean(context.proActive);
+  const title = accountLogin ? "SoloMap 登录完成" : "SoloMap Pro 已授权";
+  const instruction = accountLogin
+    ? `复制下面的登录码，回到 SoloMap 粘贴即可完成登录。${email ? `当前账号：${escapeHtml(email)}。` : ""}`
+    : `复制下面的激活码，回到 SoloMap 粘贴后即可打开 Pro 功能。${email ? `当前账户：${escapeHtml(email)}。` : ""}`;
+  const activationCopy = accountLogin
+    ? (proActive ? "SoloMap Pro 权限已生效。" : "你已登录 SoloMap 免费账号。")
+    : (deviceLimit >= 3
+      ? `你的 SoloMap Pro 可在最多 ${deviceLimit} 台个人设备上激活。`
+      : "你的 SoloMap Pro 已可在多台个人设备上激活。");
+  const copyLabel = accountLogin ? "复制登录码" : "复制激活码";
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SoloMap Pro 已授权</title>
+  <title>${title}</title>
   <style>
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: system-ui, sans-serif; background: #11100e; color: #f6f0e8; }
     main { width: min(720px, calc(100vw - 32px)); }
@@ -1379,12 +1388,12 @@ function buildDeviceGrantPage(grant, context = {}) {
 </head>
 <body>
   <main>
-    <h1>SoloMap Pro 已授权</h1>
-    <p>复制下面的激活码，回到 SoloMap 粘贴后即可打开 Pro 功能。${email ? `当前账户：${escapeHtml(email)}。` : ""}</p>
+    <h1>${title}</h1>
+    <p>${instruction}</p>
     <p>${escapeHtml(activationCopy)}</p>
     <textarea id="code" readonly>${escapedGrant}</textarea>
     <div class="actions">
-      <button id="copy" type="button">复制激活码</button>
+      <button id="copy" type="button">${copyLabel}</button>
       <a class="button secondary" href="${accountUrl}">打开账户页面</a>
     </div>
   </main>
@@ -1921,7 +1930,11 @@ async function handlePassportDeviceStart(request, env) {
   } catch (error) {
     payload = {};
   }
-  const deviceCode = await createDeviceCode(env, { authNonce: payload.authNonce || payload.auth_nonce });
+  const intent = String(payload.intent || "") === "account" ? "account" : "pro";
+  const deviceCode = await createDeviceCode(env, {
+    authNonce: payload.authNonce || payload.auth_nonce,
+    intent
+  });
   return jsonResponse({
     ok: true,
     deviceCode,
@@ -1950,15 +1963,18 @@ async function handlePassportDeviceAuthorize(request, env) {
   }
   const userinfo = { email: String(session.email || ""), sub: String(session.id || ""), userId: String(session.id || "") };
   const access = await resolvePassportAccessForUser(env, userinfo);
-  if (!access.allowed) return createPassportCheckoutRedirect(request, env, state, userinfo, access);
+  const accountLogin = device.intent === "account";
+  if (!accountLogin && !access.allowed) return createPassportCheckoutRedirect(request, env, state, userinfo, access);
   const grant = await issueSoloMapGrant(env, String(access.email || session.email || ""), {
     userId: String(access.userId || session.id || ""),
-    entitlements: access.entitlements
+    entitlements: access.allowed ? access.entitlements : ["base_access"]
   });
   const code = state.authNonce ? await issueSoloMapExchangeCode(env, grant, state) : grant;
   return htmlResponse(buildDeviceGrantPage(code, {
     email: access.email || session.email,
     deviceLimit: access.deviceLimit || 0,
+    intent: accountLogin ? "account" : "pro",
+    proActive: access.allowed,
     accountUrl: getPassportAccountUrl(env)
   }), 200);
 }
