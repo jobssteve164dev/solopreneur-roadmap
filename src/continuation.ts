@@ -38,6 +38,9 @@ export function getContinuationAgentProvider(agentCli: string): string {
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return 'copilot';
   }
+  if (executableName === 'grok') {
+    return 'grok';
+  }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return 'antigravity';
   }

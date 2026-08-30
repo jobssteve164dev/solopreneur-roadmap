@@ -46,7 +46,8 @@ const supportedAgentFamilies = [
   { family: 'cursor', title: 'Cursor' },
   { family: 'claude', title: 'Claude' },
   { family: 'copilot', title: 'Copilot' },
-  { family: 'opencode', title: 'OpenCode' }
+  { family: 'opencode', title: 'OpenCode' },
+  { family: 'grok', title: 'Grok' }
 ];
 
 export function getSupportedAgentStatuses(configuredCliPath: string): SupportedAgentStatus[] {
@@ -128,6 +129,7 @@ export function buildAgentInstallCommand(cliPath: string): string {
   if (family === 'copilot') return `npm install -g @github/copilot; ${verifyScript}`;
   if (family === 'opencode') return `npm install -g opencode-ai; ${verifyScript}`;
   if (family === 'antigravity') return `curl -fsSL https://antigravity.google/cli/install.sh | bash; ${verifyScript}`;
+  if (family === 'grok') return `curl -fsSL https://x.ai/cli/install.sh | bash; ${verifyScript}`;
   if (family === 'cursor') {
     return [
       'echo "SoloMap: Cursor CLI is installed from the Cursor app command palette."',
@@ -160,7 +162,8 @@ export function buildAgentAutomationWrapper(
     codex: 'codex',
     cursor: 'cursor-agent',
     claude: 'claude',
-    copilot: 'copilot'
+    copilot: 'copilot',
+    grok: 'grok'
   };
   const wrapperName = wrapperNameByFamily[family] || path.basename(agentCli).replace(/[^a-z0-9_-]/gi, '-') || 'agent';
   const wrapperDir = path.join(normalizeGlobalDataPath(globalDataPath, projects), 'agent-cli');

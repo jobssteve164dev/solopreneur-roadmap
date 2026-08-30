@@ -4083,6 +4083,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <button type="button" class="solo-select-option" data-solo-option-value="copilot" aria-selected="false">copilot</button>
             <button type="button" class="solo-select-option" data-solo-option-value="claude" aria-selected="false">claude</button>
             <button type="button" class="solo-select-option" data-solo-option-value="opencode" aria-selected="false">opencode</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="grok" aria-selected="false">grok</button>
             <button type="button" class="solo-select-option" data-solo-option-value="custom" aria-selected="false">Custom...</button>
           </div>
         </div>
@@ -4095,7 +4096,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         >
       </div>
       <div id="help-cli-path" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-        Name of globally installed CLI (e.g. <code>agy</code>, <code>codex</code>, <code>cursor</code>, <code>claude</code>, <code>copilot</code>, <code>opencode</code>) or the absolute path to its executable.
+        Name of globally installed CLI (e.g. <code>agy</code>, <code>codex</code>, <code>cursor</code>, <code>claude</code>, <code>copilot</code>, <code>opencode</code>, <code>grok</code>) or the absolute path to its executable.
       </div>
     </div>
 
@@ -4149,6 +4150,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <button type="button" class="solo-select-option" data-solo-option-value="copilot" aria-selected="false">copilot</button>
             <button type="button" class="solo-select-option" data-solo-option-value="claude" aria-selected="false">claude</button>
             <button type="button" class="solo-select-option" data-solo-option-value="opencode" aria-selected="false">opencode</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="grok" aria-selected="false">grok</button>
             <button type="button" class="solo-select-option" data-solo-option-value="custom" aria-selected="false">Custom...</button>
           </div>
         </div>
@@ -5627,7 +5629,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsTitle: 'SoloMap 设置',
         language: '界面语言',
         cliPath: 'Agent CLI 命令或路径',
-        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode）或可执行文件绝对路径。',
+        cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode、grok）或可执行文件绝对路径。',
         globalPrompt: '全局默认提示词',
         globalPromptPlaceholder: '例如：始终保持改动范围最小，并运行最相关的验证。',
         globalPromptHelp: '会注入每一次任务对话；环节内本次补充要求优先级更高。',
@@ -6082,7 +6084,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsTitle: 'SoloMap Settings',
         language: 'Language',
         cliPath: 'CLI Command or Path',
-        cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, or opencode, or an absolute executable path.',
+        cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, opencode, or grok, or an absolute executable path.',
         globalPrompt: 'Default Agent Instructions',
         globalPromptPlaceholder: 'e.g. Keep changes minimal and run the narrowest relevant test.',
         globalPromptHelp: 'Injected into every task conversation; current conversation guidance takes priority.',

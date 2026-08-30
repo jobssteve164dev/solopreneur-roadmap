@@ -48,6 +48,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     if (name === 'agy' || name === 'antigravity-cli' || name === 'solomap-antigravity-auto') return 'antigravity';
     if (name === 'claude-code' || name === 'claude-code-cli' || name === 'solomap-claude-auto') return 'claude';
     if (name === 'open-code' || name === 'open-code-cli') return 'opencode';
+    if (name === 'grok') return 'grok';
     return normalized;
   }
 
@@ -59,6 +60,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     if (['copilot', 'copilot-cli'].includes(base)) return 'copilot';
     if (['claude', 'claude-code', 'claude-code-cli'].includes(base)) return 'claude';
     if (['opencode', 'open-code', 'open-code-cli'].includes(base)) return 'opencode';
+    if (base === 'grok') return 'grok';
     return 'custom';
   }
 
@@ -81,7 +83,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     }
     add(currentCliPath || 'agy');
     add(nodeCliPath || currentCliPath || 'agy');
-    ['antigravity', 'cursor', 'codex', 'copilot', 'claude', 'opencode'].forEach(add);
+    ['antigravity', 'cursor', 'codex', 'copilot', 'claude', 'opencode', 'grok'].forEach(add);
     return options;
   }
 

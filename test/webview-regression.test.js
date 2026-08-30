@@ -568,6 +568,7 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
     { value: 'copilot', label: 'copilot' },
     { value: 'claude', label: 'claude' },
     { value: 'opencode', label: 'opencode' },
+    { value: 'grok', label: 'grok' },
     { value: 'custom', label: 'Custom...' }
   ]);
   wireSoloSelect(elements['setting-agent-model-select'], []);
@@ -864,6 +865,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.doesNotThrow(() => new vm.Script(script));
   assert.doesNotMatch(html, /<select\b|<option\b/);
   assert.match(html, /data-solo-select/);
+  const mainAgentOptions = html.match(/id="setting-cli-select"[\s\S]*?<\/div>\s*<input/)?.[0] || '';
+  const reviewAgentOptions = html.match(/id="setting-reviewer-cli-select"[\s\S]*?<\/div>\s*<input/)?.[0] || '';
+  assert.match(mainAgentOptions, /data-solo-option-value="grok"[^>]*>grok<\/button>/);
+  assert.match(reviewAgentOptions, /data-solo-option-value="grok"[^>]*>grok<\/button>/);
   assert.match(script, /bindSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
   assert.match(script, /attachment\.save/);
@@ -1404,6 +1409,15 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     && message.automationTasks.triggers.completed.sound === false
     && message.automationTasks.triggers.stopped.retry === true
   ));
+  postedMessages.length = 0;
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: { cliPath: 'grok', language: 'zh', globalPrompt: '', globalDataPath: '/workspace/.solomap-global' }
+  });
+  assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'grok');
+  assert.equal(elements['setting-cli-select'].querySelector('[data-solo-label]').textContent, 'grok');
+  elements['btn-save-settings'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.cliPath === 'grok'));
   postedMessages.length = 0;
 
   const newProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-new-project-card-'));
@@ -2517,7 +2531,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /\.sidebar-conversation-detail\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.match(html, /\.sidebar-conversation-detail pre\s*\{[\s\S]*?max-width:\s*100%/);
   assert.match(html, /function normalizeAgentOption/);
-  assert.match(html, /\['antigravity', 'cursor', 'codex', 'copilot', 'claude', 'opencode'\]\.forEach\(add\)/);
+  assert.match(html, /\['antigravity', 'cursor', 'codex', 'copilot', 'claude', 'opencode', 'grok'\]\.forEach\(add\)/);
   assert.doesNotMatch(html, /add\('codex-cli'\)/);
   assert.doesNotMatch(html, /add\('antigravity-cli'\)/);
   assert.match(html, /\.portfolio-panel\s*\{[\s\S]*?z-index:\s*1/);
@@ -6342,6 +6356,35 @@ test('agent command builder keeps background one-shot commands and uses native i
     JSON.parse(fs.readFileSync(openCodeSessionFilePath, 'utf8')).sessionId,
     'ses_13abdae1dffekQpdcehmyyexoY'
   );
+  const grokCaptureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-grok-capture-'));
+  const grokOutputFilePath = path.join(grokCaptureDir, 'output.log');
+  const grokStartedAtFilePath = path.join(grokCaptureDir, 'started_at');
+  const grokSessionFilePath = path.join(grokCaptureDir, 'session.json');
+  const plannedGrokSessionId = '019ecd99-4325-7050-8e71-7def92359c9a';
+  fs.writeFileSync(grokStartedAtFilePath, '', 'utf8');
+  fs.writeFileSync(grokOutputFilePath, 'Tool output contains unrelated UUID 019ecd99-4325-7050-8e71-7def92359c9b\n', 'utf8');
+  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript(
+    'grok', '/workspace/app', grokStartedAtFilePath, grokOutputFilePath, grokSessionFilePath, plannedGrokSessionId
+  )], {
+    cwd: grokCaptureDir,
+    env: { ...process.env, HOME: grokCaptureDir, GROK_HOME: path.join(grokCaptureDir, '.grok') }
+  });
+  assert.equal(fs.existsSync(grokSessionFilePath), false, 'a failed Grok launch must not expose a nonexistent session');
+  const grokSummaryDir = path.join(grokCaptureDir, '.grok', 'sessions', '%2Fworkspace%2Fapp', plannedGrokSessionId);
+  fs.mkdirSync(grokSummaryDir, { recursive: true });
+  fs.writeFileSync(path.join(grokSummaryDir, 'summary.json'), JSON.stringify({
+    info: { id: plannedGrokSessionId, cwd: '/workspace/app' }
+  }), 'utf8');
+  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript(
+    'grok', '/workspace/app', grokStartedAtFilePath, grokOutputFilePath, grokSessionFilePath, plannedGrokSessionId
+  )], {
+    cwd: grokCaptureDir,
+    env: { ...process.env, HOME: grokCaptureDir, GROK_HOME: path.join(grokCaptureDir, '.grok') }
+  });
+  assert.deepEqual(JSON.parse(fs.readFileSync(grokSessionFilePath, 'utf8')), {
+    sessionId: plannedGrokSessionId,
+    source: 'grok-session-store'
+  });
   assert.equal(
     extensionModule.__extractCodexSessionIdFromOutputText('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11\nsession id: 019ecd99-4325-7050-8e71-7def92359c9f'),
     '019ecd99-4325-7050-8e71-7def92359c9f'
@@ -6525,6 +6568,18 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /sessionMode/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /commandFilePath/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.codex\/sessions/);
+  const grokShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-grok-shell-'));
+  const grokShellScript = extensionModule.__buildAgentShellScript(
+    'grok', '', 'Review this project.', grokShellRoot, '__solo__', 43, '', undefined, '', '', 'solo'
+  );
+  const grokCommand = fs.readFileSync(grokShellScript.commandFilePath, 'utf8');
+  const grokRunScript = fs.readFileSync(grokShellScript.runScriptPath, 'utf8');
+  const plannedSessionMatch = grokCommand.match(/--session-id '([0-9a-f-]{36})'/);
+  assert.ok(plannedSessionMatch, 'Grok launch must receive a client-planned session UUID');
+  assert.match(grokRunScript, new RegExp(`'${plannedSessionMatch[1]}'`));
+  assert.match(grokRunScript, /summary\.json/);
+  assert.doesNotMatch(grokRunScript, new RegExp(`"nativeSessionId":"${plannedSessionMatch[1]}"`));
+  assert.doesNotMatch(grokRunScript, /session_source="generic-output"/);
   const globalShellScript = extensionModule.__buildAgentShellScript(
     'codex',
     'Use the configured global memory path.',

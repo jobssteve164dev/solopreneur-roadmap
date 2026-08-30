@@ -43,7 +43,7 @@ SoloMap 是直接嵌在 VS Code 里的**本地优先、Git 友好、高审美**�
     **Git 友好**：路线图保存在 `.solopreneur/roadmap.csv`。状态变更或路线调整都是纯文本 diff，告别二进制冲突。
 
 ### 🤖 Local Agent Orchestrator / 无缝本地 Agent 调度
-*   **One-Click Run**: Dispatch tasks to your local CLI agents (`agy`, `codex`, `claude-code`, `copilot-cli`) directly from the active roadmap step.
+*   **One-Click Run**: Dispatch tasks to your local CLI agents (`agy`, `codex`, `claude-code`, `copilot-cli`, `grok`) directly from the active roadmap step.
     **一键调度**：在当前路线图步骤中直接唤起本地 Agent CLI（如 `agy`、`codex`、`claude-code` 等）执行任务。
 *   **Step-Level Handover**: Automatically builds a context-rich `.solopreneur/step-memory/` package before each execution so agents know the exact scope and completion criteria.
     **环节记忆交接**：执行前自动组装上下文交接包，让 Agent 带着清晰的完成标准（Completion Criteria）去工作。
@@ -85,6 +85,7 @@ SoloMap runs your local CLI agents via VS Code's integrated terminal for maximum
 *   **Claude Code** (`claude-code`)
 *   **GitHub Copilot** (`copilot-cli`)
 *   **OpenCode** (`opencode`)
+*   **Grok Build** (`grok`)
 *   *Custom executables are fully supported in SoloMap settings.*
 
 ---

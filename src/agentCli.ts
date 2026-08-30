@@ -25,6 +25,7 @@ export function getTaskPermissionDetectionTokens(agentCli: string): string[] {
     '--permission-mode=dontask',
     '--allow-all',
     '--allow-all-tools',
+    '--always-approve',
     '--yolo'
   ];
   if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
@@ -77,6 +78,9 @@ export function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return '--allow-all --no-ask-user';
+  }
+  if (executableName === 'grok') {
+    return '--always-approve';
   }
   return '';
 }
@@ -235,6 +239,7 @@ export function getAgentCliFamily(command: string): string {
   if (['cursor', 'cursor-cli', 'cursor-agent'].includes(name)) return 'cursor';
   if (['copilot', 'copilot-cli'].includes(name)) return 'copilot';
   if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
+  if (name === 'grok') return 'grok';
   if (['', 'agy', 'antigravity', 'antigravity-cli'].includes(name)) return 'antigravity';
   return name;
 }
@@ -248,7 +253,7 @@ export function getAgentModelFlag(agentCli: string, selectedModel = ''): string 
   if (family === 'codex') {
     return ` -m ${shellQuote(model)}`;
   }
-  if (['cursor', 'copilot', 'claude', 'opencode', 'antigravity'].includes(family)) {
+  if (['cursor', 'copilot', 'claude', 'opencode', 'antigravity', 'grok'].includes(family)) {
     return ` --model ${shellQuote(model)}`;
   }
   return '';
@@ -260,6 +265,7 @@ export function getKnownAgentCliCandidates(family: string): string[] {
   if (family === 'cursor') return ['cursor-agent', 'cursor', 'cursor-cli'];
   if (family === 'copilot') return ['copilot', 'copilot-cli'];
   if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
+  if (family === 'grok') return ['grok'];
   if (family === 'antigravity') return ['agy', 'antigravity', 'antigravity-cli'];
   return family ? [family] : [];
 }
@@ -306,7 +312,8 @@ export function getAgentCliCandidates(agentCli: string, configuredCliPath: strin
     'codex',
     'claude',
     'copilot',
-    'opencode'
+    'opencode',
+    'grok'
   ].filter(Boolean);
   const preferredCandidates = requestedCli
     ? [requestedCandidate, configuredCandidate]
@@ -348,6 +355,9 @@ export function getAgentProvider(agentCli: string): string {
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return 'copilot';
   }
+  if (executableName === 'grok') {
+    return 'grok';
+  }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return 'antigravity';
   }
@@ -382,17 +392,21 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPrompt})`;
   }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format plain -p ${quotedPrompt}`;
+  }
 
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
-export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+  const newSessionSegment = newSessionId.trim() ? ` --session-id ${shellQuote(newSessionId)}` : '';
   const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
   const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
@@ -415,16 +429,20 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPromptFileInstruction})`;
   }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)}${newSessionSegment}${permissionSegment}${modelSegment} --output-format plain -p ${quotedPromptFileInstruction}`;
+  }
 
   return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
-export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+  const newSessionSegment = newSessionId.trim() ? ` --session-id ${shellQuote(newSessionId)}` : '';
   const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.`;
   const quotedInstruction = shellQuote(promptFileInstruction);
 
@@ -445,6 +463,9 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${modelSegment} --prompt ${quotedInstruction})`;
+  }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --no-alt-screen --cwd ${shellQuote(workspaceRoot)}${newSessionSegment}${permissionSegment}${modelSegment} ${quotedInstruction}`;
   }
 
   return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} ${quotedInstruction})`;
@@ -481,6 +502,9 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --session ${quotedSessionId}${modelSegment} --prompt ${quotedInstruction})`;
   }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --no-alt-screen --cwd ${shellQuote(workspaceRoot)} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction}`;
+  }
   return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} ${quotedSessionId} ${quotedInstruction})`;
 }
 
@@ -503,6 +527,9 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p --permission-mode plan${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+  }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)} --sandbox read-only --tools ${shellQuote('read_file,grep,list_dir')} --deny ${shellQuote('Bash')} --deny ${shellQuote('Edit')} --deny ${shellQuote('Write')} --deny ${shellQuote('MCPTool')} --always-approve${modelSegment} --output-format plain -p ${quotedInstruction}`;
   }
   return '';
 }
@@ -532,6 +559,9 @@ export function buildAgentContinuationCommandForPromptFile(agentCli: string, pro
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return `${quotedCli} -p ${quotedInstruction} --resume=${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
+  }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)} --resume ${quotedSessionId}${permissionSegment}${modelSegment} --output-format plain -p ${quotedInstruction}`;
   }
   return buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel);
 }
@@ -563,6 +593,9 @@ export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: s
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `${quotedCli} run${modelSegment} ${promptExpression}`;
   }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format plain -p ${promptExpression}`;
+  }
 
   return `${quotedCli} run --task ${promptExpression}`;
 }
@@ -592,6 +625,9 @@ export function buildNativeContinueCommand(agentCli: string, sessionId: string, 
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --session ${quotedSessionId})`;
+  }
+  if (executableName === 'grok') {
+    return `${quotedCli} --no-auto-update --no-alt-screen --cwd ${shellQuote(workspaceRoot)} --resume ${quotedSessionId}${permissionSegment}`;
   }
 
   return `${quotedCli} ${quotedSessionId}`;

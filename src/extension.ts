@@ -3711,7 +3711,8 @@ function buildSessionCaptureScript(
   workspaceRoot: string,
   startedAtFilePath: string,
   outputFilePath: string,
-  sessionFilePath: string
+  sessionFilePath: string,
+  plannedSessionId = ''
 ): string {
   const sessionWriter = [
     `if [ -n "$session_id" ]; then`,
@@ -3725,6 +3726,34 @@ function buildSessionCaptureScript(
     ].join(''))} ${shellQuote(sessionFilePath)} "$session_id" "$session_source";`,
     `fi`
   ].join(' ');
+
+  if (provider === 'grok' && plannedSessionId.trim()) {
+    const grokSessionVerifier = [
+      'const fs=require("fs");',
+      'const path=require("path");',
+      'const os=require("os");',
+      'const sessionId=process.argv[1];',
+      'const workspace=path.resolve(process.argv[2]);',
+      'const home=String(process.env.GROK_HOME||"").trim()||path.join(os.homedir(),".grok");',
+      'const sessions=path.join(home,"sessions");',
+      'try {',
+      'for(const bucket of fs.readdirSync(sessions,{withFileTypes:true})) {',
+      'if(!bucket.isDirectory()) continue;',
+      'const summary=path.join(sessions,bucket.name,sessionId,"summary.json");',
+      'let data; try { data=JSON.parse(fs.readFileSync(summary,"utf8")); } catch { continue; }',
+      'const recordedCwd=String(data?.info?.cwd||"").trim();',
+      'if(String(data?.info?.id||"")===sessionId && recordedCwd && path.resolve(recordedCwd)===workspace) {',
+      'process.stdout.write(sessionId); process.exit(0);',
+      '}',
+      '}',
+      '} catch {}'
+    ].join('');
+    return [
+      `session_id=$(node -e ${shellQuote(grokSessionVerifier)} ${shellQuote(plannedSessionId)} ${shellQuote(workspaceRoot)})`,
+      `session_source="grok-session-store"`,
+      sessionWriter
+    ].join('; ');
+  }
 
   if (provider === 'antigravity') {
     return [
@@ -4769,10 +4798,13 @@ function buildAgentShellScript(
   const interactiveSession = isInteractiveConversationRunKind(effectiveRunKind);
   const taskCheckpointCommandPath = interactiveSession ? ensureTaskCheckpointRuntime(effectiveWorkspaceRoot) : '';
   const checkpointToken = interactiveSession ? crypto.randomBytes(24).toString('hex') : '';
+  const plannedGrokSessionId = agentProvider === 'grok' && !effectiveDirectExecutionCommand
+    ? crypto.randomUUID()
+    : '';
   const startedAt = new Date().toISOString();
   const defaultExecutionCommand = interactiveSession
-    ? buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel)
-    : buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
+    ? buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel, plannedGrokSessionId)
+    : buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel, plannedGrokSessionId);
   const loggedCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
@@ -4784,7 +4816,7 @@ function buildAgentShellScript(
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
   const noChangesStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'no_deliverable_changes', failureReason: 'Agent exited without project file changes or a completion decision.' });
-  const sessionCaptureScript = buildSessionCaptureScript(agentProvider, effectiveWorkspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath);
+  const sessionCaptureScript = buildSessionCaptureScript(agentProvider, effectiveWorkspaceRoot, startedAtFilePath, outputFilePath, sessionFilePath, plannedGrokSessionId);
   const workspaceSnapshotScript = buildWorkspaceSnapshotScript(effectiveWorkspaceRoot, workspaceSnapshotPath);
   const workspaceDiffScript = buildWorkspaceDiffScript(effectiveWorkspaceRoot, workspaceSnapshotPath, touchedFilesPath, changesFilePath);
   const enhancementRuntime = ensureSolomapEnhancementRuntime(effectiveWorkspaceRoot, effectiveGlobalDataPath, effectiveEnabledEnhancements);

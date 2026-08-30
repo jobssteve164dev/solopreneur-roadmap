@@ -86,7 +86,7 @@
         "solopreneur.cliPath": {
           "type": "string",
           "default": "agy",
-          "description": "The command name or absolute path of your local Agent CLI executable, such as agy, codex, claude, or opencode."
+          "description": "The command name or absolute path of your local Agent CLI executable, such as agy, codex, claude, opencode, or grok."
         },
         "solopreneur.language": {
           "type": "string",

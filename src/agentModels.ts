@@ -124,6 +124,26 @@ export function parseTextModelList(output: string): AgentModelOption[] {
     }));
 }
 
+export function parseGrokModelCatalog(output: string): AgentModelOption[] {
+  const lines = stripTerminalControlSequences(output).split(/\r?\n/);
+  const catalogStart = lines.findIndex((line) => /^\s*Available models:\s*$/i.test(line));
+  if (catalogStart < 0) {
+    return [];
+  }
+  const modelLines: string[] = [];
+  for (const line of lines.slice(catalogStart + 1)) {
+    if (!line.trim()) continue;
+    if (!/^\s*[*-]\s+/.test(line)) break;
+    modelLines.push(line);
+  }
+  return normalizeModelOptions(modelLines.flatMap((line) => {
+    const match = line.match(/^\s*[*-]\s+(.+?)(?:\s+\(default\))?\s*$/i);
+    if (!match) return [];
+    const value = match[1].trim();
+    return value ? [{ value, label: value }] : [];
+  }));
+}
+
 export function normalizeModelOptions(options: AgentModelOption[]): AgentModelOption[] {
   const seen = new Set<string>();
   return options
@@ -261,6 +281,8 @@ export function getAgentModelDiscoveryStrategies(family: string): AgentModelDisc
     attempts.push({ kind: 'command', args: ['models'], parse: parseTextModelList });
   } else if (family === 'opencode') {
     attempts.push({ kind: 'command', args: ['models'], parse: parseTextModelList });
+  } else if (family === 'grok') {
+    attempts.push({ kind: 'command', args: ['--no-auto-update', 'models'], parse: parseGrokModelCatalog });
   } else if (family === 'copilot') {
     attempts.push(
       { kind: 'json-rpc', args: ['--headless', '--no-auto-update', '--stdio'], parse: parseCopilotModelCatalog },
