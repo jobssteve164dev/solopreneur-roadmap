@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.436 - 2026-08-30
+
+### Added
+- unify interactive agent task checkpoints (3031722)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.435 - 2026-08-29
 
 ### Added
