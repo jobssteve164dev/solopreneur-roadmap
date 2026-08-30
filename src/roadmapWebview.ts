@@ -4569,7 +4569,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const children = (conversationChildrenMap[String(conversation.id || '')] || []);
       const continuationChildrenCount = children.filter(child => !isReviewConversation(child)).length;
       const reviewChildrenCount = children.filter(child => isReviewConversation(child)).length;
-      const rootConversationId = conversation.continuationRootConversationId || findConversationRootId(conversation);
       const open = activeConversationId === conversationId || hasActiveConversationDescendant(nodeId, conversation);
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const summary = summarizeConversation(conversation);
@@ -4585,7 +4584,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         ? \`<button class="conversation-retry-btn" data-retry-conversation-id="\${escapeHtml(conversation.id)}">\${t('retry')}</button>\`
         : '';
       const continueButton = conversation.capabilities && conversation.capabilities.canContinue
-        ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(rootConversationId)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
+        ? \`<button class="conversation-control-btn" data-continue-native-conversation-id="\${escapeHtml(conversation.id)}" data-continue-native-node-id="\${escapeHtml(nodeId)}" title="\${escapeHtml(t('continueNative'))}">\${t('continueNative')}</button>\`
         : '';
       const runningButtons = conversation.capabilities && conversation.capabilities.canStop
         ? \`
@@ -4704,16 +4703,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       });
       const items = roots.map(conversation => renderConversationItem(nodeId, conversation, false)).join('');
       return '<div class="conversation-list">' + items + '</div>';
-    }
-
-    function findConversationRootId(conversation) {
-      const currentId = String(conversation && conversation.id || '');
-      if (!currentId) return '';
-      const rootId = Object.keys(conversationChildrenMap).find(key => {
-        if (key === currentId) return true;
-        return (conversationChildrenMap[key] || []).some(child => String(child.id || '') === currentId);
-      });
-      return rootId || currentId;
     }
 
     function hasActiveConversationDescendant(nodeId, conversation) {

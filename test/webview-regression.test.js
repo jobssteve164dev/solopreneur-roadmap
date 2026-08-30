@@ -1866,7 +1866,6 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /conversation-log-pre/);
   assert.ok(script.includes("querySelectorAll('[data-conversation-id] .conversation-row')"));
   assert.match(script, /hasActiveConversationDescendant/);
-  assert.match(script, /findConversationRootId/);
   assert.match(script, /findRootByParent/);
   assert.match(script, /data-log-scroll-key/);
   assert.match(script, /captureConversationLogScrollPositions/);
@@ -2072,7 +2071,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.doesNotMatch(script, /data-continue-turn-send-id/);
   assert.match(script, /conversation-children-title/);
   assert.match(script, /sessionRoots/);
-  assert.match(script, /const rootConversationId = conversation\.continuationRootConversationId \|\| findConversationRootId\(conversation\)/);
+  assert.match(script, /data-continue-native-conversation-id="\$\{escapeHtml\(conversation\.id\)\}"/);
   assert.doesNotMatch(script, /Continuation first message/);
   assert.match(script, /conversation\.openTerminal/);
   assert.match(script, /conversation\.stop/);
@@ -2291,6 +2290,51 @@ test('full roadmap conversation history recovers continuation parent from the re
   assert.match(rendered, /data-conversation-id="__solo__:114"/);
   assert.doesNotMatch(rendered, /data-conversation-id="__solo__:116"[^]*data-conversation-id="__solo__:114"/);
   assert.match(rendered, /续聊 1|Continuation/);
+});
+
+test('full roadmap continue buttons keep the exact conversation selected by the user', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
+  );
+  const html = extensionModule.__getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  const { context } = runScriptWithMinimalDom(script, ids, [
+    'globalThis.__renderConversationsForTest = renderConversations;',
+    'globalThis.__setActiveConversationForTest = (id) => { activeConversationId = id; };'
+  ].join('\n'));
+  const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const conversations = presentation.buildConversationPresentations('', '__solo__', [
+    {
+      id: 140,
+      status: 'Completed',
+      agentCli: 'codex',
+      command: 'codex exec',
+      output: 'User supplement:\nroot\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10dc)'
+    },
+    {
+      id: 141,
+      status: 'Recorded',
+      agentCli: 'codex',
+      command: 'codex resume',
+      output: 'Continuation parent conversation: 140\nContinuation first message:\na\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10da)'
+    },
+    {
+      id: 142,
+      status: 'Recorded',
+      agentCli: 'codex',
+      command: 'codex resume',
+      output: 'Continuation parent conversation: 140\nContinuation first message:\nc\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10db)'
+    }
+  ]);
+
+  context.__setActiveConversationForTest('__solo__:140');
+  const rendered = context.__renderConversationsForTest('__solo__', conversations, 'empty');
+
+  assert.match(rendered, /data-continue-native-conversation-id="140"/);
+  assert.match(rendered, /data-continue-native-conversation-id="141"/);
+  assert.match(rendered, /data-continue-native-conversation-id="142"/);
 });
 
 test('full roadmap conversation history folds review runs under the reviewed conversation', () => {
