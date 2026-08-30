@@ -562,7 +562,10 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
           reason: accessAllowed ? 'feature_granted' : 'not_entitled',
           email: 'pro@solomap.app',
           userId: 'passport-user',
-          entitlements: accessAllowed ? ['strategy_pyramid'] : []
+          product: 'solomap',
+          featureKey: 'strategy_pyramid',
+          productAccess: accessAllowed ? { active: true } : null,
+          featureGrant: accessAllowed ? { featureKey: 'strategy_pyramid', active: true } : null
         }
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
@@ -609,7 +612,7 @@ test('Passport device auth returns a browser login URL and verifies the pasted g
     assert.ok(grant);
     assert.equal(verify.status, 200);
     assert.equal(verifyBody.allowed, true);
-    assert.deepEqual(verifyBody.entitlements, ['strategy_pyramid']);
+    assert.deepEqual(verifyBody.entitlements, ['strategy_pyramid', 'flow_mode', 'collaboration_pro']);
     assert.equal(verifyBody.deviceLimit, 5);
     accessAllowed = false;
     const revoked = await worker.default.fetch(
@@ -947,6 +950,60 @@ test('Privacy Policy and Terms of Service endpoints render correct bilingual cop
   assert.match(termsZh, /公司主体/);
 });
 
+test('unified account login restores paid access from the current Passport access response', async () => {
+  const worker = await loadWebsiteWorker();
+  const env = {
+    SITE_ORIGIN: 'https://solomap.app',
+    SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+    SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
+  };
+  const originalFetch = global.fetch;
+  global.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          allowed: true,
+          reason: 'feature_granted',
+          email: 'paid@solomap.app',
+          userId: 'paid-user',
+          product: 'solomap',
+          featureKey: 'strategy_pyramid',
+          productAccess: { active: true },
+          featureGrant: { featureKey: 'strategy_pyramid', active: true }
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
+    const authNonce = 'p'.repeat(32);
+    const cookie = await sessionCookie(env, { id: 'paid-user', email: 'paid@solomap.app' });
+    const accountStart = await worker.default.fetch(new Request(
+      `https://solomap.app/api/account/start?auth_nonce=${authNonce}&callback=${encodeURIComponent(callback)}`,
+      { headers: { cookie } }
+    ), env);
+    const callbackLocation = new URL(accountStart.headers.get('location') || '');
+    const accountVerify = await worker.default.fetch(new Request('https://solomap.app/api/passport/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: callbackLocation.searchParams.get('code'), authNonce, callback })
+    }), env);
+    const verified = await accountVerify.json();
+
+    assert.equal(callbackLocation.searchParams.get('intent'), 'account');
+    assert.equal(verified.authenticated, true);
+    assert.equal(verified.allowed, true);
+    assert.equal(verified.email, 'paid@solomap.app');
+    assert.deepEqual(verified.entitlements, ['strategy_pyramid', 'flow_mode', 'collaboration_pro']);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('website headless auth renders product-owned forms and creates a protected workbench session', async () => {
   const worker = await loadWebsiteWorker();
   const env = { SITE_ORIGIN: 'https://solomap.app', SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret' };
@@ -1006,14 +1063,14 @@ test('website headless auth renders product-owned forms and creates a protected 
     const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
     const authNonce = 'l'.repeat(32);
     const accountStart = await worker.default.fetch(new Request(
-      `https://solomap.app/api/collaboration/account/start?auth_nonce=${authNonce}&callback=${encodeURIComponent(callback)}`,
+      `https://solomap.app/api/account/start?auth_nonce=${authNonce}&callback=${encodeURIComponent(callback)}`,
       { headers: { cookie } }
     ), env);
     const callbackLocation = new URL(accountStart.headers.get('location') || '');
     assert.equal(accountStart.status, 302);
     assert.equal(callbackLocation.origin, 'null');
     assert.equal(callbackLocation.protocol, 'vscode:');
-    assert.equal(callbackLocation.searchParams.get('intent'), 'collaboration');
+    assert.equal(callbackLocation.searchParams.get('intent'), 'account');
     const accountVerify = await worker.default.fetch(new Request('https://solomap.app/api/passport/verify', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1026,7 +1083,7 @@ test('website headless auth renders product-owned forms and creates a protected 
     const accountGrant = await accountVerify.json();
     assert.equal(accountGrant.authenticated, true);
     assert.equal(accountGrant.allowed, false);
-    assert.deepEqual(accountGrant.entitlements, ['collaboration_lobby']);
+    assert.deepEqual(accountGrant.entitlements, ['base_access']);
 
     const workbench = await worker.default.fetch(new Request('https://solomap.app/workbench', { headers: { cookie } }), env);
     const workbenchHtml = await workbench.text();
@@ -1037,7 +1094,7 @@ test('website headless auth renders product-owned forms and creates a protected 
     assert.match(workbenchHtml, /Your projects will appear here/);
     assert.match(workbenchHtml, /Project data in the extension stays local/);
     assert.match(workbenchHtml, /<footer>/);
-    assert.match(workbenchHtml, /Local-first roadmap and strategy cockpit/);
+    assert.match(workbenchHtml, /A local-first working agreement for you and your AI Agents/);
     assert.doesNotMatch(workbenchHtml, /Pro Feature Roadmap &amp; Voting/);
   } finally {
     global.fetch = originalFetch;

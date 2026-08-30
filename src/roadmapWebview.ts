@@ -2158,7 +2158,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
     const proAccountPanel = document.getElementById('pro-account-panel');
     const btnOpenProAuthorization = document.getElementById('btn-open-pro-authorization');
-    const btnPasteProCode = document.getElementById('btn-paste-pro-code');
     const settingAbilitySelect = document.getElementById('setting-ability-select');
     const settingsAbilityUrlInputContainer = document.getElementById('settings-ability-url-input-container');
     const settingAbilityUrlInput = document.getElementById('setting-ability-url-input');
@@ -2259,7 +2258,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         continuationCount: '续聊',
         reviewCount: '复核',
         settingsSectionBasic: '基础',
-        settingsSectionAccount: '账户与 Pro',
+        settingsSectionAccount: 'SoloMap 账号',
         settingsSectionAgent: 'Agent 协作',
         settingsSectionData: '项目数据',
         settingsSectionInstructions: '默认指令',
@@ -2273,6 +2272,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         proLogin: '登录 / 升级 Pro',
         proPasteCode: '粘贴授权码',
         proAccountHelp: '登录后即可打开 Pro 功能；本地项目数据仍留在你的工作区。',
+        accountName: 'SoloMap 账号',
+        accountFree: '免费账号',
+        accountLogin: '登录 SoloMap',
+        proUpgrade: '升级 Pro',
+        accountSignedOutHelp: '登录后可使用账号功能；本地项目数据仍留在你的工作区。',
+        accountSignedInHelp: '已登录，可使用 SoloMap 免费功能。',
+        accountProHelp: 'Pro 权限已生效。',
         reviewHighRisk: '高风险任务',
         reviewAll: '每次任务',
         reviewOff: '关闭',
@@ -2467,7 +2473,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         continuationCount: 'Continuations',
         reviewCount: 'Reviews',
         settingsSectionBasic: 'Basics',
-        settingsSectionAccount: 'Account & Pro',
+        settingsSectionAccount: 'SoloMap Account',
         settingsSectionAgent: 'Agent Collaboration',
         settingsSectionData: 'Project Data',
         settingsSectionInstructions: 'Instructions',
@@ -2481,6 +2487,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         proLogin: 'Sign in / Upgrade Pro',
         proPasteCode: 'Paste authorization code',
         proAccountHelp: 'Sign in to open Pro features; local project data stays in your workspace.',
+        accountName: 'SoloMap Account',
+        accountFree: 'Free account',
+        accountLogin: 'Sign in to SoloMap',
+        proUpgrade: 'Upgrade to Pro',
+        accountSignedOutHelp: 'Sign in to use account features; local project data stays in your workspace.',
+        accountSignedInHelp: 'Signed in with access to SoloMap free features.',
+        accountProHelp: 'Your Pro access is active.',
         reviewHighRisk: 'High-risk tasks',
         reviewAll: 'Every task',
         reviewOff: 'Off',
@@ -2821,7 +2834,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('impact-progress-label', t('impactProgress'));
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
       setText('text-open-pro-authorization', t('proLogin'));
-      setText('text-paste-pro-code', t('proPasteCode'));
       setText('label-enhancement-toggles', t('abilityManagerLabel'));
       setText('help-enhancement-toggles', t('abilityManagerHelp'));
       setText('text-install-ability', t('installEnhancement'));
@@ -2947,7 +2959,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         roadmapRevisionPanel.classList.remove('open');
         btnToggleRoadmapRevision.classList.remove('active');
         if (!currentFlowState.hasProAccess) {
-          vscode.postMessage({ command: 'entitlement.login' });
+          vscode.postMessage({ command: 'entitlement.upgrade' });
           return;
         }
         setMainView('flow');
@@ -3018,13 +3030,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
-        vscode.postMessage({ command: 'entitlement.login' });
-      });
-    }
-
-    if (btnPasteProCode) {
-      btnPasteProCode.addEventListener('click', () => {
-        vscode.postMessage({ command: 'entitlement.paste' });
+        const authenticated = Boolean(currentSettings && currentSettings.proAccount && currentSettings.proAccount.authenticated);
+        vscode.postMessage({ command: authenticated ? 'entitlement.upgrade' : 'account.login' });
       });
     }
 
@@ -3097,6 +3104,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     function renderProAccount(settings) {
       SoloMapWebview.renderProAccount(proAccountPanel, settings, t, currentLanguage);
+      if (!btnOpenProAuthorization) return;
+      const authenticated = Boolean(settings && settings.proAccount && settings.proAccount.authenticated);
+      const unlocked = hasStrategyPyramidPro(settings);
+      btnOpenProAuthorization.style.display = unlocked ? 'none' : '';
+      const actionText = btnOpenProAuthorization.querySelector('span:last-child');
+      if (actionText) actionText.textContent = authenticated ? t('proUpgrade') : t('accountLogin');
+      const actionIcon = btnOpenProAuthorization.querySelector('.codicon');
+      if (actionIcon) actionIcon.className = 'codicon ' + (authenticated ? 'codicon-rocket' : 'codicon-sign-in');
     }
 
     const abilityController = SoloMapWebview.createAbilityController({
@@ -4142,7 +4157,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         const upgradeButton = flowBody.querySelector('[data-open-flow-pro]');
         if (upgradeButton) {
           upgradeButton.addEventListener('click', () => {
-            vscode.postMessage({ command: 'entitlement.login' });
+            vscode.postMessage({ command: 'entitlement.upgrade' });
           });
         }
         return;

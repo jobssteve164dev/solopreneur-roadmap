@@ -255,7 +255,7 @@ let extensionContextRef: vscode.ExtensionContext | null = null;
 let activeProjectRoot: string | null = null;
 let syncEngineReady = false;
 let pendingPassportAuthNonce: string | null = null;
-let pendingPassportAuthIntent: 'pro' | 'collaboration' | null = null;
+let pendingPassportAuthIntent: 'account' | 'pro' | null = null;
 let syncEngineInitPromise: Promise<boolean> | null = null;
 let syncEngineInitProjectRoot = '';
 let projectSelectionGeneration = 0;
@@ -718,9 +718,6 @@ async function handleSharedWebviewAction(
     'collaboration.getRooms': async () => {
       await respond({ command: 'collaborationRoomsLoaded', rooms: await readCollaborationRooms(context) });
     },
-    'collaboration.login': async () => {
-      await beginCollaborationAuthorization();
-    },
     'collaboration.joinLobby': async (request) => {
       const cached = await readPassportGrant(context);
       if (!cached) {
@@ -1129,12 +1126,12 @@ async function handleSharedWebviewAction(
       await handleReviewGlobalPrompt(context, String(request.globalPrompt || ''), target);
     },
     'agent.upgradeAll': async () => handleUpgradeAllAgentClis(context),
-    'entitlement.login': async () => {
-      await handleManageProAuthorization(context, 'login');
+    'account.login': async () => {
+      await beginAccountAuthorization();
       await broadcastSettings(context);
     },
-    'entitlement.paste': async () => {
-      await handleManageProAuthorization(context, 'paste');
+    'entitlement.upgrade': async () => {
+      await handleManageProAuthorization(context, 'login');
       await broadcastSettings(context);
     },
     'ability.installSkill': async (request) => handleInstallSolomapSkill(context, request.skillInput || ''),
@@ -1574,10 +1571,10 @@ async function beginPassportAuthorization(): Promise<void> {
   await vscode.env.openExternal(vscode.Uri.parse(buildPassportProUrl('callback', authNonce, buildPassportCallbackUri())));
 }
 
-async function beginCollaborationAuthorization(): Promise<void> {
+async function beginAccountAuthorization(): Promise<void> {
   const authNonce = createPassportAuthNonce();
   pendingPassportAuthNonce = authNonce;
-  pendingPassportAuthIntent = 'collaboration';
+  pendingPassportAuthIntent = 'account';
   await vscode.env.openExternal(vscode.Uri.parse(buildPassportAccountUrl(authNonce, buildPassportCallbackUri())));
 }
 
@@ -1613,26 +1610,6 @@ async function beginPassportDeviceAuthorization(context: vscode.ExtensionContext
   }
 }
 
-async function pastePassportAuthorizationCode(context: vscode.ExtensionContext): Promise<void> {
-  const code = await vscode.window.showInputBox({
-    title: 'SoloMap Pro',
-    prompt: '粘贴网页上显示的授权码。',
-    placeHolder: '授权码',
-    ignoreFocusOut: true
-  });
-  const normalizedCode = String(code || '').trim();
-  if (!normalizedCode) {
-    return;
-  }
-  const result = await verifyPassportGrant(normalizedCode);
-  if (!result.allowed) {
-    vscode.window.showWarningMessage('SoloMap Pro 授权未通过。');
-    return;
-  }
-  await writePassportGrant(context, result, result.grant || normalizedCode);
-  vscode.window.showInformationMessage('SoloMap Pro 已解锁。');
-}
-
 async function beginPassportAuthorizationFlow(context: vscode.ExtensionContext): Promise<void> {
   const isRemoteEnvironment = Boolean((vscode.env as any).remoteName);
   const callbackLabel = '浏览器回到 VS Code';
@@ -1654,23 +1631,8 @@ async function beginPassportAuthorizationFlow(context: vscode.ExtensionContext):
 
 async function handleManageProAuthorization(context: vscode.ExtensionContext, action?: string): Promise<void> {
   const normalizedAction = String(action || '').trim();
-  if (normalizedAction === 'login') {
+  if (!normalizedAction || normalizedAction === 'login') {
     await beginPassportAuthorizationFlow(context);
-    return;
-  }
-  if (normalizedAction === 'paste') {
-    await pastePassportAuthorizationCode(context);
-    return;
-  }
-  const loginLabel = '登录 / 升级 Pro';
-  const pasteLabel = '粘贴授权码';
-  const choice = await vscode.window.showInformationMessage('管理 SoloMap Pro 授权。', loginLabel, pasteLabel);
-  if (choice === loginLabel) {
-    await beginPassportAuthorizationFlow(context);
-    return;
-  }
-  if (choice === pasteLabel) {
-    await pastePassportAuthorizationCode(context);
   }
 }
 
@@ -1690,16 +1652,16 @@ async function handlePassportUri(context: vscode.ExtensionContext, uri: vscode.U
     authNonce: pendingPassportAuthNonce,
     callbackUri
   });
-  const callbackIntent = String(params.get('intent') || '') === 'collaboration' ? 'collaboration' : pendingPassportAuthIntent;
-  if (callbackIntent === 'collaboration' ? !result.authenticated : !result.allowed) {
-    vscode.window.showWarningMessage(callbackIntent === 'collaboration' ? 'SoloMap 登录未完成。' : 'SoloMap Pro 授权未通过。');
+  const callbackIntent = String(params.get('intent') || '') === 'account' ? 'account' : pendingPassportAuthIntent;
+  if (callbackIntent === 'account' ? !result.authenticated : !result.allowed) {
+    vscode.window.showWarningMessage(callbackIntent === 'account' ? 'SoloMap 登录未完成。' : 'SoloMap Pro 授权未通过。');
     return;
   }
   pendingPassportAuthNonce = null;
   pendingPassportAuthIntent = null;
   await writePassportGrant(context, result, result.grant || grant);
-  if (callbackIntent === 'collaboration') {
-    vscode.window.showInformationMessage('已登录 SoloMap，可以进入共创大厅。');
+  if (callbackIntent === 'account') {
+    vscode.window.showInformationMessage(result.allowed ? '已登录 SoloMap，Pro 权限已恢复。' : '已登录 SoloMap。');
     return;
   }
   vscode.window.showInformationMessage('SoloMap Pro 已解锁。');

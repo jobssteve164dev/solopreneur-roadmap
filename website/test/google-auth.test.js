@@ -100,7 +100,7 @@ test("a returning paid Google account reuses its product identity, links before 
     if (url.endsWith("/api/oidc/userinfo")) return json({ sub: "passport-user-1", email: "PAID@example.com", email_verified: true, name: "Paid Builder" });
     if (url.includes("/api/v1/passport/lookup?")) return json({ ok: true, data: { products: [{ product: "aif", productUid: "wrong-product-user" }, { product: "solomap", productUid: "solomap-user-1" }] } });
     if (url.endsWith("/api/v1/passport/link")) return json({ ok: true, data: { linked: true, userId: "passport-user-1", productUid: "solomap-user-1" } });
-    if (url.endsWith("/api/v1/entitlements/access-check")) return json({ ok: true, data: { allowed: true, email: "paid@example.com", userId: "solomap-user-1", entitlements: ["strategy_pyramid", "flow_mode", "collaboration_pro"] } });
+    if (url.endsWith("/api/v1/entitlements/access-check")) return json({ ok: true, data: { allowed: true, reason: "feature_granted", email: "paid@example.com", userId: "solomap-user-1", product: "solomap", featureKey: "strategy_pyramid", productAccess: { active: true }, featureGrant: { featureKey: "strategy_pyramid", active: true } } });
     if (url.endsWith("/api/v1/billing/catalog")) return json({ ok: true, data: { plans: [{ interval: "year", currency: "usd", amountCents: 2900, planId: "solomap_pro_early_access_yearly", featureKeys: ["strategy_pyramid", "flow_mode", "collaboration_pro"], metadata: { deviceLimit: 5 } }] } });
     throw new Error(`Unexpected fetch: ${url}`);
   };

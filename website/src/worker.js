@@ -1123,7 +1123,7 @@ async function resolveCollaborationAccountCreator(request, env) {
   return { subjectId: `account:${stableId}`, tier: verified.allowed ? "pro" : "account" };
 }
 
-async function handleCollaborationAccountStart(request, env) {
+async function handleSoloMapAccountStart(request, env) {
   const url = new URL(request.url);
   const callback = String(url.searchParams.get("callback") || "");
   const authNonce = normalizeAuthNonce(url.searchParams.get("auth_nonce"));
@@ -1135,14 +1135,18 @@ async function handleCollaborationAccountStart(request, env) {
     const returnTo = `${url.pathname}${url.search}`;
     return Response.redirect(`${url.origin}/login?return_to=${encodeURIComponent(returnTo)}`, 302);
   }
-  const grant = await issueSoloMapGrant(env, String(session.email || ""), {
-    userId: String(session.id || session.email || ""),
-    entitlements: ["collaboration_lobby"]
+  const access = await resolvePassportAccessForUser(env, {
+    email: String(session.email || ""),
+    userId: String(session.id || "")
+  });
+  const grant = await issueSoloMapGrant(env, String(access.email || session.email || ""), {
+    userId: String(access.userId || session.id || session.email || ""),
+    entitlements: access.allowed ? access.entitlements : ["base_access"]
   });
   const code = await issueCollaborationAccountExchangeCode(env, grant, { callback, authNonce });
   const callbackUrl = new URL(callback);
   callbackUrl.searchParams.set("code", code);
-  callbackUrl.searchParams.set("intent", "collaboration");
+  callbackUrl.searchParams.set("intent", "account");
   return Response.redirect(callbackUrl.toString(), 302);
 }
 
@@ -1168,14 +1172,17 @@ async function verifyGrantWithPassport(env, grant) {
   }
   const body = await response.json();
   const data = body && typeof body === "object" && body.ok === true && body.data ? body.data : body;
+  const plan = Boolean(data.allowed) ? await getPassportProPlan(env) : null;
+  const planFeatures = getPlanFeatureKeys(plan);
+  const allowed = Boolean(data.allowed) && planFeatures.includes(STRATEGY_PYRAMID_FEATURE);
   return {
-    authenticated: Boolean(data.authenticated || data.allowed) && Boolean(data.email || data.userId || data.user_id),
-    allowed: Boolean(data.allowed),
+    authenticated: Boolean(data.email || data.userId || data.user_id),
+    allowed,
     reason: String(data.reason || ""),
     email: String(data.email || ""),
     userId: String(data.userId || data.user_id || ""),
-    entitlements: Array.isArray(data.entitlements) ? data.entitlements.map((item) => String(item || "")).filter(Boolean) : [],
-    deviceLimit: Number(data.deviceLimit || data.device_limit || 0),
+    entitlements: allowed ? planFeatures : [],
+    deviceLimit: allowed ? getProDeviceLimit(plan) : 0,
     expiresAt: String(data.expiresAt || data.expires_at || "")
   };
 }
@@ -1213,16 +1220,25 @@ async function checkPassportAccessForUser(env, userinfo) {
         entitlements: []
       };
     }
+    if (!data.allowed) {
+      return {
+        allowed: false,
+        reason: String(data.reason || "not_entitled"),
+        email: String(data.email || email),
+        userId: String(data.userId || data.user_id || userId),
+        entitlements: [],
+        deviceLimit: 0
+      };
+    }
     const plan = await getPassportProPlan(env);
     const planFeatures = getPlanFeatureKeys(plan);
-    const entitlements = Array.isArray(data.entitlements) ? data.entitlements.map((item) => String(item || "")).filter(Boolean) : [];
-    const allowed = Boolean(data.allowed) && entitlements.includes(STRATEGY_PYRAMID_FEATURE) && planFeatures.includes(STRATEGY_PYRAMID_FEATURE);
+    const allowed = Boolean(data.allowed) && planFeatures.includes(STRATEGY_PYRAMID_FEATURE);
     return {
       allowed,
       reason: String(data.reason || ""),
       email: String(data.email || email),
       userId: String(data.userId || data.user_id || userId),
-      entitlements: allowed ? entitlements.filter((item) => planFeatures.includes(item)) : [],
+      entitlements: allowed ? planFeatures : [],
       deviceLimit: allowed ? getProDeviceLimit(plan) : 0
     };
   }
@@ -6531,8 +6547,8 @@ export default {
       return handleCollaborationSocket(request, env);
     }
 
-    if (request.method === "GET" && url.pathname === "/api/collaboration/account/start") {
-      return handleCollaborationAccountStart(request, env);
+    if (request.method === "GET" && (url.pathname === "/api/account/start" || url.pathname === "/api/collaboration/account/start")) {
+      return handleSoloMapAccountStart(request, env);
     }
 
     const collaborationRoomMatch = url.pathname.match(/^\/(zh\/)?room(?:\/([A-Za-z0-9_-]{20,64}))?$/);

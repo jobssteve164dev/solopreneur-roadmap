@@ -927,7 +927,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(html, /id="agent-readiness-panel"/);
   assert.match(html, /id="pro-account-panel"/);
   assert.match(html, /id="btn-open-pro-authorization"/);
-  assert.match(html, /id="btn-paste-pro-code"/);
+  assert.doesNotMatch(html, /id="btn-paste-pro-code"/);
   assert.match(html, /id="automation-trigger-select"/);
   assert.match(html, /id="automation-action-select"/);
   assert.match(html, /id="automation-time-input"/);
@@ -935,8 +935,9 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /automationActionNone/);
   assert.match(script, /openScheduledTasks/);
   assert.doesNotMatch(html, /automation-trigger-row|automation-check/);
-  assert.match(script, /entitlement\.login/);
-  assert.match(script, /entitlement\.paste/);
+  assert.match(script, /account\.login/);
+  assert.match(script, /entitlement\.upgrade/);
+  assert.doesNotMatch(script, /entitlement\.paste/);
   assert.match(html, /data-issue-panel/);
   assert.match(script, /command: 'project\.continue',\s*projectPath,\s*nodeId,\s*agentCli: getEffectiveSettingCliPath\(\)/);
   assert.match(script, /command: 'project\.continue',\s*projectPath: button\.getAttribute\('data-continue-project-path'\),\s*nodeId: button\.getAttribute\('data-continue-node-id'\),\s*agentCli: getEffectiveSettingCliPath\(\)/);
@@ -947,7 +948,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /data-collaboration-invite-code/);
   assert.match(script, /command: 'collaboration\.joinRoom'/);
   assert.match(script, /command: 'collaboration\.copyInviteCode'/);
-  assert.match(script, /command: 'collaboration\.login'/);
+  assert.doesNotMatch(script, /command: 'collaboration\.login'/);
+  assert.match(script, /data-open-account-settings/);
   assert.match(script, /command: 'collaboration\.joinLobby'/);
   assert.match(script, /collaborationLobbyTitle: '共创大厅'/);
   assert.match(script, /collaborationLobbySignedOut: '登录后即可进入，未登录用户不能查看或发言。'/);
@@ -1019,7 +1021,6 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'setting-global-data-path',
     'pro-account-panel',
     'btn-open-pro-authorization',
-    'btn-paste-pro-code',
     'automation-trigger-select',
     'automation-action-select',
     'automation-prompt-input',
@@ -1232,9 +1233,30 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
   postedMessages.length = 0;
   elements['btn-open-pro-authorization'].listeners.click();
-  elements['btn-paste-pro-code'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'entitlement.login'));
-  assert.ok(postedMessages.some((message) => message.command === 'entitlement.paste'));
+  assert.ok(postedMessages.some((message) => message.command === 'account.login'));
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: {
+      language: 'zh',
+      proAccount: { authenticated: true, allowed: false, email: 'free@solomap.app' },
+      proEntitlements: {}
+    }
+  });
+  assert.match(elements['pro-account-panel'].innerHTML, /free@solomap\.app/);
+  assert.match(elements['pro-account-panel'].innerHTML, /免费账号/);
+  postedMessages.length = 0;
+  elements['btn-open-pro-authorization'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'entitlement.upgrade'));
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: {
+      language: 'zh',
+      proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app' },
+      proEntitlements: { strategy_pyramid: true }
+    }
+  });
+  assert.match(elements['pro-account-panel'].innerHTML, /SoloMap Pro/);
+  assert.equal(elements['btn-open-pro-authorization'].style.display, 'none');
   elements['btn-check-dependencies'].listeners.click();
   assert.equal(elements['dependency-panel'].style.display, 'block');
   assert.equal(elements['btn-check-dependencies'].attributes['aria-expanded'], 'true');
@@ -2750,7 +2772,6 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
     'setting-global-data-path',
     'pro-account-panel',
     'btn-open-pro-authorization',
-    'btn-paste-pro-code',
     'setting-feedback-title',
     'setting-feedback-body',
     'btn-open-feedback',
@@ -5247,7 +5268,7 @@ test('pro account module keeps expired remote grants from unlocking local featur
     email: 'member@solomap.app',
     expiresAt: '2999-01-01T00:00:00.000Z'
   });
-  assert.match(proAccount.buildPassportAccountUrl('n'.repeat(32), 'vscode://SZLK.solopreneur-roadmap/passport/callback'), /\/api\/collaboration\/account\/start/);
+  assert.match(proAccount.buildPassportAccountUrl('n'.repeat(32), 'vscode://SZLK.solopreneur-roadmap/passport/callback'), /\/api\/account\/start/);
 
   assert.equal(proAccount.hasProEntitlement({
     proEntitlements: { strategy_pyramid: true },

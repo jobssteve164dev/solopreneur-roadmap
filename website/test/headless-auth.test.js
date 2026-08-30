@@ -71,7 +71,6 @@ test("headless login binds the SoloMap product identity before issuing a session
       "/api/v1/passport/lookup",
       "/api/v1/passport/link",
       "/api/v1/entitlements/access-check",
-      "/api/v1/billing/catalog",
     ]);
   } finally {
     globalThis.fetch = originalFetch;

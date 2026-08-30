@@ -109,7 +109,7 @@ export function buildPassportProUrl(mode: 'callback' | 'device', authNonce: stri
 }
 
 export function buildPassportAccountUrl(authNonce: string, callbackUri: string): string {
-  const url = new URL('/api/collaboration/account/start', getPassportBaseUrl());
+  const url = new URL('/api/account/start', getPassportBaseUrl());
   url.searchParams.set('source', 'vscode');
   url.searchParams.set('auth_nonce', authNonce);
   url.searchParams.set('callback', callbackUri);

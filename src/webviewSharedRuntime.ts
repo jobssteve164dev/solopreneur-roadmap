@@ -339,24 +339,16 @@ function bootstrapSoloMapWebviewRuntime(): void {
   function renderProAccount(panel: Element | null, settings: any, t: (key: string) => string, language: string): void {
     if (!panel) return;
     const account = settings?.proAccount || {};
+    const authenticated = Boolean(account.authenticated);
     const unlocked = hasProEntitlement(settings || {}, 'strategy_pyramid');
     const email = String(account.email || '').trim();
-    const expiresAt = String(account.expiresAt || '').trim();
-    let expiresText = '';
-    if (expiresAt) {
-      const dateText = new Date(expiresAt).toLocaleDateString(language === 'zh' ? 'zh-CN' : 'en-US');
-      expiresText = '<div class="dependency-message">' + escapeHtml(t('proValidUntil')) + ' ' + escapeHtml(dateText) + '</div>' +
-        '<div class="dependency-message" style="font-size: 10px; opacity: 0.8; line-height: 1.35; margin-top: 2px; color: var(--vscode-descriptionForeground, var(--text-muted));">' +
-        escapeHtml(t('proExpirationHelp')) + '</div>';
-    }
     panel.innerHTML =
       '<div class="dependency-item"><div class="dependency-info">' +
-      '<div class="dependency-name">' + escapeHtml(t('proFeatureName')) + '</div>' +
+      '<div class="dependency-name">' + escapeHtml(t('accountName')) + '</div>' +
       '<div class="dependency-message">' + escapeHtml(email || t('proAccountAnonymous')) + '</div>' +
-      expiresText +
-      '<div class="dependency-message">' + escapeHtml(t('proAccountHelp')) + '</div></div>' +
-      '<span class="dependency-status ' + (unlocked ? 'ready' : 'missing') + '">' +
-      escapeHtml(unlocked ? t('proUnlocked') : t('proLocked')) + '</span></div>';
+      '<div class="dependency-message">' + escapeHtml(t(unlocked ? 'accountProHelp' : authenticated ? 'accountSignedInHelp' : 'accountSignedOutHelp')) + '</div></div>' +
+      '<span class="dependency-status ' + (unlocked || authenticated ? 'ready' : 'missing') + '">' +
+      escapeHtml(unlocked ? 'SoloMap Pro' : authenticated ? t('accountFree') : t('proAccountAnonymous')) + '</span></div>';
   }
 
   function renderOnboardingPanel(t: (key: string) => string): string {

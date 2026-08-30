@@ -4056,12 +4056,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
 
     <div class="settings-card">
-      <div class="settings-card-title"><span class="codicon codicon-account"></span><span id="settings-section-account">SoloMap Pro</span></div>
+      <div class="settings-card-title"><span class="codicon codicon-account"></span><span id="settings-section-account">SoloMap 账号</span></div>
       <div class="settings-field">
         <div class="dependency-panel" id="pro-account-panel"></div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px;">
-          <button class="settings-action-btn save-btn" id="btn-open-pro-authorization"><span class="codicon codicon-lock"></span><span id="text-open-pro-authorization">登录 / 升级 Pro</span></button>
-          <button class="settings-action-btn test-btn" id="btn-paste-pro-code"><span class="codicon codicon-key"></span><span id="text-paste-pro-code">粘贴授权码</span></button>
+        <div style="display:grid; grid-template-columns: 1fr; gap: 6px; margin-top: 8px;">
+          <button class="settings-action-btn save-btn" id="btn-open-pro-authorization"><span class="codicon codicon-sign-in"></span><span id="text-open-pro-authorization">登录 SoloMap</span></button>
         </div>
       </div>
     </div>
@@ -4453,7 +4452,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
     const proAccountPanel = document.getElementById('pro-account-panel');
     const btnOpenProAuthorization = document.getElementById('btn-open-pro-authorization');
-    const btnPasteProCode = document.getElementById('btn-paste-pro-code');
     const settingAbilitySelect = document.getElementById('setting-ability-select');
     const settingsAbilityUrlInputContainer = document.getElementById('settings-ability-url-input-container');
     const settingAbilityUrlInput = document.getElementById('setting-ability-url-input');
@@ -4505,7 +4503,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let collaborationNotice = '';
     let collaborationPendingCopyRoomId = '';
     let collaborationPendingRoom = null;
-    let collaborationLobbyLoginPending = false;
     let collaborationNickname = String((typeof vscode.getState === 'function' && vscode.getState() && vscode.getState().collaborationNickname) || '');
     const collaborationMessages = new Map();
     const collaborationCreatedQuickNoteIds = new Set();
@@ -5019,15 +5016,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const lobbyAuthenticated = Boolean(currentSettings && currentSettings.proAccount && currentSettings.proAccount.authenticated);
         const lobbyAction = lobbyAuthenticated
           ? '<button type="button" class="collaboration-primary" data-collaboration-lobby' + (collaborationBusy ? ' disabled' : '') + '>' + escapeHtml(collaborationConnectionState === 'joining' ? t('collaborationJoining') : t('collaborationLobbyJoin')) + '</button>'
-          : '<button type="button" class="collaboration-primary" data-collaboration-login' + (collaborationLobbyLoginPending ? ' disabled' : '') + '>' + escapeHtml(collaborationLobbyLoginPending ? t('collaborationLoginOpening') : t('collaborationLoginRequired')) + '</button>';
+          : '<button type="button" class="collaboration-primary" data-open-account-settings>' + escapeHtml(t('collaborationOpenAccountSettings')) + '</button>';
         collaborationContent.innerHTML = '<div class="collaboration-start"><div class="collaboration-lobby-card"><span class="collaboration-lobby-copy"><span class="collaboration-lobby-title">' + escapeHtml(t('collaborationLobbyTitle')) + '</span><span class="collaboration-lobby-detail">' + escapeHtml(lobbyAuthenticated ? t('collaborationLobbyDetail') : t('collaborationLobbySignedOut')) + '</span></span>' + lobbyAction + '</div><p class="collaboration-intro">' + escapeHtml(t('collaborationIntro')) + '</p><div class="collaboration-create-row"><label class="collaboration-create-label" for="collaboration-nickname">' + escapeHtml(t('collaborationNameLabel')) + '</label><div class="collaboration-create-controls"><input id="collaboration-nickname" type="text" class="settings-input" maxlength="40" data-collaboration-nickname placeholder="' + escapeHtml(t('collaborationNamePlaceholder')) + '" value="' + escapeHtml(collaborationNickname) + '"><button type="button" class="collaboration-primary" data-collaboration-create' + (collaborationBusy ? ' disabled' : '') + '><span class="codicon codicon-live-share"></span><span>' + escapeHtml(collaborationConnectionState === 'creating' ? t('collaborationCreating') : t('collaborationCreate')) + '</span></button></div><div class="collaboration-quota-note">' + escapeHtml(collaborationQuotaLabel(collaborationExpectedTier())) + '</div></div><div class="collaboration-join-row"><label class="collaboration-create-label" for="collaboration-invite-code">' + escapeHtml(t('collaborationInviteCodeLabel')) + '</label><div class="collaboration-join-controls"><input id="collaboration-invite-code" type="text" class="settings-input" data-collaboration-invite-code autocomplete="off" spellcheck="false" placeholder="' + escapeHtml(t('collaborationInviteCodePlaceholder')) + '"><button type="button" class="collaboration-secondary" data-collaboration-join' + (collaborationBusy ? ' disabled' : '') + '>' + escapeHtml(collaborationConnectionState === 'joining' ? t('collaborationJoining') : t('collaborationJoin')) + '</button></div></div>' + (collaborationError ? '<div class="collaboration-error" role="alert">' + escapeHtml(collaborationError) + '</div>' : '') + '</div><div class="collaboration-room-list"><div class="collaboration-room-list-title">' + escapeHtml(t('collaborationRooms')) + '</div>' + roomRows + '</div>';
         const lobbyButton = collaborationContent.querySelector('[data-collaboration-lobby]');
         if (lobbyButton) lobbyButton.addEventListener('click', joinCollaborationLobby);
-        const loginButton = collaborationContent.querySelector('[data-collaboration-login]');
-        if (loginButton) loginButton.addEventListener('click', () => {
-          collaborationLobbyLoginPending = true;
-          renderCollaborationPanel();
-          vscode.postMessage({ command: 'collaboration.login' });
+        const accountSettingsButton = collaborationContent.querySelector('[data-open-account-settings]');
+        if (accountSettingsButton) accountSettingsButton.addEventListener('click', () => {
+          collaborationPanel.style.display = 'none';
+          btnToggleCollaboration.classList.remove('is-active');
+          settingsPanel.style.display = 'block';
         });
         const createButton = collaborationContent.querySelector('[data-collaboration-create]');
         if (createButton) createButton.addEventListener('click', createCollaborationRoom);
@@ -5314,7 +5311,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationReviewHelp: '复核会作为同一环节的一条独立对话记录。',
         reviewerSame: '跟随主 Agent',
         settingsSectionBasic: '基础',
-        settingsSectionAccount: '账户与 Pro',
+        settingsSectionAccount: 'SoloMap 账号',
         settingsSectionAgent: 'Agent 协作',
         settingsSectionData: '项目数据',
         settingsSectionInstructions: '默认指令',
@@ -5387,6 +5384,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         proLogin: '登录 / 升级 Pro',
         proPasteCode: '粘贴授权码',
         proAccountHelp: '登录后即可打开 Pro 功能；本地项目数据仍留在你的工作区。',
+        accountName: 'SoloMap 账号',
+        accountFree: '免费账号',
+        accountLogin: '登录 SoloMap',
+        proUpgrade: '升级 Pro',
+        accountSignedOutHelp: '登录后可使用账号功能；本地项目数据仍留在你的工作区。',
+        accountSignedInHelp: '已登录，可使用 SoloMap 免费功能。',
+        accountProHelp: 'Pro 权限已生效。',
         reviewHighRisk: '高风险任务',
         reviewAll: '每次任务',
         reviewOff: '关闭',
@@ -5449,6 +5453,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationLobbySignedOut: '登录后即可进入，未登录用户不能查看或发言。',
         collaborationLobbyJoin: '进入大厅',
         collaborationLoginRequired: '登录后进入',
+        collaborationOpenAccountSettings: '前往设置登录',
         collaborationLoginOpening: '正在打开…',
         collaborationLobbyPrivacy: '公开大厅 · 消息服务端可见 · 整点永久清空 · 参与者不能控制 Agent',
         collaborationLobbyEndingSoon: '本轮即将结束，消息将在整点永久清空',
@@ -5760,7 +5765,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationReviewHelp: 'Review runs appear as a separate conversation in the same step.',
         reviewerSame: 'Same as main Agent',
         settingsSectionBasic: 'Basics',
-        settingsSectionAccount: 'Account & Pro',
+        settingsSectionAccount: 'SoloMap Account',
         settingsSectionAgent: 'Agent Collaboration',
         settingsSectionData: 'Project Data',
         settingsSectionInstructions: 'Instructions',
@@ -5833,6 +5838,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         proLogin: 'Sign in / Upgrade Pro',
         proPasteCode: 'Paste authorization code',
         proAccountHelp: 'Sign in to open Pro features; local project data stays in your workspace.',
+        accountName: 'SoloMap Account',
+        accountFree: 'Free account',
+        accountLogin: 'Sign in to SoloMap',
+        proUpgrade: 'Upgrade to Pro',
+        accountSignedOutHelp: 'Sign in to use account features; local project data stays in your workspace.',
+        accountSignedInHelp: 'Signed in with access to SoloMap free features.',
+        accountProHelp: 'Your Pro access is active.',
         reviewHighRisk: 'High-risk tasks',
         reviewAll: 'Every task',
         reviewOff: 'Off',
@@ -5895,6 +5907,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationLobbySignedOut: 'Sign in to enter. Signed-out users cannot read or post messages.',
         collaborationLobbyJoin: 'Enter lobby',
         collaborationLoginRequired: 'Sign in to enter',
+        collaborationOpenAccountSettings: 'Sign in from Settings',
         collaborationLoginOpening: 'Opening…',
         collaborationLobbyPrivacy: 'Public lobby · server-visible messages · permanently cleared on the hour · participants cannot control the Agent',
         collaborationLobbyEndingSoon: 'This session is ending soon. Messages will be permanently cleared on the hour.',
@@ -6312,7 +6325,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('impact-progress-label', t('impactProgress'));
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
       setText('text-open-pro-authorization', t('proLogin'));
-      setText('text-paste-pro-code', t('proPasteCode'));
       setText('label-enhancement-toggles', t('abilityManagerLabel'));
       setText('help-enhancement-toggles', t('abilityManagerHelp'));
       setText('text-install-ability', t('installEnhancement'));
@@ -6634,13 +6646,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
-        vscode.postMessage({ command: 'entitlement.login' });
-      });
-    }
-
-    if (btnPasteProCode) {
-      btnPasteProCode.addEventListener('click', () => {
-        vscode.postMessage({ command: 'entitlement.paste' });
+        const authenticated = Boolean(currentSettings && currentSettings.proAccount && currentSettings.proAccount.authenticated);
+        vscode.postMessage({ command: authenticated ? 'entitlement.upgrade' : 'account.login' });
       });
     }
 
@@ -6774,6 +6781,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderProAccount(settings) {
       SoloMapWebview.renderProAccount(proAccountPanel, settings, t, currentLanguage);
+      if (!btnOpenProAuthorization) return;
+      const authenticated = Boolean(settings && settings.proAccount && settings.proAccount.authenticated);
+      const unlocked = hasStrategyPyramidPro(settings);
+      btnOpenProAuthorization.style.display = unlocked ? 'none' : '';
+      const actionText = btnOpenProAuthorization.querySelector('span:last-child');
+      if (actionText) actionText.textContent = authenticated ? t('proUpgrade') : t('accountLogin');
+      const actionIcon = btnOpenProAuthorization.querySelector('.codicon');
+      if (actionIcon) actionIcon.className = 'codicon ' + (authenticated ? 'codicon-rocket' : 'codicon-sign-in');
     }
 
     function dependencyBadge(ok) {
@@ -7601,7 +7616,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             break;
           }
           currentSettings = message.settings || {};
-          if (currentSettings.proAccount && currentSettings.proAccount.authenticated) collaborationLobbyLoginPending = false;
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
           Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
           applySettingCliPath(message.settings.cliPath || 'agy');
@@ -7815,13 +7829,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }
 
         case 'collaborationLobbyJoined':
-          collaborationLobbyLoginPending = false;
           collaborationConnectionState = 'idle';
           collaborationConnectLobby(message);
           break;
 
         case 'collaborationLobbyLoginRequired':
-          collaborationLobbyLoginPending = false;
           collaborationConnectionState = 'idle';
           collaborationError = t('collaborationLobbySignedOut');
           renderCollaborationPanel();
@@ -9017,7 +9029,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       container.querySelectorAll('[data-open-pro-upgrade]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
-          vscode.postMessage({ command: 'entitlement.login' });
+          vscode.postMessage({ command: 'entitlement.upgrade' });
         });
       });
       container.querySelectorAll('[data-open-flow-view]').forEach(button => {
