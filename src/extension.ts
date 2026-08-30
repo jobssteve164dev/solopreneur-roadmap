@@ -5636,7 +5636,11 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
   ];
 }
 
-function postNodeConversations(nodeId: string, fallbackConversations: import('./db/types').AgentConversation[] = []): void {
+function postNodeConversations(
+  nodeId: string,
+  fallbackConversations: import('./db/types').AgentConversation[] = [],
+  refreshSidebarSnapshot = true
+): void {
   if (syncEngine && activePanel) {
     const pageSize = 20;
     const page = nodeId === soloConversationId
@@ -5660,6 +5664,7 @@ function postNodeConversations(nodeId: string, fallbackConversations: import('./
   if (
     sidebarProvider
     && activeProjectRoot
+    && refreshSidebarSnapshot
     && nodeId !== roadmapRevisionId
     && typeof sidebarProvider.refreshProjectConversationSnapshotAfterStatusChange === 'function'
   ) {
@@ -8732,8 +8737,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         status: 'Processed',
         processedAt: new Date().toISOString()
       });
-      if (isActiveProject) postNodeConversations(nodeId);
-      if (!isActiveProject) {
+      if (isActiveProject) postNodeConversations(nodeId, [], false);
+      if (workspaceRoot) {
         await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
       }
       processedSuccessfully = true;
@@ -9381,9 +9386,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     if (isActiveProject) {
       sendNodesToWebview();
-      postNodeConversations(nodeId);
+      postNodeConversations(nodeId, [], false);
     }
-    if (workspaceRoot && !isActiveProject) {
+    if (workspaceRoot) {
       await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
     }
     refreshSidebarProjectCards();

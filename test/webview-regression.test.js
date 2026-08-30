@@ -8350,6 +8350,68 @@ test('task sentinel refreshes the settled project conversation snapshot after pe
   assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Waiting');
 });
 
+test('active project settlement waits for its terminal sidebar snapshot before completing', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-active-sidebar-settlement-'));
+  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '61');
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  for (const fileName of ['output.log', 'changes.txt', 'touched-files.txt']) {
+    fs.writeFileSync(path.join(runDir, fileName), '', 'utf8');
+  }
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    agentCli: 'codex',
+    executionLogId: 61,
+    rootExecutionLogId: 61,
+    interactiveSession: true,
+    checkpointOutcome: 'partial',
+    checkpointSummary: '本轮已完成',
+    outputFilePath: path.join(runDir, 'output.log'),
+    changesFilePath: path.join(runDir, 'changes.txt'),
+    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
+    startedAt: '2026-08-30T00:00:00.000Z'
+  }), 'utf8');
+  let releaseRefresh;
+  let signalRefreshEntered;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  const refreshEntered = new Promise((resolve) => { signalRefreshEntered = resolve; });
+  let settled = false;
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 61, nodeId: '__solo__', output: 'Interactive session state: Running', status: 'Running' }],
+    getAgentExecutions: () => [],
+    updateAgentExecution: () => true,
+    logAgentExecution: () => 61
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {
+      signalRefreshEntered();
+      await refreshGate;
+    },
+    sendLocalProjects() {}
+  });
+
+  const settlement = extensionModule.__processAgentStatusFile(statusFilePath).then(() => { settled = true; });
+  await refreshEntered;
+
+  assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Waiting');
+  assert.equal(settled, false, 'the task must not settle while the card still has an older snapshot');
+  releaseRefresh();
+  await settlement;
+  assert.equal(settled, true);
+});
+
 test('interactive start checkpoint opens a new tracked turn under the same terminal session', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
