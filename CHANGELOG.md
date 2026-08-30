@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.437 - 2026-08-30
+
+### Fixed
+- unify account login in settings (0ff18eb)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.436 - 2026-08-30
 
 ### Added
