@@ -43,10 +43,12 @@ Agent 每轮从插件提示词获得唯一命令入口：
 
 ```text
 node "$SOLOMAP_TASK_COMMAND" start --message "当前要求"
-node "$SOLOMAP_TASK_COMMAND" complete --outcome <结果> --summary "本轮结果" --next "下一步"
+node "$SOLOMAP_TASK_COMMAND" complete --message "当前要求" --outcome <结果> --summary "本轮结果" --next "下一步"
 ```
 
 其中 `complete` 的结果只允许：`partial`、`candidate_complete`、`blocked_user`、`blocked_external`、`failed`。`candidate_complete` 只提交路线图完成候选，不能绕过完成标准或副 Agent 复核。Agent 不能直接编辑状态文件、完成文件或 SQLite 账本。
+
+入账可靠性不再只依赖 Agent 是否完整执行提示词：用户点击“继续”时，插件必须先创建活动轮次，再开放现有终端输入；`Waiting` 是可长期保持的合法状态，不设置短时过期。若 Agent 在终端内漏掉 `start` 但执行了 `complete`，状态消费者必须为该完成事件补建独立轮次，不能覆盖上一条记录。状态事件按 `checkpointEventId` 防止旧结算覆盖新事件，处理期间到达的新事件进入待处理队列；`Waiting` 必须先于对话历史刷新落盘。
 
 ## 核心决策
 
@@ -80,6 +82,7 @@ Agent 的 Stop Hook、终端关闭或 SessionEnd 都不得直接把路线图环�
 ### 3. 任务哨兵监控活动轮次，不监控空闲会话
 
 - 用户提交输入时创建活动轮次并进入“正在执行”。
+- 用户通过“继续”进入原生终端时，也必须在终端可输入前创建活动轮次。
 - Agent 完成回复后结算该轮次并退出 `Running`。
 - 终端仍然存在时，会话进入“等待你继续”；跨窗口会话登记继续保留，但任务哨兵不会把它计作正在运行的任务。
 - 用户再次输入时，在同一主对话下创建下一轮并重新注册活动轮次。

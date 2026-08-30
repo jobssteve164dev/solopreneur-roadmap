@@ -126,3 +126,60 @@ test('checkpoint command scopes writes, records a turn, and captures its workspa
   assert.notEqual(wrongToken.status, 0);
   assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).checkpointSummary, '完成最小修正');
 });
+
+test('completion checkpoint recovers a missing start without overwriting the previous turn identity', () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-checkpoint-recovery-'));
+  const runtimePath = ensureTaskCheckpointRuntime(workspaceRoot);
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '7');
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '7.json');
+  const snapshotFilePath = path.join(runDir, 'workspace-before.json');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  const completionDecisionFilePath = path.join(runDir, 'completion.json');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(snapshotFilePath, '{}', 'utf8');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    executionLogId: 9,
+    rootExecutionLogId: 7,
+    interactiveSession: true,
+    checkpointToken: 'recovery-token',
+    checkpointSequence: 4,
+    status: 'Waiting',
+    workspaceSnapshotPath: snapshotFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    completionDecisionFilePath
+  }), 'utf8');
+
+  const result = cp.spawnSync(process.execPath, [
+    runtimePath,
+    'complete',
+    '--message',
+    '补充审计结果',
+    '--outcome',
+    'partial',
+    '--summary',
+    '已完成补充审计'
+  ], {
+    cwd: workspaceRoot,
+    env: {
+      ...process.env,
+      SOLOMAP_TASK_COMMAND: runtimePath,
+      SOLOMAP_TASK_STATUS_FILE: statusFilePath,
+      SOLOMAP_TASK_CHECKPOINT_TOKEN: 'recovery-token'
+    },
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const completedStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(completedStatus.status, 'In Progress');
+  assert.equal(completedStatus.executionLogId, 9, 'the command leaves identity allocation to the plugin consumer');
+  assert.equal(completedStatus.checkpointImplicitTurn, true);
+  assert.equal(completedStatus.checkpointMessage, '补充审计结果');
+  assert.equal(completedStatus.checkpointEventId, '5:complete');
+});

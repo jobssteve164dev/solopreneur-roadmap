@@ -249,6 +249,7 @@ let selectedProjectPathInMemory = '';
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
 const processingAgentStatusFiles = new Set<string>();
+const pendingAgentStatusFiles = new Set<string>();
 const activeConversationOwnerInstanceId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
@@ -920,7 +921,19 @@ async function handleSharedWebviewAction(
         const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
         const existingTerminal = findActiveAgentTerminal(conversationId);
         if (existingTerminal) {
-          existingTerminal.show(true);
+          const terminalProjectRoot = agentTerminalProjectRootsByConversationId.get(conversationId)
+            || String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+          const registered = await registerInteractiveConversationTurn(
+            terminalProjectRoot,
+            conversationId,
+            '继续当前 Agent 对话'
+          );
+          if (registered) {
+            existingTerminal.show(true);
+          } else {
+            vscode.window.showInformationMessage('当前会话暂时无法开始新一轮；本次没有发送内容，请稍后重试。');
+          }
+          refreshConversation(nodeId);
           return;
         }
         await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue', String(conversation?.agentCli || ''));
@@ -6406,10 +6419,7 @@ async function registerInteractiveConversationTurn(workspaceRoot: string, conver
   }
   const rootExecutionLogId = Number(statusData.rootExecutionLogId || statusData.executionLogId || conversationId);
   const statusFilePath = getAgentStatusFilePath(workspaceRoot, rootExecutionLogId);
-  try {
-    const ageMs = Date.now() - fs.statSync(statusFilePath).mtimeMs;
-    if (ageMs > 90_000) return false;
-  } catch {
+  if (!fs.existsSync(statusFilePath)) {
     return false;
   }
   const taskCheckpointCommandPath = String(statusData.taskCheckpointCommandPath || '').trim();
@@ -6435,8 +6445,18 @@ async function registerInteractiveConversationTurn(workspaceRoot: string, conver
     console.warn('SoloMap could not register the next interactive turn:', result.stderr || result.stdout);
     return false;
   }
-  await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
-  return String(readAgentStatus(statusFilePath)?.status || '') === 'Running';
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
+    const currentStatus = String(readAgentStatus(statusFilePath)?.status || '');
+    if (currentStatus === 'Running') {
+      return true;
+    }
+    if (currentStatus !== 'Turn Started') {
+      return false;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
 }
 
 async function handleContinueConversationTurn(
@@ -6635,6 +6655,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     'Agent continuation started.',
     `Run started at: ${new Date().toISOString()}`,
     buildContinuationMetadataBlock(rootConversationId, sessionId),
+    'User supplement:\n继续当前 Agent 对话',
     'Continuation mode: direct terminal with tracked sentinel recording.'
   ].filter(Boolean).join('\n\n');
   const executionLogId = syncEngine.logAgentExecution(
@@ -6649,12 +6670,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   fs.mkdirSync(runDir, { recursive: true });
   const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot);
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
-  const waitingSummary = [
-    launchSummary,
-    `Interactive session root: ${executionLogId}`,
-    'Interactive session state: Waiting'
-  ].join('\n\n');
-  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, waitingSummary, 'Recorded');
+  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
   const { finalCommand } = buildAgentShellScript(
     agentCli,
     '',
@@ -6662,7 +6678,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     activeProjectRoot,
     nodeId,
     executionLogId,
-    '',
+    '继续当前 Agent 对话',
     undefined,
     sessionId,
     directExecutionCommand,
@@ -6674,8 +6690,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     settings.collaborationReviewMode,
     settings.enabledEnhancements,
     runDir,
-    statusFilePath,
-    { startWaiting: true }
+    statusFilePath
   );
   await launchAgentConversationTerminal({
     workspaceRoot: activeProjectRoot,
@@ -6702,6 +6717,13 @@ function readAgentStatus(statusFilePath: string): any | null {
   } catch {
     return null;
   }
+}
+
+function writeAgentStatus(statusFilePath: string, statusData: Record<string, any>): void {
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const temporaryPath = `${statusFilePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(statusData), 'utf8');
+  fs.renameSync(temporaryPath, statusFilePath);
 }
 
 function getAgentStatusFilePaths(workspaceRoot: string): string[] {
@@ -8485,9 +8507,57 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
   return true;
 }
 
+function ensureInteractiveTurnExecution(
+  statusSyncEngine: SyncEngine,
+  statusData: Record<string, any>,
+  workspaceRoot: string,
+  forceNew = false
+): { executionLogId: number; userMessage: string; startedAt: string } {
+  const nodeId = String(statusData.nodeId || '');
+  const rootExecutionLogId = Number(statusData.rootExecutionLogId || statusData.executionLogId || 0);
+  const currentExecutionLogId = Number(statusData.executionLogId || rootExecutionLogId || 0);
+  const userMessage = String(statusData.checkpointMessage || statusData.userMessage || '继续当前 Agent 对话').trim();
+  const startedAt = String(statusData.turnStartedAt || statusData.startedAt || new Date().toISOString());
+  const currentLogs = nodeId === soloConversationId && typeof statusSyncEngine.getProjectAgentExecutions === 'function'
+    ? statusSyncEngine.getProjectAgentExecutions()
+    : statusSyncEngine.getAgentExecutions(nodeId);
+  const currentConversation = currentLogs.find((entry) => Number(entry.id || 0) === currentExecutionLogId);
+  const executionLogId = !forceNew && currentConversation?.status === 'Running'
+    ? Number(currentConversation.id)
+    : statusSyncEngine.logAgentExecution(
+      nodeId,
+      String(statusData.agentCli || statusData.commandPreview || statusData.command || 'Unknown CLI'),
+      String(statusData.commandPreview || statusData.command || `${statusData.agentCli || 'Agent'} [interactive turn]`),
+      [
+        `Continuation parent conversation: ${rootExecutionLogId}`,
+        userMessage ? `User supplement:\n${userMessage}` : '',
+        `Run started at: ${startedAt}`,
+        `Interactive session root: ${rootExecutionLogId}`,
+        'Interactive session state: Running'
+      ].filter(Boolean).join('\n\n'),
+      'Running'
+    );
+  if (nodeId !== soloConversationId && nodeId !== roadmapRevisionId) {
+    const currentNode = statusSyncEngine.getNodes().find((candidate) => candidate.id === nodeId);
+    if (currentNode?.status !== 'Completed') {
+      statusSyncEngine.updateNode(nodeId, { status: 'Running', completedAt: '' });
+    }
+  }
+  const terminalName = String(statusData.terminalName || agentTerminalNamesByConversationId.get(rootExecutionLogId) || '');
+  if (terminalName) {
+    agentTerminalNamesByConversationId.set(executionLogId, terminalName);
+    agentTerminalProjectRootsByConversationId.set(executionLogId, workspaceRoot);
+  }
+  return { executionLogId, userMessage, startedAt };
+}
+
 async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   const normalizedStatusFilePath = path.resolve(statusFilePath);
-  if (!fs.existsSync(normalizedStatusFilePath) || processingAgentStatusFiles.has(normalizedStatusFilePath)) {
+  if (!fs.existsSync(normalizedStatusFilePath)) {
+    return;
+  }
+  if (processingAgentStatusFiles.has(normalizedStatusFilePath)) {
+    pendingAgentStatusFiles.add(normalizedStatusFilePath);
     return;
   }
 
@@ -8517,7 +8587,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       }
       return;
     }
-    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId, reviewMainAgentCli, reviewMainNativeSessionId, reviewAttempt, reviewTaskGoal, reviewCompletionCriteria } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId: statusExecutionLogId, userMessage: statusUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt: statusStartedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId, reviewMainAgentCli, reviewMainNativeSessionId, reviewAttempt, reviewTaskGoal, reviewCompletionCriteria } = statusData;
+    let executionLogId = Number(statusExecutionLogId || 0);
+    let userMessage = String(statusUserMessage || '');
+    let startedAt = String(statusStartedAt || '');
 
     if (!nodeId || !status || status === 'Running' || status === 'Waiting' || status === 'Processed') {
       return;
@@ -8536,6 +8609,17 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     if (!statusSyncEngine) {
       return;
+    }
+
+    if (statusData.interactiveSession === true && statusData.checkpointImplicitTurn === true && statusData.checkpointOutcome) {
+      const recoveredTurn = ensureInteractiveTurnExecution(statusSyncEngine, statusData, workspaceRoot, true);
+      executionLogId = recoveredTurn.executionLogId;
+      userMessage = recoveredTurn.userMessage;
+      startedAt = recoveredTurn.startedAt;
+      statusData.executionLogId = executionLogId;
+      statusData.userMessage = userMessage;
+      statusData.startedAt = startedAt;
+      writeAgentStatus(normalizedStatusFilePath, statusData);
     }
 
     if (status === 'Session Closed' && statusData.interactiveSession === true) {
@@ -8579,12 +8663,12 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       agentTerminalNamesByConversationId.delete(Number(executionLogId || 0));
       agentTerminalProjectRootsByConversationId.delete(rootExecutionLogId);
       agentTerminalProjectRootsByConversationId.delete(Number(executionLogId || 0));
-      fs.writeFileSync(normalizedStatusFilePath, JSON.stringify({
+      writeAgentStatus(normalizedStatusFilePath, {
         ...statusData,
         nativeSessionId: capturedSessionId,
         status: 'Processed',
         processedAt: new Date().toISOString()
-      }), 'utf8');
+      });
       if (isActiveProject) postNodeConversations(nodeId);
       await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
       processedSuccessfully = true;
@@ -8593,48 +8677,19 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     if (status === 'Turn Started' && statusData.interactiveSession === true) {
       const rootExecutionLogId = Number(statusData.rootExecutionLogId || executionLogId || 0);
-      const message = String(statusData.checkpointMessage || '').trim();
-      const currentLogs = nodeId === soloConversationId && typeof statusSyncEngine.getProjectAgentExecutions === 'function'
-        ? statusSyncEngine.getProjectAgentExecutions()
-        : statusSyncEngine.getAgentExecutions(nodeId);
-      const currentConversation = currentLogs.find((entry) => Number(entry.id || 0) === Number(executionLogId || 0));
-      const turnExecutionLogId = currentConversation?.status === 'Running'
-        ? Number(currentConversation.id)
-        : statusSyncEngine.logAgentExecution(
-          nodeId,
-          String(agentCli || commandPreview || command || 'Unknown CLI'),
-          String(commandPreview || command || `${agentCli} [interactive turn]`),
-          [
-            `Continuation parent conversation: ${rootExecutionLogId}`,
-            message ? `User supplement:\n${message}` : '',
-            `Run started at: ${String(statusData.turnStartedAt || new Date().toISOString())}`,
-            `Interactive session root: ${rootExecutionLogId}`,
-            'Interactive session state: Running'
-          ].filter(Boolean).join('\n\n'),
-          'Running'
-        );
-      if (nodeId !== soloConversationId && nodeId !== roadmapRevisionId) {
-        const currentNode = statusSyncEngine.getNodes().find((candidate) => candidate.id === nodeId);
-        if (currentNode?.status !== 'Completed') {
-          statusSyncEngine.updateNode(nodeId, { status: 'Running', completedAt: '' });
-        }
-      }
-      const terminalName = String(statusData.terminalName || agentTerminalNamesByConversationId.get(rootExecutionLogId) || '');
-      if (terminalName) {
-        agentTerminalNamesByConversationId.set(turnExecutionLogId, terminalName);
-        agentTerminalProjectRootsByConversationId.set(turnExecutionLogId, workspaceRoot);
-      }
-      fs.writeFileSync(normalizedStatusFilePath, JSON.stringify({
+      const registeredTurn = ensureInteractiveTurnExecution(statusSyncEngine, statusData, workspaceRoot);
+      writeAgentStatus(normalizedStatusFilePath, {
         ...statusData,
-        executionLogId: turnExecutionLogId,
+        executionLogId: registeredTurn.executionLogId,
         rootExecutionLogId,
-        userMessage: message,
+        userMessage: registeredTurn.userMessage,
         status: 'Running',
-        startedAt: String(statusData.turnStartedAt || new Date().toISOString()),
+        startedAt: registeredTurn.startedAt,
         checkpointOutcome: '',
         checkpointSummary: '',
-        checkpointNext: ''
-      }), 'utf8');
+        checkpointNext: '',
+        checkpointImplicitTurn: false
+      });
       if (isActiveProject) {
         sendNodesToWebview();
         postNodeConversations(nodeId);
@@ -9147,6 +9202,26 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       );
     }
 
+    const keepInteractiveSessionOpen = statusData.interactiveSession === true && statusData.interactiveSessionClosed !== true;
+    const currentStatus = readAgentStatus(normalizedStatusFilePath);
+    const capturedCheckpointEventId = String(statusData.checkpointEventId || '');
+    const belongsToProcessedRun = currentStatus
+      && Number(currentStatus.executionLogId || 0) === Number(executionLogId || 0)
+      && String(currentStatus.status || '') === String(status || '')
+      && (!capturedCheckpointEventId || String(currentStatus.checkpointEventId || '') === capturedCheckpointEventId);
+    if (belongsToProcessedRun && fs.existsSync(normalizedStatusFilePath)) {
+      writeAgentStatus(normalizedStatusFilePath, {
+        ...currentStatus,
+        status: keepInteractiveSessionOpen ? 'Waiting' : 'Processed',
+        ...(keepInteractiveSessionOpen ? {
+          checkpointSettledStatus: nextStatus,
+          waitingSince: new Date().toISOString(),
+          checkpointImplicitTurn: false
+        } : {}),
+        processedAt: new Date().toISOString()
+      });
+    }
+
     const taskGoal = String(reviewTaskGoal || (isSoloConversation
       ? userMessage
       : [currentNode?.title, currentNode?.description].filter(Boolean).join('：')) || userMessage || '').trim();
@@ -9291,14 +9366,13 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     } else if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
     } else if (statusData.interactiveSession === true) {
-      vscode.window.showInformationMessage('本轮已记录，可在当前 Agent 终端继续对话。');
+      vscode.window.showInformationMessage('本轮已记录；点击“继续”后可在当前 Agent 终端输入下一条消息。');
     } else if (isSoloConversation) {
       vscode.window.showInformationMessage(`Solo conversation finished with state: ${nextStatus}`);
     } else {
       vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${nextStatus}`);
     }
 
-    const keepInteractiveSessionOpen = statusData.interactiveSession === true && statusData.interactiveSessionClosed !== true;
     if (keepInteractiveSessionOpen) {
       keepActiveConversationRegistered = true;
     } else {
@@ -9313,23 +9387,6 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         console.error(`SoloMap failed to clean some output logs for ${workspaceRoot}:`, retentionResult.errors);
       }
     }
-    setTimeout(() => {
-      const currentStatus = readAgentStatus(normalizedStatusFilePath);
-      const belongsToProcessedRun = currentStatus
-        && Number(currentStatus.executionLogId || 0) === Number(executionLogId || 0)
-        && String(currentStatus.status || '') === String(status || '');
-      if (belongsToProcessedRun && fs.existsSync(normalizedStatusFilePath)) {
-        fs.writeFileSync(normalizedStatusFilePath, JSON.stringify({
-          ...currentStatus,
-          status: keepInteractiveSessionOpen ? 'Waiting' : 'Processed',
-          ...(keepInteractiveSessionOpen ? {
-            checkpointSettledStatus: nextStatus,
-            waitingSince: new Date().toISOString()
-          } : {}),
-          processedAt: new Date().toISOString()
-        }), 'utf8');
-      }
-    }, 1000);
     processedSuccessfully = true;
   } catch (e) {
     // JSON might be partially written; watcher or poller will retry.
@@ -9347,6 +9404,11 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         );
       }
       processingAgentStatusFiles.delete(normalizedStatusFilePath);
+      if (pendingAgentStatusFiles.delete(normalizedStatusFilePath)) {
+        setTimeout(() => {
+          void processAgentStatusFile(normalizedStatusFilePath);
+        }, 0);
+      }
     }
   }
 }

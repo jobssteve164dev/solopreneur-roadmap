@@ -5702,6 +5702,21 @@ test('agent launch path uses one terminal-first startup component', () => {
     'function readAgentStatus',
     'nodeId'
   );
+  const nativeContinuationBody = source.slice(
+    source.indexOf('async function handleContinueNativeConversation'),
+    source.indexOf('function readAgentStatus')
+  );
+  assert.match(nativeContinuationBody, /updateAgentExecution\(executionLogId, agentCli, displayCommand, launchSummary, 'Running'\)/);
+  assert.doesNotMatch(nativeContinuationBody, /startWaiting:\s*true|Interactive session state: Waiting/);
+
+  const continueActionBody = source.slice(
+    source.indexOf("'conversation.continue': async"),
+    source.indexOf("'conversation.stop': async")
+  );
+  assert.ok(
+    continueActionBody.indexOf('registerInteractiveConversationTurn(') < continueActionBody.indexOf('existingTerminal.show(true)'),
+    'the continue action must register a ledger turn before revealing an existing terminal for input'
+  );
   assertLaunchComponent(
     'agent review launch',
     'function startAgentReviewRun',
@@ -8129,17 +8144,16 @@ test('task sentinel refreshes the settled project conversation snapshot after pe
     sendNodesToWebview() {},
     sendSoloConversationHistory() {},
     async refreshProjectConversationSnapshotAfterStatusChange(projectPath) {
-      events.push(['refresh', projectPath]);
+      events.push(['refresh', projectPath, JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status]);
     },
     sendLocalProjects() {}
   });
 
   await extensionModule.__processAgentStatusFile(statusFilePath);
-  await new Promise((resolve) => setTimeout(resolve, 1100));
 
   assert.deepEqual(events, [
     ['persist', 'Completed'],
-    ['refresh', projectRoot]
+    ['refresh', projectRoot, 'Waiting']
   ]);
   assert.match(persistedOutput, /Interactive session state: Waiting/);
   assert.match(persistedOutput, /Completion decision: 完成这一轮讨论/);
@@ -8196,6 +8210,233 @@ test('interactive start checkpoint opens a new tracked turn under the same termi
   assert.equal(logged[0].status, 'Running');
   assert.match(logged[0].output, /Continuation parent conversation: 61/);
   assert.match(logged[0].output, /继续审计剩余风险/);
+});
+
+test('interactive completion recovers a distinct ledger turn when the Agent omitted start', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-interactive-implicit-turn-'));
+  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '61');
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  fs.writeFileSync(outputFilePath, 'Agent completed an unregistered terminal turn.\n', 'utf8');
+  fs.writeFileSync(changesFilePath, '', 'utf8');
+  fs.writeFileSync(touchedFilesPath, '', 'utf8');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    agentCli: 'codex',
+    command: 'codex interactive',
+    executionLogId: 61,
+    rootExecutionLogId: 61,
+    interactiveSession: true,
+    checkpointSequence: 4,
+    checkpointEventId: '4:complete',
+    checkpointImplicitTurn: true,
+    checkpointMessage: '检查遗漏的账本记录',
+    checkpointOutcome: 'partial',
+    checkpointSummary: '已补齐本轮结果',
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    startedAt: '2026-08-30T09:00:00.000Z'
+  }), 'utf8');
+  const logs = [{ id: 61, nodeId: '__solo__', output: 'Previous completed turn.', status: 'Completed' }];
+  const logged = [];
+  const updated = [];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => logs,
+    getAgentExecutions: () => [],
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      const entry = { id: 62, nodeId, agentCli, command, output, status };
+      logs.push(entry);
+      logged.push(entry);
+      return 62;
+    },
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      updated.push({ id, agentCli, command, output, status });
+      const entry = logs.find((candidate) => candidate.id === id);
+      if (entry) Object.assign(entry, { agentCli, command, output, status });
+      return Boolean(entry);
+    }
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const settledStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].id, 62);
+  assert.match(logged[0].output, /检查遗漏的账本记录/);
+  assert.ok(updated.some((entry) => entry.id === 62 && entry.status === 'Completed'));
+  assert.ok(!updated.some((entry) => entry.id === 61), 'the previous completed turn must not be overwritten');
+  assert.equal(settledStatus.executionLogId, 62);
+  assert.equal(settledStatus.status, 'Waiting');
+  assert.equal(settledStatus.checkpointImplicitTurn, false);
+});
+
+test('a long-waiting interactive session can still register a new turn before delivery', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__registerInteractiveConversationTurn = registerInteractiveConversationTurn;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = null; };'
+    ].join('\n')
+  );
+  const { ensureTaskCheckpointRuntime } = require(path.join(projectRoot, 'out/taskCheckpoint.js'));
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-interactive-long-wait-'));
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '71.json');
+  const runtimePath = ensureTaskCheckpointRuntime(workspaceRoot);
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Waiting',
+    agentCli: 'codex',
+    executionLogId: 71,
+    rootExecutionLogId: 71,
+    interactiveSession: true,
+    taskCheckpointCommandPath: runtimePath,
+    checkpointToken: 'long-wait-token',
+    checkpointSequence: 2
+  }), 'utf8');
+  const oldTime = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(statusFilePath, oldTime, oldTime);
+  const logged = [];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 71, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
+    getAgentExecutions: () => [],
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      logged.push({ nodeId, agentCli, command, output, status });
+      return 72;
+    }
+  }, workspaceRoot);
+
+  const registered = await extensionModule.__registerInteractiveConversationTurn(
+    workspaceRoot,
+    71,
+    '等待十分钟后继续'
+  );
+
+  assert.equal(registered, true);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].status, 'Running');
+  assert.match(logged[0].output, /等待十分钟后继续/);
+  const runningStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(runningStatus.status, 'Running');
+  assert.equal(runningStatus.executionLogId, 72);
+});
+
+test('a checkpoint event arriving during settlement is queued and processed after the current event', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-checkpoint-event-queue-'));
+  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '81');
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '81.json');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  fs.writeFileSync(outputFilePath, 'First turn complete.\n', 'utf8');
+  fs.writeFileSync(changesFilePath, '', 'utf8');
+  fs.writeFileSync(touchedFilesPath, '', 'utf8');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    agentCli: 'codex',
+    executionLogId: 81,
+    rootExecutionLogId: 81,
+    interactiveSession: true,
+    checkpointSequence: 1,
+    checkpointEventId: '1:complete',
+    checkpointOutcome: 'partial',
+    checkpointSummary: '第一轮已完成',
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    startedAt: '2026-08-30T09:10:00.000Z'
+  }), 'utf8');
+  const logs = [{ id: 81, nodeId: '__solo__', output: 'Interactive session state: Running', status: 'Running' }];
+  const logged = [];
+  let releaseRefresh;
+  let signalRefreshEntered;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  const refreshEntered = new Promise((resolve) => { signalRefreshEntered = resolve; });
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => logs,
+    getAgentExecutions: () => [],
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      const entry = { id: 82, nodeId, agentCli, command, output, status };
+      logs.push(entry);
+      logged.push(entry);
+      return 82;
+    },
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      const entry = logs.find((candidate) => candidate.id === id);
+      if (entry) Object.assign(entry, { agentCli, command, output, status });
+      return Boolean(entry);
+    }
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {
+      signalRefreshEntered();
+      await refreshGate;
+    },
+    sendLocalProjects() {}
+  });
+
+  const firstSettlement = extensionModule.__processAgentStatusFile(statusFilePath);
+  await refreshEntered;
+  const waitingStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(waitingStatus.status, 'Waiting');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    ...waitingStatus,
+    status: 'Turn Started',
+    checkpointSequence: 2,
+    checkpointEventId: '2:start',
+    checkpointMessage: '第二轮紧接着开始',
+    turnStartedAt: '2026-08-30T09:11:00.000Z'
+  }), 'utf8');
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+  releaseRefresh();
+  await firstSettlement;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const runningStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].id, 82);
+  assert.match(logged[0].output, /第二轮紧接着开始/);
+  assert.equal(runningStatus.status, 'Running');
+  assert.equal(runningStatus.executionLogId, 82);
+  assert.equal(runningStatus.checkpointEventId, '2:start');
 });
 
 test('finishing one parallel step conversation keeps the node running without rewriting that conversation status', async () => {

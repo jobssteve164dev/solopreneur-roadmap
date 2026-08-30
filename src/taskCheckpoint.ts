@@ -20,11 +20,11 @@ export function buildTaskCheckpointInstructions(workspaceRoot: string, isFirstTu
       : '- 开始处理当前用户消息前，先登记本轮：node "$SOLOMAP_TASK_COMMAND" start --message "用一句话概括当前用户要求"',
     ...(isFirstTurn ? ['- 从下一条用户消息开始，每轮处理前先运行：node "$SOLOMAP_TASK_COMMAND" start --message "用一句话概括当前用户要求"'] : []),
     '- 在向用户给出本轮最终回答之前，必须且只能选择下面一种结果，并运行一次完成命令：',
-    '  - 本轮取得可继续推进的阶段成果：node "$SOLOMAP_TASK_COMMAND" complete --outcome partial --summary "本轮结果" --next "下一步"',
-    '  - 整个路线图环节已达到完成标准：node "$SOLOMAP_TASK_COMMAND" complete --outcome candidate_complete --summary "完成依据"',
-    '  - 需要用户补充信息：node "$SOLOMAP_TASK_COMMAND" complete --outcome blocked_user --summary "阻塞原因" --next "需要用户提供什么"',
-    '  - 被外部条件阻塞：node "$SOLOMAP_TASK_COMMAND" complete --outcome blocked_external --summary "阻塞原因" --next "恢复条件"',
-    '  - 本轮执行失败：node "$SOLOMAP_TASK_COMMAND" complete --outcome failed --summary "失败原因"',
+    '  - 本轮取得可继续推进的阶段成果：node "$SOLOMAP_TASK_COMMAND" complete --message "当前用户要求" --outcome partial --summary "本轮结果" --next "下一步"',
+    '  - 整个路线图环节已达到完成标准：node "$SOLOMAP_TASK_COMMAND" complete --message "当前用户要求" --outcome candidate_complete --summary "完成依据"',
+    '  - 需要用户补充信息：node "$SOLOMAP_TASK_COMMAND" complete --message "当前用户要求" --outcome blocked_user --summary "阻塞原因" --next "需要用户提供什么"',
+    '  - 被外部条件阻塞：node "$SOLOMAP_TASK_COMMAND" complete --message "当前用户要求" --outcome blocked_external --summary "阻塞原因" --next "恢复条件"',
+    '  - 本轮执行失败：node "$SOLOMAP_TASK_COMMAND" complete --message "当前用户要求" --outcome failed --summary "失败原因"',
     '- complete 只结算当前一轮，不会关闭交互会话。命令成功后再输出面向用户的最终回答，并留在当前 CLI 中等待下一条消息。',
     '- candidate_complete 只是提交完成候选；插件仍会按既有完成标准和复核规则决定路线图环节是否完成。',
     '- 不要直接编辑 .agent_status.json、completion.json 或项目账本；只使用上述命令。'
@@ -176,6 +176,10 @@ if (action === 'start') {
     checkpointSequence: sequence,
     checkpointEventId: sequence + ':start',
     checkpointMessage: String(args.message || '').trim(),
+    checkpointImplicitTurn: false,
+    checkpointOutcome: '',
+    checkpointSummary: '',
+    checkpointNext: '',
     turnStartedAt: now,
     startedAt: now,
     finishedAt: ''
@@ -185,10 +189,17 @@ if (action === 'start') {
 }
 
 if (action === 'complete') {
+  const previousStatus = String(status.status || '');
+  if (!['Running', 'Waiting', 'Processed', 'Turn Started'].includes(previousStatus)) {
+    fail('the previous turn has not settled or this session is already closed');
+  }
   const outcome = String(args.outcome || 'partial').trim();
   const summary = String(args.summary || '').trim();
   if (!allowedOutcomes.has(outcome)) fail('unsupported outcome ' + outcome);
   if (!summary) fail('--summary is required');
+  const implicitTurn = previousStatus !== 'Running';
+  const checkpointMessage = String(args.message || '').trim()
+    || (implicitTurn ? '终端内继续对话（Agent 未登记开始检查点）' : String(status.checkpointMessage || status.userMessage || '').trim());
   const snapshot = writeWorkspaceDiff(status);
   if (status.completionDecisionFilePath) {
     atomicWriteJson(status.completionDecisionFilePath, outcome === 'candidate_complete'
@@ -201,10 +212,14 @@ if (action === 'complete') {
     status: outcome === 'failed' ? 'Failed' : 'In Progress',
     checkpointSequence: sequence,
     checkpointEventId: sequence + ':complete',
+    checkpointImplicitTurn: implicitTurn,
+    checkpointMessage,
     checkpointOutcome: outcome,
     checkpointSummary: summary,
     checkpointNext: String(args.next || '').trim(),
     checkpointAt: now,
+    turnStartedAt: implicitTurn ? now : String(status.turnStartedAt || status.startedAt || now),
+    startedAt: implicitTurn ? now : String(status.startedAt || status.turnStartedAt || now),
     finishedAt: now,
     ...(outcome === 'failed' ? {
       failureCode: 'agent_reported_failure',
