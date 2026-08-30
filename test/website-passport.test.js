@@ -1004,6 +1004,65 @@ test('unified account login restores paid access from the current Passport acces
   }
 });
 
+test('a signed-in account grant refreshes newly available Pro access', async () => {
+  const worker = await loadWebsiteWorker();
+  const env = {
+    SITE_ORIGIN: 'https://solomap.app',
+    SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret',
+    SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
+  };
+  let accessAllowed = false;
+  const originalFetch = global.fetch;
+  global.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      return new Response(JSON.stringify({
+        ok: true,
+        data: {
+          allowed: accessAllowed,
+          reason: accessAllowed ? 'feature_granted' : 'feature_not_granted',
+          email: 'returning@solomap.app',
+          userId: 'returning-user'
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://passport.szlk.ai/api/v1/billing/catalog') return testCatalogResponse();
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  try {
+    const callback = 'vscode://SZLK.solopreneur-roadmap/passport/callback';
+    const authNonce = 'r'.repeat(32);
+    const cookie = await sessionCookie(env, { id: 'returning-user', email: 'returning@solomap.app' });
+    const accountStart = await worker.default.fetch(new Request(
+      `https://solomap.app/api/account/start?auth_nonce=${authNonce}&callback=${encodeURIComponent(callback)}`,
+      { headers: { cookie } }
+    ), env);
+    const callbackLocation = new URL(accountStart.headers.get('location') || '');
+    const accountVerify = await worker.default.fetch(new Request('https://solomap.app/api/passport/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: callbackLocation.searchParams.get('code'), authNonce, callback })
+    }), env);
+    const signedIn = await accountVerify.json();
+    assert.equal(signedIn.authenticated, true);
+    assert.equal(signedIn.allowed, false);
+    assert.deepEqual(signedIn.entitlements, ['base_access']);
+
+    accessAllowed = true;
+    const refreshedResponse = await worker.default.fetch(new Request('https://solomap.app/api/passport/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ grant: signedIn.grant })
+    }), env);
+    const refreshed = await refreshedResponse.json();
+    assert.equal(refreshed.authenticated, true);
+    assert.equal(refreshed.allowed, true);
+    assert.deepEqual(refreshed.entitlements, ['strategy_pyramid', 'flow_mode', 'collaboration_pro']);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test('website headless auth renders product-owned forms and creates a protected workbench session', async () => {
   const worker = await loadWebsiteWorker();
   const env = { SITE_ORIGIN: 'https://solomap.app', SOLOMAP_PASSPORT_PRODUCT_SECRET: 'test-product-secret' };

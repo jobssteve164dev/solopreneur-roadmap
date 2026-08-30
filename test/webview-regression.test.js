@@ -927,6 +927,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(html, /id="agent-readiness-panel"/);
   assert.match(html, /id="pro-account-panel"/);
   assert.match(html, /id="btn-open-pro-authorization"/);
+  assert.match(html, /id="btn-account-logout"/);
   assert.doesNotMatch(html, /id="btn-paste-pro-code"/);
   assert.match(html, /id="automation-trigger-select"/);
   assert.match(html, /id="automation-action-select"/);
@@ -1021,6 +1022,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'setting-global-data-path',
     'pro-account-panel',
     'btn-open-pro-authorization',
+    'btn-account-logout',
     'automation-trigger-select',
     'automation-action-select',
     'automation-prompt-input',
@@ -1244,6 +1246,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   });
   assert.match(elements['pro-account-panel'].innerHTML, /free@solomap\.app/);
   assert.match(elements['pro-account-panel'].innerHTML, /免费账号/);
+  assert.equal(elements['btn-account-logout'].style.display, '');
   postedMessages.length = 0;
   elements['btn-open-pro-authorization'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'entitlement.upgrade'));
@@ -1257,6 +1260,9 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   });
   assert.match(elements['pro-account-panel'].innerHTML, /SoloMap Pro/);
   assert.equal(elements['btn-open-pro-authorization'].style.display, 'none');
+  postedMessages.length = 0;
+  elements['btn-account-logout'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'account.logout'));
   elements['btn-check-dependencies'].listeners.click();
   assert.equal(elements['dependency-panel'].style.display, 'block');
   assert.equal(elements['btn-check-dependencies'].attributes['aria-expanded'], 'true');
@@ -2772,6 +2778,7 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
     'setting-global-data-path',
     'pro-account-panel',
     'btn-open-pro-authorization',
+    'btn-account-logout',
     'setting-feedback-title',
     'setting-feedback-body',
     'btn-open-feedback',

@@ -720,19 +720,25 @@ async function handleSharedWebviewAction(
       await respond({ command: 'collaborationRoomsLoaded', rooms: await readCollaborationRooms(context) });
     },
     'collaboration.joinLobby': async (request) => {
+      const diagnosticDataPath = getPersistedSettings(context).globalDataPath;
       const cached = await readPassportGrant(context);
       if (!cached) {
+        recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.login', 'missing_account_grant');
+        await clearStoredProAccess(context);
         await respond({ command: 'collaborationLobbyLoginRequired' });
         return;
       }
       const verified = await verifyPassportGrant(cached.grant);
       if (!verified.authenticated) {
+        recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.login', String(verified.reason || 'account_grant_rejected'));
+        await clearStoredProAccess(context);
         await respond({ command: 'collaborationLobbyLoginRequired' });
         return;
       }
       await writePassportGrant(context, verified, verified.grant || cached.grant);
       const result = await createCollaborationLobbySession(String(request.nickname || ''), verified.grant || cached.grant, fetch);
       if (!result.ok) {
+        recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.join', String(result.error || 'lobby_join_failed'));
         await respond({
           command: result.error === 'login_required' ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed',
           error: String(result.error || 'lobby_join_failed')
@@ -1143,6 +1149,15 @@ async function handleSharedWebviewAction(
       await beginAccountAuthorization();
       await broadcastSettings(context);
     },
+    'account.logout': async () => {
+      await context.secrets.delete(passportGrantSecretKey);
+      const saved = getPersistedSettings(context);
+      await updatePersistedSettings(context, {
+        proEntitlements: clearProEntitlements(saved.proEntitlements || {}),
+        proAccount: { authenticated: false, allowed: false, email: '', expiresAt: '' }
+      });
+      await broadcastSettings(context);
+    },
     'entitlement.upgrade': async () => {
       await handleManageProAuthorization(context, 'login');
       await broadcastSettings(context);
@@ -1456,10 +1471,7 @@ async function clearStoredProAccess(context: vscode.ExtensionContext): Promise<v
   const saved = getPersistedSettings(context);
   await updatePersistedSettings(context, {
     proEntitlements: clearProEntitlements(saved.proEntitlements || {}),
-    proAccount: {
-      ...normalizeProAccountStatus(saved.proAccount),
-      allowed: false
-    }
+    proAccount: { authenticated: false, allowed: false, email: '', expiresAt: '' }
   });
   await broadcastSettings(context);
 }

@@ -4061,6 +4061,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         <div class="dependency-panel" id="pro-account-panel"></div>
         <div style="display:grid; grid-template-columns: 1fr; gap: 6px; margin-top: 8px;">
           <button class="settings-action-btn save-btn" id="btn-open-pro-authorization"><span class="codicon codicon-sign-in"></span><span id="text-open-pro-authorization">登录 SoloMap</span></button>
+          <button class="settings-action-btn test-btn" id="btn-account-logout" style="display:none;"><span class="codicon codicon-sign-out"></span><span id="text-account-logout">退出登录</span></button>
         </div>
       </div>
     </div>
@@ -4452,6 +4453,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const settingCollaborationReviewMode = document.getElementById('setting-collaboration-review-mode');
     const proAccountPanel = document.getElementById('pro-account-panel');
     const btnOpenProAuthorization = document.getElementById('btn-open-pro-authorization');
+    const btnAccountLogout = document.getElementById('btn-account-logout');
     const settingAbilitySelect = document.getElementById('setting-ability-select');
     const settingsAbilityUrlInputContainer = document.getElementById('settings-ability-url-input-container');
     const settingAbilityUrlInput = document.getElementById('setting-ability-url-input');
@@ -5387,6 +5389,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         accountName: 'SoloMap 账号',
         accountFree: '免费账号',
         accountLogin: '登录 SoloMap',
+        accountLogout: '退出登录',
         proUpgrade: '升级 Pro',
         accountSignedOutHelp: '登录后可使用账号功能；本地项目数据仍留在你的工作区。',
         accountSignedInHelp: '已登录，可使用 SoloMap 免费功能。',
@@ -5841,6 +5844,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         accountName: 'SoloMap Account',
         accountFree: 'Free account',
         accountLogin: 'Sign in to SoloMap',
+        accountLogout: 'Sign out',
         proUpgrade: 'Upgrade to Pro',
         accountSignedOutHelp: 'Sign in to use account features; local project data stays in your workspace.',
         accountSignedInHelp: 'Signed in with access to SoloMap free features.',
@@ -6325,6 +6329,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('impact-progress-label', t('impactProgress'));
       setText('text-refresh-agent-impact', t('refreshAgentImpact'));
       setText('text-open-pro-authorization', t('proLogin'));
+      setText('text-account-logout', t('accountLogout'));
       setText('label-enhancement-toggles', t('abilityManagerLabel'));
       setText('help-enhancement-toggles', t('abilityManagerHelp'));
       setText('text-install-ability', t('installEnhancement'));
@@ -6651,6 +6656,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
     }
 
+    if (btnAccountLogout) {
+      btnAccountLogout.addEventListener('click', () => {
+        vscode.postMessage({ command: 'account.logout' });
+      });
+    }
+
     function showAbilityActionMessage(message, isError = false) {
       if (!abilityActionBadge) return;
       abilityActionBadge.style.display = 'block';
@@ -6785,6 +6796,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const authenticated = Boolean(settings && settings.proAccount && settings.proAccount.authenticated);
       const unlocked = hasStrategyPyramidPro(settings);
       btnOpenProAuthorization.style.display = unlocked ? 'none' : '';
+      if (btnAccountLogout) btnAccountLogout.style.display = authenticated ? '' : 'none';
       const actionText = btnOpenProAuthorization.querySelector('span:last-child');
       if (actionText) actionText.textContent = authenticated ? t('proUpgrade') : t('accountLogin');
       const actionIcon = btnOpenProAuthorization.querySelector('.codicon');

@@ -1083,7 +1083,7 @@ async function verifySignedGrant(env, grant) {
 
 async function verifySignedGrantWithLiveAccess(env, grant) {
   const signed = await verifySignedGrant(env, grant);
-  if (!signed.authenticated || !signed.entitlements?.includes(STRATEGY_PYRAMID_FEATURE)) {
+  if (!signed.authenticated) {
     return signed;
   }
   const access = await resolvePassportAccessForUser(env, {
@@ -1096,7 +1096,9 @@ async function verifySignedGrantWithLiveAccess(env, grant) {
     reason: String(access.reason || (access.allowed ? "allowed" : "access_denied")),
     email: String(access.email || signed.email || ""),
     userId: String(access.userId || signed.userId || ""),
-    entitlements: access.allowed ? signed.entitlements : [],
+    entitlements: access.allowed
+      ? access.entitlements
+      : signed.entitlements.filter((item) => item === "base_access" || item === "collaboration_lobby"),
     deviceLimit: Number(access.deviceLimit || signed.deviceLimit || 0),
     expiresAt: String(signed.expiresAt || "")
   };
