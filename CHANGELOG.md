@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.440 - 2026-08-30
+
+### Fixed
+- keep account access and lobby state in sync (d07e3e4)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.439 - 2026-08-30
 
 ### Fixed
