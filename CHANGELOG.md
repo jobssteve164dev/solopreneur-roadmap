@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.441 - 2026-08-30
+
+### Fixed
+- bind roadmap continuation to selected conversation (53ea9ce)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.440 - 2026-08-30
 
 ### Fixed
