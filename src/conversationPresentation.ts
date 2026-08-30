@@ -56,6 +56,10 @@ function extractSummary(output: string): string {
 }
 
 function extractConclusion(output: string): string {
+  const checkpointConclusion = extractSection(output, 'Completion decision');
+  if (checkpointConclusion) {
+    return checkpointConclusion.slice(0, 4000);
+  }
   const match = String(output || '').match(/Agent output tail:\n([\s\S]*)$/);
   if (!match?.[1]) {
     return '';
@@ -171,7 +175,8 @@ export function buildConversationPresentations(
       ? recoverInterruptedNativeSessionId(workspaceRoot, nodeId, conversation)
       : '';
     const resumableNativeSessionId = conversation.resumableNativeSessionId || recoveredSessionId;
-    const canContinue = conversation.status !== 'Running' && Boolean(resumableNativeSessionId);
+    const hasOpenInteractiveSession = /Interactive session state:\s*(?:Open|Waiting|Running)/i.test(output);
+    const canContinue = conversation.status !== 'Running' && (hasOpenInteractiveSession || Boolean(resumableNativeSessionId));
     return {
       ...conversation,
       ...(resumableNativeSessionId ? { resumableNativeSessionId } : {}),
@@ -189,7 +194,7 @@ export function buildConversationPresentations(
         canStop: conversation.status === 'Running',
         canRetry: conversation.status === 'Failed' && (!canContinue || wasStoppedByUser),
         canRollback: conversation.status !== 'Running' && Boolean(rollbackGitHash),
-        canOpenTerminal: conversation.status === 'Running'
+        canOpenTerminal: conversation.status === 'Running' || hasOpenInteractiveSession
       }
     };
   });

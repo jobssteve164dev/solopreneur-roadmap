@@ -419,6 +419,71 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
+export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.`;
+  const quotedInstruction = shellQuote(promptFileInstruction);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedInstruction}`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${permissionSegment}${modelSegment} ${quotedInstruction})`;
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --prompt-interactive${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${modelSegment} --prompt ${quotedInstruction})`;
+  }
+
+  return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} ${quotedInstruction})`;
+}
+
+export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+  if (!String(sessionId || '').trim()) {
+    return buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel);
+  }
+  const executableName = path.basename(agentCli).toLowerCase();
+  const quotedCli = shellQuote(agentCli);
+  const quotedSessionId = shellQuote(sessionId);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+  const promptFileInstruction = `Read the complete SoloMap continuation prompt from ${promptFilePath} and follow that file exactly. Continue the existing task in this interactive session.`;
+  const quotedInstruction = shellQuote(promptFileInstruction);
+
+  if (executableName === 'codex' || executableName === 'codex-cli') {
+    return `${quotedCli} resume --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedSessionId} ${quotedInstruction}`;
+  }
+  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction})`;
+  }
+  if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    return `${quotedCli} --prompt-interactive --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+  }
+  if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
+    return `${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+  }
+  if (executableName === 'copilot' || executableName === 'copilot-cli') {
+    return `${quotedCli} --resume=${quotedSessionId} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --session ${quotedSessionId}${modelSegment} --prompt ${quotedInstruction})`;
+  }
+  return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} ${quotedSessionId} ${quotedInstruction})`;
+}
+
 export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, selectedModel = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);

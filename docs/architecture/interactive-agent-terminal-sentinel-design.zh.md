@@ -1,26 +1,25 @@
 # 交互式任务终端与任务哨兵解耦设计
 
-> 决策更新（2026-07-29）：SoloMap 自建 Chat UI 与内置 ACP 对话客户端路线已撤销，运行时恢复既有终端对话路径。原因是完整聊天渲染、交互和 Provider 适配会显著扩大长期维护面积。下文保留为历史调研与可行性证据，不再作为当前实施计划。
+> 决策更新（2026-08-30）：SoloMap 不再用非交互 CLI 进程退出判断用户对话完成。Solo、用户主动发起的路线图环节对话和续聊统一使用 Agent CLI 原生交互终端；Agent 通过插件生成的受约束检查点命令上报每轮结果，插件沿用既有结算、复核与路线图完成判断。自建 Chat UI 与 ACP 方案仍只作为历史调研保留。
 
 ## 文档状态
 
-- 状态：历史调研已完成；自建 Chat UI 路线已终止。
-- 首版目标 Agent：Codex。
-- 当前运行边界：继续使用既有非交互任务终端、任务哨兵和原生继续会话路径，不增加自定义对话界面或 ACP 运行时依赖。
-- 当前结论：除非用户重新明确作出产品决策，否则不再实施自建 Chat UI；Hook 与 ACP 验证结果仅作为历史技术证据保留。
+- 状态：原生交互终端 + Agent 检查点账本首版已落地。
+- 当前覆盖：Codex、Cursor Agent、Antigravity CLI、Claude Code、GitHub Copilot CLI 和 OpenCode 的用户主动对话入口。
+- 当前运行边界：用户对话使用原生交互终端；Flow、复核、定时任务、时间计划、自动重试和其他无人值守任务继续使用非交互命令。
+- 当前结论：不增加自建 Chat UI 或 ACP 运行时依赖；任务轮次结算依赖显式检查点，不依赖进程退出、终端空闲或输出文案匹配。
 
 ## 用户结果
 
-用户从 Solo 或路线图环节发起任务后，第一次就进入 SoloMap 的 Agent 对话终端；Agent 完成当前回复后，终端继续等待用户输入，用户不需要回到侧边栏点击“继续”才能补充要求。
+用户从 Solo 或路线图环节发起任务后，第一次就进入 Agent CLI 原生交互终端；Agent 完成当前回复后，终端继续等待用户输入，用户不需要回到侧边栏重新创建一次 CLI 运行才能补充要求。
 
-Codex 首版的“对话终端”是 SoloMap 持有会话的键盘优先交互界面，不冒充原生 Codex TUI。它保留终端式的连续输入、流式输出、中断与快捷操作，同时原生呈现审批、问题选项、文件变化和错误，不把这些结构化交互降级成 ANSI 文本。
+审批、问题选项、流式输出、中断和快捷操作继续由各 Agent CLI 原生呈现。SoloMap 只负责启动、轮次账本、结果结算和恢复映射，不复制 Provider 的聊天界面。
 
 任务哨兵仍然能够准确区分：
 
 - Agent 正在执行当前轮次。
 - Agent 已完成当前轮次，正在等待用户继续。
-- Agent 正在等待用户确认或回答。
-- 当前轮次失败、被中断或 Agent 连接异常断开。
+- 当前轮次失败或会话被关闭。
 
 侧边栏只使用上述用户语言，不暴露 Hook、PTY、事件日志、适配器或 Provider 协议。
 
@@ -28,14 +27,26 @@ Codex 首版的“对话终端”是 SoloMap 持有会话的键盘优先交互�
 
 ### Observed in code
 
-- 用户主动发起的首次任务通过 `codex exec`、Cursor `-p`、Claude `-p` 等非交互命令执行（`src/agentCli.ts` 的 `buildAgentCommandForPromptFile`）。
-- 运行脚本在 Agent 命令前写入 `Running` 状态和心跳，在命令退出后捕获 Session、计算工作区变化并写入最终状态（`src/extension.ts` 的 `buildAgentShellScript`）。
-- 原生续聊已经使用交互式 CLI（`src/agentCli.ts` 的 `buildNativeContinueCommand`）；在 Unix 环境存在 `script` 时，SoloMap 可以在保留终端交互的同时捕获输出（`src/extension.ts` 的 `terminalExecutionScript`）。
-- 活动对话账本和跨窗口 lease 已有独立实现（`src/activeConversationLedger.ts`），侧边栏动作仍以 `Running` 与否区分“打开终端”和“继续”（`src/conversationPresentation.ts`）。
+- 用户主动发起的首次任务由 `buildInteractiveAgentCommandForPromptFile` 构造原生交互命令；后台任务继续调用 `buildAgentCommandForPromptFile`（`src/agentCli.ts`）。
+- 插件在项目内生成 `.solopreneur/runtime/task-checkpoint.cjs`，命令校验当前会话令牌后原子写入 `start`、`complete` 或 `session-close` 事件，并在 `complete` 时计算本轮工作区变化（`src/taskCheckpoint.ts`）。
+- `buildAgentShellScript` 只在用户对话中注入检查点环境变量；CLI 进程退出仅关闭 Session，未上报检查点时按协议缺失处理，不再被当作正常完成（`src/extension.ts`）。
+- `processAgentStatusFile` 消费同一状态管线：`Turn Started` 建立新轮次，完成检查点复用既有完成文件、复核、学习与通知逻辑，结算后写回 `Waiting` 并保留终端映射，`Session Closed` 才注销活动会话。
+- 侧边栏通过统一投影把已结算但终端仍存在的会话显示为可继续，不要求数据库记录长期保持 `Running`（`src/conversationPresentation.ts`）。
 
 ### Inference
 
 现有任务哨兵不是必须依赖非交互终端。真正的耦合是：系统把“Agent 命令退出”当成“当前任务轮次完成”。交互式 TUI 完成一轮后仍会等待下一次输入，因此不能再用进程退出作为主要完成信号。
+
+### 已落地的检查点协议
+
+Agent 每轮从插件提示词获得唯一命令入口：
+
+```text
+node "$SOLOMAP_TASK_COMMAND" start --message "当前要求"
+node "$SOLOMAP_TASK_COMMAND" complete --outcome <结果> --summary "本轮结果" --next "下一步"
+```
+
+其中 `complete` 的结果只允许：`partial`、`candidate_complete`、`blocked_user`、`blocked_external`、`failed`。`candidate_complete` 只提交路线图完成候选，不能绕过完成标准或副 Agent 复核。Agent 不能直接编辑状态文件、完成文件或 SQLite 账本。
 
 ## 核心决策
 
@@ -64,13 +75,13 @@ Agent 的 Stop Hook、终端关闭或 SessionEnd 都不得直接把路线图环�
 
 判断标准是用户是否正在进行一场对话，而不是底层是否调用 Agent。
 
-Codex 首版通过 ACP 由 SoloMap 创建并持有 Session，再提交首轮 Prompt。这样 Session ID 在第一轮开始前已经确定，任务哨兵无需猜测 rollout，也不依赖 Agent 进程退出。原生 Codex TUI 仅在未来 Hook 受信接入门禁通过后重新评估。
+首版不接入 ACP，也不修改用户全局 Hook。插件使用各 Provider 已公开的原生交互启动参数，并用自己的检查点命令取得 Provider 无关的轮次完成信号。
 
 ### 3. 任务哨兵监控活动轮次，不监控空闲会话
 
 - 用户提交输入时创建活动轮次并进入“正在执行”。
-- Agent 完成回复后结算该轮次并从活动账本移除。
-- 终端仍然存在时，会话进入“等待你继续”，但不继续占用活动任务账本。
+- Agent 完成回复后结算该轮次并退出 `Running`。
+- 终端仍然存在时，会话进入“等待你继续”；跨窗口会话登记继续保留，但任务哨兵不会把它计作正在运行的任务。
 - 用户再次输入时，在同一主对话下创建下一轮并重新注册活动轮次。
 
 终端和原生 Session 的可恢复映射独立保存，不用 `Running` 状态维持。
@@ -80,9 +91,9 @@ Codex 首版通过 ACP 由 SoloMap 创建并持有 Session，再提交首轮 Pro
 下列动作从“CLI 退出后执行”迁移为“每轮结束后执行”：
 
 - 记录本轮开始、结束和结果。
-- 捕获或确认原生 Session ID 与 Turn ID。
+- 维护 SoloMap 根会话 ID 与当前轮次执行记录；原生 Session ID 在 Provider 能提供时保存。
 - 计算本轮文件变化和验证信号。
-- 保存用户输入与 Agent 最终结论。
+- 保存用户输入、Agent 上报的本轮摘要与后续动作。
 - 更新最近对话和侧边栏状态。
 - 触发现有复核或完成决策，但不改变其原有边界。
 
@@ -90,33 +101,28 @@ Codex 首版通过 ACP 由 SoloMap 创建并持有 Session，再提交首轮 Pro
 
 ## 标准化生命周期
 
-Provider 适配器向 SoloMap 输出统一事件：
+当前检查点协议向 SoloMap 输出统一事件：
 
 ```text
-session_started
 turn_started
-turn_waiting_for_approval
-turn_waiting_for_user
 turn_completed
 turn_failed
-turn_interrupted
 session_closed
 ```
 
 事件至少携带：
 
 - `provider`
-- `runId`
 - `rootConversationId`
-- `sessionId`
-- `turnId`
+- `executionLogId`
+- `checkpointSequence`
 - `eventType`
 - `occurredAt`
 - `cwd`
 
-SoloMap 在发送每个 Prompt 前生成自己的 `turnId`，Provider Turn ID 作为可选关联字段。原因是 ACP v1 的 `session/prompt` 返回停止原因，但不保证提供 Provider Turn ID。事件以 `provider + sessionId + turnId + eventType` 幂等。同一协议更新、恢复事件和进程事件重复到达时，只能结算一次。
+状态文件固定绑定根会话，后续 `turn_started` 由插件创建新的执行记录；`checkpointSequence + eventType` 保证同一轮事件只结算一次。Provider 的审批与提问仍由原生 CLI 处理，SoloMap 首版不伪造自己拿不到的结构化等待状态。
 
-## Codex 首版：ACP 自建对话终端
+## 历史调研：Codex ACP 自建对话终端（未实施）
 
 ### 为什么采用 ACP，而不是直接复刻 app-server 适配器
 

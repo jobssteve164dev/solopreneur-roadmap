@@ -372,6 +372,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './agentCli') {
           return require(path.join(projectRoot, 'out/agentCli.js'));
         }
+        if (id === './taskCheckpoint') {
+          return require(path.join(projectRoot, 'out/taskCheckpoint.js'));
+        }
         if (id === './agentModels') {
           return require(path.join(projectRoot, 'out/agentModels.js'));
         }
@@ -5691,12 +5694,14 @@ test('agent launch path uses one terminal-first startup component', () => {
   );
 });
 
-test('agent command builder uses non-interactive task runs and native continuation commands', async () => {
+test('agent command builder keeps background one-shot commands and uses native interactive user conversations', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
       'module.exports.__buildAgentCommand = agentCli_1.buildAgentCommand;',
       'module.exports.__buildAgentCommandForPromptFile = agentCli_1.buildAgentCommandForPromptFile;',
+      'module.exports.__buildInteractiveAgentCommandForPromptFile = agentCli_1.buildInteractiveAgentCommandForPromptFile;',
+      'module.exports.__buildInteractiveAgentContinuationCommandForPromptFile = agentCli_1.buildInteractiveAgentContinuationCommandForPromptFile;',
       'module.exports.__buildReadOnlyAgentCommandForPromptFile = agentCli_1.buildReadOnlyAgentCommandForPromptFile;',
       'module.exports.__buildAgentContinuationCommandForPromptFile = agentCli_1.buildAgentContinuationCommandForPromptFile;',
       'module.exports.__buildAgentCommandFromShellVar = agentCli_1.buildAgentCommandFromShellVar;',
@@ -6061,7 +6066,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.match(continuationPrompt, /继续 SoloMap 中已经存在的一段对话/);
   assert.match(continuationPrompt, /继续把登录态和订阅校验打通/);
-  assert.match(continuationPrompt, /completion\.json/);
+  assert.match(continuationPrompt, /SOLOMAP_TASK_COMMAND/);
+  assert.match(continuationPrompt, /不要直接编辑 .*completion\.json/);
   const runnerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-runner-'));
   const runnerPath = path.join(runnerDir, 'run-codex-continuation.cjs');
   extensionModule.__buildCodexContinuationRunnerScript(
@@ -6273,17 +6279,19 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /cat .*prompt\.txt.*codex' exec --color always -C .*--skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /codex' --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /ls-files/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /check-ignore/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
-  assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -e -c/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -f -e -c/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /tee .*output\.log/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /codex' exec --color always -C .*--skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /codex' --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /FORCE_COLOR/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /timed out waiting for response|Error: timed out/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
+  assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /SOLOMAP_TASK_COMMAND/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /session-close --code/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.agent_status\.json/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /executionLogId/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /workspaceRoot/);
@@ -6858,8 +6866,8 @@ test('agent command builder uses non-interactive task runs and native continuati
   );
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-cli\/cache\/last_conversations\.json/);
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-log/);
-  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /cat .*prompt\.txt' \| 'agy' --print --dangerously-skip-permissions --add-dir/);
-  assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --prompt-interactive --dangerously-skip-permissions --add-dir/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$\(cat/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /@prompt-file/);
@@ -6944,11 +6952,11 @@ test('agent command builder uses non-interactive task runs and native continuati
   assert.doesNotMatch(prompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
   assert.doesNotMatch(prompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(prompt, /Created README and ran npm test/);
-  assert.match(prompt, /markCompleted/);
+  assert.match(prompt, /SOLOMAP_TASK_COMMAND/);
   assert.match(prompt, /本环节完成标准/);
   assert.match(prompt, /MVP 或产品切片已经能被运行/);
   assert.match(prompt, /本轮交付和最终完成判断必须对照这些标准/);
-  assert.match(prompt, /正常退出 CLI 进程/);
+  assert.match(prompt, /不要因为本轮回答完成而退出交互式 CLI/);
   assert.match(prompt, /唯一任务/);
   assert.match(prompt, /SoloMap/);
   assert.match(prompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
@@ -7386,23 +7394,24 @@ test('agent command builder uses non-interactive task runs and native continuati
   childProcess.execSync(noopRun.finalCommand, { cwd: tempRoot, stdio: 'ignore' });
   const noopStatus = JSON.parse(fs.readFileSync(path.join(tempRoot, '.agent_status.json'), 'utf8'));
   assert.equal(noopStatus.status, 'Failed');
-  assert.equal(noopStatus.failureCode, 'no_deliverable_changes');
-  assert.match(noopStatus.failureReason, /without project file changes/);
+  assert.equal(noopStatus.failureCode, 'checkpoint_missing');
+  assert.match(noopStatus.failureReason, /before reporting a turn checkpoint/);
   assert.match(noopStatus.startedAt, /^\d{4}-\d{2}-\d{2}T/);
-  assert.match(fs.readFileSync(noopRun.outputFilePath, 'utf8'), /without project file changes/);
+  assert.doesNotMatch(fs.readFileSync(noopRun.outputFilePath, 'utf8'), /without project file changes/);
 
   const soloRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-agent-'));
   const soloRun = extensionModule.__buildAgentShellScript('agy', 'printf ok', soloRoot, '__solo__', 71, 'brainstorm', undefined, '', 'printf ok', 'solo');
   childProcess.execSync(soloRun.finalCommand, { cwd: soloRoot, stdio: 'ignore' });
   const soloStatus = JSON.parse(fs.readFileSync(path.join(soloRoot, '.agent_status.json'), 'utf8'));
-  assert.equal(soloStatus.status, 'In Progress');
+  assert.equal(soloStatus.status, 'Failed');
+  assert.equal(soloStatus.failureCode, 'checkpoint_missing');
   assert.equal(soloStatus.runKind, 'solo');
 
   const writeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-write-agent-'));
   fs.mkdirSync(path.join(writeRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(writeRoot, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n', 'utf8');
   const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.appendFileSync(".solopreneur/roadmap.csv","1,Init,,问题与客户发现,,codex,Prompt,Pending,2026-01-01T00:00:00.000Z,\\n");')}`;
-  const writeRun = extensionModule.__buildAgentShellScript('codex', writeCommand, writeRoot, 'write', 8, '', undefined, '', writeCommand);
+  const writeRun = extensionModule.__buildAgentShellScript('codex', '', writeCommand, writeRoot, 'write', 8, '', undefined, '', writeCommand, 'maintenance');
   childProcess.execSync(writeRun.finalCommand, { cwd: writeRoot, stdio: 'ignore' });
   const touchedFiles = fs.readFileSync(path.join(writeRoot, '.solopreneur/agent-runs/write/touched-files.txt'), 'utf8');
   assert.match(touchedFiles, /[AM] \.solopreneur\/roadmap\.csv/);
@@ -7424,6 +7433,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   ].join(''))}`;
   const attributedRun = extensionModule.__buildAgentShellScript(
     'codex',
+    '',
     attributedCommand,
     attributedRoot,
     'attributed',
@@ -7431,7 +7441,8 @@ test('agent command builder uses non-interactive task runs and native continuati
     '',
     undefined,
     '',
-    attributedCommand
+    attributedCommand,
+    'maintenance'
   );
   childProcess.execSync(attributedRun.finalCommand, { cwd: attributedRoot, stdio: 'ignore' });
   const attributedChanges = fs.readFileSync(attributedRun.changesFilePath, 'utf8');
@@ -7451,6 +7462,7 @@ test('agent command builder uses non-interactive task runs and native continuati
   ].join(''))}`;
   const nonGitRun = extensionModule.__buildAgentShellScript(
     'codex',
+    '',
     nonGitCommand,
     nonGitRoot,
     'non-git',
@@ -7458,7 +7470,8 @@ test('agent command builder uses non-interactive task runs and native continuati
     '',
     undefined,
     '',
-    nonGitCommand
+    nonGitCommand,
+    'maintenance'
   );
   childProcess.execSync(nonGitRun.finalCommand, { cwd: nonGitRoot, stdio: 'ignore' });
   const nonGitChanges = fs.readFileSync(nonGitRun.changesFilePath, 'utf8');
@@ -8069,6 +8082,10 @@ test('task sentinel refreshes the settled project conversation snapshot after pe
     agentCli: 'codex',
     command: 'codex exec',
     executionLogId: 61,
+    rootExecutionLogId: 61,
+    interactiveSession: true,
+    checkpointOutcome: 'partial',
+    checkpointSummary: '完成这一轮讨论',
     userMessage: '完成任务',
     outputFilePath,
     changesFilePath,
@@ -8076,11 +8093,13 @@ test('task sentinel refreshes the settled project conversation snapshot after pe
     startedAt: '2026-08-03T00:00:00.000Z'
   }), 'utf8');
   const events = [];
+  let persistedOutput = '';
   extensionModule.__setRuntimeForTest({
     getNodes: () => [],
     getProjectAgentExecutions: () => [{ id: 61, nodeId: '__solo__', output: 'Agent conversation started.', status: 'Running' }],
     getAgentExecutions: () => [],
-    updateAgentExecution: (_id, _agentCli, _command, _output, status) => {
+    updateAgentExecution: (_id, _agentCli, _command, output, status) => {
+      persistedOutput = output;
       events.push(['persist', status]);
       return true;
     },
@@ -8095,11 +8114,67 @@ test('task sentinel refreshes the settled project conversation snapshot after pe
   });
 
   await extensionModule.__processAgentStatusFile(statusFilePath);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
 
   assert.deepEqual(events, [
     ['persist', 'Completed'],
     ['refresh', projectRoot]
   ]);
+  assert.match(persistedOutput, /Interactive session state: Waiting/);
+  assert.match(persistedOutput, /Completion decision: 完成这一轮讨论/);
+  assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Waiting');
+});
+
+test('interactive start checkpoint opens a new tracked turn under the same terminal session', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-interactive-turn-start-'));
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Turn Started',
+    agentCli: 'codex',
+    commandPreview: 'codex [interactive turn]',
+    executionLogId: 61,
+    rootExecutionLogId: 61,
+    interactiveSession: true,
+    checkpointMessage: '继续审计剩余风险',
+    turnStartedAt: '2026-08-03T00:01:00.000Z',
+    terminalName: 'project · solo-61 · 1 (solomap)'
+  }), 'utf8');
+  const logged = [];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 61, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
+    getAgentExecutions: () => [],
+    logAgentExecution: (nodeId, agentCli, command, output, status) => {
+      logged.push({ nodeId, agentCli, command, output, status });
+      return 62;
+    }
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const running = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(running.status, 'Running');
+  assert.equal(running.executionLogId, 62);
+  assert.equal(running.rootExecutionLogId, 61);
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].status, 'Running');
+  assert.match(logged[0].output, /Continuation parent conversation: 61/);
+  assert.match(logged[0].output, /继续审计剩余风险/);
 });
 
 test('finishing one parallel step conversation keeps the node running without rewriting that conversation status', async () => {

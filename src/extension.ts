@@ -111,6 +111,8 @@ import {
   buildAgentCommand,
   buildAgentContinuationCommandForPromptFile,
   buildAgentCommandForPromptFile,
+  buildInteractiveAgentCommandForPromptFile,
+  buildInteractiveAgentContinuationCommandForPromptFile,
   buildAgentCommandFromShellVar,
   buildReadOnlyAgentCommandForPromptFile,
   buildNativeContinueCommand,
@@ -128,6 +130,11 @@ import {
   shellQuote,
   supportsSdkContinuation
 } from './agentCli';
+import {
+  buildTaskCheckpointInstructions,
+  ensureTaskCheckpointRuntime,
+  isInteractiveConversationRunKind
+} from './taskCheckpoint';
 import { SolomapAutomationSettings, SolomapAutomationTrigger, SolomapScheduledAutomationTask, SolopreneurSettings } from './pluginContracts';
 import {
   buildOpenCodeTerminalEnvironment,
@@ -914,6 +921,11 @@ async function handleSharedWebviewAction(
       try {
         const nodeId = String(request.nodeId || '');
         const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
+        const existingTerminal = findActiveAgentTerminal(conversationId);
+        if (existingTerminal) {
+          existingTerminal.show(true);
+          return;
+        }
         await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue', String(conversation?.agentCli || ''));
         const projectPath = await ensureActionProject(context, request.projectPath || '');
         if (!projectPath && request.projectPath) return;
@@ -948,7 +960,9 @@ async function handleSharedWebviewAction(
       const nodeId = String(request.nodeId || '');
       const conversationId = Number(request.conversationId || 0);
       const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
-      await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue', String(conversation?.agentCli || ''), String(request.model || ''));
+      if (!findActiveAgentTerminal(conversationId)) {
+        await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue', String(conversation?.agentCli || ''), String(request.model || ''));
+      }
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
       await handleContinueConversationTurn(
@@ -3575,9 +3589,6 @@ function buildInteractiveContinuationPrompt(
   globalDataPath = ''
 ): string {
   const normalizedUserMessage = String(userMessage || '').trim();
-  const completionFile = completionDecisionFilePath
-    ? toProjectRelativeRuntimePath(workspaceRoot, completionDecisionFilePath)
-    : '';
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
   const supplementFileInstructions = attachedFiles.length > 0
     ? [
@@ -3663,10 +3674,9 @@ function buildInteractiveContinuationPrompt(
     '闭环要求：',
     '1. 保持这是同一次任务的续聊，不要把它改造成新的无关任务。',
     '2. 运行必要的最窄验证；如果无法验证，要说明原因。',
-    completionDecisionFilePath
-      ? `3. 如果你判断整个任务已经达到完成标准，请向 ${completionFile} 写入 JSON：{"markCompleted":true,"reason":"一句话说明为什么已完成"}。如果仍需后续续聊，不要写入完成。`
-      : '3. 如果你判断任务已完成，请在最终回答中明确说明。',
-    '4. 完成当前这一轮后正常结束本次 turn。'
+    '3. 完成当前这一轮后不要退出交互式 CLI；结算后留在当前会话中等待用户继续。',
+    '',
+    buildTaskCheckpointInstructions(workspaceRoot, true)
   ].join('\n');
 }
 
@@ -3892,7 +3902,8 @@ function buildAgentConversationPrompt(
   githubIssueContext = '',
   globalDataPath = '',
   enabledEnhancements: Record<string, boolean> = {},
-  includeLiveProjectSignals = true
+  includeLiveProjectSignals = true,
+  interactiveConversation = true
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const normalizedGlobalPrompt = globalPrompt.trim();
@@ -3917,9 +3928,6 @@ function buildAgentConversationPrompt(
     : '';
   const memoryFile = stepMemoryFilePath || getStepMemoryFilePath(workspaceRoot, node.id || '');
   const runsDir = agentRunsDir || path.join(workspaceRoot, '.solopreneur', 'agent-runs', node.id || '');
-  const completionFile = completionDecisionFilePath
-    ? toProjectRelativeRuntimePath(workspaceRoot, completionDecisionFilePath)
-    : '';
   const memoryFileDisplay = toProjectRelativeRuntimePath(workspaceRoot, memoryFile);
   const runsDirDisplay = toProjectRelativeRuntimePath(workspaceRoot, runsDir);
   const completionCriteria = readCompletionCriteria(workspaceRoot, node);
@@ -4043,10 +4051,16 @@ function buildAgentConversationPrompt(
     '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。除非用户明确要求，否则不要只输出计划或总结。',
     '2. 不要等待用户二次确认；如果任务过大，先交付一个可验证的小闭环，并在输出末尾说明下一次建议继续做什么。',
     '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
-    '4. 完成后正常退出 CLI 进程。扩展会根据进程退出码记录本轮对话是否成功。',
-    completionDecisionFilePath
-      ? `5. 如果你判断整个路线图环节已经达到完成标准，请向 ${completionFile} 写入 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续对话，不要写这个文件。`
-      : '5. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。'
+    ...(interactiveConversation ? [
+      '4. 不要因为本轮回答完成而退出交互式 CLI；结算后留在当前会话中等待用户继续。',
+      '',
+      buildTaskCheckpointInstructions(workspaceRoot, true)
+    ] : [
+      '4. 完成本轮后台任务后正常退出 CLI 进程。',
+      completionDecisionFilePath
+        ? `5. 如果你判断整个路线图环节已经达到完成标准，请向 ${toProjectRelativeRuntimePath(workspaceRoot, completionDecisionFilePath)} 写入 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续推进，不要写入完成。`
+        : '5. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。'
+    ])
   ].join('\n');
 }
 
@@ -4144,7 +4158,8 @@ function buildSoloConversationPrompt(
   globalPrompt = '',
   supplementFiles: string[] = [],
   globalDataPath = '',
-  enabledEnhancements: Record<string, boolean> = {}
+  enabledEnhancements: Record<string, boolean> = {},
+  interactiveConversation = true
 ): string {
   const normalizedUserMessage = userMessage.trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -4184,7 +4199,13 @@ function buildSoloConversationPrompt(
     '2. 如果用户要的是讨论、判断或头脑风暴，直接给出有用结论即可，不要求产生文件修改。',
     '3. 如果用户明确要求实现或修复，直接交付可验证的最小改动并运行必要验证。',
     '4. 完成后在结论中用一句话说明本次对话更适合：仅保留在 Solo、关联某个已有环节（写明环节标题），或进入路线图调整。',
-    '5. 完成后正常退出 CLI 进程；SoloMap 会保存本次 Solo 对话，由用户决定是否关联路线图环节。'
+    ...(interactiveConversation ? [
+      '5. 本轮结算后不要退出交互式 CLI；留在当前会话中等待用户继续。',
+      '',
+      buildTaskCheckpointInstructions(workspaceRoot, true)
+    ] : [
+      '5. 这是无人值守的后台运行；完成本轮任务后正常退出 CLI 进程。'
+    ])
   ].join('\n');
 }
 
@@ -4719,12 +4740,21 @@ function buildAgentShellScript(
   const agentProvider = getAgentProvider(agentCli);
   const sessionKey = getAgentSessionKey(agentCli);
   const sessionMode = effectiveNativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
+  const interactiveSession = isInteractiveConversationRunKind(effectiveRunKind);
+  const taskCheckpointCommandPath = interactiveSession ? ensureTaskCheckpointRuntime(effectiveWorkspaceRoot) : '';
+  const checkpointToken = interactiveSession ? crypto.randomBytes(24).toString('hex') : '';
   const startedAt = new Date().toISOString();
-  const loggedCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
+  const defaultExecutionCommand = interactiveSession
+    ? buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel)
+    : buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
+  const loggedCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
-  const executionCommand = effectiveDirectExecutionCommand || buildAgentCommandForPromptFile(agentCli, promptFilePath, effectiveWorkspaceRoot, effectiveTaskPermissionMode, effectiveSelectedModel);
-  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, ...statusMetadata };
-  const runningStatus = JSON.stringify({ ...statusBase, status: 'Running' });
+  const executionCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
+  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...statusMetadata };
+  const runningStatus = JSON.stringify({
+    ...statusBase,
+    status: interactiveSession && statusMetadata.startWaiting === true ? 'Waiting' : 'Running'
+  });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
   const failedStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'agent_exit_failed', failureReason: 'Agent CLI exited before completing this task.' });
   const noChangesStatus = JSON.stringify({ ...statusBase, status: 'Failed', failureCode: 'no_deliverable_changes', failureReason: 'Agent exited without project file changes or a completion decision.' });
@@ -4738,7 +4768,7 @@ function buildAgentShellScript(
   const promptExportScript = effectiveDirectExecutionCommand
     ? [`agent_prompt=$(cat ${shellQuote(promptFilePath)})`, 'export agent_prompt']
     : [];
-  const terminalExecutionScript = (effectiveRunKind === 'solo_continue' || effectiveRunKind === 'step_continue')
+  const terminalExecutionScript = interactiveSession
     ? [
       'if command -v script >/dev/null 2>&1; then',
       `script -q -f -e -c ${shellQuote(executionCommand)} ${shellQuote(outputFilePath)};`,
@@ -4759,6 +4789,7 @@ function buildAgentShellScript(
   const script = [
     `cd ${shellQuote(effectiveWorkspaceRoot)}`,
     'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
+    interactiveSession ? `export SOLOMAP_TASK_COMMAND=${shellQuote(taskCheckpointCommandPath)} SOLOMAP_TASK_STATUS_FILE=${shellQuote(statusFilePath)} SOLOMAP_TASK_CHECKPOINT_TOKEN=${shellQuote(checkpointToken)}` : '',
     ...enhancementRuntime.envLines,
     `mkdir -p ${shellQuote(runDir)}`,
     `touch ${shellQuote(startedAtFilePath)}`,
@@ -4774,8 +4805,10 @@ function buildAgentShellScript(
     `${shellQuote(process.execPath)} -e ${shellQuote('process.stdout.write(new Date().toISOString())')} > ${shellQuote(finishedAtFilePath)}`,
     `kill "$solomap_status_heartbeat_pid" 2>/dev/null || true`,
     sessionCaptureScript,
-    workspaceDiffScript,
-    `if [ ${shellQuote(effectiveRunKind)} != 'solo' ] && [ ${shellQuote(effectiveRunKind)} != 'solo_continue' ] && [ ${shellQuote(effectiveRunKind)} != 'step_continue' ] && [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
+    interactiveSession ? '' : workspaceDiffScript,
+    interactiveSession
+      ? `${shellQuote(process.execPath)} ${shellQuote(taskCheckpointCommandPath)} session-close --code "$status"`
+      : `if [ ${shellQuote(effectiveRunKind)} != 'solo' ] && [ ${shellQuote(effectiveRunKind)} != 'solo_background' ] && [ ${shellQuote(effectiveRunKind)} != 'solo_continue' ] && [ ${shellQuote(effectiveRunKind)} != 'step_continue' ] && [ $status -eq 0 ] && [ ! -s ${shellQuote(changesFilePath)} ] && [ ! -s ${shellQuote(touchedFilesPath)} ] && ! grep -q '"markCompleted"[[:space:]]*:[[:space:]]*true' ${shellQuote(decisionFilePath)} 2>/dev/null; then status=125; printf '\\nSoloMap: Agent exited without project file changes or a completion decision. Marking this run as failed so it can be retried.\\n' >> ${shellQuote(outputFilePath)}; printf %s ${shellQuote(noChangesStatus)} > ${shellQuote(statusFilePath)}; elif [ $status -eq 0 ]; then printf %s ${shellQuote(completedStatus)} > ${shellQuote(statusFilePath)}; else printf %s ${shellQuote(failedStatus)} > ${shellQuote(statusFilePath)}; fi`
   ].filter(Boolean).join('; ');
   fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
 
@@ -5638,7 +5671,7 @@ function findAgentStatusForConversation(workspaceRoot: string, conversationId: n
     return directStatus;
   }
   const legacyStatus = readAgentStatus(path.join(workspaceRoot, '.agent_status.json'));
-  if (legacyStatus && Number(legacyStatus.executionLogId || 0) === Number(conversationId || 0)) {
+  if (legacyStatus && [legacyStatus.executionLogId, legacyStatus.rootExecutionLogId].some((value) => Number(value || 0) === Number(conversationId || 0))) {
     return legacyStatus;
   }
   try {
@@ -5650,7 +5683,7 @@ function findAgentStatusForConversation(workspaceRoot: string, conversationId: n
         continue;
       }
       const candidate = readAgentStatus(path.join(statusRoot, fileName));
-      if (candidate && Number(candidate.executionLogId || 0) === Number(conversationId || 0)) {
+      if (candidate && [candidate.executionLogId, candidate.rootExecutionLogId].some((value) => Number(value || 0) === Number(conversationId || 0))) {
         return candidate;
       }
     }
@@ -5675,6 +5708,21 @@ function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefine
     if (mapped) {
       return mapped;
     }
+  }
+  if (conversationId && activeProjectRoot) {
+    const statusData = findAgentStatusForConversation(activeProjectRoot, conversationId);
+    const statusTerminalName = String(statusData?.terminalName || '');
+    if (statusTerminalName) {
+      const recorded = terminals.find((candidate) => candidate.name === statusTerminalName);
+      if (recorded) return recorded;
+    }
+    const rootExecutionLogId = Number(statusData?.rootExecutionLogId || 0);
+    const rootTerminalName = rootExecutionLogId ? agentTerminalNamesByConversationId.get(rootExecutionLogId) : '';
+    if (rootTerminalName) {
+      const rootTerminal = terminals.find((candidate) => candidate.name === rootTerminalName);
+      if (rootTerminal) return rootTerminal;
+    }
+    return undefined;
   }
   if (activeAgentTerminalName) {
     const active = terminals.find((candidate) => candidate.name === activeAgentTerminalName);
@@ -5802,7 +5850,22 @@ async function launchAgentConversationTerminal(input: {
       : undefined
   );
   terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, input.command);
+  void sendTextWhenTerminalReady(terminal, input.command).then(() => {
+    let attempts = 0;
+    const persistTerminalName = () => {
+      attempts += 1;
+      const launchedStatus = readAgentStatus(input.statusFilePath);
+      if (launchedStatus && Number(launchedStatus.rootExecutionLogId || launchedStatus.executionLogId || 0) === Number(input.conversationId)) {
+        fs.writeFileSync(input.statusFilePath, JSON.stringify({
+          ...launchedStatus,
+          terminalName: terminal.name
+        }), 'utf8');
+        return;
+      }
+      if (attempts < 10) setTimeout(persistTerminalName, 200);
+    };
+    persistTerminalName();
+  });
   if (input.refreshNodeId) {
     postNodeConversations(input.refreshNodeId);
   }
@@ -5823,16 +5886,21 @@ async function handleAgentTerminalClosed(
   }
   const [conversationId] = matched;
   const workspaceRoot = agentTerminalProjectRootsByConversationId.get(Number(conversationId)) || activeProjectRoot || '';
-  agentTerminalNamesByConversationId.delete(Number(conversationId));
-  agentTerminalProjectRootsByConversationId.delete(Number(conversationId));
+  for (const [mappedConversationId, mappedTerminalName] of agentTerminalNamesByConversationId.entries()) {
+    if (mappedTerminalName !== terminalName) continue;
+    agentTerminalNamesByConversationId.delete(mappedConversationId);
+    agentTerminalProjectRootsByConversationId.delete(mappedConversationId);
+  }
   if (!workspaceRoot) {
     return false;
   }
   const runningStatus = findAgentStatusForConversation(workspaceRoot, Number(conversationId));
-  if (!runningStatus || String(runningStatus.status || '') !== 'Running') {
+  const currentStatus = String(runningStatus?.status || '');
+  const isInteractiveSession = runningStatus?.interactiveSession === true;
+  if (!runningStatus || (!isInteractiveSession && currentStatus !== 'Running')) {
     return false;
   }
-  const statusFilePath = getAgentStatusFilePath(workspaceRoot, Number(runningStatus.executionLogId || conversationId));
+  const statusFilePath = getAgentStatusFilePath(workspaceRoot, Number(runningStatus.rootExecutionLogId || runningStatus.executionLogId || conversationId));
   const isContinuationRun = isContinuationRunKind(String(runningStatus.runKind || ''));
   const finishedAt = new Date().toISOString();
   if (runningStatus.outputFilePath) {
@@ -5843,12 +5911,17 @@ async function handleAgentTerminalClosed(
     );
   }
   fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const settledInteractiveSession = isInteractiveSession && ['Waiting', 'Processed'].includes(currentStatus);
   fs.writeFileSync(statusFilePath, JSON.stringify({
     ...runningStatus,
-    status: isContinuationRun ? 'In Progress' : 'Failed',
-    ...(isContinuationRun ? {} : {
+    status: settledInteractiveSession ? 'Session Closed' : isInteractiveSession ? 'Failed' : isContinuationRun ? 'In Progress' : 'Failed',
+    ...(settledInteractiveSession ? {
+      sessionClosePreviousStatus: currentStatus,
+      interactiveSessionClosed: true
+    } : isContinuationRun && !isInteractiveSession ? {} : {
       failureCode: 'terminal_closed',
-      failureReason: 'Agent terminal was closed before the task finished.'
+      failureReason: 'Agent terminal was closed before the task finished.',
+      ...(isInteractiveSession ? { interactiveSessionClosed: true } : {})
     }),
     finishedAt
   }), 'utf8');
@@ -6364,6 +6437,46 @@ function resolveContinuationRootConversation(nodeId: string, conversationId: num
   return resolveContinuationRootConversationFromList(syncEngine.getAgentExecutions(nodeId), conversationId);
 }
 
+async function registerInteractiveConversationTurn(workspaceRoot: string, conversationId: number, userMessage: string): Promise<boolean> {
+  const statusData = findAgentStatusForConversation(workspaceRoot, conversationId);
+  if (!statusData || statusData.interactiveSession !== true || String(statusData.status || '') !== 'Waiting') {
+    return false;
+  }
+  const rootExecutionLogId = Number(statusData.rootExecutionLogId || statusData.executionLogId || conversationId);
+  const statusFilePath = getAgentStatusFilePath(workspaceRoot, rootExecutionLogId);
+  try {
+    const ageMs = Date.now() - fs.statSync(statusFilePath).mtimeMs;
+    if (ageMs > 90_000) return false;
+  } catch {
+    return false;
+  }
+  const taskCheckpointCommandPath = String(statusData.taskCheckpointCommandPath || '').trim();
+  const checkpointToken = String(statusData.checkpointToken || '');
+  if (!taskCheckpointCommandPath || !checkpointToken || !fs.existsSync(taskCheckpointCommandPath)) {
+    return false;
+  }
+  const result = childProcess.spawnSync(
+    process.execPath,
+    [taskCheckpointCommandPath, 'start', '--message', String(userMessage || '').trim()],
+    {
+      cwd: workspaceRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        SOLOMAP_TASK_COMMAND: taskCheckpointCommandPath,
+        SOLOMAP_TASK_STATUS_FILE: statusFilePath,
+        SOLOMAP_TASK_CHECKPOINT_TOKEN: checkpointToken
+      }
+    }
+  );
+  if (result.status !== 0) {
+    console.warn('SoloMap could not register the next interactive turn:', result.stderr || result.stdout);
+    return false;
+  }
+  await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
+  return String(readAgentStatus(statusFilePath)?.status || '') === 'Running';
+}
+
 async function handleContinueConversationTurn(
   context: vscode.ExtensionContext,
   nodeId: string,
@@ -6398,14 +6511,30 @@ async function handleContinueConversationTurn(
     vscode.window.showErrorMessage(`Agent CLI not found for continuation: ${requestedAgentCli || agentCli}`);
     return;
   }
-  if (!supportsSdkContinuation(agentCli)) {
-    await handleContinueNativeConversation(context, nodeId, rootConversationId);
+  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
+  const terminalMessage = [
+    request,
+    attachedFiles.length > 0 ? `补充文件（开始前先读取）：\n${attachedFiles.map((file) => `- ${file}`).join('\n')}` : ''
+  ].filter(Boolean).join('\n\n');
+  const activeTerminal = findActiveAgentTerminal(rootConversationId);
+  if (activeTerminal) {
+    if (await registerInteractiveConversationTurn(activeProjectRoot, rootConversationId, terminalMessage)) {
+      activeTerminal.show(true);
+      const delivered = await sendTextWhenTerminalReady(activeTerminal, terminalMessage);
+      if (!delivered) {
+        vscode.window.showErrorMessage('无法把本轮消息发送到当前 Agent 终端。');
+      }
+      postNodeConversations(nodeId);
+    } else {
+      activeTerminal.show(true);
+      vscode.window.showInformationMessage('当前 Agent 终端仍在处理上一轮，已为你打开现有会话。');
+    }
     return;
   }
   const sessionConversation = resolveContinuationSessionConversation(nodeId, parentConversationId) || parentConversation;
   const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
   if (!sessionId) {
-    vscode.window.showErrorMessage('No resumable Codex session ID was recorded for this conversation.');
+    vscode.window.showErrorMessage('No resumable native Agent session ID was recorded for this conversation.');
     return;
   }
 
@@ -6419,7 +6548,6 @@ async function handleContinueConversationTurn(
   }
 
   const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
-  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Agent continuation started.',
@@ -6450,11 +6578,17 @@ async function handleContinueConversationTurn(
     settings.globalPrompt,
     settings.globalDataPath
   );
-  const runnerFilePath = path.join(runDir, 'run-codex-continuation.cjs');
-  const sessionFilePath = path.join(runDir, 'session.json');
   fs.mkdirSync(runDir, { recursive: true });
-  buildCodexContinuationRunnerScript(runnerFilePath, activeProjectRoot, sessionId, continuationPrompt, sessionFilePath, selectedModel);
-  const directExecutionCommand = `${shellQuote(process.execPath)} ${shellQuote(runnerFilePath)}`;
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  fs.writeFileSync(promptFilePath, continuationPrompt, 'utf8');
+  const directExecutionCommand = buildInteractiveAgentContinuationCommandForPromptFile(
+    agentCli,
+    promptFilePath,
+    activeProjectRoot,
+    sessionId,
+    settings.taskPermissionMode,
+    selectedModel
+  );
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
   syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
 
@@ -6511,6 +6645,11 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
     return;
   }
+  const existingTerminal = findActiveAgentTerminal(conversationId);
+  if (existingTerminal) {
+    existingTerminal.show(true);
+    return;
+  }
 
   const sessionConversation = resolveContinuationSessionConversation(nodeId, conversationId) || conversation;
   const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
@@ -6528,14 +6667,6 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   const settings = getPersistedSettings(context);
   const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
   const rootConversationId = Number(rootConversation.id || conversationId);
-  if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
-    const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
-    if (currentNode && currentNode.status !== 'Completed') {
-      syncEngine.updateNode(nodeId, { status: 'Running' });
-      sendNodesToWebview();
-      refreshSidebarProjectCards();
-    }
-  }
   const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
@@ -6556,7 +6687,12 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   fs.mkdirSync(runDir, { recursive: true });
   const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot);
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
-  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
+  const waitingSummary = [
+    launchSummary,
+    `Interactive session root: ${executionLogId}`,
+    'Interactive session state: Waiting'
+  ].join('\n\n');
+  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, waitingSummary, 'Recorded');
   const { finalCommand } = buildAgentShellScript(
     agentCli,
     '',
@@ -6576,7 +6712,8 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     settings.collaborationReviewMode,
     settings.enabledEnhancements,
     runDir,
-    statusFilePath
+    statusFilePath,
+    { startWaiting: true }
   );
   await launchAgentConversationTerminal({
     workspaceRoot: activeProjectRoot,
@@ -6640,7 +6777,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   }
   const runningStatus = findAgentStatusForConversation(activeProjectRoot, conversationId);
   const statusFilePath = runningStatus
-    ? getAgentStatusFilePath(activeProjectRoot, Number(runningStatus.executionLogId || conversationId))
+    ? getAgentStatusFilePath(activeProjectRoot, Number(runningStatus.rootExecutionLogId || runningStatus.executionLogId || conversationId))
     : path.join(activeProjectRoot, '.agent_status.json');
   const conversation = syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId));
   if (!conversation || conversation.status !== 'Running') {
@@ -6649,6 +6786,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   }
 
   const terminal = findActiveAgentTerminal(conversationId);
+  const isInteractiveSession = runningStatus?.interactiveSession === true;
   const isContinuationRun = isContinuationRunKind(String(runningStatus?.runKind || ''))
     || /Agent continuation started\.|Continuation mode:/i.test(String(conversation.output || ''));
   const failureReason = 'Stopped by user.';
@@ -6664,11 +6802,18 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
     fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
     fs.writeFileSync(statusFilePath, JSON.stringify({
       ...runningStatus,
-      status: isContinuationRun ? 'In Progress' : 'Failed',
-      ...(isContinuationRun ? {} : { failureCode: 'stopped_by_user', failureReason }),
+      status: isContinuationRun && !isInteractiveSession ? 'In Progress' : 'Failed',
+      ...(isContinuationRun && !isInteractiveSession ? {} : {
+        failureCode: 'stopped_by_user',
+        failureReason,
+        ...(isInteractiveSession ? { interactiveSessionClosed: true } : {})
+      }),
       finishedAt
     }), 'utf8');
+    const rootExecutionLogId = Number(runningStatus.rootExecutionLogId || conversationId);
+    agentTerminalNamesByConversationId.delete(rootExecutionLogId);
     agentTerminalNamesByConversationId.delete(Number(conversationId));
+    agentTerminalProjectRootsByConversationId.delete(rootExecutionLogId);
     agentTerminalProjectRootsByConversationId.delete(Number(conversationId));
     terminal?.dispose();
     await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
@@ -6850,10 +6995,10 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
     '写入后必须运行 `node .solopreneur/validate-time-plan.cjs`。如果校验失败，按输出修正 JSON 并重新运行，直到出现 PASS 后才结束。',
     '最终回复只需说明草案已生成并通过校验，等待用户在 SoloMap 中确认。'
   ]).join('\n\n');
-  await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel);
+  await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel, [], '', false);
 }
 
-async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = ''): Promise<number> {
+async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = '', interactiveConversation = true): Promise<number> {
   if (!syncEngine || !activeProjectRoot) {
     return 0;
   }
@@ -6934,8 +7079,10 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   if (fs.existsSync(roadmapPath)) {
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
-  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements);
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode, selectedModel);
+  const conversationPrompt = buildSoloConversationPrompt(request, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements, interactiveConversation);
+  const agentCommand = interactiveConversation
+    ? buildInteractiveAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode, selectedModel)
+    : buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(
     executionLogId,
     agentCli,
@@ -6955,7 +7102,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     undefined,
     nativeSessionId,
     '',
-    'solo',
+    interactiveConversation ? 'solo' : 'solo_background',
     roadmapBackupFilePath,
     settings.globalDataPath,
     settings.taskPermissionMode,
@@ -6971,7 +7118,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     conversationId: executionLogId,
     nodeId: soloConversationId,
     statusFilePath: getAgentStatusFilePath(activeProjectRoot, executionLogId),
-    runKind: 'solo',
+    runKind: interactiveConversation ? 'solo' : 'solo_background',
     globalDataPath: settings.globalDataPath,
     context,
     agentCli,
@@ -7354,7 +7501,7 @@ async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionConte
 /**
  * Executes a CLI agent in the integrated terminal.
  */
-async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []) {
+async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], interactiveConversation = true) {
   if (!syncEngine) {
     return;
   }
@@ -7472,13 +7619,17 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     githubIssueContext,
     settings.globalDataPath,
     settings.enabledEnhancements,
-    false
+    false,
+    interactiveConversation
   );
   const promptFilePath = path.join(runDir, 'prompt.txt');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
+  const agentCommand = interactiveConversation
+    ? buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel)
+    : buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
   syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
 
-  const { finalCommand } = buildAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', 'step', '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
+  const runKind = interactiveConversation ? 'step' : 'step_background';
+  const { finalCommand } = buildAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', runKind, '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
 
   await launchAgentConversationTerminal({
     workspaceRoot,
@@ -7486,7 +7637,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     conversationId: executionLogId,
     nodeId,
     statusFilePath,
-    runKind: 'step',
+    runKind,
     globalDataPath: settings.globalDataPath,
     context,
     agentCli,
@@ -7502,7 +7653,7 @@ function extractUserSupplementFromExecutionOutput(output: string): string {
   return match ? match[1].trim() : '';
 }
 
-async function handleRetryConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
+async function handleRetryConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number, interactiveConversation = true): Promise<void> {
   if (!syncEngine || !nodeId || !conversationId) {
     return;
   }
@@ -7524,10 +7675,10 @@ async function handleRetryConversation(context: vscode.ExtensionContext, nodeId:
     return;
   }
   if (nodeId === soloConversationId) {
-    await handleRunSoloConversation(context, retryUserMessage, conversation.agentCli || '');
+    await handleRunSoloConversation(context, retryUserMessage, conversation.agentCli || '', '', [], '', interactiveConversation);
     return;
   }
-  await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '');
+  await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '', '', [], interactiveConversation);
 }
 
 function automationTriggerFromRunStatus(nextStatus: string, failureCode: string): SolomapAutomationTrigger | '' {
@@ -7755,7 +7906,7 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
     title: task.title || '',
     timeOfDay
   });
-  const executionLogId = await handleRunSoloConversation(context, prompt, persisted.cliPath || '', '', [], occurrenceId);
+  const executionLogId = await handleRunSoloConversation(context, prompt, persisted.cliPath || '', '', [], occurrenceId, false);
   if (!executionLogId) {
     deferOrFailScheduledOccurrence(context, occurrenceId, task.title || '');
     return;
@@ -7848,7 +7999,7 @@ async function runAutomationTasksAfterRun(context: vscode.ExtensionContext, trig
         action: 'retry',
         status: 'started'
       });
-      await handleRetryConversation(context, input.nodeId, input.executionLogId);
+      await handleRetryConversation(context, input.nodeId, input.executionLogId, false);
     } else {
       recordAutomationTaskEvent(input.workspaceRoot, {
         trigger,
@@ -7885,9 +8036,9 @@ async function runAutomationTasksAfterRun(context: vscode.ExtensionContext, trig
     if (input.runKind === 'roadmap_revision' || input.nodeId === roadmapRevisionId) {
       await handleRoadmapRevision(context, prompt, input.agentCli || '');
     } else if (input.runKind === 'solo' || input.nodeId === soloConversationId) {
-      await handleRunSoloConversation(context, prompt, input.agentCli || '');
+      await handleRunSoloConversation(context, prompt, input.agentCli || '', '', [], '', false);
     } else {
-      await handleRunAgent(context, input.nodeId, prompt, input.agentCli || '');
+      await handleRunAgent(context, input.nodeId, prompt, input.agentCli || '', '', [], false);
     }
   }
 }
@@ -8381,6 +8532,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
   processingAgentStatusFiles.add(normalizedStatusFilePath);
   let transientStatusSyncEngine: SyncEngine | null = null;
   let processedSuccessfully = false;
+  let keepActiveConversationRegistered = false;
   let ledgerWorkspaceRoot = '';
   let ledgerGlobalDataPath = '';
   let ledgerExecutionLogId = 0;
@@ -8395,7 +8547,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     const workspaceRoot = statusWorkspaceRoot || activeProjectRoot || '';
     ledgerWorkspaceRoot = workspaceRoot;
     ledgerGlobalDataPath = String(statusData.globalDataPath || '');
-    ledgerExecutionLogId = Number(statusData.executionLogId || 0);
+    ledgerExecutionLogId = Number(statusData.rootExecutionLogId || statusData.executionLogId || 0);
     const isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine);
     if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
       if (isActiveProject) {
@@ -8405,7 +8557,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
     const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId, userMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId, reviewMainAgentCli, reviewMainNativeSessionId, reviewAttempt, reviewTaskGoal, reviewCompletionCriteria } = statusData;
 
-    if (!nodeId || !status || status === 'Running' || status === 'Processed') {
+    if (!nodeId || !status || status === 'Running' || status === 'Waiting' || status === 'Processed') {
       return;
     }
     let statusSyncEngine = isActiveProject ? syncEngine : null;
@@ -8424,8 +8576,115 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       return;
     }
 
+    if (status === 'Session Closed' && statusData.interactiveSession === true) {
+      let capturedSessionId = String(nativeSessionId || '').trim();
+      if (sessionFilePath && fs.existsSync(String(sessionFilePath))) {
+        try {
+          capturedSessionId = String(JSON.parse(fs.readFileSync(String(sessionFilePath), 'utf8'))?.sessionId || capturedSessionId).trim();
+        } catch {}
+      }
+      if (capturedSessionId) {
+        updateStoredAgentSession(workspaceRoot, nodeId, agentCli || command || 'unknown', capturedSessionId);
+      }
+      const existingLogs = nodeId === soloConversationId && typeof statusSyncEngine.getProjectAgentExecutions === 'function'
+        ? statusSyncEngine.getProjectAgentExecutions()
+        : statusSyncEngine.getAgentExecutions(nodeId);
+      const rootExecutionLogId = Number(statusData.rootExecutionLogId || executionLogId || 0);
+      const sessionConversations = existingLogs.filter((entry) => (
+        Number(entry.id || 0) === rootExecutionLogId
+        || Number(entry.id || 0) === Number(executionLogId || 0)
+        || String(entry.output || '').includes(`Interactive session root: ${rootExecutionLogId}`)
+      ));
+      for (const currentConversation of sessionConversations) {
+        const previousOutput = String(currentConversation.output || '');
+        const closedOutput = previousOutput.replace(
+          /Interactive session state:\s*(?:Open|Waiting|Running|Closed)/gi,
+          'Interactive session state: Closed'
+        );
+        statusSyncEngine.updateAgentExecution(
+          Number(currentConversation.id),
+          currentConversation.agentCli,
+          currentConversation.command,
+          [
+            closedOutput,
+            capturedSessionId ? `Native Agent session saved: ${capturedSessionId}` : '',
+            /Interactive session state:/i.test(closedOutput) ? '' : 'Interactive session state: Closed'
+          ].filter(Boolean).join('\n\n'),
+          currentConversation.status
+        );
+      }
+      agentTerminalNamesByConversationId.delete(rootExecutionLogId);
+      agentTerminalNamesByConversationId.delete(Number(executionLogId || 0));
+      agentTerminalProjectRootsByConversationId.delete(rootExecutionLogId);
+      agentTerminalProjectRootsByConversationId.delete(Number(executionLogId || 0));
+      fs.writeFileSync(normalizedStatusFilePath, JSON.stringify({
+        ...statusData,
+        nativeSessionId: capturedSessionId,
+        status: 'Processed',
+        processedAt: new Date().toISOString()
+      }), 'utf8');
+      if (isActiveProject) postNodeConversations(nodeId);
+      await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
+      processedSuccessfully = true;
+      return;
+    }
+
+    if (status === 'Turn Started' && statusData.interactiveSession === true) {
+      const rootExecutionLogId = Number(statusData.rootExecutionLogId || executionLogId || 0);
+      const message = String(statusData.checkpointMessage || '').trim();
+      const currentLogs = nodeId === soloConversationId && typeof statusSyncEngine.getProjectAgentExecutions === 'function'
+        ? statusSyncEngine.getProjectAgentExecutions()
+        : statusSyncEngine.getAgentExecutions(nodeId);
+      const currentConversation = currentLogs.find((entry) => Number(entry.id || 0) === Number(executionLogId || 0));
+      const turnExecutionLogId = currentConversation?.status === 'Running'
+        ? Number(currentConversation.id)
+        : statusSyncEngine.logAgentExecution(
+          nodeId,
+          String(agentCli || commandPreview || command || 'Unknown CLI'),
+          String(commandPreview || command || `${agentCli} [interactive turn]`),
+          [
+            `Continuation parent conversation: ${rootExecutionLogId}`,
+            message ? `User supplement:\n${message}` : '',
+            `Run started at: ${String(statusData.turnStartedAt || new Date().toISOString())}`,
+            `Interactive session root: ${rootExecutionLogId}`,
+            'Interactive session state: Running'
+          ].filter(Boolean).join('\n\n'),
+          'Running'
+        );
+      if (nodeId !== soloConversationId && nodeId !== roadmapRevisionId) {
+        const currentNode = statusSyncEngine.getNodes().find((candidate) => candidate.id === nodeId);
+        if (currentNode?.status !== 'Completed') {
+          statusSyncEngine.updateNode(nodeId, { status: 'Running', completedAt: '' });
+        }
+      }
+      const terminalName = String(statusData.terminalName || agentTerminalNamesByConversationId.get(rootExecutionLogId) || '');
+      if (terminalName) {
+        agentTerminalNamesByConversationId.set(turnExecutionLogId, terminalName);
+        agentTerminalProjectRootsByConversationId.set(turnExecutionLogId, workspaceRoot);
+      }
+      fs.writeFileSync(normalizedStatusFilePath, JSON.stringify({
+        ...statusData,
+        executionLogId: turnExecutionLogId,
+        rootExecutionLogId,
+        userMessage: message,
+        status: 'Running',
+        startedAt: String(statusData.turnStartedAt || new Date().toISOString()),
+        checkpointOutcome: '',
+        checkpointSummary: '',
+        checkpointNext: ''
+      }), 'utf8');
+      if (isActiveProject) {
+        sendNodesToWebview();
+        postNodeConversations(nodeId);
+      }
+      refreshSidebarProjectCards();
+      keepActiveConversationRegistered = true;
+      processedSuccessfully = true;
+      return;
+    }
+
     const isReviewRun = runKind === 'agent_review';
-    const isContinuationRun = isContinuationRunKind(String(runKind || ''));
+    const isContinuationRun = isContinuationRunKind(String(runKind || '')) && statusData.interactiveSession !== true;
     const isSoloConversation = runKind === 'solo' || nodeId === soloConversationId;
     let nextStatus = String(status || '');
     let completionReason = '';
@@ -8468,6 +8727,18 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         failureReason = 'Agent completion decision file could not be parsed.';
         completionReason = 'Agent completion decision file could not be parsed.';
       }
+    }
+    if (statusData.interactiveSession === true && statusData.checkpointOutcome) {
+      const checkpointOutcome = String(statusData.checkpointOutcome || 'partial');
+      const checkpointSummary = String(statusData.checkpointSummary || '').trim();
+      const checkpointNext = String(statusData.checkpointNext || '').trim();
+      if (checkpointOutcome !== 'candidate_complete' && checkpointOutcome !== 'failed') {
+        nextStatus = 'In Progress';
+      }
+      completionReason = [
+        checkpointSummary,
+        checkpointNext ? `下一步：${checkpointNext}` : ''
+      ].filter(Boolean).join(' ');
     }
 
     const outputTail = getOutputTail(outputFilePath);
@@ -8517,7 +8788,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       shouldWriteNodeStatus = false;
       if (status === 'In Progress') {
         nextStatus = 'Completed';
-        completionReason = 'Solo 对话已完成，等待用户决定是否关联到路线图环节。';
+        const soloCompletionReason = 'Solo 对话已完成，等待用户决定是否关联到路线图环节。';
+        completionReason = completionReason
+          ? `${completionReason} ${soloCompletionReason}`
+          : soloCompletionReason;
       } else {
         nextStatus = 'Failed';
         failureCode = failureCode || 'agent_exit_failed';
@@ -8864,6 +9138,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       userMessage ? `User supplement:\n${userMessage}` : '',
       sessionMode ? `Native session mode: ${sessionMode}` : '',
       nativeSessionSummary,
+      statusData.interactiveSession === true ? `Interactive session root: ${Number(statusData.rootExecutionLogId || executionLogId || 0)}` : '',
+      statusData.interactiveSession === true ? 'Interactive session state: Waiting' : '',
       `Sentinel captured state: ${status}`,
       isContinuationRun
         ? `Continuation record state: ${nextStatus}`
@@ -9024,8 +9300,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       } else if (nextStatus === 'Failed') {
         notifyText = `❌ <b>[${pName}] 环节 "${nodeTitle}" 执行失败！</b>\n原因: ${failureReason || '未捕获的具体错误'}`;
       } else if (nextStatus === 'In Progress') {
-        notifyText = `⚠️ <b>[${pName}] 环节 "${nodeTitle}" 处于推进中。</b>\n详情: ${completionReason || '等待下一步操作。'}`;
-        notifyText += `\n系统已进入人在回路状态，可回复 <code>/approve</code> 批准完成，或回复 <code>/deny</code> 拒绝并终止。`;
+        notifyText = statusData.interactiveSession === true
+          ? `💬 <b>[${pName}] 本轮对话已结束，环节仍可继续推进。</b>\n详情: ${completionReason || '等待下一条消息。'}`
+          : `⚠️ <b>[${pName}] 环节 "${nodeTitle}" 处于推进中。</b>\n详情: ${completionReason || '等待下一步操作。'}\n系统已进入人在回路状态，可回复 <code>/approve</code> 批准完成，或回复 <code>/deny</code> 拒绝并终止。`;
       }
       if (notifyText) {
         void sendTelegramNotification(extensionContextRef, notifyText);
@@ -9051,13 +9328,23 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       // Recording a continuation is background bookkeeping and must never interrupt user input.
     } else if (!isSoloConversation && nextStatus === 'Completed' && !hasRecordedWorkspaceChanges(changedFilesSummary, touchedFilesSummary)) {
       vscode.window.showWarningMessage(`Agent task [${nodeId}] completed, but no workspace file changes were detected.`);
+    } else if (statusData.interactiveSession === true) {
+      vscode.window.showInformationMessage('本轮已记录，可在当前 Agent 终端继续对话。');
     } else if (isSoloConversation) {
       vscode.window.showInformationMessage(`Solo conversation finished with state: ${nextStatus}`);
     } else {
       vscode.window.showInformationMessage(`Agent task [${nodeId}] finished with state: ${nextStatus}`);
     }
 
-    agentTerminalNamesByConversationId.delete(Number(executionLogId || 0));
+    const keepInteractiveSessionOpen = statusData.interactiveSession === true && statusData.interactiveSessionClosed !== true;
+    if (keepInteractiveSessionOpen) {
+      keepActiveConversationRegistered = true;
+    } else {
+      agentTerminalNamesByConversationId.delete(Number(statusData.rootExecutionLogId || executionLogId || 0));
+      agentTerminalNamesByConversationId.delete(Number(executionLogId || 0));
+      agentTerminalProjectRootsByConversationId.delete(Number(statusData.rootExecutionLogId || executionLogId || 0));
+      agentTerminalProjectRootsByConversationId.delete(Number(executionLogId || 0));
+    }
     if (workspaceRoot) {
       const retentionResult = pruneProjectOutputLogs(workspaceRoot);
       if (retentionResult.errors.length > 0) {
@@ -9072,7 +9359,11 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       if (belongsToProcessedRun && fs.existsSync(normalizedStatusFilePath)) {
         fs.writeFileSync(normalizedStatusFilePath, JSON.stringify({
           ...currentStatus,
-          status: 'Processed',
+          status: keepInteractiveSessionOpen ? 'Waiting' : 'Processed',
+          ...(keepInteractiveSessionOpen ? {
+            checkpointSettledStatus: nextStatus,
+            waitingSince: new Date().toISOString()
+          } : {}),
           processedAt: new Date().toISOString()
         }), 'utf8');
       }
@@ -9085,7 +9376,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     try {
       transientStatusSyncEngine?.close();
     } finally {
-      if (processedSuccessfully && ledgerWorkspaceRoot && ledgerExecutionLogId) {
+      if (processedSuccessfully && !keepActiveConversationRegistered && ledgerWorkspaceRoot && ledgerExecutionLogId) {
         unregisterActiveConversation(
           ledgerWorkspaceRoot,
           ledgerGlobalDataPath,
@@ -9101,7 +9392,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 function isPendingAgentStatusFile(statusFilePath: string): boolean {
   const statusData = readAgentStatus(statusFilePath);
   const status = String(statusData?.status || '');
-  return Boolean(statusData?.nodeId && status && status !== 'Running' && status !== 'Processed');
+  return Boolean(statusData?.nodeId && status && !['Running', 'Waiting', 'Processed'].includes(status));
 }
 
 function migrateLegacyActiveConversations(context: vscode.ExtensionContext): void {
@@ -9119,8 +9410,8 @@ function migrateLegacyActiveConversations(context: vscode.ExtensionContext): voi
       registerActiveConversation({
         workspaceRoot: project.path,
         globalDataPath: settings.globalDataPath,
-        conversationId: executionLogId,
-        executionLogId,
+        conversationId: Number(statusData.rootExecutionLogId || executionLogId),
+        executionLogId: Number(statusData.rootExecutionLogId || executionLogId),
         nodeId: String(statusData.nodeId),
         statusFilePath,
         runKind: String(statusData.runKind || 'step'),
