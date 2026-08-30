@@ -3461,6 +3461,51 @@ test('terminal status refresh supersedes a stale running conversation snapshot',
   assert.equal(postedMessages[0].soloConversations[0].status, 'Completed');
 });
 
+test('a ledger refresh invalidates older per-conversation sidebar reads', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const postedMessages = [];
+  let resolveSoloHistory;
+  const staleSoloHistory = new Promise((resolve) => {
+    resolveSoloHistory = resolve;
+  });
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'app', path: '/workspace/app' }],
+        selectedProjectPath: '/workspace/app'
+      }),
+      getSoloConversationHistory: () => staleSoloHistory,
+      getProjectConversationSnapshot: async () => ({
+        solo: [{ id: 8, nodeId: '__solo__', status: 'Running', summary: 'New conversation' }],
+        project: [],
+        flow: []
+      })
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+
+  const staleRead = provider.sendSoloConversationHistory('/workspace/app');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await provider.refreshProjectConversationSnapshotAfterStatusChange('/workspace/app');
+  resolveSoloHistory([{ id: 7, nodeId: '__solo__', status: 'Completed', summary: 'Older history' }]);
+  await staleRead;
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(postedMessages[0].command, 'sidebarProjectConversationSnapshotLoaded');
+  assert.equal(postedMessages[0].soloConversations[0].id, 8);
+});
+
 test('forced project refresh paints the valid local conversation snapshot before fresh loading finishes', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -5690,6 +5735,18 @@ test('agent launch path uses one terminal-first startup component', () => {
     'function extractUserSupplementFromExecutionOutput',
     'nodeId'
   );
+  for (const [name, startMarker, endMarker, refreshCall] of [
+    ['solo', 'async function handleRunSoloConversation', 'function getCurrentFlowTrace', 'postNodeConversations(soloConversationId)'],
+    ['step', 'async function handleRunAgent', 'function extractUserSupplementFromExecutionOutput', 'postNodeConversations(nodeId)']
+  ]) {
+    const body = source.slice(source.indexOf(startMarker), source.indexOf(endMarker, source.indexOf(startMarker)));
+    const ledgerWrite = body.indexOf('const executionLogId = syncEngine.logAgentExecution(');
+    const ledgerPublish = body.indexOf(refreshCall, ledgerWrite);
+    const preSessionGit = body.indexOf('await createPreSessionGitCommit(', ledgerWrite);
+    assert.ok(ledgerWrite >= 0, `${name} launch must create its first ledger row`);
+    assert.ok(ledgerPublish > ledgerWrite, `${name} launch must publish its first ledger row immediately`);
+    assert.ok(preSessionGit > ledgerPublish, `${name} launch must not delay its first ledger row behind pre-session work`);
+  }
   assertLaunchComponent(
     'sdk continuation launch',
     'async function handleContinueConversationTurn',
@@ -9729,7 +9786,7 @@ test('project-level execution history returns latest roadmap run across nodes', 
   store.close();
 });
 
-test('posting a step conversation refreshes one sidebar project snapshot without a duplicate step read', () => {
+test('posting a newly created conversation supersedes stale sidebar snapshots on every surface', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -9749,14 +9806,77 @@ test('posting a step conversation refreshes one sidebar project snapshot without
     },
     sendSoloConversationHistory(projectPath) {
       calls.push(['solo', projectPath]);
+    },
+    refreshProjectConversationSnapshotAfterStatusChange(projectPath) {
+      calls.push(['refresh', projectPath]);
     }
   });
 
   extensionModule.__postNodeConversations('3');
+  extensionModule.__postNodeConversations('__solo__');
 
   assert.deepEqual(calls, [
-    ['snapshot', '/workspace/project']
+    ['refresh', '/workspace/project'],
+    ['refresh', '/workspace/project']
   ]);
+});
+
+test('a new solo conversation cannot be overwritten by a sidebar snapshot started before its ledger row', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const projectPath = '/workspace/project';
+  const snapshotResolvers = [];
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'project', path: projectPath }],
+        selectedProjectPath: projectPath
+      }),
+      getProjectConversationSnapshot: () => new Promise((resolve) => snapshotResolvers.push(resolve))
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__postNodeConversations = postNodeConversations;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  extensionModule.__setRuntimeForTest({ getAgentExecutions: () => [] }, projectPath, provider);
+
+  const staleLoad = provider.sendProjectConversationSnapshot(projectPath, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  extensionModule.__postNodeConversations('__solo__');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(snapshotResolvers.length, 2);
+  snapshotResolvers[0]({ solo: [], project: [], flow: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(postedMessages.length, 0);
+
+  snapshotResolvers[1]({
+    solo: [{ id: 42, nodeId: '__solo__', status: 'Running', summary: 'New conversation' }],
+    project: [],
+    flow: []
+  });
+  await staleLoad;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(postedMessages[0].command, 'sidebarProjectConversationSnapshotLoaded');
+  assert.equal(postedMessages[0].soloConversations[0].id, 42);
 });
 
 test('project registry persists projects and pin state in the global SoloMap file', async () => {

@@ -72,6 +72,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private _latestPortfolio: ProjectPortfolioSummary[] = [];
   private _corePortfolioRequest = 0;
   private _conversationSnapshotRequest = 0;
+  private readonly _conversationLedgerRevisions = new Map<string, number>();
   private _localRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private _refreshAllLocalProjects = false;
   private readonly _pendingLocalProjectPaths = new Set<string>();
@@ -492,11 +493,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
+    const ledgerRevision = this._conversationLedgerRevisions.get(projectPath) || 0;
     try {
       if (!this._view || !this._getSoloConversationHistory || !projectPath) {
         return;
       }
       const conversations = await this._getSoloConversationHistory(projectPath);
+      if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)) return;
       this._view.webview.postMessage({
         command: 'sidebarSoloConversationLoaded',
         projectPath,
@@ -508,11 +511,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendStepConversationHistory(projectPath: string, nodeId: string) {
+    const ledgerRevision = this._conversationLedgerRevisions.get(projectPath) || 0;
     try {
       if (!this._view || !this._getStepConversationHistory || !projectPath || !nodeId) {
         return;
       }
       const conversations = await this._getStepConversationHistory(projectPath, nodeId);
+      if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)) return;
       this._view.webview.postMessage({
         command: 'sidebarStepConversationLoaded',
         projectPath,
@@ -525,11 +530,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendProjectConversationHistory(projectPath: string) {
+    const ledgerRevision = this._conversationLedgerRevisions.get(projectPath) || 0;
     try {
       if (!this._view || !this._getProjectConversationHistory || !projectPath) {
         return;
       }
       const conversations = await this._getProjectConversationHistory(projectPath);
+      if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)) return;
       this._view.webview.postMessage({
         command: 'sidebarProjectConversationLoaded',
         projectPath,
@@ -579,6 +586,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async refreshProjectConversationSnapshotAfterStatusChange(projectPath: string): Promise<void> {
+    this._conversationLedgerRevisions.set(
+      projectPath,
+      (this._conversationLedgerRevisions.get(projectPath) || 0) + 1
+    );
     await this.sendProjectConversationSnapshot(projectPath, true, true);
   }
 

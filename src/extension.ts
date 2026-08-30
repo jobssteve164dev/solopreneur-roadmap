@@ -5606,12 +5606,16 @@ function postNodeConversations(nodeId: string, fallbackConversations: import('./
       ...(page ? { pagination: { page: 0, pageSize, hasMore: page.hasMore, append: false } } : {})
     });
   }
-  if (nodeId === soloConversationId && sidebarProvider && activeProjectRoot) {
-    void sidebarProvider.sendSoloConversationHistory(activeProjectRoot);
-  } else if (sidebarProvider && activeProjectRoot) {
-    if (nodeId !== roadmapRevisionId) {
-      void sidebarProvider.sendProjectConversationSnapshot(activeProjectRoot);
-    }
+  if (
+    sidebarProvider
+    && activeProjectRoot
+    && nodeId !== roadmapRevisionId
+    && typeof sidebarProvider.refreshProjectConversationSnapshotAfterStatusChange === 'function'
+  ) {
+    // A ledger mutation must supersede any snapshot that started before the
+    // new row was persisted. Reusing the ordinary cached/in-flight read can
+    // repaint the sidebar without the newly created conversation.
+    void sidebarProvider.refreshProjectConversationSnapshotAfterStatusChange(activeProjectRoot);
   }
 }
 
@@ -7037,11 +7041,11 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const storedSession = getStoredAgentSession(activeProjectRoot, soloConversationId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
   const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
-  const launchSummary = [
+  const runStartedAt = new Date().toISOString();
+  const buildLaunchSummary = (preGitHash = '') => [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Solo conversation started.',
-    `Run started at: ${new Date().toISOString()}`,
+    `Run started at: ${runStartedAt}`,
     occurrenceMarker,
     nativeSessionId
       ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
@@ -7049,6 +7053,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     `User supplement:\n${request}`,
     attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
+  let launchSummary = buildLaunchSummary();
   const executionLogId = syncEngine.logAgentExecution(
     soloConversationId,
     agentCli,
@@ -7056,6 +7061,9 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     launchSummary,
     'Running'
   );
+  postNodeConversations(soloConversationId);
+  const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
+  launchSummary = buildLaunchSummary(preGitHash || '');
   const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', soloConversationId, String(executionLogId));
   const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
   const roadmapBackupFilePath = path.join(runDir, 'roadmap-before.csv');
@@ -7563,17 +7571,18 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
   const nativeSessionId = storedSession?.sessionId || '';
-  const preGitHash = await createPreSessionGitCommit(workspaceRoot);
-  const launchSummary = [
+  const runStartedAt = new Date().toISOString();
+  const buildLaunchSummary = (preGitHash = '') => [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Agent conversation started.',
-    `Run started at: ${new Date().toISOString()}`,
+    `Run started at: ${runStartedAt}`,
     nativeSessionId
       ? `Starting a new native ${getAgentProvider(agentCli)} session. Previous session available as optional reference: ${nativeSessionId}`
       : `Starting a new native ${getAgentProvider(agentCli)} session.`,
     userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
     attachedFiles.length ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
+  let launchSummary = buildLaunchSummary();
   const executionLogId = syncEngine.logAgentExecution(
     nodeId,
     agentCli,
@@ -7581,6 +7590,9 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     launchSummary,
     'Running'
   );
+  postNodeConversations(nodeId);
+  const preGitHash = await createPreSessionGitCommit(workspaceRoot);
+  launchSummary = buildLaunchSummary(preGitHash || '');
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
   const statusFilePath = getAgentStatusFilePath(workspaceRoot, executionLogId);
   const completionDecisionFilePath = path.join(runDir, 'completion.json');
@@ -8670,7 +8682,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
         processedAt: new Date().toISOString()
       });
       if (isActiveProject) postNodeConversations(nodeId);
-      await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
+      if (!isActiveProject) {
+        await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
+      }
       processedSuccessfully = true;
       return;
     }
@@ -9318,7 +9332,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       sendNodesToWebview();
       postNodeConversations(nodeId);
     }
-    if (workspaceRoot) {
+    if (workspaceRoot && !isActiveProject) {
       await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
     }
     refreshSidebarProjectCards();
