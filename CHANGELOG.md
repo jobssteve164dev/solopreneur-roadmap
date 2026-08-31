@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.445 - 2026-08-31
+
+### Fixed
+- restore interactive conversation continuity (70fafc2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.444 - 2026-08-30
 
 ### Added
