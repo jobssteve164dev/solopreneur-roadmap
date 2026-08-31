@@ -4808,7 +4808,8 @@ function buildAgentShellScript(
   const loggedCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
-  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId: effectiveNativeSessionId, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...statusMetadata };
+  const nativeSessionIdIsCurrent = Boolean(effectiveDirectExecutionCommand && effectiveNativeSessionId.trim());
+  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, previousNativeSessionId: effectiveNativeSessionId, nativeSessionId: nativeSessionIdIsCurrent ? effectiveNativeSessionId : '', nativeSessionIdIsCurrent, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...statusMetadata };
   const runningStatus = JSON.stringify({
     ...statusBase,
     status: interactiveSession && statusMetadata.startWaiting === true ? 'Waiting' : 'Running'
@@ -5808,10 +5809,20 @@ function createAgentTerminal(
 ): vscode.Terminal {
   const reservedTerminals = reservedAgentTerminalsByProject.get(workspaceRoot);
   const environmentSignature = JSON.stringify(env || {});
-  const reservedIndex = reservedTerminals?.findIndex((entry) => entry.environmentSignature === environmentSignature) ?? -1;
-  const reserved = reservedIndex >= 0 ? reservedTerminals?.splice(reservedIndex, 1)[0] : undefined;
+  const liveTerminals = new Set(vscode.window.terminals);
+  if (reservedTerminals) {
+    const liveReservations = reservedTerminals.filter((entry) => liveTerminals.has(entry.terminal));
+    if (liveReservations.length > 0) {
+      reservedAgentTerminalsByProject.set(workspaceRoot, liveReservations);
+    } else {
+      reservedAgentTerminalsByProject.delete(workspaceRoot);
+    }
+  }
+  const currentReservations = reservedAgentTerminalsByProject.get(workspaceRoot);
+  const reservedIndex = currentReservations?.findIndex((entry) => entry.environmentSignature === environmentSignature) ?? -1;
+  const reserved = reservedIndex >= 0 ? currentReservations?.splice(reservedIndex, 1)[0] : undefined;
   if (reserved) {
-    if (!reservedTerminals?.length) {
+    if (!currentReservations?.length) {
       reservedAgentTerminalsByProject.delete(workspaceRoot);
     }
     const reservedTerminal = reserved.terminal;
@@ -5945,6 +5956,14 @@ async function handleAgentTerminalClosed(
 ): Promise<boolean> {
   if (exitReason === vscode.TerminalExitReason.Shutdown) {
     return false;
+  }
+  for (const [workspaceRoot, reservations] of reservedAgentTerminalsByProject.entries()) {
+    const remaining = reservations.filter((entry) => entry.terminal.name !== terminalName);
+    if (remaining.length > 0) {
+      reservedAgentTerminalsByProject.set(workspaceRoot, remaining);
+    } else {
+      reservedAgentTerminalsByProject.delete(workspaceRoot);
+    }
   }
   const matched = [...agentTerminalNamesByConversationId.entries()]
     .find(([, name]) => name === terminalName);
@@ -8687,7 +8706,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       }
       return;
     }
-    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId: statusExecutionLogId, userMessage: statusUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, sessionMode, startedAt: statusStartedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId, reviewMainAgentCli, reviewMainNativeSessionId, reviewAttempt, reviewTaskGoal, reviewCompletionCriteria } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId: statusExecutionLogId, userMessage: statusUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, nativeSessionIdIsCurrent, sessionMode, startedAt: statusStartedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId, reviewMainAgentCli, reviewMainNativeSessionId, reviewAttempt, reviewTaskGoal, reviewCompletionCriteria } = statusData;
     let executionLogId = Number(statusExecutionLogId || 0);
     let userMessage = String(statusUserMessage || '');
     let startedAt = String(statusStartedAt || '');
@@ -8723,19 +8742,26 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     if (status === 'Session Closed' && statusData.interactiveSession === true) {
-      let capturedSessionId = String(nativeSessionId || '').trim();
+      let capturedSessionId = '';
       if (sessionFilePath && fs.existsSync(String(sessionFilePath))) {
         try {
-          capturedSessionId = String(JSON.parse(fs.readFileSync(String(sessionFilePath), 'utf8'))?.sessionId || capturedSessionId).trim();
+          capturedSessionId = String(JSON.parse(fs.readFileSync(String(sessionFilePath), 'utf8'))?.sessionId || '').trim();
         } catch {}
-      }
-      if (capturedSessionId) {
-        updateStoredAgentSession(workspaceRoot, nodeId, agentCli || command || 'unknown', capturedSessionId);
       }
       const existingLogs = nodeId === soloConversationId && typeof statusSyncEngine.getProjectAgentExecutions === 'function'
         ? statusSyncEngine.getProjectAgentExecutions()
         : statusSyncEngine.getAgentExecutions(nodeId);
       const rootExecutionLogId = Number(statusData.rootExecutionLogId || executionLogId || 0);
+      if (!capturedSessionId) {
+        const rootConversation = existingLogs.find((entry) => Number(entry.id || 0) === rootExecutionLogId) || null;
+        capturedSessionId = resolveNativeSessionIdForConversationFromWorkspace(workspaceRoot, nodeId, rootConversation);
+      }
+      if (!capturedSessionId && nativeSessionIdIsCurrent === true) {
+        capturedSessionId = String(nativeSessionId || '').trim();
+      }
+      if (capturedSessionId) {
+        updateStoredAgentSession(workspaceRoot, nodeId, agentCli || command || 'unknown', capturedSessionId);
+      }
       const sessionConversations = existingLogs.filter((entry) => (
         Number(entry.id || 0) === rootExecutionLogId
         || Number(entry.id || 0) === Number(executionLogId || 0)
@@ -8753,7 +8779,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           currentConversation.command,
           [
             closedOutput,
-            capturedSessionId ? `Native Agent session saved: ${capturedSessionId}` : '',
+            capturedSessionId ? `Native Agent session saved: ${sessionFilePath || 'session.json'} (${capturedSessionId})` : '',
             /Interactive session state:/i.test(closedOutput) ? '' : 'Interactive session state: Closed'
           ].filter(Boolean).join('\n\n'),
           currentConversation.status
@@ -8862,11 +8888,29 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     const outputTail = getOutputTail(outputFilePath);
     const outputText = readTextFileSafe(String(outputFilePath || ''));
-    let capturedSessionId = String(nativeSessionId || '').trim();
-    if (!capturedSessionId && sessionFilePath && fs.existsSync(String(sessionFilePath))) {
+    let capturedSessionId = '';
+    if (sessionFilePath && fs.existsSync(String(sessionFilePath))) {
       try {
         capturedSessionId = String(JSON.parse(fs.readFileSync(String(sessionFilePath), 'utf8'))?.sessionId || '').trim();
       } catch {}
+    }
+    if (!capturedSessionId && statusData.interactiveSession === true) {
+      const currentLogs = nodeId === soloConversationId && typeof statusSyncEngine.getProjectAgentExecutions === 'function'
+        ? statusSyncEngine.getProjectAgentExecutions()
+        : statusSyncEngine.getAgentExecutions(nodeId);
+      const rootExecutionLogId = Number(statusData.rootExecutionLogId || executionLogId || 0);
+      const rootConversation = currentLogs.find((entry) => Number(entry.id || 0) === rootExecutionLogId) || null;
+      capturedSessionId = resolveNativeSessionIdForConversationFromWorkspace(workspaceRoot, nodeId, rootConversation);
+      if (capturedSessionId && sessionFilePath) {
+        fs.mkdirSync(path.dirname(String(sessionFilePath)), { recursive: true });
+        fs.writeFileSync(String(sessionFilePath), JSON.stringify({
+          sessionId: capturedSessionId,
+          source: 'interactive-live-transcript'
+        }, null, 2), 'utf8');
+      }
+    }
+    if (!capturedSessionId && nativeSessionIdIsCurrent === true) {
+      capturedSessionId = String(nativeSessionId || '').trim();
     }
     const recordedCodexHome = codexHomeFilePath && fs.existsSync(String(codexHomeFilePath))
       ? fs.readFileSync(String(codexHomeFilePath), 'utf8').trim()
@@ -9560,19 +9604,8 @@ async function pollActiveConversations(context: vscode.ExtensionContext): Promis
     return;
   }
   for (const record of activeConversations) {
-    const statusData = readAgentStatus(record.statusFilePath);
-    const registeredAtMs = Date.parse(record.registeredAt || '') || Date.now();
-    let lastSignalAtMs = registeredAtMs;
-    try {
-      if (fs.existsSync(record.statusFilePath)) lastSignalAtMs = fs.statSync(record.statusFilePath).mtimeMs;
-    } catch {
-      // A concurrent final status write will be observed on the next pass.
-    }
-    const status = String(statusData?.status || '');
-    const hasLostSupervisor = Date.now() - lastSignalAtMs > 2 * 60 * 1000
-      && (!statusData || status === 'Running');
-    if (!hasLostSupervisor && !isPendingAgentStatusFile(record.statusFilePath)) continue;
-    await processRegisteredStatusFile(context, record.statusFilePath, false, record, hasLostSupervisor);
+    if (!isPendingAgentStatusFile(record.statusFilePath)) continue;
+    await processRegisteredStatusFile(context, record.statusFilePath, false, record);
   }
 }
 
@@ -9580,8 +9613,7 @@ async function processRegisteredStatusFile(
   context: vscode.ExtensionContext | null,
   statusFilePath: string,
   allowUnregistered: boolean,
-  knownRecord?: ReturnType<typeof listActiveConversations>[number],
-  recoverLostSupervisor = false
+  knownRecord?: ReturnType<typeof listActiveConversations>[number]
 ): Promise<void> {
   if (!context) {
     if (allowUnregistered) await processAgentStatusFile(statusFilePath);
@@ -9603,23 +9635,6 @@ async function processRegisteredStatusFile(
   );
   if (!lease) return;
   try {
-    if (recoverLostSupervisor) {
-      const statusData = readAgentStatus(record.statusFilePath);
-      fs.mkdirSync(path.dirname(record.statusFilePath), { recursive: true });
-      fs.writeFileSync(record.statusFilePath, JSON.stringify({
-        ...(statusData || {}),
-        workspaceRoot: record.workspaceRoot,
-        nodeId: record.nodeId,
-        runKind: record.runKind,
-        globalDataPath: settings.globalDataPath,
-        executionLogId: record.executionLogId,
-        status: 'Failed',
-        failureCode: 'agent_supervisor_lost',
-        failureReason: 'The Agent supervisor stopped reporting before the conversation finished.',
-        startedAt: statusData?.startedAt || record.registeredAt,
-        finishedAt: new Date().toISOString()
-      }), 'utf8');
-    }
     await processAgentStatusFile(record.statusFilePath);
   } finally {
     releaseActiveConversationLease(lease);

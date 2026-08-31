@@ -16,6 +16,16 @@ export interface StepSessionState {
   sessions: Record<string, AgentStepSession>;
 }
 
+interface CodexRunSessionIndexEntry {
+  sessionId: string;
+  timestampMs: number;
+}
+
+const codexRunSessionIndexCache = new Map<string, {
+  expiresAt: number;
+  entries: Map<string, CodexRunSessionIndexEntry>;
+}>();
+
 export type ContinuableAgentConversation = AgentConversation & {
   resumableNativeSessionId?: string;
   continuationRootConversationId?: number;
@@ -168,17 +178,113 @@ export function extractContinuationParentConversationId(output: string): number 
   return match ? Number(match[1]) : 0;
 }
 
+const codexTranscriptFilesCache = new Map<string, { expiresAt: number; files: string[] }>();
+
 export function findCodexTranscriptFile(codexHome: string, sessionId: string): string {
   const normalizedHome = String(codexHome || '').trim();
   const normalizedSessionId = String(sessionId || '').trim();
   if (!normalizedHome || !normalizedSessionId) {
     return '';
   }
-  const roots = [
-    path.join(normalizedHome, 'sessions'),
-    path.join(normalizedHome, 'archived_sessions')
-  ];
+  const cacheKey = path.resolve(normalizedHome);
+  let cached = codexTranscriptFilesCache.get(cacheKey);
+  const reusedCachedIndex = Boolean(cached && cached.expiresAt > Date.now());
+  if (!cached || cached.expiresAt <= Date.now()) {
+    const roots = [
+      path.join(normalizedHome, 'sessions'),
+      path.join(normalizedHome, 'archived_sessions')
+    ];
+    const stack = roots.filter((candidate) => fs.existsSync(candidate));
+    const files: string[] = [];
+    while (stack.length > 0) {
+      const current = stack.pop() || '';
+      let entries: fs.Dirent[] = [];
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const fullPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(fullPath);
+        } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+          files.push(fullPath);
+        }
+      }
+    }
+    cached = { expiresAt: Date.now() + 30 * 1000, files };
+    codexTranscriptFilesCache.set(cacheKey, cached);
+  }
+  const candidateFiles = cached.files.filter((candidate) => path.basename(candidate).includes(normalizedSessionId));
+  if (candidateFiles.length === 0 && reusedCachedIndex) {
+    codexTranscriptFilesCache.delete(cacheKey);
+    return findCodexTranscriptFile(normalizedHome, normalizedSessionId);
+  }
+  for (const fullPath of candidateFiles) {
+    let descriptor = -1;
+    try {
+      descriptor = fs.openSync(fullPath, 'r');
+      const prefixBuffer = Buffer.alloc(16 * 1024);
+      const bytesRead = fs.readSync(descriptor, prefixBuffer, 0, prefixBuffer.length, 0);
+      const firstLine = prefixBuffer.subarray(0, bytesRead).toString('utf8').split(/\r?\n/).find(Boolean) || '';
+      const parsed = JSON.parse(firstLine);
+      if (String(parsed?.payload?.id || '') === normalizedSessionId) {
+        return fullPath;
+      }
+    } catch {
+      // Ignore malformed or partially-written transcript files.
+    } finally {
+      if (descriptor >= 0) {
+        try { fs.closeSync(descriptor); } catch {}
+      }
+    }
+  }
+  return '';
+}
+
+export function findCodexSessionIdForRun(
+  codexHome: string,
+  workspaceRoot: string,
+  promptFilePath: string,
+  startedAt: string
+): string {
+  const normalizedHome = String(codexHome || '').trim();
+  const normalizedWorkspace = String(workspaceRoot || '').trim();
+  const normalizedPrompt = String(promptFilePath || '').trim();
+  const startedMs = Date.parse(String(startedAt || ''));
+  if (
+    !normalizedHome
+    || !normalizedWorkspace
+    || !normalizedPrompt
+    || !fs.existsSync(normalizedPrompt)
+    || !Number.isFinite(startedMs)
+  ) {
+    return '';
+  }
+  const startedDate = new Date(startedMs);
+  const dateKey = startedDate.toISOString().slice(0, 10);
+  const cacheKey = `${path.resolve(normalizedHome)}\0${path.resolve(normalizedWorkspace)}\0${dateKey}`;
+  const cached = codexRunSessionIndexCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    const match = cached.entries.get(path.resolve(normalizedPrompt));
+    if (match) {
+      return match.timestampMs >= startedMs ? match.sessionId : '';
+    }
+    codexRunSessionIndexCache.delete(cacheKey);
+  }
+  const roots = [-1, 0, 1].map((dayOffset) => {
+    const candidateDate = new Date(startedMs + dayOffset * 24 * 60 * 60 * 1000);
+    return path.join(
+      normalizedHome,
+      'sessions',
+      String(candidateDate.getUTCFullYear()),
+      String(candidateDate.getUTCMonth() + 1).padStart(2, '0'),
+      String(candidateDate.getUTCDate()).padStart(2, '0')
+    );
+  });
   const stack = roots.filter((candidate) => fs.existsSync(candidate));
+  const indexedEntries = new Map<string, CodexRunSessionIndexEntry>();
   while (stack.length > 0) {
     const current = stack.pop() || '';
     let entries: fs.Dirent[] = [];
@@ -193,21 +299,49 @@ export function findCodexTranscriptFile(codexHome: string, sessionId: string): s
         stack.push(fullPath);
         continue;
       }
-      if (!entry.isFile() || !entry.name.endsWith('.jsonl') || !entry.name.includes(normalizedSessionId)) {
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
         continue;
       }
+      let descriptor = -1;
       try {
-        const firstLine = fs.readFileSync(fullPath, 'utf8').split(/\r?\n/).find(Boolean) || '';
+        descriptor = fs.openSync(fullPath, 'r');
+        const prefixBuffer = Buffer.alloc(160 * 1024);
+        const bytesRead = fs.readSync(descriptor, prefixBuffer, 0, prefixBuffer.length, 0);
+        const contentPrefix = prefixBuffer.subarray(0, bytesRead).toString('utf8');
+        const firstLine = contentPrefix.split(/\r?\n/).find(Boolean) || '';
         const parsed = JSON.parse(firstLine);
-        if (String(parsed?.payload?.id || '') === normalizedSessionId) {
-          return fullPath;
+        const payload = parsed?.payload || {};
+        const sessionId = String(payload.id || payload.session_id || '').trim();
+        const cwd = String(payload.cwd || '').trim();
+        const timestampMs = Date.parse(String(parsed.timestamp || payload.timestamp || ''));
+        if (!sessionId || !cwd || path.resolve(cwd) !== path.resolve(normalizedWorkspace) || !Number.isFinite(timestampMs)) {
+          continue;
+        }
+        const promptMatch = contentPrefix.match(/Read the complete SoloMap task prompt from ([^"\r\n]+?\/prompt\.txt) and follow/);
+        const indexedPrompt = String(promptMatch?.[1] || '').trim();
+        if (indexedPrompt) {
+          const promptKey = path.resolve(indexedPrompt);
+          const previous = indexedEntries.get(promptKey);
+          if (!previous || timestampMs < previous.timestampMs) {
+            indexedEntries.set(promptKey, { sessionId, timestampMs });
+          }
         }
       } catch {
         // Ignore malformed or partially-written transcript files.
+      } finally {
+        if (descriptor >= 0) {
+          try { fs.closeSync(descriptor); } catch {}
+        }
       }
     }
   }
-  return '';
+  const match = indexedEntries.get(path.resolve(normalizedPrompt));
+  const recentlyStarted = Date.now() - startedMs < 5 * 60 * 1000;
+  codexRunSessionIndexCache.set(cacheKey, {
+    expiresAt: Date.now() + (!match && recentlyStarted ? 1000 : 30 * 1000),
+    entries: indexedEntries
+  });
+  return match && match.timestampMs >= startedMs ? match.sessionId : '';
 }
 
 export function extractFirstCodexUserMessageAfter(codexHome: string, sessionId: string, startedAt: string): string {
@@ -368,18 +502,10 @@ export function resolveContinuationRootConversationFromList(conversations: Agent
   if (!start) {
     return null;
   }
-  const sessionId = extractNativeSessionIdFromConversation(start);
-  if (sessionId) {
-    return conversations
-      .filter((conversation) => extractNativeSessionIdFromConversation(conversation) === sessionId)
-      .sort((a, b) => {
-        const leftHasParent = extractContinuationParentConversationId(a.output || '') ? 1 : 0;
-        const rightHasParent = extractContinuationParentConversationId(b.output || '') ? 1 : 0;
-        return leftHasParent - rightHasParent || Number(a.id || 0) - Number(b.id || 0);
-      })[0] || start;
-  }
   let current = start;
   const seen = new Set<number>();
+  let followedParent = false;
+  let declaredParent = false;
   while (current) {
     const currentId = Number(current.id || 0);
     if (seen.has(currentId)) {
@@ -387,13 +513,42 @@ export function resolveContinuationRootConversationFromList(conversations: Agent
     }
     seen.add(currentId);
     const parentId = extractContinuationParentConversationId(current.output || '');
+    declaredParent = declaredParent || Boolean(parentId);
     const parent = parentId ? byId.get(Number(parentId)) : null;
     if (!parent) {
-      return current;
+      break;
     }
+    followedParent = true;
     current = parent;
   }
+  if (followedParent) {
+    return current || start;
+  }
+  if (declaredParent) {
+    return start;
+  }
+  const sessionId = extractNativeSessionIdFromConversation(start);
+  if (sessionId) {
+    return conversations
+      .filter((conversation) => extractNativeSessionIdFromConversation(conversation) === sessionId)
+      .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))[0] || start;
+  }
   return start;
+}
+
+function shouldRecoverCodexRunSessionIdentity(conversation: AgentConversation): boolean {
+  if (getContinuationAgentProvider(conversation.agentCli || '') !== 'codex') {
+    return false;
+  }
+  const output = String(conversation.output || '');
+  const hasInteractiveRunEvidence = /Interactive session (?:root|state):|Starting a new native\s+\S+\s+session\./i.test(output)
+    || /--no-alt-screen\b/.test(String(conversation.command || ''));
+  if (!hasInteractiveRunEvidence) {
+    return false;
+  }
+  const savedSessionId = extractSavedNativeSessionIdFromExecutionOutput(output);
+  const hasUnverifiedBareSessionMarker = /Native Agent session saved:\s*[A-Za-z0-9_.:-]+\s*(?:\r?\n|$)/.test(output);
+  return !savedSessionId || hasUnverifiedBareSessionMarker;
 }
 
 export function resolveNativeSessionIdForConversation(workspaceRoot: string, nodeId: string, conversation: AgentConversation | null): string {
@@ -410,6 +565,29 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
   }
   const recordedCodexHome = readRunTextFile(workspaceRoot, nodeId, conversationId, 'codex-home.txt').trim();
   const codexHome = recordedCodexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const runDir = getConversationRunDir(workspaceRoot, nodeId, conversationId);
+  const promptFilePath = path.join(runDir, 'prompt.txt');
+  const runStartedAtMatch = String(conversation.output || '').match(/Run started at:\s*([^\n]+)/);
+  let runStartedAt = String(runStartedAtMatch?.[1] || conversation.timestamp || '').trim();
+  try {
+    const startedAtPath = path.join(runDir, 'started_at');
+    if (fs.existsSync(startedAtPath)) {
+      runStartedAt = fs.statSync(startedAtPath).mtime.toISOString();
+    }
+  } catch {
+    // Fall back to the persisted conversation start time.
+  }
+  if (shouldRecoverCodexRunSessionIdentity(conversation)) {
+    const liveRunSessionId = findCodexSessionIdForRun(
+      codexHome,
+      workspaceRoot,
+      promptFilePath,
+      runStartedAt
+    );
+    if (liveRunSessionId) {
+      return liveRunSessionId;
+    }
+  }
   const outputText = readRunTextFile(workspaceRoot, nodeId, conversationId, 'output.log');
   const outputSessionId = extractCodexSessionIdFromOutputText(outputText);
   const candidates = [runSessionId, outputSessionId, savedSessionId, continuationSessionId, commandSessionId]
@@ -428,14 +606,19 @@ export function hydrateConversationContinuations(
   workspaceRoot: string,
   nodeId: string,
   conversations: AgentConversation[],
-  options: { validateCodexTranscript?: boolean } = {}
+  options: { validateCodexTranscript?: boolean; recoverRunSessionIdentity?: boolean } = {}
 ): ContinuableAgentConversation[] {
   return conversations.map((conversation) => {
     const rootConversation = resolveContinuationRootConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
     const sessionConversation = resolveContinuationSessionConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
-    const sessionId = options.validateCodexTranscript === false
+    const shouldResolveDirectSession = options.validateCodexTranscript !== false
+      || (options.recoverRunSessionIdentity === true && shouldRecoverCodexRunSessionIdentity(conversation));
+    const directSessionId = shouldResolveDirectSession
+      ? resolveNativeSessionIdForConversation(workspaceRoot, nodeId, conversation)
+      : extractNativeSessionIdFromConversation(conversation);
+    const sessionId = directSessionId || (options.validateCodexTranscript === false
       ? extractNativeSessionIdFromConversation(sessionConversation)
-      : resolveNativeSessionIdForConversation(workspaceRoot, nodeId, sessionConversation);
+      : resolveNativeSessionIdForConversation(workspaceRoot, nodeId, sessionConversation));
     return {
       ...conversation,
       ...(sessionId ? { resumableNativeSessionId: sessionId } : {}),

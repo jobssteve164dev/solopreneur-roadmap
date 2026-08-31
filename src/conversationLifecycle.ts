@@ -80,33 +80,14 @@ function isContinuationConversation(conversation: AgentConversation, status: any
     || /Agent continuation started\.|Continuation parent conversation:|Continuation mode:/i.test(output);
 }
 
-function getFileMtimeMs(filePath: string): number {
-  try {
-    return fs.existsSync(filePath) ? fs.statSync(filePath).mtimeMs : 0;
-  } catch {
-    return 0;
-  }
-}
-
 function hasFreshRunningStatus(
   projectRoot: string,
   conversation: AgentConversation,
-  nowMs: number,
-  staleRunningStatusMs: number
+  _nowMs: number,
+  _staleRunningStatusMs: number
 ): boolean {
   const match = readStatusForConversation(projectRoot, Number(conversation.id || 0));
-  if (!match || String(match.status?.status || '') !== 'Running') {
-    return false;
-  }
-  const outputFilePath = String(match.status?.outputFilePath || '').trim();
-  const latestActivityMs = Math.max(
-    getFileMtimeMs(match.filePath),
-    outputFilePath ? getFileMtimeMs(outputFilePath) : 0
-  );
-  if (!latestActivityMs) {
-    return true;
-  }
-  return nowMs - latestActivityMs <= staleRunningStatusMs;
+  return Boolean(match && String(match.status?.status || '') === 'Running');
 }
 
 function statusFromStatusFile(conversation: AgentConversation, status: any | null): string {

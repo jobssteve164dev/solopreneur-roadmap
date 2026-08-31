@@ -4242,7 +4242,7 @@ test('Solo conversation history reads bounded SQLite pages newest first', async 
   store.close();
 });
 
-test('conversation lifecycle records stale continuation runs instead of showing them as running', async () => {
+test('conversation lifecycle keeps a quiet continuation running while its authoritative status is running', async () => {
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-lifecycle-continuation-'));
   const solopreneurA = path.join(projectRootA, '.solopreneur');
@@ -4277,14 +4277,14 @@ test('conversation lifecycle records stale continuation runs instead of showing 
   store.save();
 
   const logs = store.getExecutionLogs('__solo__');
-  assert.equal(logs[0].status, 'Recorded');
-  assert.match(logs[0].output, /SoloMap lifecycle reconciliation: Running -> Recorded/);
+  assert.equal(logs[0].status, 'Running');
+  assert.doesNotMatch(logs[0].output, /SoloMap lifecycle reconciliation/);
   store.close();
 
   const reopened = new SqliteStore(path.join(solopreneurA, 'project_journal.db'), projectRoot);
   await reopened.init();
   const persisted = reopened.getExecutionLogs('__solo__');
-  assert.equal(persisted[0].status, 'Recorded');
+  assert.equal(persisted[0].status, 'Running');
   reopened.close();
 });
 
@@ -5934,6 +5934,82 @@ test('agent launch path uses one terminal-first startup component', () => {
   );
 });
 
+test('a closed startup reservation cannot consume the next Agent launch command', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__createAgentTerminal = createAgentTerminal;',
+      'module.exports.__reserveTerminalForTest = (projectRoot, terminal) => { reservedAgentTerminalsByProject.set(projectRoot, [{ terminal, environmentSignature: "{}" }]); };'
+    ].join('\n')
+  );
+  const workspaceRoot = '/workspace/closed-startup-reservation';
+  const closedTerminal = {
+    name: 'closed startup terminal',
+    show() {},
+    sendText() { throw new Error('closed terminal must never receive a command'); }
+  };
+  extensionModule.__reserveTerminalForTest(workspaceRoot, closedTerminal);
+  extensionModule.__vscodeTestState.createdTerminal = null;
+
+  const terminal = extensionModule.__createAgentTerminal(workspaceRoot, 'solo', 72);
+
+  assert.notEqual(terminal, closedTerminal);
+});
+
+test('the active conversation poller does not fail a quiet long-running Agent', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__pollActiveConversations = pollActiveConversations;',
+      'module.exports.__setActiveProjectForPollTest = (projectRoot) => { activeProjectRoot = projectRoot; selectedProjectPathInMemory = projectRoot; extensionContextRef = null; syncEngine = null; };'
+    ].join('\n')
+  );
+  const { registerActiveConversation } = require(path.join(projectRoot, 'out/activeConversationLedger.js'));
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-quiet-active-project-'));
+  const globalDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-quiet-active-global-'));
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '73.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Running',
+    executionLogId: 73,
+    rootExecutionLogId: 73,
+    interactiveSession: true,
+    startedAt: '2026-08-31T10:00:00.000Z'
+  }), 'utf8');
+  const oldDate = new Date(Date.now() - 30 * 60 * 1000);
+  fs.utimesSync(statusFilePath, oldDate, oldDate);
+  registerActiveConversation({
+    workspaceRoot,
+    globalDataPath,
+    conversationId: 73,
+    executionLogId: 73,
+    nodeId: '__solo__',
+    statusFilePath,
+    runKind: 'solo',
+    ownerInstanceId: 'test-owner'
+  });
+  extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalDataPath;
+  extensionModule.__setActiveProjectForPollTest(workspaceRoot);
+  const context = {
+    globalState: {
+      get(key) {
+        if (key === 'solopreneur.projects') return [{ name: 'quiet-project', path: workspaceRoot }];
+        if (key === 'solopreneur.selectedProjectPath') return workspaceRoot;
+        return undefined;
+      }
+    }
+  };
+
+  await extensionModule.__pollActiveConversations(context);
+
+  const persisted = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(persisted.status, 'Running');
+  assert.equal(persisted.failureCode, undefined);
+});
+
 test('agent command builder keeps background one-shot commands and uses native interactive user conversations', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
@@ -6202,6 +6278,10 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(
     extensionModule.__extractNativeSessionIdFromExecutionOutput('Native Agent session saved: session.json (ses_13abdae1dffekQpdcehmyyexoY)'),
     'ses_13abdae1dffekQpdcehmyyexoY'
+  );
+  assert.equal(
+    extensionModule.__extractNativeSessionIdFromExecutionOutput('Native Agent session saved: ses_13abdae1dffekQpdcehmyyexoY'),
+    ''
   );
   assert.equal(
     extensionModule.__extractSavedNativeSessionIdFromExecutionOutput('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11'),
@@ -6568,6 +6648,22 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /sessionMode/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /commandFilePath/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.codex\/sessions/);
+  const referencedSessionId = '019dc472-6a80-7c70-99a4-b2593a641d11';
+  const referencedShellScript = extensionModule.__buildAgentShellScript(
+    'codex', '', 'Start an independent conversation.', shellRoot, 'reference', 44, '', undefined,
+    referencedSessionId, '', 'solo'
+  );
+  const referencedRunScript = fs.readFileSync(referencedShellScript.runScriptPath, 'utf8');
+  assert.match(referencedRunScript, new RegExp(`"previousNativeSessionId":"${referencedSessionId}"`));
+  assert.match(referencedRunScript, /"nativeSessionId":""/);
+  assert.match(referencedRunScript, /"nativeSessionIdIsCurrent":false/);
+  const continuedShellScript = extensionModule.__buildAgentShellScript(
+    'codex', '', 'Continue the selected conversation.', shellRoot, 'continue', 45, '', undefined,
+    referencedSessionId, `codex resume ${referencedSessionId}`, 'solo_continue'
+  );
+  const continuedRunScript = fs.readFileSync(continuedShellScript.runScriptPath, 'utf8');
+  assert.match(continuedRunScript, new RegExp(`"nativeSessionId":"${referencedSessionId}"`));
+  assert.match(continuedRunScript, /"nativeSessionIdIsCurrent":true/);
   const grokShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-grok-shell-'));
   const grokShellScript = extensionModule.__buildAgentShellScript(
     'grok', '', 'Review this project.', grokShellRoot, '__solo__', 43, '', undefined, '', '', 'solo'

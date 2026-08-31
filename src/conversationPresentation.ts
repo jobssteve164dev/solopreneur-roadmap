@@ -164,7 +164,8 @@ export function buildConversationPresentations(
 ): PresentedAgentConversation[] {
   const normalizedConversations = normalizeAgentConversationLifecycles(workspaceRoot, conversations, { nowMs: now });
   return hydrateConversationContinuations(workspaceRoot, nodeId, normalizedConversations, {
-    validateCodexTranscript: false
+    validateCodexTranscript: false,
+    recoverRunSessionIdentity: true
   }).map((conversation) => {
     const output = String(conversation.output || '');
     const rollbackGitHash = extractRollbackGitHash(output);
