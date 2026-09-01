@@ -2835,6 +2835,119 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       margin-top: 8px;
     }
 
+    .project-next-action-card {
+      margin-top: 8px;
+      border: 1px solid rgba(0, 176, 255, 0.24);
+      border-radius: 7px;
+      padding: 9px;
+      background: linear-gradient(135deg, rgba(0, 176, 255, 0.09), rgba(124, 77, 255, 0.06));
+      cursor: default;
+    }
+
+    .project-next-action-card.is-running {
+      border-color: rgba(124, 77, 255, 0.38);
+    }
+
+    .project-next-action-head,
+    .project-next-action-buttons,
+    .project-roadmap-revision-compose {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .project-next-action-head {
+      justify-content: space-between;
+      color: var(--text-muted);
+      font-size: 9.5px;
+      font-weight: 800;
+    }
+
+    .project-next-action-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: #80d8ff;
+    }
+
+    .project-next-action-copy {
+      margin-top: 7px;
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .project-next-action-status {
+      margin-top: 6px;
+      color: var(--text-muted);
+      font-size: 9.5px;
+      line-height: 1.4;
+    }
+
+    .project-next-action-buttons {
+      margin-top: 9px;
+    }
+
+    .project-next-action-btn {
+      min-height: 30px;
+      flex: 1 1 0;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-main);
+      font: inherit;
+      font-size: 10px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .project-next-action-btn.primary {
+      border-color: transparent;
+      background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
+      color: #000;
+    }
+
+    .project-next-action-btn:hover:not(:disabled) {
+      border-color: rgba(0, 229, 255, 0.42);
+    }
+
+    .project-next-action-btn:focus-visible {
+      outline: 2px solid var(--vscode-focusBorder, #007fd4);
+      outline-offset: 2px;
+    }
+
+    .project-next-action-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .project-roadmap-revision-compose {
+      align-items: stretch;
+      margin-top: 8px;
+    }
+
+    .project-roadmap-revision-input {
+      min-width: 0;
+      min-height: 44px;
+      flex: 1 1 auto;
+      resize: vertical;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 5px;
+      padding: 7px 8px;
+      background: rgba(0, 0, 0, 0.16);
+      color: var(--text-main);
+      font: inherit;
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .project-roadmap-revision-send {
+      flex: 0 0 auto;
+      min-width: 58px;
+    }
+
     .portfolio-action-btn {
       flex: 1;
       border: 1px solid var(--border-glass);
@@ -4521,6 +4634,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const sidebarLogsExpandedConversations = {};
     const sidebarStepConversations = {};
     const sidebarProjectConversations = {};
+    const sidebarRoadmapRevisionConversations = {};
     const sidebarFlowConversations = {};
     const sidebarStepConversationRequested = {};
     const sidebarProjectConversationRequested = {};
@@ -4539,11 +4653,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let issueDraftPriority = '';
     let issueActionMessage = '';
     let deliveryActionMessage = '';
+    let expandedRoadmapRevisionProjectPath = '';
+    const roadmapRevisionDrafts = {};
+    const startingRoadmapRevisionPaths = new Set();
+    const pendingRoadmapRevisionPaths = new Set();
+    const roadmapRevisionPendingAfterIds = {};
+    const roadmapRevisionResults = {};
     let currentDailyReview = null;
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
     let currentCliPath = 'agy';
     let currentSettings = {};
+    let settingsDataLoaded = false;
     let openCodeApiKeyRemovalRequested = false;
     let settingsFormDirty = false;
     let settingsSavePending = false;
@@ -5131,7 +5252,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function isProjectComposerInteractionActive() {
       if (projectComposerComposing) return true;
       const active = document.activeElement;
-      return Boolean(active && active.closest && active.closest('[data-project-continue-composer]'));
+      return Boolean(active && active.closest && active.closest('[data-project-continue-composer], [data-roadmap-revision-input]'));
     }
 
     function renderPortfolioFromAsyncUpdate(portfolio, selectedProjectPath) {
@@ -5178,7 +5299,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }, 0);
       });
       portfolioList.addEventListener('compositionstart', (event) => {
-        if (event.target && event.target.closest && event.target.closest('[data-project-conversation-input]')) {
+        if (event.target && event.target.closest && event.target.closest('[data-project-conversation-input], [data-roadmap-revision-input]')) {
           projectComposerComposing = true;
         }
       });
@@ -5555,6 +5676,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         pullRequestOpenGithub: '打开 PR',
         projectContinue: '继续推进',
         projectReviewFailure: '处理失败',
+        adjustRoadmap: '调整路线图',
+        preparingRoadmapAdjustment: '正在准备路线图调整…',
+        adjustingRoadmap: 'Agent 正在调整路线图…',
+        roadmapUpdated: '路线图已更新，下一步已同步。',
+        roadmapAdjustmentFailed: '调整失败，原路线图已保留。',
+        roadmapRevisionPlaceholder: '目标、优先级或方向有变化时，可以在这里补充…',
+        sendRoadmapRevision: '开始调整',
         refreshProjectData: '刷新项目数据',
         refreshProjectDataDone: '已刷新',
         pinProject: '置顶项目',
@@ -6010,6 +6138,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         pullRequestOpenGithub: 'Open PR',
         projectContinue: 'Continue',
         projectReviewFailure: 'Review Failure',
+        adjustRoadmap: 'Adjust roadmap',
+        preparingRoadmapAdjustment: 'Preparing roadmap adjustment…',
+        adjustingRoadmap: 'Agent is adjusting the roadmap…',
+        roadmapUpdated: 'Roadmap updated. The next step is now current.',
+        roadmapAdjustmentFailed: 'Adjustment failed. The previous roadmap was kept.',
+        roadmapRevisionPlaceholder: 'Optionally add a change in goal, priority, or direction…',
+        sendRoadmapRevision: 'Adjust',
         refreshProjectData: 'Refresh project data',
         refreshProjectDataDone: 'Refreshed',
         pinProject: 'Pin project',
@@ -6770,6 +6905,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function getEffectiveSettingCliPath() {
       return SoloMapWebview.getEffectiveSettingCliPath(settingCliSelect, settingCliPathCustom, currentCliPath);
+    }
+
+    function getLoadedAgentCliPath() {
+      return settingsDataLoaded ? getEffectiveSettingCliPath() : '';
     }
 
     function applySettingCliPath(cliPath) {
@@ -7619,6 +7758,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'settingsLoaded':
+          settingsDataLoaded = true;
           if (settingsSavePending && !message.requestId) {
             settingsSavePending = false;
             settingsFormDirty = false;
@@ -7743,6 +7883,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             sidebarSoloConversations = sidebarSoloConversationsByProject[currentProjects.selectedProjectPath];
             sidebarProjectConversations[currentProjects.selectedProjectPath] = recentSnapshot.project || [];
             sidebarFlowConversations[currentProjects.selectedProjectPath] = recentSnapshot.flow || [];
+            reconcileRoadmapRevisionConversations(currentProjects.selectedProjectPath, recentSnapshot.revision || []);
             sidebarProjectConversationRequested[currentProjects.selectedProjectPath] = true;
           }
           renderProjects(message.projects.projects, currentProjects.selectedProjectPath);
@@ -7905,6 +8046,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'sidebarActionFailed':
+          if (message.action === 'conversation.runRoadmapRevision' && message.projectPath) {
+            startingRoadmapRevisionPaths.delete(message.projectPath);
+            pendingRoadmapRevisionPaths.delete(message.projectPath);
+            delete roadmapRevisionPendingAfterIds[message.projectPath];
+            roadmapRevisionResults[message.projectPath] = 'Failed';
+            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            break;
+          }
           settingsSavePending = false;
           Object.keys(pendingPastedAttachments).forEach(key => pendingPastedAttachments[key].clear());
           pendingConversationContinuations.clear();
@@ -7918,6 +8067,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             cliTestBadge.className = 'cli-badge error';
             cliTestBadge.textContent = message.message || '';
           }
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+
+        case 'roadmapRevisionLaunchRegistered':
+          startingRoadmapRevisionPaths.delete(message.projectPath);
+          pendingRoadmapRevisionPaths.add(message.projectPath);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -8034,8 +8189,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           sidebarSoloConversationsByProject[message.projectPath] = message.soloConversations || [];
           sidebarProjectConversations[message.projectPath] = message.projectConversations || [];
           sidebarFlowConversations[message.projectPath] = message.flowConversations || [];
+          reconcileRoadmapRevisionConversations(message.projectPath, message.revisionConversations || []);
           sidebarProjectConversationRequested[message.projectPath] = true;
-          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          if (message.projectPath !== currentProjects.selectedProjectPath) {
+            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            return;
+          }
           sidebarSoloConversations = sidebarSoloConversationsByProject[message.projectPath];
           pruneSidebarConversationExpansionState([
             ...sidebarSoloConversations,
@@ -10113,6 +10272,108 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         + '</div>';
     }
 
+    function latestRoadmapRevisionConversation(projectPath) {
+      return (sidebarRoadmapRevisionConversations[projectPath] || [])
+        .slice()
+        .sort((a, b) => {
+          const idDiff = Number(b && b.id || 0) - Number(a && a.id || 0);
+          if (idDiff) return idDiff;
+          return Date.parse(String(b && b.timestamp || '')) - Date.parse(String(a && a.timestamp || ''));
+        })[0] || null;
+    }
+
+    function reconcileRoadmapRevisionConversations(projectPath, conversations) {
+      const currentLatest = latestRoadmapRevisionConversation(projectPath);
+      const incoming = (conversations || [])
+        .slice()
+        .sort((a, b) => {
+          const idDiff = Number(b && b.id || 0) - Number(a && a.id || 0);
+          if (idDiff) return idDiff;
+          return Date.parse(String(b && b.timestamp || '')) - Date.parse(String(a && a.timestamp || ''));
+        })[0] || null;
+      if (currentLatest && incoming) {
+        const currentId = Number(currentLatest.id || 0);
+        const incomingId = Number(incoming.id || 0);
+        const currentStatus = String(currentLatest.status || '');
+        const incomingStatus = String(incoming.status || '');
+        const currentIsTerminal = currentStatus && currentStatus !== 'Running';
+        if (incomingId < currentId || (incomingId === currentId && currentIsTerminal && incomingStatus === 'Running')) {
+          return;
+        }
+      }
+      sidebarRoadmapRevisionConversations[projectPath] = conversations || [];
+      const latest = latestRoadmapRevisionConversation(projectPath);
+      if (!latest) return;
+      const latestId = Number(latest.id || 0);
+      const status = String(latest.status || '');
+      if (status === 'Running') {
+        startingRoadmapRevisionPaths.delete(projectPath);
+        pendingRoadmapRevisionPaths.add(projectPath);
+        if (!Object.prototype.hasOwnProperty.call(roadmapRevisionPendingAfterIds, projectPath)) {
+          roadmapRevisionPendingAfterIds[projectPath] = Math.max(0, latestId - 1);
+        }
+        roadmapRevisionResults[projectPath] = '';
+        return;
+      }
+      const baselineId = Number(roadmapRevisionPendingAfterIds[projectPath] || 0);
+      if ((startingRoadmapRevisionPaths.has(projectPath) || pendingRoadmapRevisionPaths.has(projectPath)) && latestId <= baselineId) return;
+      startingRoadmapRevisionPaths.delete(projectPath);
+      pendingRoadmapRevisionPaths.delete(projectPath);
+      delete roadmapRevisionPendingAfterIds[projectPath];
+      roadmapRevisionResults[projectPath] = status === 'Completed' ? 'Completed' : 'Failed';
+    }
+
+    function buildSidebarRoadmapRevisionRequest(projectPath, draft) {
+      const agentCli = getLoadedAgentCliPath();
+      const targetId = 'roadmap-revision:' + projectPath;
+      const userMessage = String(draft || '').trim() || (currentLanguage === 'zh'
+        ? '请根据当前项目实际进度重新校准后续路线图，保留已经完成的事实，并让新的下一步反映当前最值得推进的目标。'
+        : 'Recalibrate the remaining roadmap from the project\\'s current actual progress. Preserve completed facts and make the new next step reflect the most valuable current goal.');
+      return {
+        command: 'conversation.runRoadmapRevision',
+        projectPath,
+        userMessage,
+        agentCli,
+        model: getTargetModelValue(targetId, agentCli),
+        supplementFiles: []
+      };
+    }
+
+    function renderProjectNextActionCard(project) {
+      const projectPath = String(project && project.path || '');
+      const nextAction = String(project && (project.globalNextAction || project.recommendedNodeTitle) || '-');
+      const nextActionLabel = Number(project && project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue');
+      const starting = startingRoadmapRevisionPaths.has(projectPath);
+      const running = pendingRoadmapRevisionPaths.has(projectPath)
+        || String(latestRoadmapRevisionConversation(projectPath)?.status || '') === 'Running';
+      const busy = starting || running;
+      const expanded = expandedRoadmapRevisionProjectPath === projectPath && !busy;
+      const result = roadmapRevisionResults[projectPath] || '';
+      const statusText = busy
+        ? (starting ? t('preparingRoadmapAdjustment') : t('adjustingRoadmap'))
+        : (result === 'Completed' ? t('roadmapUpdated') : (result === 'Failed' ? t('roadmapAdjustmentFailed') : ''));
+      const nodeId = String(project && project.recommendedNodeId || '');
+      return \`
+        <section class="project-next-action-card\${busy ? ' is-running' : ''}" data-project-next-action-card="\${escapeHtml(projectPath)}" aria-label="\${escapeHtml(t('nextAction'))}">
+          <div class="project-next-action-head">
+            <span class="project-next-action-title"><span class="codicon codicon-target" aria-hidden="true"></span>\${escapeHtml(t('nextAction'))}</span>
+          </div>
+          <div class="project-next-action-copy">\${escapeHtml(nextAction)}</div>
+          \${statusText ? \`<div class="project-next-action-status" role="status">\${escapeHtml(statusText)}</div>\` : ''}
+          <div class="project-next-action-buttons">
+            \${nodeId ? \`<button type="button" class="project-next-action-btn primary" data-continue-next-action-project-path="\${escapeHtml(projectPath)}" data-continue-next-action-node-id="\${escapeHtml(nodeId)}">\${escapeHtml(nextActionLabel)}</button>\` : ''}
+            <button type="button" class="project-next-action-btn" data-adjust-roadmap-project-path="\${escapeHtml(projectPath)}" aria-expanded="\${expanded}" \${busy ? 'disabled' : ''}>\${escapeHtml(t('adjustRoadmap'))}</button>
+          </div>
+          \${expanded ? \`
+            <div class="project-roadmap-revision-compose">
+              <textarea class="project-roadmap-revision-input" data-roadmap-revision-input="\${escapeHtml(projectPath)}" aria-label="\${escapeHtml(t('roadmapRevisionPlaceholder'))}" placeholder="\${escapeHtml(t('roadmapRevisionPlaceholder'))}">\${escapeHtml(roadmapRevisionDrafts[projectPath] || '')}</textarea>
+              <button type="button" class="project-next-action-btn primary project-roadmap-revision-send" data-send-roadmap-revision-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('sendRoadmapRevision'))}</button>
+            </div>
+          \` : ''}
+        </section>
+      \`;
+    }
+
     function renderPortfolio(portfolio, selectedProjectPath) {
       const preservedComposerState = captureProjectConversationInputState();
       hoveredConversationCard = null;
@@ -10151,7 +10412,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
       portfolioList.innerHTML = visibleProjects.map(project => {
         const isSelected = project.path === selectedProjectPath;
-        const nextActionLabel = Number(project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue');
         const relativeTime = formatRelativeTime(project.recentActivityAt);
         const recommendation = project.recommendedNodeTitle || '';
         const isRefreshing = projectRefreshPaths.has(project.path);
@@ -10191,9 +10451,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               \${securitySignal ? \`<span class="global-chip">\${escapeHtml(securitySignal)}</span>\` : ''}
               \${foundationSignal ? \`<span class="global-chip">\${escapeHtml(foundationSignal)}</span>\` : ''}
             </div>
-            <div class="portfolio-card-meta">
-              <span class="portfolio-recommendation">\${t('nextAction')}: \${escapeHtml(project.globalNextAction || recommendation || '-')}</span>
-            </div>
+            \${renderProjectNextActionCard({ ...project, globalNextAction: project.globalNextAction || recommendation || '-' })}
             <div class="portfolio-card-meta">
               <span class="portfolio-updated">\${t('latestUpdate')}: \${relativeTime || '-'}</span>
               \${isSelected ? \`<span>\${t('selected')}</span>\` : ''}
@@ -10201,7 +10459,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="portfolio-card-actions">
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
               <button class="portfolio-action-btn" data-open-project-growth-path="\${escapeHtml(project.path)}">\${t('projectGrowth')}</button>
-              \${isSelected ? '' : \`<button class="portfolio-action-btn primary" data-continue-project-path="\${escapeHtml(project.path)}" data-continue-node-id="\${escapeHtml(project.recommendedNodeId || '')}">\${nextActionLabel}</button>\`}
             </div>
             \${isSelected ? renderProjectDeliveryPanel(project) + renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
           </div>
@@ -10234,6 +10491,57 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             command: 'project.openGrowth',
             projectPath: button.getAttribute('data-open-project-growth-path')
           });
+        });
+      });
+      portfolioList.querySelectorAll('[data-continue-next-action-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({
+            command: 'project.continue',
+            projectPath: button.getAttribute('data-continue-next-action-project-path'),
+            nodeId: button.getAttribute('data-continue-next-action-node-id'),
+            agentCli: getLoadedAgentCliPath()
+          });
+        });
+      });
+      portfolioList.querySelectorAll('[data-adjust-roadmap-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-adjust-roadmap-project-path') || '';
+          if (!projectPath || startingRoadmapRevisionPaths.has(projectPath) || pendingRoadmapRevisionPaths.has(projectPath)) return;
+          expandedRoadmapRevisionProjectPath = expandedRoadmapRevisionProjectPath === projectPath ? '' : projectPath;
+          roadmapRevisionResults[projectPath] = '';
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+        });
+      });
+      portfolioList.querySelectorAll('[data-roadmap-revision-input]').forEach(input => {
+        const projectPath = input.getAttribute('data-roadmap-revision-input') || '';
+        input.addEventListener('input', () => {
+          roadmapRevisionDrafts[projectPath] = input.value || '';
+        });
+        input.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' || (!event.ctrlKey && !event.metaKey)) return;
+          event.preventDefault();
+          const card = input.closest('[data-project-next-action-card]');
+          const sendButton = card ? card.querySelector('[data-send-roadmap-revision-project-path]') : null;
+          if (sendButton) sendButton.click();
+        });
+      });
+      portfolioList.querySelectorAll('[data-send-roadmap-revision-project-path]').forEach(button => {
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          const projectPath = button.getAttribute('data-send-roadmap-revision-project-path') || '';
+          if (!projectPath || startingRoadmapRevisionPaths.has(projectPath) || pendingRoadmapRevisionPaths.has(projectPath)) return;
+          const card = button.closest('[data-project-next-action-card]');
+          const input = card ? card.querySelector('[data-roadmap-revision-input]') : null;
+          const draft = input ? input.value : (roadmapRevisionDrafts[projectPath] || '');
+          roadmapRevisionDrafts[projectPath] = draft;
+          roadmapRevisionPendingAfterIds[projectPath] = Number(latestRoadmapRevisionConversation(projectPath)?.id || 0);
+          startingRoadmapRevisionPaths.add(projectPath);
+          roadmapRevisionResults[projectPath] = '';
+          expandedRoadmapRevisionProjectPath = '';
+          vscode.postMessage(buildSidebarRoadmapRevisionRequest(projectPath, draft));
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
       portfolioList.querySelectorAll('[data-refresh-project-path]').forEach(button => {
@@ -10408,16 +10716,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({
             command: 'project.togglePinned',
             projectPath
-          });
-        });
-      });
-      portfolioList.querySelectorAll('[data-continue-project-path]').forEach(button => {
-        button.addEventListener('click', () => {
-          vscode.postMessage({
-            command: 'project.continue',
-            projectPath: button.getAttribute('data-continue-project-path'),
-            nodeId: button.getAttribute('data-continue-node-id'),
-            agentCli: getEffectiveSettingCliPath()
           });
         });
       });

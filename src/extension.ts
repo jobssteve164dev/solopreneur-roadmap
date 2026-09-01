@@ -581,6 +581,26 @@ export async function activate(context: vscode.ExtensionContext) {
   }, 15_000);
 }
 
+let projectActionLaunchQueue: Promise<void> = Promise.resolve();
+
+async function enqueueProjectActionLaunch<T>(action: (registered: () => void) => Promise<T>): Promise<T> {
+  const previous = projectActionLaunchQueue;
+  let releaseQueue: () => void = () => {};
+  projectActionLaunchQueue = new Promise<void>((resolve) => { releaseQueue = resolve; });
+  await previous;
+  let released = false;
+  const registered = () => {
+    if (released) return;
+    released = true;
+    releaseQueue();
+  };
+  try {
+    return await action(registered);
+  } finally {
+    registered();
+  }
+}
+
 async function ensureActionProject(context: vscode.ExtensionContext, projectPath: string): Promise<string> {
   const requestedPath = String(projectPath || getSelectedProjectPath(context) || '');
   if (!requestedPath || !getProjects(context).some((project) => project.path === requestedPath)) {
@@ -836,16 +856,29 @@ async function handleSharedWebviewAction(
       await respond({ command: 'collaborationInviteCodeCopied', roomId });
     },
     'conversation.runRoadmapRevision': async (request) => {
-      await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''));
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
-      await handleRoadmapRevision(
-        context,
-        String(request.userMessage || ''),
-        String(request.agentCli || ''),
-        String(request.model || ''),
-        normalizeSupplementFiles(request.supplementFiles)
-      );
+      let preparedProjectPath = '';
+      await enqueueProjectActionLaunch(async (registered) => {
+        await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''));
+        const projectPath = await ensureActionProject(context, request.projectPath || '');
+        if (!projectPath && request.projectPath) {
+          throw new Error('SoloMap could not prepare this project for roadmap adjustment.');
+        }
+        preparedProjectPath = projectPath;
+        await handleRoadmapRevision(
+          context,
+          String(request.userMessage || ''),
+          String(request.agentCli || ''),
+          String(request.model || ''),
+          normalizeSupplementFiles(request.supplementFiles),
+          () => {
+            registered();
+            void respond({ command: 'roadmapRevisionLaunchRegistered', projectPath });
+          }
+        );
+      });
+      if (preparedProjectPath) {
+        await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(preparedProjectPath);
+      }
     },
     'flow.run': async (request) => {
       await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'flow', String(request.agentCli || ''), String(request.model || ''));
@@ -1217,26 +1250,33 @@ async function handleSharedWebviewAction(
       setTimeout(() => void selectProject(context, projectPath), 0);
     },
     'project.continue': async (request) => {
-      if (request.nodeId) {
-        await revealAgentStartupTerminal(
-          context,
-          String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
-          `step-${String(request.nodeId)}`,
-          String(request.agentCli || getPersistedSettings(context).cliPath || '')
-        );
-      }
-      const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
-      if (!projectPath) return;
-      if (request.nodeId) {
-        await handleRunAgent(
-          context,
-          String(request.nodeId),
-          '',
-          String(request.agentCli || getPersistedSettings(context).cliPath || '')
-        );
-      } else {
-        await vscode.commands.executeCommand('solopreneur.showRoadmap');
-      }
+      await enqueueProjectActionLaunch(async (registered) => {
+        if (request.nodeId) {
+          await revealAgentStartupTerminal(
+            context,
+            String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
+            `step-${String(request.nodeId)}`,
+            String(request.agentCli || getPersistedSettings(context).cliPath || '')
+          );
+        }
+        const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
+        if (!projectPath) return;
+        if (request.nodeId) {
+          await handleRunAgent(
+            context,
+            String(request.nodeId),
+            '',
+            String(request.agentCli || getPersistedSettings(context).cliPath || ''),
+            '',
+            [],
+            true,
+            registered
+          );
+        } else {
+          registered();
+          await vscode.commands.executeCommand('solopreneur.showRoadmap');
+        }
+      });
     },
     'issue.getDetails': async (request) => {
       const projectPath = String(request.projectPath || '');
@@ -2875,12 +2915,16 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
 async function getProjectConversationSnapshotForProject(
   context: vscode.ExtensionContext,
   projectPath: string
-): Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }> {
+): Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[]; revision: AgentConversation[] }> {
   if (!getProjects(context).some((project) => project.path === projectPath)) {
-    return { solo: [], project: [], flow: [] };
+    return { solo: [], project: [], flow: [], revision: [] };
   }
   const excludeNodeIds = new Set([soloConversationId, roadmapRevisionId]);
-  const buildSnapshot = (soloLogs: AgentConversation[], projectLogs: AgentConversation[]) => {
+  const buildSnapshot = (
+    soloLogs: AgentConversation[],
+    projectLogs: AgentConversation[],
+    revisionLogs: AgentConversation[]
+  ) => {
     const hydratedProjectLogs = hydrateProjectConversationContinuations(projectPath, projectLogs);
     return {
       solo: selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, soloLogs), 1),
@@ -2892,7 +2936,11 @@ async function getProjectConversationSnapshotForProject(
         .slice(0, sidebarProjectConversationHistoryLimit),
       flow: hydratedProjectLogs
         .filter((conversation) => String(conversation.nodeId || '').startsWith('__flow__::'))
-        .slice(0, sidebarProjectConversationHistoryLimit)
+        .slice(0, sidebarProjectConversationHistoryLimit),
+      revision: selectLatestConversationRoots(
+        buildConversationPresentations(projectPath, roadmapRevisionId, revisionLogs),
+        1
+      )
     };
   };
   if (syncEngine && activeProjectRoot === projectPath) {
@@ -2902,20 +2950,22 @@ async function getProjectConversationSnapshotForProject(
     if (syncEngine && syncEngineReady && activeProjectRoot === projectPath) {
       return buildSnapshot(
         syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
-        syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit)
+        syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit),
+        syncEngine.getAgentExecutionPage(roadmapRevisionId, sidebarConversationQueryLimit, 0).logs
       );
     }
   }
   const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   if (!fs.existsSync(journalPath)) {
-    return { solo: [], project: [], flow: [] };
+    return { solo: [], project: [], flow: [], revision: [] };
   }
   const store = new SqliteStore(journalPath, context.extensionPath);
   await store.init();
   try {
     return buildSnapshot(
       store.getExecutionLogPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
-      store.getRecentExecutionLogs(sidebarConversationQueryLimit)
+      store.getRecentExecutionLogs(sidebarConversationQueryLimit),
+      store.getExecutionLogPage(roadmapRevisionId, sidebarConversationQueryLimit, 0).logs
     );
   } finally {
     store.close();
@@ -6951,10 +7001,19 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   }
 }
 
-async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = []): Promise<void> {
+async function handleRoadmapRevision(
+  context: vscode.ExtensionContext,
+  userMessage: string,
+  selectedAgentCli = '',
+  selectedModel = '',
+  supplementFiles: string[] = [],
+  onExecutionRegistered: () => void = () => {}
+): Promise<void> {
   if (!syncEngine || !activeProjectRoot) {
     return;
   }
+  const projectSyncEngine = syncEngine;
+  const workspaceRoot = activeProjectRoot;
   const revisionRequest = userMessage.trim();
   if (!revisionRequest) {
     vscode.window.showWarningMessage('Describe how you want to adjust the roadmap before sending.');
@@ -6966,7 +7025,7 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
-    syncEngine.logAgentExecution(
+    projectSyncEngine.logAgentExecution(
       roadmapRevisionId,
       requestedAgentCli || agentCli,
       requestedAgentCli || agentCli,
@@ -6979,7 +7038,7 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    syncEngine.logAgentExecution(
+    projectSyncEngine.logAgentExecution(
       roadmapRevisionId,
       agentCli,
       agentCli,
@@ -6992,39 +7051,40 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
   }
 
   recordLocalUsageEvent(context, 'roadmapRevision');
-  ensureRoadmapValidationScript(path.join(activeProjectRoot, '.solopreneur'));
-  ensureSolomapMemoryStore(activeProjectRoot, settings.globalDataPath);
-  const attachedFiles = filterProjectRelativeFiles(activeProjectRoot, supplementFiles);
-  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, activeProjectRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements, false);
+  ensureRoadmapValidationScript(path.join(workspaceRoot, '.solopreneur'));
+  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
+  const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
+  const conversationPrompt = buildRoadmapRevisionPrompt(revisionRequest, workspaceRoot, settings.globalPrompt, attachedFiles, settings.globalDataPath, settings.enabledEnhancements, false);
   const launchSummary = [
     'Roadmap revision started.',
     `Run started at: ${new Date().toISOString()}`,
     `User supplement:\n${revisionRequest}`,
     attachedFiles.length > 0 ? `Supplement files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
-  const executionLogId = syncEngine.logAgentExecution(
+  const executionLogId = projectSyncEngine.logAgentExecution(
     roadmapRevisionId,
     agentCli,
     `${agentCli} [preparing isolated run]`,
     launchSummary,
     'Running'
   );
-  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', 'roadmap-revision', String(executionLogId));
-  const roadmapPath = path.join(activeProjectRoot, '.solopreneur', 'roadmap.csv');
+  onExecutionRegistered();
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', 'roadmap-revision', String(executionLogId));
+  const roadmapPath = path.join(workspaceRoot, '.solopreneur', 'roadmap.csv');
   const roadmapBackupFilePath = path.join(runDir, 'roadmap-before.csv');
   fs.mkdirSync(runDir, { recursive: true });
   if (fs.existsSync(roadmapPath)) {
     fs.writeFileSync(roadmapBackupFilePath, fs.readFileSync(roadmapPath, 'utf8'), 'utf8');
   }
   const promptFilePath = path.join(runDir, 'prompt.txt');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, activeProjectRoot, settings.taskPermissionMode, selectedModel);
-  syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
+  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
+  projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
 
   const { finalCommand } = buildAgentShellScript(
     agentCli,
     selectedModel,
     conversationPrompt,
-    activeProjectRoot,
+    workspaceRoot,
     roadmapRevisionId,
     executionLogId,
     revisionRequest,
@@ -7039,14 +7099,14 @@ async function handleRoadmapRevision(context: vscode.ExtensionContext, userMessa
     settings.collaborationReviewMode,
     settings.enabledEnhancements,
     runDir,
-    getAgentStatusFilePath(activeProjectRoot, executionLogId)
+    getAgentStatusFilePath(workspaceRoot, executionLogId)
   );
   await launchAgentConversationTerminal({
-    workspaceRoot: activeProjectRoot,
+    workspaceRoot,
     label: `revision-${executionLogId}`,
     conversationId: executionLogId,
     nodeId: roadmapRevisionId,
-    statusFilePath: getAgentStatusFilePath(activeProjectRoot, executionLogId),
+    statusFilePath: getAgentStatusFilePath(workspaceRoot, executionLogId),
     runKind: 'roadmap_revision',
     globalDataPath: settings.globalDataPath,
     context,
@@ -7600,7 +7660,16 @@ async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionConte
 /**
  * Executes a CLI agent in the integrated terminal.
  */
-async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], interactiveConversation = true) {
+async function handleRunAgent(
+  context: vscode.ExtensionContext,
+  nodeId: string,
+  userMessage: string,
+  selectedAgentCli = '',
+  selectedModel = '',
+  supplementFiles: string[] = [],
+  interactiveConversation = true,
+  onExecutionRegistered: () => void = () => {}
+) {
   if (!syncEngine) {
     return;
   }
@@ -7610,11 +7679,12 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     vscode.window.showErrorMessage('Choose a project folder before running an Agent task.');
     return;
   }
+  const projectSyncEngine = syncEngine;
 
-  await syncEngine.initAndSync();
+  await projectSyncEngine.initAndSync();
   sendNodesToWebview();
 
-  const nodes = syncEngine.getNodes();
+  const nodes = projectSyncEngine.getNodes();
   const node = nodes.find((n) => n.id === nodeId);
 
   if (!node) {
@@ -7633,8 +7703,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
-    syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
-    syncEngine.logAgentExecution(
+    projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    projectSyncEngine.logAgentExecution(
       nodeId,
       requestedAgentCli || agentCli,
       requestedAgentCli || agentCli,
@@ -7652,8 +7722,8 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
-    syncEngine.logAgentExecution(
+    projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    projectSyncEngine.logAgentExecution(
       nodeId,
       agentCli,
       agentCli,
@@ -7672,7 +7742,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
 
   // Update node status to Running
   recordLocalUsageEvent(context, 'agentRun');
-  syncEngine.updateNode(nodeId, { status: 'Running' });
+  projectSyncEngine.updateNode(nodeId, { status: 'Running' });
   sendNodesToWebview();
   refreshSidebarProjectCards();
 
@@ -7690,7 +7760,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     attachedFiles.length ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
   let launchSummary = buildLaunchSummary();
-  const executionLogId = syncEngine.logAgentExecution(
+  const executionLogId = projectSyncEngine.logAgentExecution(
     nodeId,
     agentCli,
     `${agentCli} [preparing isolated run]`,
@@ -7698,6 +7768,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
     'Running'
   );
   postNodeConversations(nodeId);
+  onExecutionRegistered();
   const preGitHash = await createPreSessionGitCommit(workspaceRoot);
   launchSummary = buildLaunchSummary(preGitHash || '');
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
@@ -7729,7 +7800,7 @@ async function handleRunAgent(context: vscode.ExtensionContext, nodeId: string, 
   const agentCommand = interactiveConversation
     ? buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel)
     : buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
-  syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
+  projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
 
   const runKind = interactiveConversation ? 'step' : 'step_background';
   const { finalCommand } = buildAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', runKind, '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);

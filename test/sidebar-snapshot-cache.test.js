@@ -70,7 +70,8 @@ test('conversation snapshot cache is reused only while the local journal is unch
     const snapshot = {
       solo: [{ id: 1, nodeId: '__solo__', status: 'Completed' }],
       project: [{ id: 2, nodeId: 'step-1', status: 'Completed' }],
-      flow: [{ id: 3, nodeId: '__flow__::flow-1::loop-1::builder', status: 'Completed' }]
+      flow: [{ id: 3, nodeId: '__flow__::flow-1::loop-1::builder', status: 'Completed' }],
+      revision: []
     };
     writeCachedConversationSnapshot(fixture.cachePath, fixture.projectPath, snapshot);
     const projectKey = createHash('sha1').update(fixture.projectPath).digest('hex');
@@ -97,7 +98,8 @@ test('legacy conversation snapshots are moved out of the global root before read
     const snapshot = {
       solo: [{ id: 1, nodeId: '__solo__', status: 'Completed' }],
       project: [],
-      flow: []
+      flow: [],
+      revision: []
     };
     const projectKey = createHash('sha1').update(fixture.projectPath).digest('hex');
     const fileName = `sidebar-conversation-${projectKey}-v1.json`;

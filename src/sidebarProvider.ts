@@ -31,6 +31,7 @@ import {
   buildSidebarProjectSignature,
   readCachedConversationSnapshot,
   readSidebarCoreSnapshot,
+  SidebarConversationSnapshot,
   writeCachedConversationSnapshot,
   writeSidebarPortfolioSnapshot
 } from './sidebarSnapshotCache';
@@ -48,7 +49,7 @@ interface SidebarProviderDependencies {
   getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
   getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
-  getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>;
+  getProjectConversationSnapshot?: (projectPath: string) => Promise<SidebarConversationSnapshot>;
   dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
 }
 
@@ -62,10 +63,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
   private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
-  private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>;
+  private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<SidebarConversationSnapshot>;
   private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
   private readonly _conversationSnapshotLoads = new Map<string, {
-    promise: Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }>;
+    promise: Promise<SidebarConversationSnapshot>;
     startedAt: number;
   }>();
   private readonly _latestConversationSnapshotRequest = new Map<string, number>();
@@ -223,7 +224,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         console.error('SoloMap sidebar message failed:', data?.command, error);
         this._view?.webview.postMessage({
           command: 'sidebarActionFailed',
-          message: error instanceof Error ? error.message : String(error)
+          message: error instanceof Error ? error.message : String(error),
+          action: String(data?.command || ''),
+          projectPath: String(data?.projectPath || '')
         });
       }
     });
@@ -325,12 +328,24 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, cached.portfolio, globalDataPath, cachedConversation);
         this._projectLoader.scheduleAll(projectState.projects, projectState.selectedProjectPath, cached.portfolio);
       } else {
+        if (cachedConversation) {
+          this.postProjectConversationSnapshot(projectState.selectedProjectPath, cachedConversation);
+        }
         this.scheduleCorePortfolio(projectState.projects, projectState.selectedProjectPath, globalDataPath, stalePortfolio, {
           includeExternal: true
         });
       }
       if (!cachedConversation) {
         void this.sendProjectConversationSnapshot(projectState.selectedProjectPath);
+      }
+      for (const project of projectState.projects) {
+        if (!project.path || project.path === projectState.selectedProjectPath) continue;
+        const projectConversation = readCachedConversationSnapshot(globalDataPath, project.path);
+        if (projectConversation) {
+          this.postProjectConversationSnapshot(project.path, projectConversation);
+        } else {
+          void this.sendProjectConversationSnapshot(project.path);
+        }
       }
       this.sendDailyReview();
     } catch (error) {
@@ -396,7 +411,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     selectedProjectPath: string,
     portfolio: ProjectPortfolioSummary[],
     globalDataPath: string,
-    recentConversationSnapshot: { solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] } | null = null
+    recentConversationSnapshot: SidebarConversationSnapshot | null = null
   ): void {
     const currentPortfolio = applyProjectRegistryToPortfolio(projects, portfolio);
     this._latestPortfolio = currentPortfolio;
@@ -549,7 +564,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
   public async sendProjectConversationSnapshot(projectPath: string, force = false, supersedeInFlight = false) {
     const requestId = ++this._conversationSnapshotRequest;
-    let claimedSnapshotLoad: Promise<{ solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }> | null = null;
+    let claimedSnapshotLoad: Promise<SidebarConversationSnapshot> | null = null;
     this._latestConversationSnapshotRequest.set(projectPath, requestId);
     try {
       if (!this._view || !this._getProjectConversationSnapshot || !projectPath) return;
@@ -593,13 +608,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     await this.sendProjectConversationSnapshot(projectPath, true, true);
   }
 
-  private postProjectConversationSnapshot(projectPath: string, snapshot: { solo: AgentConversation[]; project: AgentConversation[]; flow: AgentConversation[] }): void {
+  private postProjectConversationSnapshot(projectPath: string, snapshot: SidebarConversationSnapshot): void {
     this._view?.webview.postMessage({
       command: 'sidebarProjectConversationSnapshotLoaded',
       projectPath,
       soloConversations: snapshot.solo,
       projectConversations: snapshot.project,
-      flowConversations: snapshot.flow
+      flowConversations: snapshot.flow,
+      revisionConversations: snapshot.revision
     });
   }
 

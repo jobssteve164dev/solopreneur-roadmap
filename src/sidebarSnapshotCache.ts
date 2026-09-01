@@ -8,12 +8,13 @@ const cacheVersion = 2;
 const cacheFileName = 'sidebar-core-snapshot-v1.json';
 const conversationCacheDirectoryName = 'conversations';
 const conversationCacheFilePattern = /^sidebar-conversation-[a-f0-9]{40}-v1\.json$/;
-const conversationPresentationVersion = 2;
+const conversationPresentationVersion = 3;
 
 export interface SidebarConversationSnapshot {
   solo: AgentConversation[];
   project: AgentConversation[];
   flow: AgentConversation[];
+  revision: AgentConversation[];
 }
 
 interface CachedConversationSnapshot {
@@ -130,7 +131,10 @@ export function readCachedConversationSnapshot(globalDataPath: string, projectPa
     return null;
   }
   if (!cached || cached.signature !== buildConversationDatabaseSignature(projectPath)) return null;
-  if (!Array.isArray(cached.snapshot?.solo) || !Array.isArray(cached.snapshot?.project) || !Array.isArray(cached.snapshot?.flow)) return null;
+  if (!Array.isArray(cached.snapshot?.solo)
+    || !Array.isArray(cached.snapshot?.project)
+    || !Array.isArray(cached.snapshot?.flow)
+    || !Array.isArray(cached.snapshot?.revision)) return null;
   return cached.snapshot;
 }
 

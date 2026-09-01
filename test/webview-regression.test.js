@@ -946,7 +946,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.doesNotMatch(script, /entitlement\.paste/);
   assert.match(html, /data-issue-panel/);
   assert.match(script, /command: 'project\.continue',\s*projectPath,\s*nodeId,\s*agentCli: getEffectiveSettingCliPath\(\)/);
-  assert.match(script, /command: 'project\.continue',\s*projectPath: button\.getAttribute\('data-continue-project-path'\),\s*nodeId: button\.getAttribute\('data-continue-node-id'\),\s*agentCli: getEffectiveSettingCliPath\(\)/);
+  assert.match(script, /command: 'project\.continue',\s*projectPath: button\.getAttribute\('data-continue-next-action-project-path'\),\s*nodeId: button\.getAttribute\('data-continue-next-action-node-id'\),\s*agentCli: getLoadedAgentCliPath\(\)/);
   assert.match(html, /data-toggle-issue-form/);
   assert.match(html, /id="btn-toggle-collaboration"[^>]*><span class="codicon codicon-live-share"/);
   assert.match(html, /id="btn-toggle-feedback"[^>]*><span class="codicon codicon-comment-discussion"/);
@@ -1067,6 +1067,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     globalThis.__renderProjectConversationComposer = renderProjectConversationComposer;
     globalThis.__setCurrentCliForTest = (cliPath) => {
       currentSettings = { ...(currentSettings || {}), cliPath };
+      settingsDataLoaded = true;
       applySettingCliPath(cliPath);
     };
     globalThis.__syncOpenCodeSettingsForTest = syncOpenCodeSettings;
@@ -1082,7 +1083,89 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     globalThis.__setActivePortfolioFilter = (value) => { activePortfolioFilter = value; };
     globalThis.__getActivePortfolioFilter = () => activePortfolioFilter;
     globalThis.__activateProjectInSidebar = activateProjectInSidebar;
+    globalThis.__renderProjectNextActionCard = typeof renderProjectNextActionCard === 'function' ? renderProjectNextActionCard : undefined;
+    globalThis.__buildSidebarRoadmapRevisionRequest = typeof buildSidebarRoadmapRevisionRequest === 'function' ? buildSidebarRoadmapRevisionRequest : undefined;
+    globalThis.__setSidebarRoadmapRevisionState = (projectPath, conversations, pending, result) => {
+      if (typeof sidebarRoadmapRevisionConversations !== 'undefined') sidebarRoadmapRevisionConversations[projectPath] = conversations;
+      if (typeof pendingRoadmapRevisionPaths !== 'undefined') {
+        if (pending) pendingRoadmapRevisionPaths.add(projectPath);
+        else pendingRoadmapRevisionPaths.delete(projectPath);
+      }
+      if (typeof roadmapRevisionResults !== 'undefined') roadmapRevisionResults[projectPath] = result || '';
+    };
+    globalThis.__setExpandedRoadmapRevisionProject = (projectPath) => {
+      if (typeof expandedRoadmapRevisionProjectPath !== 'undefined') expandedRoadmapRevisionProjectPath = projectPath;
+    };
+    globalThis.__setStartingRoadmapRevisionProject = (projectPath) => {
+      startingRoadmapRevisionPaths.clear();
+      if (projectPath) startingRoadmapRevisionPaths.add(projectPath);
+    };
+    globalThis.__setSidebarLanguage = (language) => { currentLanguage = language; };
+    globalThis.__reconcileRoadmapRevisionConversations = typeof reconcileRoadmapRevisionConversations === 'function'
+      ? reconcileRoadmapRevisionConversations
+      : undefined;
   `);
+
+  assert.equal(typeof context.__renderProjectNextActionCard, 'function');
+  assert.equal(typeof context.__buildSidebarRoadmapRevisionRequest, 'function');
+  const nextActionProject = {
+    name: 'app',
+    path: '/workspace/app',
+    recommendedNodeId: 'step-1',
+    recommendedNodeTitle: '完成侧边栏项目卡片的下一步行动组件',
+    globalNextAction: '完成侧边栏项目卡片的下一步行动组件',
+    failedNodes: 0
+  };
+  const nextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
+  assert.match(nextActionHtml, /class="project-next-action-card/);
+  assert.match(nextActionHtml, />下一步</);
+  assert.match(nextActionHtml, /完成侧边栏项目卡片的下一步行动组件/);
+  assert.match(nextActionHtml, /data-continue-next-action-project-path="\/workspace\/app"/);
+  assert.match(nextActionHtml, /data-adjust-roadmap-project-path="\/workspace\/app"/);
+
+  context.__setExpandedRoadmapRevisionProject('/workspace/app');
+  const expandedNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
+  assert.match(expandedNextActionHtml, /data-roadmap-revision-input="\/workspace\/app"/);
+  assert.match(expandedNextActionHtml, /data-send-roadmap-revision-project-path="\/workspace\/app"/);
+
+  const coldStartRevisionRequest = context.__buildSidebarRoadmapRevisionRequest('/workspace/app', '调整优先级');
+  assert.equal(coldStartRevisionRequest.agentCli, '');
+
+  context.__setCurrentCliForTest('codex');
+  const automaticRevisionRequest = context.__buildSidebarRoadmapRevisionRequest('/workspace/app', '');
+  assert.equal(automaticRevisionRequest.command, 'conversation.runRoadmapRevision');
+  assert.equal(automaticRevisionRequest.projectPath, '/workspace/app');
+  assert.equal(automaticRevisionRequest.agentCli, 'codex');
+  assert.match(automaticRevisionRequest.userMessage, /当前项目实际进度/);
+
+  context.__setStartingRoadmapRevisionProject('/workspace/app');
+  const preparingNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
+  assert.match(preparingNextActionHtml, /正在准备路线图调整/);
+  assert.match(preparingNextActionHtml.match(/<button[^>]*data-adjust-roadmap-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
+  assert.doesNotMatch(preparingNextActionHtml.match(/<button[^>]*data-continue-next-action-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
+  context.__setStartingRoadmapRevisionProject('');
+
+  context.__setSidebarRoadmapRevisionState('/workspace/app', [{ nodeId: '__roadmap_revision__', status: 'Running' }], true, '');
+  const runningNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
+  assert.match(runningNextActionHtml, /Agent 正在调整路线图/);
+  assert.match(runningNextActionHtml.match(/<button[^>]*data-adjust-roadmap-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
+  assert.doesNotMatch(runningNextActionHtml.match(/<button[^>]*data-continue-next-action-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
+
+  context.__setSidebarRoadmapRevisionState('/workspace/app', [], false, '');
+  context.__reconcileRoadmapRevisionConversations('/workspace/app', [{ id: 72, nodeId: '__roadmap_revision__', status: 'Completed' }]);
+  context.__reconcileRoadmapRevisionConversations('/workspace/app', [{ id: 71, nodeId: '__roadmap_revision__', status: 'Running' }]);
+  const staleRunningNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
+  assert.doesNotMatch(staleRunningNextActionHtml, /Agent 正在调整路线图/);
+  assert.doesNotMatch(staleRunningNextActionHtml.match(/<button[^>]*data-adjust-roadmap-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
+
+  context.__setSidebarRoadmapRevisionState('/workspace/app', [], false, '');
+  context.__reconcileRoadmapRevisionConversations('/workspace/app', [{ id: 73, nodeId: '__roadmap_revision__', status: 'Completed' }]);
+  assert.match(context.__renderProjectNextActionCard(nextActionProject), /路线图已更新/);
+  context.__setSidebarLanguage('en');
+  assert.match(context.__renderProjectNextActionCard(nextActionProject), /Roadmap updated/);
+  context.__setSidebarLanguage('zh');
+  context.__reconcileRoadmapRevisionConversations('/workspace/app', [{ id: 74, nodeId: '__roadmap_revision__', status: 'Failed' }]);
+  assert.match(context.__renderProjectNextActionCard(nextActionProject), /调整失败，原路线图已保留/);
 
   context.__renderGlobalFocus([], '');
   const coldStartTodayPlan = elements['global-focus-panel'].innerHTML;
@@ -1431,7 +1514,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
       portfolio: [newProjectSummary]
     }
   });
-  assert.match(elements['portfolio-list'].innerHTML, /下一步: 生成初始路线图/);
+  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-title[^>]*>[\s\S]*下一步[\s\S]*project-next-action-copy">生成初始路线图/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /Initialize roadmap/);
 
   dispatchMessage({
@@ -1511,7 +1594,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   const afterDeliveryRefresh = elements['global-focus-panel'].innerHTML;
   assert.equal(extractTodayProjectOrder(afterDeliveryRefresh)[0], 'Beta');
   assert.match(afterDeliveryRefresh, /发布检查需要处理/);
-  assert.match(elements['portfolio-list'].innerHTML, /下一步: 发布检查需要处理/);
+  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-copy">发布检查需要处理/);
   dispatchMessage({
     command: 'projectDeliveryLoaded',
     projectPath: '/workspace/beta',
@@ -1524,7 +1607,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   });
   const afterDeliveryRecovery = elements['global-focus-panel'].innerHTML;
   assert.deepEqual(extractTodayProjectOrder(afterDeliveryRecovery), initialTodayProjectOrder);
-  assert.match(elements['portfolio-list'].innerHTML, /下一步: 推进 Beta/);
+  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-copy">推进 Beta/);
   const beforePartialUpdate = JSON.parse(JSON.stringify(context.__getCurrentPortfolio()));
   dispatchMessage({
     command: 'projectsLoaded',
@@ -1800,6 +1883,28 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.equal(context.__getActivePortfolioFilter(), 'frozen');
   assert.match(elements['portfolio-list'].innerHTML, /data-select-project-path="\/workspace\/frozen"/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-select-project-path="\/workspace\/active"/);
+
+  context.__setActivePortfolioFilter('all');
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'Alpha', path: '/workspace/alpha' }, { name: 'Beta', path: '/workspace/beta' }],
+      selectedProjectPath: '/workspace/beta',
+      portfolio: [
+        { name: 'Alpha', path: '/workspace/alpha', recommendedNodeId: 'alpha-step', globalNextAction: '推进 Alpha' },
+        { name: 'Beta', path: '/workspace/beta', recommendedNodeId: 'beta-step', globalNextAction: '推进 Beta' }
+      ]
+    }
+  });
+  dispatchMessage({
+    command: 'sidebarProjectConversationSnapshotLoaded',
+    projectPath: '/workspace/alpha',
+    soloConversations: [],
+    projectConversations: [],
+    flowConversations: [],
+    revisionConversations: [{ id: 91, nodeId: '__roadmap_revision__', status: 'Running' }]
+  });
+  assert.match(elements['portfolio-list'].innerHTML, /推进 Alpha[\s\S]*?Agent 正在调整路线图/);
 });
 
 test('sidebar resolve survives persisted state and startup data failures', async () => {
@@ -3457,7 +3562,7 @@ test('sidebar conversation snapshots share one in-flight database read and only 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(snapshotLoads, 1);
 
-  resolveSnapshot({ solo: [], project: [], flow: [] });
+  resolveSnapshot({ solo: [], project: [], flow: [], revision: [] });
   await Promise.all([first, second]);
 
   assert.equal(snapshotLoads, 1);
@@ -3465,6 +3570,122 @@ test('sidebar conversation snapshots share one in-flight database read and only 
     postedMessages.filter((message) => message.command === 'sidebarProjectConversationSnapshotLoaded').length,
     1
   );
+});
+
+test('sidebar conversation snapshot carries the current roadmap revision state', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const postedMessages = [];
+  const revision = [{
+    id: 71,
+    nodeId: '__roadmap_revision__',
+    status: 'Running',
+    timestamp: '2026-09-01T08:00:00.000Z'
+  }];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'app', path: '/workspace/app' }],
+        selectedProjectPath: '/workspace/app'
+      }),
+      getProjectConversationSnapshot: async () => ({ solo: [], project: [], flow: [], revision })
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+
+  await provider.sendProjectConversationSnapshot('/workspace/app', true);
+
+  const snapshotMessage = postedMessages.find((message) => message.command === 'sidebarProjectConversationSnapshotLoaded');
+  assert.deepEqual(snapshotMessage.revisionConversations, revision);
+});
+
+test('sidebar sends a valid conversation snapshot even when the core portfolio cache is stale', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const snapshotCache = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-independent-conversation-cache-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const projectPath = path.join(root, 'project');
+  fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(projectPath, '.solopreneur', 'project_journal.db'), 'journal', 'utf8');
+  const revision = [{ id: 81, nodeId: '__roadmap_revision__', status: 'Completed' }];
+  snapshotCache.writeCachedConversationSnapshot(globalRoot, projectPath, {
+    solo: [], project: [], flow: [], revision
+  });
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: globalRoot }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ name: 'app', path: projectPath }], selectedProjectPath: projectPath }),
+      getProjectConversationSnapshot: async () => ({ solo: [], project: [], flow: [], revision })
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+  provider.scheduleCorePortfolio = () => {};
+
+  provider.sendProjects();
+
+  const conversationMessage = postedMessages.find((message) => message.command === 'sidebarProjectConversationSnapshotLoaded');
+  assert.deepEqual(conversationMessage?.revisionConversations, revision);
+});
+
+test('sidebar restores roadmap revision snapshots for non-selected visible projects', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const snapshotCache = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-all-project-revisions-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const projects = ['alpha', 'beta'].map((name) => {
+    const projectPath = path.join(root, name);
+    fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
+    fs.writeFileSync(path.join(projectPath, '.solopreneur', 'project_journal.db'), 'journal', 'utf8');
+    snapshotCache.writeCachedConversationSnapshot(globalRoot, projectPath, {
+      solo: [], project: [], flow: [], revision: [{ id: name === 'alpha' ? 92 : 93, nodeId: '__roadmap_revision__', status: name === 'alpha' ? 'Running' : 'Completed' }]
+    });
+    return { name, path: projectPath };
+  });
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: globalRoot }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: projects[1].path }),
+      getProjectConversationSnapshot: async () => ({ solo: [], project: [], flow: [], revision: [] })
+    }
+  );
+  provider._view = { webview: { postMessage(message) { postedMessages.push(message); return Promise.resolve(true); } } };
+  provider.scheduleCorePortfolio = () => {};
+
+  provider.sendProjects();
+
+  const restoredPaths = postedMessages
+    .filter((message) => message.command === 'sidebarProjectConversationSnapshotLoaded')
+    .map((message) => message.projectPath);
+  assert.ok(restoredPaths.includes(projects[0].path));
+  assert.ok(restoredPaths.includes(projects[1].path));
 });
 
 test('terminal status refresh supersedes a stale running conversation snapshot', async () => {
@@ -3585,7 +3806,8 @@ test('forced project refresh paints the valid local conversation snapshot before
   snapshotCache.writeCachedConversationSnapshot(globalRoot, projectPath, {
     solo: [{ id: 1, nodeId: '__solo__', summary: 'Cached now' }],
     project: [],
-    flow: []
+    flow: [],
+    revision: []
   });
   let resolveFresh;
   const fresh = new Promise((resolve) => {
@@ -3615,7 +3837,7 @@ test('forced project refresh paints the valid local conversation snapshot before
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].soloConversations[0].summary, 'Cached now');
 
-  resolveFresh({ solo: [{ id: 2, nodeId: '__solo__', summary: 'Fresh later' }], project: [], flow: [] });
+  resolveFresh({ solo: [{ id: 2, nodeId: '__solo__', summary: 'Fresh later' }], project: [], flow: [], revision: [] });
   await loading;
   assert.equal(postedMessages.length, 2);
   assert.equal(postedMessages[1].soloConversations[0].summary, 'Fresh later');
@@ -4137,8 +4359,10 @@ test('local-first loading paints and launches before optional or durable work', 
 
   const sidebarWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
   assert.match(sidebarWebviewSource, /function isProjectComposerInteractionActive\(\)[\s\S]*?data-project-continue-composer/);
+  assert.match(sidebarWebviewSource, /function isProjectComposerInteractionActive\(\)[\s\S]*?data-roadmap-revision-input/);
   assert.match(sidebarWebviewSource, /isConversationCardInteractionActive\(\) \|\| isProjectComposerInteractionActive\(\)/);
-  assert.match(sidebarWebviewSource, /compositionstart[\s\S]*?projectComposerComposing = true/);
+  assert.match(sidebarWebviewSource, /compositionstart[\s\S]*?data-roadmap-revision-input[\s\S]*?projectComposerComposing = true/);
+  assert.match(sidebarWebviewSource, /case 'sidebarActionFailed':[\s\S]*?conversation\.runRoadmapRevision[\s\S]*?renderPortfolioFromAsyncUpdate[\s\S]*?break;[\s\S]*?pendingConversationContinuations\.clear/);
 
   const dispatchBody = extensionSource.slice(
     extensionSource.indexOf('async function handleSharedWebviewAction'),
@@ -4169,9 +4393,12 @@ test('local-first loading paints and launches before optional or durable work', 
   const projectContinueBody = dispatchBody.slice(projectContinueStart, projectContinueEnd);
   assert.match(
     projectContinueBody,
-    /handleRunAgent\(\s*context,\s*String\(request\.nodeId\),\s*'',\s*String\(request\.agentCli \|\| getPersistedSettings\(context\)\.cliPath \|\| ''\)\s*\)/,
+    /handleRunAgent\(\s*context,\s*String\(request\.nodeId\),\s*'',\s*String\(request\.agentCli \|\| getPersistedSettings\(context\)\.cliPath \|\| ''\),[\s\S]*?registered\s*\)/,
     'project card quick continue must explicitly use the persisted default Agent CLI'
   );
+  assert.match(extensionSource, /function enqueueProjectActionLaunch/);
+  assert.match(dispatchBody, /'conversation\.runRoadmapRevision': async[\s\S]*?await enqueueProjectActionLaunch/);
+  assert.match(projectContinueBody, /await enqueueProjectActionLaunch/);
   const revealBody = extensionSource.slice(
     extensionSource.indexOf('function revealAgentStartupTerminal'),
     extensionSource.indexOf('function launchAgentConversationTerminal')
@@ -4180,6 +4407,33 @@ test('local-first loading paints and launches before optional or durable work', 
   assert.doesNotMatch(revealBody, /makeAgentTerminalName\(workspaceRoot, 'preparing'\)/);
   assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'[\s\S]*?\);/);
   assert.match(dispatchBody, /'conversation\.runStep': async[\s\S]*?`step-\$\{String\(request\.nodeId \|\| 'conversation'\)\}`/);
+});
+
+test('project card action launches release the next project after execution registration', async () => {
+  const extension = loadCompiledModule(
+    'out/extension.js',
+    '\nmodule.exports.__enqueueProjectActionLaunch = enqueueProjectActionLaunch;'
+  );
+  const events = [];
+  let finishFirst;
+  const firstTail = new Promise((resolve) => { finishFirst = resolve; });
+  const first = extension.__enqueueProjectActionLaunch(async (registered) => {
+    events.push('first:start');
+    registered();
+    events.push('first:registered');
+    await firstTail;
+    events.push('first:finished');
+  });
+  const second = extension.__enqueueProjectActionLaunch(async (registered) => {
+    events.push('second:start');
+    registered();
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(events, ['first:start', 'first:registered', 'second:start']);
+  finishFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, ['first:start', 'first:registered', 'second:start', 'first:finished']);
 });
 
 test('sidebar project switcher supports searching by project name or path', () => {
@@ -5887,7 +6141,8 @@ test('agent launch path uses one terminal-first startup component', () => {
     ['step', 'async function handleRunAgent', 'function extractUserSupplementFromExecutionOutput', 'postNodeConversations(nodeId)']
   ]) {
     const body = source.slice(source.indexOf(startMarker), source.indexOf(endMarker, source.indexOf(startMarker)));
-    const ledgerWrite = body.indexOf('const executionLogId = syncEngine.logAgentExecution(');
+    const ledgerOwner = name === 'step' ? 'projectSyncEngine' : 'syncEngine';
+    const ledgerWrite = body.indexOf(`const executionLogId = ${ledgerOwner}.logAgentExecution(`);
     const ledgerPublish = body.indexOf(refreshCall, ledgerWrite);
     const preSessionGit = body.indexOf('await createPreSessionGitCommit(', ledgerWrite);
     assert.ok(ledgerWrite >= 0, `${name} launch must create its first ledger row`);
