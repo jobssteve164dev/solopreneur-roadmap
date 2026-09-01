@@ -2228,7 +2228,218 @@ function chinesePathFor(pagePath) {
   return `/zh${pagePath === "/" ? "" : pagePath}`;
 }
 
+const searchMetadata = {
+  "/pro": {
+    description: "Compare SoloMap Pro for solo founders who need to choose which projects to grow, pause, or stop, with a local-first strategy cockpit for stronger decisions."
+  },
+  "/zh/pro": {
+    description: "了解独道 (SoloMap) Pro 如何帮助独立开发者比较多个项目的市场信号、投入成本与复利潜力，判断下一阶段该加码、暂停还是停止，并用本地优先的战略驾驶舱做出更清晰的经营选择。"
+  },
+  "/blog": {
+    description: "Read practical OPC guides for solo developers using AI agents to build products, ship reliably, reach customers, learn from evidence, and run a one-person company."
+  },
+  "/zh/blog": {
+    description: "阅读面向独立开发者的 OPC 实战文章，学习如何用 AI Agent 构建并发布真正可用的产品、找到客户、验证市场信号，并把一次次项目推进积累成可持续经营的一人公司。"
+  },
+  "/zh/compare": {
+    description: "对比 SoloMap、主流 AI 编码 Agent、代码编辑器与项目管理工具，理解各自负责的用户动作、项目边界和适用场景，并选择能让项目跨会话持续对齐的工作组合。"
+  },
+  "/alternatives": {
+    description: "Compare alternatives to Claude Code and conventional AI coding project management, with honest guidance on execution, continuity, tradeoffs, and when each option fits."
+  },
+  "/zh/alternatives": {
+    description: "比较 Claude Code、Codex、Cursor、SoloMap 与常见 AI 编码项目管理方案，先区分代码执行、项目规划和跨会话连续性，再按真实任务选择合适的替代方案。"
+  },
+  "/zh/compare/solomap-vs-claude-code": {
+    description: "从代码执行、项目连续性、权限边界、完成证据和本地记录比较 SoloMap 与 Claude Code，理解一个如何保存工作约定、一个如何执行代码，并判断何时组合使用。"
+  },
+  "/compare/solomap-vs-codex": {
+    description: "Compare SoloMap and OpenAI Codex across local execution, permissions, project memory, evidence, roadmap continuity, and when using both makes sense."
+  },
+  "/zh/compare/solomap-vs-codex": {
+    description: "比较 SoloMap 与 Codex 在本地代码执行、授权边界、项目记忆、验证证据和跨会话续接上的不同职责，理解何时只用 Codex，何时组合使用才能持续推进。"
+  },
+  "/compare/solomap-vs-cursor": {
+    description: "Compare SoloMap and Cursor by editor experience, Agent execution, local project records, completion evidence, and cross-session continuity in a real AI coding workflow."
+  },
+  "/zh/compare/solomap-vs-cursor": {
+    description: "比较 SoloMap 和 Cursor 在编辑体验、Agent 执行、本地项目记录、完成证据与跨会话连续性上的分工，判断应该选择工作协议、AI 代码编辑器，还是让二者配合。"
+  },
+  "/compare/solomap-vs-linear": {
+    title: "SoloMap vs Linear for AI Coding Project Workflows"
+  },
+  "/zh/compare/solomap-vs-linear": {
+    description: "比较 SoloMap 与 Linear 在个人 Agent 执行、团队承诺、路线图所有权、验证证据和项目状态上的不同边界，判断本地独立开发与团队协作分别应由谁负责。"
+  },
+  "/zh/compare/solomap-vs-notion": {
+    description: "比较 SoloMap 与 Notion 在项目知识、结构自由度、本地 Agent 执行、完成证据和跨会话续接上的取舍，判断你需要的是执行协议、通用知识空间，还是分层组合。"
+  },
+  "/compare/claude-code-vs-codex": {
+    title: "Claude Code vs Codex for Local AI Coding Agent Work"
+  },
+  "/zh/compare/claude-code-vs-codex": {
+    description: "从终端工作流、代码修改、权限控制、会话续接和项目协议边界比较 Claude Code 与 Codex，帮助你用同一个真实任务验证哪个本地编码 Agent 更适合当前项目。"
+  },
+  "/zh/alternatives/claude-code": {
+    description: "按真实任务比较 Codex、Cursor、SoloMap 和手动终端工作流，区分替换 Claude Code 这个编码 Agent 与补齐项目连续性，并看清每种替代方案的重要取舍。"
+  },
+  "/docs": {
+    description: "Explore practical SoloMap guides for setup, AI coding roadmaps, local-first project continuity, Codex, Claude Code, and Cursor integrations, plus honest tool comparisons."
+  },
+  "/zh/docs": {
+    description: "浏览 SoloMap 实用指南，完成安装上手、规划 AI 编码路线图、续接中断项目，并接入 Codex、Claude Code 或 Cursor 等本地 Agent CLI，用可验证证据推进下一步。"
+  },
+  "/docs/getting-started": {
+    title: "SoloMap Quick Start for Local AI Coding Projects",
+    description: "Install SoloMap in VS Code, register a local project, create your first AI coding roadmap, choose an Agent CLI, run one focused task, and verify the result."
+  },
+  "/zh/docs/getting-started": {
+    description: "按照 SoloMap 快速上手指南完成 VS Code 插件安装、登记本地项目、创建第一份 AI 编码路线图、选择 Agent CLI，并运行和验证一次边界清晰的真实任务。"
+  },
+  "/docs/ai-coding-project-roadmap": {
+    description: "Build an AI coding roadmap that connects user outcomes, Agent tasks, verification evidence, launch work, customer feedback, and the next decision in one durable loop."
+  },
+  "/zh/docs/ai-coding-project-roadmap": {
+    description: "学习如何规划真正可执行的 AI 编码项目路线图，把用户结果、Agent 任务、完成证据、发布工作和客户反馈连接起来，让 Build、Sell、Learn、Improve 形成持续循环。"
+  },
+  "/docs/resume-ai-coding-projects": {
+    description: "Resume an AI coding project after a break by checking roadmap state, local history, touched files, accepted evidence, remaining risk, and the next bounded action."
+  },
+  "/zh/docs/resume-ai-coding-projects": {
+    description: "中断后无需重读所有 AI 对话；通过路线图状态、本地历史、改动文件、已验证证据和剩余风险恢复项目事实，再选择一个边界清晰的下一步继续推进。"
+  },
+  "/docs/local-first-ai-project-management": {
+    description: "Learn how local-first project records keep AI coding roadmaps, Agent runs, evidence, and handoffs portable, inspectable, Git-friendly, private, and easier to resume."
+  },
+  "/zh/docs/local-first-ai-project-management": {
+    description: "了解本地优先的项目记录如何保存 AI 编码路线图、Agent 运行、完成证据和交接，让项目保持可迁移、可检查、Git 友好，并在换会话后更容易安全续接。"
+  },
+  "/docs/agents/codex": {
+    title: "Use Codex CLI in a SoloMap AI Coding Project Roadmap",
+    description: "Configure Codex in SoloMap, verify the CLI, launch one bounded roadmap task from VS Code, review the code result, and preserve evidence for the next session."
+  },
+  "/zh/docs/agents/codex": {
+    description: "在 SoloMap 中配置并检测 Codex CLI，从当前路线图环节启动一个边界清晰的本地 Agent 任务，检查代码结果与验证证据，再把可靠交接留给下一次会话。"
+  },
+  "/docs/agents/claude-code": {
+    title: "Use Claude Code in a SoloMap AI Coding Roadmap",
+    description: "Connect Claude Code to SoloMap, launch one bounded roadmap step, keep the outcome and scope visible, review the result, and save verification in the local project."
+  },
+  "/zh/docs/agents/claude-code": {
+    description: "把 Claude Code 接入 SoloMap，从一个边界清晰的路线图环节启动执行，保持目标与范围可见，检查仓库改动和验证结果，并把可靠交接保存到本地项目记录。"
+  },
+  "/docs/agents/cursor": {
+    title: "Use Cursor Agent CLI in a SoloMap Project Roadmap",
+    description: "Configure Cursor Agent CLI in SoloMap, launch focused work from a VS Code roadmap step, review changed files and evidence, and keep the result portable across sessions."
+  },
+  "/zh/docs/agents/cursor": {
+    description: "在 SoloMap 中配置并检测 Cursor Agent CLI，从 VS Code 里的当前路线图环节运行聚焦任务，检查改动文件与完成证据，再让结果在后续会话或其他 Agent 间保持可续接。"
+  },
+  "/zh/docs/compare/solomap-vs-task-managers": {
+    description: "从项目数据位置、Agent 执行、上下文续接、验证证据、协作和汇报维度比较 SoloMap 与通用任务管理工具，判断本地执行连续性与团队计划分别应该由谁负责。"
+  },
+  "/docs/solomap-method": {
+    title: "The SoloMap Method for Shipping AI-Built Products",
+    description: "Turn an AI-built product idea into a roadmap, focused Agent execution, verified delivery, market contact, customer learning, and a stronger next iteration."
+  },
+  "/zh/docs/solomap-method": {
+    description: "了解 SoloMap 方法如何把 AI Agent 产品从真实问题推进到路线图、聚焦执行、验证交付、市场触达和客户反馈，再将证据带回下一轮 Build、Sell、Learn、Improve。"
+  },
+  "/docs/portfolio-method": {
+    title: "Solo Founder Portfolio Method for AI-Built Projects",
+    description: "Coordinate multiple AI-built products with the SoloMap portfolio method: clarify project modes, strategic priority, reusable capabilities, market evidence, and learning."
+  },
+  "/zh/docs/portfolio-method": {
+    title: "SoloMap 一人公司 AI 项目组合方法指南",
+    description: "学习用 SoloMap 项目组合方法协调多个 AI 产品，按执行模式、战略优先级、可复用能力、市场证据和学习反馈做取舍，让每次投入都能为后续项目积累复利。"
+  },
+  "/docs/micro-execution-loop": {
+    title: "Micro Execution Loop for Verifiable AI Agent Work",
+    description: "Make AI Agent work observable with a Micro Execution Loop: capture intent, judgment, action, evidence, result, and attribution before moving a roadmap forward."
+  },
+  "/zh/docs/micro-execution-loop": {
+    title: "SoloMap 可验证 AI Agent 微观执行循环指南",
+    description: "了解微观执行循环如何用意图、判断、动作、证据、结果和归因记录 AI Agent 工作，把不可检查的过程变成可信项目事实，并让路线图只从真实验证继续推进。"
+  },
+  "/privacy-local-first": {
+    title: "SoloMap Local-First Privacy and Project Data Note",
+    description: "Learn which SoloMap roadmap, task, evidence, and memory records stay in your local workspace, when optional services use network access, and what the website measures."
+  },
+  "/terms-of-service": {
+    title: "SoloMap Terms of Service: Accounts, Plans, and Product Use",
+    description: "Read the SoloMap Terms of Service covering product access, accounts, subscriptions, acceptable use, local project data, third-party Agent services, and legal conditions."
+  },
+  "/zh/terms-of-service": {
+    title: "SoloMap 服务条款：账号、订阅与产品使用规则",
+    description: "阅读 SoloMap 服务条款，了解产品访问、账号责任、订阅与退款、可接受使用、本地项目数据、第三方 Agent 服务费用，以及使用产品时适用的重要法律条件。"
+  },
+  "/privacy-policy": {
+    title: "SoloMap Privacy Policy and Personal Data Practices",
+    description: "Read what account and website data SoloMap processes, what stays in your local workspace, which service providers are involved, and how to exercise your privacy rights."
+  },
+  "/zh/privacy-policy": {
+    title: "SoloMap 隐私政策：个人数据、本地项目与用户权利",
+    description: "阅读 SoloMap 隐私政策，了解哪些账号与网站数据会被处理、哪些项目记录始终保留在本地工作区、会使用哪些服务商，以及如何行使访问、更正和删除等隐私权利。"
+  },
+  "/cookie-policy": {
+    title: "SoloMap Cookie, Consent, and Website Tracking Policy",
+    description: "Understand SoloMap login and language cookies, optional first-party analytics, consent choices, retention periods, and tracking technologies the website does not use."
+  },
+  "/zh/cookie-policy": {
+    title: "SoloMap Cookie 与网站统计政策：用途、同意与保留期限",
+    description: "阅读 SoloMap Cookie 与网站统计政策，了解登录和语言偏好所需的 Cookie、需要同意后才启用的第一方匿名统计、保留期限，以及官网不会使用的跨站广告追踪。"
+  },
+  "/refund-policy": {
+    title: "SoloMap Refund and Subscription Cancellation Policy",
+    description: "Read the SoloMap refund and cancellation rules for paid plans, including eligibility, request timing, renewals, access after cancellation, payment handling, and support."
+  },
+  "/zh/refund-policy": {
+    title: "SoloMap 退款与订阅取消政策：资格、时限与处理方式",
+    description: "阅读 SoloMap 退款与订阅取消政策，了解付费计划的退款资格、申请时限、自动续订、取消后的权益、付款处理方式，以及需要帮助时应如何提交请求。"
+  },
+  "/data-rights": {
+    title: "SoloMap Data Rights Notice for Account Holders and Visitors",
+    description: "Understand access, correction, deletion, portability, objection, and consent choices for SoloMap account data, while local workspace records stay under your control."
+  },
+  "/zh/data-rights": {
+    title: "SoloMap 数据权利说明：访问、更正、删除与可携带权",
+    description: "阅读 SoloMap 数据权利说明，了解账号与网站数据的访问、更正、删除、可携带、反对和撤回同意等选择，以及本地工作区项目记录为何始终由你自行控制。"
+  },
+  "/do-not-sell": {
+    title: "SoloMap Do Not Sell or Share Personal Information Notice",
+    description: "Learn why SoloMap does not sell personal information, what limited service-provider processing may occur, how sharing requests are handled, and how to contact us."
+  },
+  "/zh/do-not-sell": {
+    title: "SoloMap 不出售或分享个人信息声明与用户选择",
+    description: "阅读 SoloMap 不出售或分享个人信息声明，了解产品为何不会出售用户数据、提供服务时可能发生哪些有限的数据处理、你拥有哪些选择，以及如何联系我们行使相关权利。"
+  },
+  "/ai-disclaimer": {
+    title: "SoloMap AI Output, Agent Use, and Responsibility Disclaimer",
+    description: "Read about third-party Agent outputs, verification responsibilities, professional advice limits, user judgment, potential errors, and safe AI-assisted project workflows."
+  },
+  "/zh/ai-disclaimer": {
+    title: "SoloMap AI 输出、Agent 使用与用户责任免责声明",
+    description: "阅读 SoloMap AI 免责声明，了解第三方 Agent 输出可能存在的错误、用户应承担的验证与最终判断责任、专业建议边界，以及在真实项目中安全使用 AI 辅助工作流的注意事项。"
+  },
+  "/legal-supplement": {
+    title: "SoloMap Product Legal Supplement and Service-Specific Terms",
+    description: "Read SoloMap service-specific conditions that apply with shared policies, including product scope, local-first project data, account features, and paid capabilities."
+  },
+  "/zh/legal-supplement": {
+    title: "SoloMap 产品法律补充说明：本地数据、账号与付费能力",
+    description: "阅读 SoloMap 产品法律补充说明，了解在共享法律文件之外适用于本产品的具体条件，包括产品范围、本地优先项目数据、账号能力、付费权益与相关服务边界。"
+  },
+  "/sitemap": {
+    title: "SoloMap Site Directory for Docs, Comparisons, Blog, and Policies",
+    description: "Browse the SoloMap directory for product pages, setup and Agent integration docs, comparison and alternative guides, OPC Blog resources, privacy, and legal policies."
+  },
+  "/zh/sitemap": {
+    description: "浏览完整的 SoloMap 网站目录，快速找到产品首页、安装与 Agent 集成文档、AI 编码工作流对比和替代方案、OPC Blog 实战文章、本地优先说明，以及隐私与法律政策。"
+  }
+};
+
 function buildHead(t, origin, pagePath, alternatePagePath) {
+  const meta = { ...t.meta, ...(searchMetadata[pagePath] || {}) };
   const locale = t.lang === "zh-Hans" ? "zh_CN" : "en_US";
   const imageUrl = absoluteUrl("/solomap-social-card.png", origin);
   const isZh = t.lang === "zh-Hans";
@@ -2241,18 +2452,18 @@ function buildHead(t, origin, pagePath, alternatePagePath) {
   return `<meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#11100e">
-  <title>${escapeHtml(t.meta.title)}</title>
-  <meta name="description" content="${escapeHtml(t.meta.description)}">
-  ${t.meta.noindex ? `<meta name="robots" content="noindex,nofollow">` : ""}
-  ${t.meta.keywords ? `<meta name="keywords" content="${escapeHtml(t.meta.keywords)}">` : ""}
+  <title>${escapeHtml(meta.title)}</title>
+  <meta name="description" content="${escapeHtml(meta.description)}">
+  ${meta.noindex ? `<meta name="robots" content="noindex,nofollow">` : ""}
+  ${meta.keywords ? `<meta name="keywords" content="${escapeHtml(meta.keywords)}">` : ""}
   <link rel="icon" href="${LOGO_URL}" type="image/svg+xml">
   <link rel="canonical" href="${absoluteUrl(pagePath, origin)}">
   ${englishPath ? `<link rel="alternate" hreflang="en" href="${absoluteUrl(englishPath, origin)}">` : ""}
   ${chinesePath ? `<link rel="alternate" hreflang="zh-Hans" href="${absoluteUrl(chinesePath, origin)}">
   <link rel="alternate" hreflang="zh-CN" href="${absoluteUrl(chinesePath, origin)}">` : ""}
   <link rel="alternate" hreflang="x-default" href="${absoluteUrl(englishPath || chinesePath || pagePath, origin)}">
-  <meta property="og:title" content="${escapeHtml(t.meta.title)}">
-  <meta property="og:description" content="${escapeHtml(t.meta.ogDescription)}">
+  <meta property="og:title" content="${escapeHtml(meta.title)}">
+  <meta property="og:description" content="${escapeHtml(meta.description)}">
   <meta property="og:image" content="${imageUrl}">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -2262,8 +2473,8 @@ function buildHead(t, origin, pagePath, alternatePagePath) {
   <meta property="og:site_name" content="SoloMap">
   <meta property="og:locale" content="${locale}">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="${escapeHtml(t.meta.title)}">
-  <meta name="twitter:description" content="${escapeHtml(t.meta.description)}">
+  <meta name="twitter:title" content="${escapeHtml(meta.title)}">
+  <meta name="twitter:description" content="${escapeHtml(meta.description)}">
   <meta name="twitter:image" content="${imageUrl}">
   <meta name="twitter:image:alt" content="SoloMap — local-first roadmap for AI coding projects">`;
 }
