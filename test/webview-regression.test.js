@@ -1117,16 +1117,19 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     failedNodes: 0
   };
   const nextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
-  assert.match(nextActionHtml, /class="project-next-action-card/);
+  assert.match(nextActionHtml, /<section class="project-next-action-row/);
+  assert.doesNotMatch(nextActionHtml, /class="project-next-action-card/);
   assert.match(nextActionHtml, />下一步</);
   assert.match(nextActionHtml, /完成侧边栏项目卡片的下一步行动组件/);
-  assert.match(nextActionHtml, /data-continue-next-action-project-path="\/workspace\/app"/);
-  assert.match(nextActionHtml, /data-adjust-roadmap-project-path="\/workspace\/app"/);
+  assert.doesNotMatch(nextActionHtml, /data-continue-next-action-project-path/);
+  const nextActionMainHtml = nextActionHtml.match(/<div class="project-next-action-main">[\s\S]*?<\/div>/)?.[0] || '';
+  assert.match(nextActionMainHtml, /project-next-action-copy/);
+  assert.match(nextActionMainHtml, /data-adjust-roadmap-project-path="\/workspace\/app"/);
 
   context.__setExpandedRoadmapRevisionProject('/workspace/app');
   const expandedNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
   assert.match(expandedNextActionHtml, /data-roadmap-revision-input="\/workspace\/app"/);
-  assert.match(expandedNextActionHtml, /data-send-roadmap-revision-project-path="\/workspace\/app"/);
+  assert.match(expandedNextActionHtml, /class="project-next-action-btn is-confirm project-roadmap-revision-send"[^>]*data-send-roadmap-revision-project-path="\/workspace\/app"/);
 
   const coldStartRevisionRequest = context.__buildSidebarRoadmapRevisionRequest('/workspace/app', '调整优先级');
   assert.equal(coldStartRevisionRequest.agentCli, '');
@@ -1142,14 +1145,12 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   const preparingNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
   assert.match(preparingNextActionHtml, /正在准备路线图调整/);
   assert.match(preparingNextActionHtml.match(/<button[^>]*data-adjust-roadmap-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
-  assert.doesNotMatch(preparingNextActionHtml.match(/<button[^>]*data-continue-next-action-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
   context.__setStartingRoadmapRevisionProject('');
 
   context.__setSidebarRoadmapRevisionState('/workspace/app', [{ nodeId: '__roadmap_revision__', status: 'Running' }], true, '');
   const runningNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
   assert.match(runningNextActionHtml, /Agent 正在调整路线图/);
   assert.match(runningNextActionHtml.match(/<button[^>]*data-adjust-roadmap-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
-  assert.doesNotMatch(runningNextActionHtml.match(/<button[^>]*data-continue-next-action-project-path="\/workspace\/app"[^>]*>/)?.[0] || '', /disabled/);
 
   context.__setSidebarRoadmapRevisionState('/workspace/app', [], false, '');
   context.__reconcileRoadmapRevisionConversations('/workspace/app', [{ id: 72, nodeId: '__roadmap_revision__', status: 'Completed' }]);
@@ -1514,9 +1515,12 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
       portfolio: [newProjectSummary]
     }
   });
-  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-title[^>]*>[\s\S]*下一步[\s\S]*project-next-action-copy">生成初始路线图/);
+  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-label[^>]*>下一步[\s\S]*project-next-action-copy"[^>]*>生成初始路线图/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-continue-next-action-project-path/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-adjust-roadmap-project-path/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /Initialize roadmap/);
 
+  context.__resetActiveProjectPath();
   dispatchMessage({
     command: 'projectsLoaded',
     projects: {
@@ -1563,6 +1567,12 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
       }]
     }
   });
+  const alphaActionGroup = elements['portfolio-list'].innerHTML.match(/<div class="portfolio-card-actions">[\s\S]*?data-open-project-path="\/workspace\/alpha"[\s\S]*?<\/div>/)?.[0] || '';
+  assert.match(alphaActionGroup, /data-open-project-path="\/workspace\/alpha"/);
+  assert.match(alphaActionGroup, /data-open-project-growth-path="\/workspace\/alpha"/);
+  assert.match(alphaActionGroup, /data-continue-next-action-project-path="\/workspace\/alpha"/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-continue-next-action-project-path="\/workspace\/beta"/);
+  assert.match(elements['portfolio-list'].innerHTML, /data-adjust-roadmap-project-path="\/workspace\/beta"/);
   const initialTodayPlan = elements['global-focus-panel'].innerHTML;
   assert.match(initialTodayPlan, /今日安排/);
   assert.doesNotMatch(initialTodayPlan, /globalFocusTitle|globalFocusEmpty|escapeHtml|\$\{/);
@@ -1594,7 +1604,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   const afterDeliveryRefresh = elements['global-focus-panel'].innerHTML;
   assert.equal(extractTodayProjectOrder(afterDeliveryRefresh)[0], 'Beta');
   assert.match(afterDeliveryRefresh, /发布检查需要处理/);
-  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-copy">发布检查需要处理/);
+  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-copy"[^>]*>发布检查需要处理/);
   dispatchMessage({
     command: 'projectDeliveryLoaded',
     projectPath: '/workspace/beta',
@@ -1607,7 +1617,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   });
   const afterDeliveryRecovery = elements['global-focus-panel'].innerHTML;
   assert.deepEqual(extractTodayProjectOrder(afterDeliveryRecovery), initialTodayProjectOrder);
-  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-copy">推进 Beta/);
+  assert.match(elements['portfolio-list'].innerHTML, /project-next-action-copy"[^>]*>推进 Beta/);
   const beforePartialUpdate = JSON.parse(JSON.stringify(context.__getCurrentPortfolio()));
   dispatchMessage({
     command: 'projectsLoaded',
@@ -2611,6 +2621,9 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /sidebar-conversations-tree-container/);
   assert.doesNotMatch(html, /conversation\.status\.toLowerCase\(\)/);
   assert.match(html, /conversation\.continue/);
+  assert.match(html, /\.project-next-action-btn\s*\{[\s\S]*?min-height:\s*24px;[\s\S]*?color:\s*var\(--text-main\);[\s\S]*?font-size:\s*10px;/);
+  assert.match(html, /\.project-next-action-copy\s*\{[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/);
+  assert.match(html, /\.project-roadmap-revision-send\s*\{[\s\S]*?border-color:\s*rgba\(0, 229, 255, 0\.28\);[\s\S]*?color:\s*#80d8ff;/);
   assert.match(html, /data-continue-sidebar-solo-id/);
   assert.doesNotMatch(html, /Continuation session id/);
   assert.match(html, /data-stop-sidebar-solo-id/);

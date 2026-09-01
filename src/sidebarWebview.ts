@@ -2835,81 +2835,63 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       margin-top: 8px;
     }
 
-    .project-next-action-card {
-      margin-top: 8px;
-      border: 1px solid rgba(0, 176, 255, 0.24);
-      border-radius: 7px;
-      padding: 9px;
-      background: linear-gradient(135deg, rgba(0, 176, 255, 0.09), rgba(124, 77, 255, 0.06));
+    .project-next-action-row {
+      margin-top: 7px;
       cursor: default;
     }
 
-    .project-next-action-card.is-running {
-      border-color: rgba(124, 77, 255, 0.38);
-    }
-
-    .project-next-action-head,
-    .project-next-action-buttons,
+    .project-next-action-main,
     .project-roadmap-revision-compose {
       display: flex;
       align-items: center;
-      gap: 7px;
+      gap: 6px;
     }
 
-    .project-next-action-head {
-      justify-content: space-between;
+    .project-next-action-main {
+      min-width: 0;
+    }
+
+    .project-next-action-label {
+      flex: 0 0 auto;
       color: var(--text-muted);
-      font-size: 9.5px;
-      font-weight: 800;
-    }
-
-    .project-next-action-title {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      color: #80d8ff;
+      font-size: 10px;
+      font-weight: 700;
     }
 
     .project-next-action-copy {
-      margin-top: 7px;
+      min-width: 0;
+      flex: 1 1 auto;
       color: var(--text-main);
-      font-size: 12px;
-      font-weight: 700;
-      line-height: 1.45;
-      overflow-wrap: anywhere;
+      font-size: 10px;
+      line-height: 1.4;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .project-next-action-status {
-      margin-top: 6px;
+      margin-top: 4px;
       color: var(--text-muted);
-      font-size: 9.5px;
+      font-size: 9px;
       line-height: 1.4;
     }
 
-    .project-next-action-buttons {
-      margin-top: 9px;
-    }
-
     .project-next-action-btn {
-      min-height: 30px;
-      flex: 1 1 0;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 5px;
-      background: rgba(255, 255, 255, 0.05);
+      min-height: 24px;
+      border: 1px solid var(--border-glass);
+      border-radius: 4px;
+      padding: 4px 8px;
+      background: rgba(255,255,255,0.04);
       color: var(--text-main);
       font: inherit;
       font-size: 10px;
-      font-weight: 800;
+      font-weight: 700;
+      white-space: nowrap;
       cursor: pointer;
     }
 
-    .project-next-action-btn.primary {
-      border-color: transparent;
-      background: linear-gradient(135deg, #00e5ff 0%, #00b0ff 100%);
-      color: #000;
-    }
-
     .project-next-action-btn:hover:not(:disabled) {
+      color: var(--text-main);
       border-color: rgba(0, 229, 255, 0.42);
     }
 
@@ -2946,6 +2928,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     .project-roadmap-revision-send {
       flex: 0 0 auto;
       min-width: 58px;
+      border-color: rgba(0, 229, 255, 0.28);
+      background: rgba(0, 176, 255, 0.1);
+      color: #80d8ff;
     }
 
     .portfolio-action-btn {
@@ -10342,7 +10327,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function renderProjectNextActionCard(project) {
       const projectPath = String(project && project.path || '');
       const nextAction = String(project && (project.globalNextAction || project.recommendedNodeTitle) || '-');
-      const nextActionLabel = Number(project && project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue');
       const starting = startingRoadmapRevisionPaths.has(projectPath);
       const running = pendingRoadmapRevisionPaths.has(projectPath)
         || String(latestRoadmapRevisionConversation(projectPath)?.status || '') === 'Running';
@@ -10352,22 +10336,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const statusText = busy
         ? (starting ? t('preparingRoadmapAdjustment') : t('adjustingRoadmap'))
         : (result === 'Completed' ? t('roadmapUpdated') : (result === 'Failed' ? t('roadmapAdjustmentFailed') : ''));
-      const nodeId = String(project && project.recommendedNodeId || '');
       return \`
-        <section class="project-next-action-card\${busy ? ' is-running' : ''}" data-project-next-action-card="\${escapeHtml(projectPath)}" aria-label="\${escapeHtml(t('nextAction'))}">
-          <div class="project-next-action-head">
-            <span class="project-next-action-title"><span class="codicon codicon-target" aria-hidden="true"></span>\${escapeHtml(t('nextAction'))}</span>
-          </div>
-          <div class="project-next-action-copy">\${escapeHtml(nextAction)}</div>
-          \${statusText ? \`<div class="project-next-action-status" role="status">\${escapeHtml(statusText)}</div>\` : ''}
-          <div class="project-next-action-buttons">
-            \${nodeId ? \`<button type="button" class="project-next-action-btn primary" data-continue-next-action-project-path="\${escapeHtml(projectPath)}" data-continue-next-action-node-id="\${escapeHtml(nodeId)}">\${escapeHtml(nextActionLabel)}</button>\` : ''}
+        <section class="project-next-action-row\${busy ? ' is-running' : ''}" data-project-next-action-card="\${escapeHtml(projectPath)}" aria-label="\${escapeHtml(t('nextAction'))}">
+          <div class="project-next-action-main">
+            <span class="project-next-action-label">\${escapeHtml(t('nextAction'))}</span>
+            <span class="project-next-action-copy" title="\${escapeHtml(nextAction)}">\${escapeHtml(nextAction)}</span>
             <button type="button" class="project-next-action-btn" data-adjust-roadmap-project-path="\${escapeHtml(projectPath)}" aria-expanded="\${expanded}" \${busy ? 'disabled' : ''}>\${escapeHtml(t('adjustRoadmap'))}</button>
           </div>
+          \${statusText ? \`<div class="project-next-action-status" role="status">\${escapeHtml(statusText)}</div>\` : ''}
           \${expanded ? \`
             <div class="project-roadmap-revision-compose">
               <textarea class="project-roadmap-revision-input" data-roadmap-revision-input="\${escapeHtml(projectPath)}" aria-label="\${escapeHtml(t('roadmapRevisionPlaceholder'))}" placeholder="\${escapeHtml(t('roadmapRevisionPlaceholder'))}">\${escapeHtml(roadmapRevisionDrafts[projectPath] || '')}</textarea>
-              <button type="button" class="project-next-action-btn primary project-roadmap-revision-send" data-send-roadmap-revision-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('sendRoadmapRevision'))}</button>
+              <button type="button" class="project-next-action-btn is-confirm project-roadmap-revision-send" data-send-roadmap-revision-project-path="\${escapeHtml(projectPath)}">\${escapeHtml(t('sendRoadmapRevision'))}</button>
             </div>
           \` : ''}
         </section>
@@ -10459,6 +10439,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             <div class="portfolio-card-actions">
               <button class="portfolio-action-btn" data-open-project-path="\${escapeHtml(project.path)}">\${t('projectOpen')}</button>
               <button class="portfolio-action-btn" data-open-project-growth-path="\${escapeHtml(project.path)}">\${t('projectGrowth')}</button>
+              \${!isSelected && project.recommendedNodeId ? \`<button class="portfolio-action-btn primary" data-continue-next-action-project-path="\${escapeHtml(project.path)}" data-continue-next-action-node-id="\${escapeHtml(project.recommendedNodeId)}">\${escapeHtml(Number(project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue'))}</button>\` : ''}
             </div>
             \${isSelected ? renderProjectDeliveryPanel(project) + renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
           </div>
