@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.446 - 2026-09-01
+
+### Added
+- add roadmap adjustment to project action cards (90386a2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.445 - 2026-08-31
 
 ### Fixed
