@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.447 - 2026-09-01
+
+### Fixed
+- align sidebar project actions (e3fd7c8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.446 - 2026-09-01
 
 ### Added
