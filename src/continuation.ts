@@ -585,7 +585,8 @@ export function resolveContinuationLeafConversationFromList(
 
 export function resolveContinuationSessionConversationFromList(
   conversations: AgentConversation[],
-  conversationId: number
+  conversationId: number,
+  isResumableConversation?: (conversation: AgentConversation) => boolean
 ): AgentConversation | null {
   if (!conversationId) {
     return null;
@@ -609,10 +610,24 @@ export function resolveContinuationSessionConversationFromList(
       current = parentId ? byId.get(Number(parentId)) || null : null;
     }
   };
-  pushLineage(leaf);
   pushLineage(start || null);
-  return candidates.find((conversation) => extractSavedNativeSessionIdFromExecutionOutput(conversation.output || ''))
-    || candidates.find((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || ''))
+  pushLineage(leaf);
+  const orderedCandidates = [...new Map(
+    candidates.map((conversation) => [Number(conversation.id || 0), conversation])
+  ).values()];
+  if (isResumableConversation) {
+    const resumableConversation = orderedCandidates.find(isResumableConversation);
+    if (resumableConversation) {
+      return resumableConversation;
+    }
+  }
+  const targetSessionId = extractNativeSessionIdFromConversation(start || null)
+    || extractNativeSessionIdFromConversation(leaf);
+  return (targetSessionId
+    ? orderedCandidates.find((conversation) => extractNativeSessionIdFromConversation(conversation) === targetSessionId)
+    : null)
+    || orderedCandidates.find((conversation) => extractSavedNativeSessionIdFromExecutionOutput(conversation.output || ''))
+    || orderedCandidates.find((conversation) => extractNativeSessionIdFromExecutionOutput(conversation.output || ''))
     || null;
 }
 
@@ -714,7 +729,11 @@ export function hydrateConversationContinuations(
 ): ContinuableAgentConversation[] {
   return conversations.map((conversation) => {
     const rootConversation = resolveContinuationRootConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
-    const sessionConversation = resolveContinuationSessionConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
+    const sessionConversation = resolveContinuationSessionConversationFromList(
+      conversations,
+      Number(conversation.id || 0),
+      (candidate) => Boolean(resolveNativeSessionIdForConversation(workspaceRoot, nodeId, candidate))
+    ) || conversation;
     const directSessionId = resolveNativeSessionIdForConversation(workspaceRoot, nodeId, conversation);
     const sessionId = directSessionId
       || resolveNativeSessionIdForConversation(workspaceRoot, nodeId, sessionConversation);

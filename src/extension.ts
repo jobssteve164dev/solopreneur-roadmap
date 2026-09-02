@@ -6728,7 +6728,11 @@ function resolveContinuationSessionConversation(nodeId: string, conversationId: 
   if (!syncEngine || !nodeId || !conversationId) {
     return null;
   }
-  return resolveContinuationSessionConversationFromList(syncEngine.getAgentExecutions(nodeId), conversationId);
+  return resolveContinuationSessionConversationFromList(
+    syncEngine.getAgentExecutions(nodeId),
+    conversationId,
+    (conversation) => Boolean(resolveNativeSessionIdForConversation(nodeId, conversation))
+  );
 }
 
 function resolveContinuationRootConversation(nodeId: string, conversationId: number): AgentConversation | null {

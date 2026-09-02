@@ -6611,6 +6611,22 @@ test('agent command builder keeps background one-shot commands and uses native i
     { id: 31, output: 'Continuation parent conversation: 30\nContinuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11\nFailure reason:\nNo saved session found.' }
   ], 30);
   assert.equal(failedChildSessionConversation && failedChildSessionConversation.id, 30);
+  const repeatedSavedSessionConversation = extensionModule.__resolveContinuationSessionConversationFromList([
+    { id: 40, output: 'Native Agent session saved: /workspace/app/.solopreneur/step-sessions/__solo__.json (01a06051-ee69-7c51-ba9f-f35c1f9ce2e8)' },
+    { id: 41, output: 'Continuation parent conversation: 40\nContinuation session id: 01a06051-ee69-7c51-ba9f-f35c1f9ce2e8\nNative Agent session saved: /workspace/app/.solopreneur/step-sessions/__solo__.json (01a06051-ee69-7c51-ba9f-f35c1f9ce2e8)' },
+    { id: 42, output: 'Continuation parent conversation: 40\nContinuation session id: 01a06051-ee69-7c51-ba9f-f35c1f9ce2e8\nNative Agent session saved: /workspace/app/.solopreneur/step-sessions/__solo__.json (01a06051-ee69-7c51-ba9f-f35c1f9ce2e8)' }
+  ], 40, (conversation) => conversation.id === 40);
+  assert.equal(repeatedSavedSessionConversation && repeatedSavedSessionConversation.id, 40);
+  const independentlyBoundChildSessionConversation = extensionModule.__resolveContinuationSessionConversationFromList([
+    { id: 50, output: 'Native Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10dc)' },
+    { id: 51, output: 'Continuation parent conversation: 50\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10da)' }
+  ], 51, (conversation) => conversation.id === 50 || conversation.id === 51);
+  assert.equal(independentlyBoundChildSessionConversation && independentlyBoundChildSessionConversation.id, 51);
+  const continuationOnlyRootSessionConversation = extensionModule.__resolveContinuationSessionConversationFromList([
+    { id: 60, output: 'Continuation session id: 019eec98-c441-7a40-bc15-eaa1fb1f10dc' },
+    { id: 61, output: 'Continuation parent conversation: 60\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10dc)' }
+  ], 60, (conversation) => conversation.id === 60);
+  assert.equal(continuationOnlyRootSessionConversation && continuationOnlyRootSessionConversation.id, 60);
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'never'),
     "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --add-dir='/workspace/app'"
@@ -6761,6 +6777,34 @@ test('agent command builder keeps background one-shot commands and uses native i
   ]);
   assert.equal(hydratedStepConversations[0].resumableNativeSessionId, recoveredSessionId);
   assert.equal(hydratedStepConversations[0].continuationRootConversationId, 22);
+  const repeatedSessionRootDir = path.join(recoveryRoot, '.solopreneur', 'agent-runs', 'root-binding-step', '70');
+  fs.mkdirSync(repeatedSessionRootDir, { recursive: true });
+  fs.writeFileSync(path.join(repeatedSessionRootDir, 'session.json'), JSON.stringify({
+    sessionId: recoveredSessionId,
+    source: 'legacy-test'
+  }), 'utf8');
+  const hydratedRepeatedSessionConversations = extensionModule.__hydrateConversationContinuations(
+    recoveryRoot,
+    'root-binding-step',
+    [
+      {
+        id: 70,
+        nodeId: 'root-binding-step',
+        agentCli: 'claude',
+        output: `Native Agent session saved: step-sessions/root-binding-step.json (${recoveredSessionId})`,
+        status: 'Completed'
+      },
+      {
+        id: 71,
+        nodeId: 'root-binding-step',
+        agentCli: 'claude',
+        output: `Continuation parent conversation: 70\nContinuation session id: ${recoveredSessionId}\nNative Agent session saved: step-sessions/root-binding-step.json (${recoveredSessionId})`,
+        status: 'Completed'
+      }
+    ]
+  );
+  assert.equal(hydratedRepeatedSessionConversations[1].resumableNativeSessionId, recoveredSessionId);
+  assert.equal(hydratedRepeatedSessionConversations[1].continuationRootConversationId, 70);
   const missingTranscriptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-missing-transcript-'));
   const missingRunDir = path.join(missingTranscriptRoot, '.solopreneur', 'agent-runs', '__solo__', '21');
   const emptyCodexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-empty-codex-home-'));
