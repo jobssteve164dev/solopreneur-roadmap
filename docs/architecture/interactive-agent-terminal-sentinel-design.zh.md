@@ -1,6 +1,8 @@
 # 交互式任务终端与任务哨兵解耦设计
 
-> 决策更新（2026-08-30）：SoloMap 不再用非交互 CLI 进程退出判断用户对话完成。Solo、用户主动发起的路线图环节对话和续聊统一使用 Agent CLI 原生交互终端；Agent 通过插件生成的受约束检查点命令上报每轮结果，插件沿用既有结算、复核与路线图完成判断。自建 Chat UI 与 ACP 方案仍只作为历史调研保留。
+> 决策更新（2026-08-30）：SoloMap 不再用非交互 CLI 进程退出判断用户对话完成。Solo、用户主动发起的路线图环节对话和续聊统一使用 Agent CLI 原生交互终端；Agent 通过插件生成的受约束检查点命令上报每轮结果，插件沿用既有结算、复核与路线图完成判断。自建 Chat UI 与 ACP 方案禁止进入交互式对话实现，下文相关内容只作为已否决的历史调研保留。
+>
+> 身份绑定更新（2026-09-01）：各 Agent CLI 首次交互如何取得可验证的会话 ID，以[交互式 Agent 会话身份稳定绑定设计](./interactive-agent-session-identity-design.zh.md)为准；本文件继续负责终端、轮次和任务检查点边界。
 
 ## 文档状态
 
@@ -77,7 +79,7 @@ Agent 的 Stop Hook、终端关闭或 SessionEnd 都不得直接把路线图环�
 
 判断标准是用户是否正在进行一场对话，而不是底层是否调用 Agent。
 
-首版不接入 ACP，也不修改用户全局 Hook。插件使用各 Provider 已公开的原生交互启动参数，并用自己的检查点命令取得 Provider 无关的轮次完成信号。
+交互式对话不接入、探测或回退到 ACP，也不修改用户全局 Hook。插件使用各 Provider 已公开的原生交互启动参数，并用自己的检查点命令取得 Provider 无关的轮次完成信号。
 
 ### 3. 任务哨兵监控活动轮次，不监控空闲会话
 
@@ -125,9 +127,13 @@ session_closed
 
 状态文件固定绑定根会话，后续 `turn_started` 由插件创建新的执行记录；`checkpointSequence + eventType` 保证同一轮事件只结算一次。Provider 的审批与提问仍由原生 CLI 处理，SoloMap 首版不伪造自己拿不到的结构化等待状态。
 
-## 历史调研：Codex ACP 自建对话终端（未实施）
+## 历史调研与验证记录（2026-07-29，已被后续决策取代）
 
-### 为什么采用 ACP，而不是直接复刻 app-server 适配器
+> 本节只保留当时的研究证据，不再定义现行运行时。2026-08-30 已决定用户主动对话统一使用 Agent CLI 原生交互终端；2026-09-01 起，首次会话身份按[交互式 Agent 会话身份稳定绑定设计](./interactive-agent-session-identity-design.zh.md)处理。ACP 已被明确禁止，不能作为主路径、备选、兼容或未来评估项；下文关于“原生 TUI 不进入运行时”“只能使用 ACP 自建终端”或“remote TUI 未授权”的判断均已失效，不得作为实施依据。
+
+### Codex ACP 自建对话终端（未实施）
+
+#### 为什么采用 ACP，而不是直接复刻 app-server 适配器
 
 Codex app-server 能提供完整线程、轮次、审批和工具事件，但直接接入意味着 SoloMap 自己维护一套随 Codex 版本变化的 Provider 私有协议。`@agentclientprotocol/codex-acp` 已经把 app-server 转换为稳定的 ACP 客户端协议，并采用 Apache-2.0 许可；SoloMap 只需实现通用 ACP Client 与自身生命周期映射。
 
@@ -154,7 +160,7 @@ codex-acp → codex app-server → Codex
 - 用户显式关闭对话终端只关闭视图，不自动取消活动 Turn；显式“停止”才发送 `session/cancel`。Extension Host 重载后通过 `session/load` 恢复同一 Session。
 - Adapter 不可用或能力探测不通过时，不伪装成交互式成功；保留现有非交互路径作为兼容入口，并给出可执行的恢复提示。
 
-### 对话终端的界面边界
+#### 对话终端的界面边界
 
 - 使用 VS Code Webview 承载终端式对话，不用 PTY/xterm 模拟聊天协议。PTY 继续只服务真实 Shell 终端。
 - 主动作始终是输入下一条要求；状态只显示“正在执行 / 需要你确认 / 需要你回答 / 等待你继续 / 已停止 / 出错”。
@@ -162,7 +168,7 @@ codex-acp → codex app-server → Codex
 - 不展示 ACP、JSON-RPC、app-server、adapter、turnId 等内部术语。
 - 同一个主对话只有一个对话终端；侧边栏“打开终端”只 reveal 既有界面，不创建第二个 Session。
 
-## Kanna 的借鉴边界
+### Kanna 的借鉴边界
 
 Kanna 证明了“自建 Agent 客户端 + 结构化协议事件”能够提供比原生 CLI 更完整的交互体验，但 SoloMap 不直接集成 Kanna 整体应用。
 
@@ -181,9 +187,9 @@ Kanna 证明了“自建 Agent 客户端 + 结构化协议事件”能够提供�
 - 不复制 Kanna 源码。其 LICENSE 对特定主体附加排除条款，不是无差别标准 MIT 授权；SoloMap 只依据公开架构独立实现。
 - 暂不实现 queue/steer、Prompt 注入和远程分享，避免首版引入与核心目标无关的用户概念。
 
-## 原生 TUI 备选支线的信号设计
+### 原生 TUI 备选支线的信号设计
 
-### Hook 信号
+#### Hook 信号
 
 - `SessionStart`：绑定 SoloMap run 与根 Codex Session。
 - `UserPromptSubmit`：建立新轮次并标记执行中。
@@ -193,7 +199,7 @@ Hook 只写入生命周期事件，不负责路线图状态、数据库结算、
 
 上述三个 Hook 已验证能够覆盖正常多轮会话，但不能单独覆盖用户中断。`Stop` 只代表正常结束路径；用户按 Esc 中断时，不能等待一个不会到达的 `Stop`。
 
-### 恢复信号
+#### 恢复信号
 
 Codex rollout 中以下事件用于恢复和交叉校验：
 
@@ -206,11 +212,11 @@ Codex rollout 中以下事件用于恢复和交叉校验：
 
 `turn_aborted` 不是可选交叉校验。当前 Codex 在用户中断时会写入它，但不会触发 `Stop`，所以任何正式适配器都必须消费 rollout，或使用另一个经过同等验证的中断事件源。
 
-### 根会话过滤
+#### 根会话过滤
 
 Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须记录第一个与当前 run 绑定的根 Session ID，后续只接受该 Session 的轮次完成事件；其他 Session 只能作为子任务证据，不得结算主轮次。
 
-## 事件存储
+### 事件存储
 
 现有单个状态快照继续用于侧边栏快速读取，但不能承担多轮事件队列职责。
 
@@ -225,7 +231,7 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 
 原始终端录制只作为本地诊断材料。对话展示的权威内容仍是用户输入、Agent 最终回复、文件变化摘要和明确错误，不直接展示 reasoning 或完整工具输出。
 
-## Hook 配置所有权
+### Hook 配置所有权
 
 - 不覆盖用户现有 Hook、配置、授权和 Provider 设置。
 - 不把 SoloMap Hook 默认写入项目并提交到 Git。
@@ -244,7 +250,7 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 - 如果只能由用户在 `/hooks` 中手动批准，必须先把“一次性明确授权”设计成可理解的产品步骤，并由用户确认接受该体验。
 - 若改用 Codex `notify + rollout` 规避 Hook 信任门槛，应先单独验证并形成设计决策，不能在运行时实现阶段临时换方案。
 
-### `notify + rollout` 不构成等价替代
+#### `notify + rollout` 不构成等价替代
 
 `notify` 无需 Hook 信任授权，正常轮次完成时能够提供 `thread-id`、`turn-id` 和 `cwd`；相同身份也能在 rollout 中找到对应的 `task_started → task_complete`。它适合在会话已经绑定后提供低干扰的完成提示。
 
@@ -264,7 +270,7 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 
 未经验证的 rollout 猜测绑定不作为第三条生产路径。
 
-## 终端与侧边栏行为
+### 终端与侧边栏行为
 
 - 当前轮执行中：显示“正在执行”，主动作是“打开终端”。
 - 等待审批或回答：显示“需要你确认”，主动作是“打开终端”。
@@ -276,7 +282,7 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 
 终端内后续输入自动成为同一主对话下的新轮次，不创建新的顶层 Solo 对话。
 
-## 失败与降级
+### 失败与降级
 
 - ACP bridge 启动失败或能力探测不通过：不创建交互 Session，不显示伪造的“正在执行”；保留现有非交互兼容入口并给出恢复动作。
 - Adapter 在活动轮次中退出：先将当前轮标为异常中断，再以已持久化的 `sessionId` 尝试 `session/load`；不得自动重发用户 Prompt，避免重复副作用。
@@ -285,9 +291,9 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 - Provider 不具备可验证的轮次信号：继续使用现有非交互兼容模式，不以终端空闲或文本匹配伪造精确监控。
 - 等待用户确认时停止普通失联计时，避免把人工等待判为 supervisor 丢失。
 
-## 分阶段实施
+### 分阶段实施
 
-### 阶段 A1：原生 TUI + Hook 可行性验证
+#### 阶段 A1：原生 TUI + Hook 可行性验证
 
 - 验证 Codex 当前版本支持运行级 Hook 配置。
 - 验证 `SessionStart`、`UserPromptSubmit`、`Stop` 的载荷字段和触发顺序。
@@ -298,11 +304,11 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 
 阶段 A1 通过前不得沿原生 TUI 路线修改运行时代码。
 
-## 阶段 A1 验证记录（2026-07-29）
+### 阶段 A1 验证记录（2026-07-29）
 
 验证环境：Linux、Codex CLI `0.145.0`，本机 `hooks` 功能标记为 stable/enabled。验证使用仓库内的 `scripts/validate-codex-hook-event.cjs`，Hook 只向隔离 JSONL 写入事件名、Session/Turn 身份、字段名和时间，不保存提示词或 Agent 回复正文。
 
-### 已通过
+#### 已通过
 
 - 运行级注入有效：通过 CLI `-c` 注入 `SessionStart`、`UserPromptSubmit`、`Stop`，没有改写 `~/.codex/config.toml`；验证前后该文件修改时间保持在测试开始之前。
 - 正常首轮顺序成立：`SessionStart → UserPromptSubmit → Stop`。
@@ -312,14 +318,14 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 - 中断恢复证据成立：Esc 中断的轮次只触发 `UserPromptSubmit`，没有触发 `Stop`；同一 transcript 中出现同一 `turn_id` 的 `task_started → turn_aborted`，`reason` 为 `interrupted`。
 - 验证终端均正常退出；测试启动的等待进程已停止，隔离事件文件和两份测试 rollout 已删除。
 
-### 未通过或尚未验证
+#### 未通过或尚未验证
 
 - **Hook 信任体验未通过**：验证依赖 `--dangerously-bypass-hook-trust`，Codex 会在终端显示安全警告。OpenAI Codex 当前公开实现与 issue 记录表明，普通本地 wrapper 尚无受支持的程序化批准接口。
 - 子 Agent 的 Hook 触发与根 Session 过滤尚未做真实验证。
 - 限额、Provider 错误、Hook 处理器失败和进程崩溃的恢复矩阵尚未逐项验证。
 - 幂等消费与 VS Code 重载恢复属于 SoloMap 适配器行为，只能在阶段 B 代码存在后通过测试验证；不能用本次 Provider 探针替代。
 
-### `notify + rollout` 补充验证
+#### `notify + rollout` 补充验证
 
 同一环境下另行使用运行级 `notify` 配置验证，未加载 SoloMap Hook，也未使用 Hook 信任绕过参数：
 
@@ -332,7 +338,7 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 
 这组结果说明 `notify + rollout` 能降低 Hook 在正常完成路径上的依赖，但没有解决最关键的首次身份绑定，不能据此放行阶段 B。
 
-### A1 当前判定
+#### A1 当时判定（已失效）
 
 Hook 事件模型在技术上可行，正常多轮和中断恢复链已经得到真实证据；`notify + rollout` 的正常多轮与中断恢复也得到真实证据，但它无法在首次轮次结束前可靠绑定原生 TUI。由于“无需破坏用户信任边界且不污染首次交互体验”的接入条件仍未成立，阶段 A1 不通过，原生 TUI 不进入运行时实现。
 
@@ -343,7 +349,7 @@ Hook 事件模型在技术上可行，正常多轮和中断恢复链已经得到
 
 此前列出的第三条替代路径——由 SoloMap 承担终端式对话界面——已经收敛为下面的 ACP 支线，不再属于原生 TUI 的放行条件。
 
-### 阶段 A2：ACP 自建对话终端可行性验证
+#### 阶段 A2：ACP 自建对话终端可行性验证
 
 验证环境：Linux、Node.js `22.21.1`、Codex CLI `0.145.0`、`@agentclientprotocol/codex-acp@1.1.7`、ACP v1。验证使用仓库内 `scripts/validate-codex-acp-lifecycle.mjs`，通过 stdio 直接实现最小 ACP Client，不修改 `package.json`，不接入扩展运行时，也不保存提示词与 Agent 回复正文。
 
@@ -357,11 +363,11 @@ Hook 事件模型在技术上可行，正常多轮和中断恢复链已经得到
 - **跨进程恢复通过**：关闭首个 Adapter 进程，启动新进程并对原 `sessionId` 调用 `session/load`，后续 Prompt 在同一 Session 正常完成。
 - **隔离与清理通过**：验证工作区位于本次会话专用临时目录；脚本关闭 Adapter 后仅在目录为空时删除该目录，没有改写项目文件、Codex 全局配置或扩展运行时。
 
-### A2 当前判定
+#### A2 当时判定（已失效）
 
 ACP 路线满足首轮身份绑定、连续多轮、审批、用户回答、中断和恢复六项核心门禁，阶段 A2 通过。Codex 首版可进入阶段 B，但只能按“SoloMap 自建对话终端 + ACP bridge”实施；这不是对原生 TUI + Hook 支线的放行。
 
-### 阶段 B：Codex 用户主动对话
+#### 当时规划的阶段 B：Codex 用户主动对话（未作为现行方案实施）
 
 - 增加独立 ACP bridge、Codex 生命周期适配器和 append-only 事件日志。
 - 首次任务由 SoloMap 创建 ACP Session，并立即打开同一个对话终端。
@@ -370,7 +376,7 @@ ACP 路线满足首轮身份绑定、连续多轮、审批、用户回答、中�
 - 保留现有非交互后台任务路径。
 - 更新侧边栏“打开终端 / 继续”动作。
 
-### 阶段 C：其他 Provider
+#### 当时规划的阶段 C：其他 Provider（未作为现行方案实施）
 
 - Claude Code：Stop / SessionEnd。
 - Gemini 系：BeforeAgent / AfterAgent / SessionEnd。
@@ -378,7 +384,7 @@ ACP 路线满足首轮身份绑定、连续多轮、审批、用户回答、中�
 - OpenCode：session.status / session.idle。
 - 其他 Provider 只有在生命周期信号通过同等验证后才启用交互监控。
 
-## 阶段 A1 原生 TUI 支线通过标准
+### 阶段 A1 原生 TUI 支线历史通过标准
 
 - 不修改用户现有 Hook 文件也能为一次测试运行注入 Hook。
 - 首轮触发顺序可观察为 SessionStart、UserPromptSubmit、Stop。
@@ -391,7 +397,7 @@ ACP 路线满足首轮身份绑定、连续多轮、审批、用户回答、中�
 
 任一关键标准不通过时，不得沿原生 TUI 支线进入运行时实现；文档必须记录阻塞、证据和替代方案。
 
-## 阶段 A2 ACP 支线通过标准
+### 阶段 A2 ACP 支线历史通过标准
 
 - Session ID 必须在首轮 Prompt 前获得并可立即持久化。
 - 同一 Session 至少完成两轮，且每轮有独立的 SoloMap Turn 身份与停止原因。
@@ -400,7 +406,7 @@ ACP 路线满足首轮身份绑定、连续多轮、审批、用户回答、中�
 - Adapter 进程重启后必须能够加载原 Session 并继续对话。
 - 验证不得修改扩展运行时代码、项目业务文件或用户全局 Agent 配置。
 
-上述标准已由 2026-07-29 的隔离探针全部满足，阶段 B 的 ACP 路线已放行。
+上述标准已由 2026-07-29 的隔离探针全部满足；它只说明当时 ACP 探针可行。后续产品决策已明确不以 ACP 自建终端替代用户主动对话的原生 TUI，因此“阶段 B 放行”不再有效。
 
 ## 运行时代码验收标准
 
@@ -420,7 +426,7 @@ ACP 路线满足首轮身份绑定、连续多轮、审批、用户回答、中�
 
 - 本文档不修改路线图、环节状态或完成标准。
 - 本轮设计与阶段 A 验证不修改 Agent 启动、哨兵、账本、数据库和侧边栏运行时代码。
-- 不引入 tmux、远程 TUI、后台驻留或关闭终端后继续执行。
+- 不引入 tmux、后台驻留或关闭终端后继续执行。Codex 官方 Remote terminal UI 只在身份绑定设计规定的本机、实验能力探测与真实验收范围内使用，不等于远程暴露服务。
 - 不在首版同时改造全部 Agent Provider。
 
 ## 参考实现与上游证据

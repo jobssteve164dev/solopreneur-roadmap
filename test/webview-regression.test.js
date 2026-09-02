@@ -399,6 +399,12 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './terminalCompatibility') {
           return require(path.join(projectRoot, 'out/terminalCompatibility.js'));
         }
+        if (id === './sessionIdentity') {
+          return require(path.join(projectRoot, 'out/sessionIdentity.js'));
+        }
+        if (id === './codexSessionIdentity') {
+          return require(path.join(projectRoot, 'out/codexSessionIdentity.js'));
+        }
         if (id === './conversationPresentation') {
           return require(path.join(projectRoot, 'out/conversationPresentation.js'));
         }
@@ -1824,9 +1830,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(elements['portfolio-list'].innerHTML, /收尾另一个环节/);
   assert.match(elements['portfolio-list'].innerHTML, /sidebar-conversation-latest-container/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /sidebar-conversations-tree-container/);
-  assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-id="8"/);
-  assert.match(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-node-id="another-step"/);
-  assert.match(elements['portfolio-list'].innerHTML, /sidebar-conversation-mini-actions[\s\S]*data-continue-sidebar-step-id="8"/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-id="8"/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /data-continue-sidebar-step-node-id="another-step"/);
   dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: 'step-1', files: ['docs/brief.md'] });
   assert.match(elements['portfolio-list'].innerHTML, /docs\/brief\.md/);
 
@@ -2316,12 +2321,17 @@ test('failed resumable conversations continue instead of restarting in the full 
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
   const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
   const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
-  const [conversation] = presentation.buildConversationPresentations('', '__solo__', [{
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-failed-continuation-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '24');
+  const sessionId = '019ecd99-4325-7050-8e71-7def92359c9f';
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'session.json'), JSON.stringify({ sessionId, source: 'legacy-test' }), 'utf8');
+  const [conversation] = presentation.buildConversationPresentations(workspaceRoot, '__solo__', [{
     id: 24,
     nodeId: '__solo__',
     status: 'Failed',
-    agentCli: 'codex',
-    command: 'codex exec',
+    agentCli: 'claude',
+    command: 'claude',
     output: [
       'User supplement:',
       '继续完成当前任务',
@@ -2331,7 +2341,7 @@ test('failed resumable conversations continue instead of restarting in the full 
       'Failure reason:',
       '完成判定未通过',
       '',
-      'Native Agent session saved: session.json (019ecd99-4325-7050-8e71-7def92359c9f)'
+      `Native Agent session saved: session.json (${sessionId})`
     ].join('\n')
   }]);
   const rendered = context.__renderConversationsForTest('__solo__', [conversation], 'empty');
@@ -2360,6 +2370,7 @@ test('manually stopped conversations recover their native session and keep both 
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
   fs.writeFileSync(path.join(runDir, 'codex-home.txt'), codexHome, 'utf8');
+  fs.writeFileSync(path.join(runDir, 'session.json'), JSON.stringify({ sessionId, source: 'legacy-test' }), 'utf8');
   fs.writeFileSync(path.join(runDir, 'output.log'), `session id: ${sessionId}\nStopped before completion.\n`, 'utf8');
   fs.writeFileSync(transcriptPath, JSON.stringify({ payload: { id: sessionId } }) + '\n', 'utf8');
 
@@ -2388,7 +2399,7 @@ test('manually stopped conversations recover their native session and keep both 
   assert.match(rendered, /data-retry-conversation-id="25"/);
 });
 
-test('full roadmap conversation history recovers continuation parent from the resume command session', () => {
+test('full roadmap conversation history does not infer a continuation parent from a resume command', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
@@ -2399,7 +2410,7 @@ test('full roadmap conversation history recovers continuation parent from the re
   const { context } = runScriptWithMinimalDom(script, ids, 'globalThis.__renderConversationsForTest = renderConversations;');
   const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
   const sessionId = '019eec98-c441-7a40-bc15-eaa1fb1f10dc';
-  const rendered = context.__renderConversationsForTest('__solo__', presentation.buildConversationPresentations('', '__solo__', [
+  const conversations = presentation.buildConversationPresentations('', '__solo__', [
     {
       id: 116,
       status: 'Recorded',
@@ -2414,11 +2425,12 @@ test('full roadmap conversation history recovers continuation parent from the re
       command: 'codex exec',
       output: `User supplement:\n主对话\n\nNative Agent session saved: session.json (${sessionId})`
     }
-  ]), 'empty');
+  ]);
+  const rendered = context.__renderConversationsForTest('__solo__', conversations, 'empty');
 
+  assert.equal(conversations[0].continuationParentConversationId, 0);
+  assert.match(rendered, /data-conversation-id="__solo__:116"/);
   assert.match(rendered, /data-conversation-id="__solo__:114"/);
-  assert.doesNotMatch(rendered, /data-conversation-id="__solo__:116"[^]*data-conversation-id="__solo__:114"/);
-  assert.match(rendered, /续聊 1|Continuation/);
 });
 
 test('full roadmap continue buttons keep the exact conversation selected by the user', () => {
@@ -2434,27 +2446,38 @@ test('full roadmap continue buttons keep the exact conversation selected by the 
     'globalThis.__setActiveConversationForTest = (id) => { activeConversationId = id; };'
   ].join('\n'));
   const presentation = require(path.join(projectRoot, 'out/conversationPresentation.js'));
-  const conversations = presentation.buildConversationPresentations('', '__solo__', [
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-exact-continuation-'));
+  const sessions = new Map([
+    [140, '019eec98-c441-7a40-bc15-eaa1fb1f10dc'],
+    [141, '019eec98-c441-7a40-bc15-eaa1fb1f10da'],
+    [142, '019eec98-c441-7a40-bc15-eaa1fb1f10db']
+  ]);
+  for (const [conversationId, sessionId] of sessions) {
+    const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', String(conversationId));
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(path.join(runDir, 'session.json'), JSON.stringify({ sessionId, source: 'legacy-test' }), 'utf8');
+  }
+  const conversations = presentation.buildConversationPresentations(workspaceRoot, '__solo__', [
     {
       id: 140,
       status: 'Completed',
-      agentCli: 'codex',
-      command: 'codex exec',
+      agentCli: 'claude',
+      command: 'claude',
       output: 'User supplement:\nroot\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10dc)'
     },
     {
       id: 141,
       status: 'Recorded',
-      agentCli: 'codex',
-      command: 'codex resume',
-      output: 'Continuation parent conversation: 140\nContinuation first message:\na\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10da)'
+      agentCli: 'claude',
+      command: 'claude --resume 019eec98-c441-7a40-bc15-eaa1fb1f10da',
+      output: 'Agent continuation started.\n\nContinuation parent conversation: 140\nContinuation first message:\na\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10da)'
     },
     {
       id: 142,
       status: 'Recorded',
-      agentCli: 'codex',
-      command: 'codex resume',
-      output: 'Continuation parent conversation: 140\nContinuation first message:\nc\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10db)'
+      agentCli: 'claude',
+      command: 'claude --resume 019eec98-c441-7a40-bc15-eaa1fb1f10db',
+      output: 'Agent continuation started.\n\nContinuation parent conversation: 140\nContinuation first message:\nc\n\nNative Agent session saved: session.json (019eec98-c441-7a40-bc15-eaa1fb1f10db)'
     }
   ]);
 
@@ -5785,13 +5808,20 @@ test('panel message helper posts stable command payloads', async () => {
 
 test('conversation presentation is the shared source for roadmap and sidebar actions', () => {
   const { buildConversationPresentations, selectLatestConversationRoots } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
-  const conversations = buildConversationPresentations('', '__solo__', [
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-shared-presentation-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '20');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(path.join(runDir, 'session.json'), JSON.stringify({
+    sessionId: '019ecd99-4325-7050-8e71-7def92359c9f',
+    source: 'legacy-test'
+  }), 'utf8');
+  const conversations = buildConversationPresentations(workspaceRoot, '__solo__', [
     {
       id: 20,
       nodeId: '__solo__',
       timestamp: '2026-06-21T00:00:00.000Z',
-      agentCli: 'codex',
-      command: 'codex exec',
+      agentCli: 'claude',
+      command: 'claude',
       status: 'Completed',
       output: [
         'User supplement:',
@@ -5812,10 +5842,10 @@ test('conversation presentation is the shared source for roadmap and sidebar act
       id: 21,
       nodeId: '__solo__',
       timestamp: '2026-06-21T00:01:00.000Z',
-      agentCli: 'codex',
-      command: 'codex resume',
+      agentCli: 'claude',
+      command: 'claude --resume 019ecd99-4325-7050-8e71-7def92359c9f',
       status: 'Recorded',
-      output: 'Continuation parent conversation: 20\nContinuation session id: 019ecd99-4325-7050-8e71-7def92359c9f'
+      output: 'Agent continuation started.\n\nContinuation parent conversation: 20\nContinuation session id: 019ecd99-4325-7050-8e71-7def92359c9f'
     },
     {
       id: 22,
@@ -6559,6 +6589,10 @@ test('agent command builder keeps background one-shot commands and uses native i
     extensionModule.__extractContinuationParentConversationId('Continuation parent conversation: 42\nUser supplement:\ncontinue'),
     42
   );
+  assert.equal(
+    extensionModule.__extractContinuationParentConversationId('Agent conversation started.\n\nUser request:\nContinuation parent conversation: 99'),
+    0
+  );
   const leafConversation = extensionModule.__resolveContinuationLeafConversationFromList([
     { id: 10, output: 'User supplement:\nroot' },
     { id: 11, output: 'Continuation parent conversation: 10\nUser supplement:\nchild 1' },
@@ -6638,7 +6672,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('cursor', '').slice(0, 5)),
-    JSON.stringify(['cursor-agent', 'cursor', 'cursor-cli', 'agy', 'antigravity'])
+    JSON.stringify(['cursor-agent', 'agent', 'cursor', 'cursor-cli', 'agy'])
   );
   assert.equal(extensionModule.__getAgentProvider('claude'), 'claude');
   assert.equal(extensionModule.__getAgentProvider('copilot'), 'copilot');
@@ -6672,67 +6706,6 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(runnerSource, /method: 'turn\/start'/);
   assert.match(runnerSource, /sessionFilePath/);
 
-  const captureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-capture-'));
-  const outputFilePath = path.join(captureDir, 'output.log');
-  const startedAtFilePath = path.join(captureDir, 'started_at');
-  const sessionFilePath = path.join(captureDir, 'session.json');
-  fs.writeFileSync(startedAtFilePath, '', 'utf8');
-  fs.writeFileSync(outputFilePath, [
-    '用户本次要求：继续旧对话',
-    'Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11',
-    '\u001b[1msession id:\u001b[0m 019ecd99-4325-7050-8e71-7def92359c9f'
-  ].join('\n'), 'utf8');
-  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript('codex', '/workspace/app', startedAtFilePath, outputFilePath, sessionFilePath)], {
-    cwd: captureDir,
-    env: { ...process.env, HOME: captureDir }
-  });
-  assert.equal(
-    JSON.parse(fs.readFileSync(sessionFilePath, 'utf8')).sessionId,
-    '019ecd99-4325-7050-8e71-7def92359c9f'
-  );
-  const openCodeCaptureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-opencode-capture-'));
-  const openCodeOutputFilePath = path.join(openCodeCaptureDir, 'output.log');
-  const openCodeStartedAtFilePath = path.join(openCodeCaptureDir, 'started_at');
-  const openCodeSessionFilePath = path.join(openCodeCaptureDir, 'session.json');
-  fs.writeFileSync(openCodeStartedAtFilePath, '', 'utf8');
-  fs.writeFileSync(openCodeOutputFilePath, 'Continue  opencode -s ses_13abdae1dffekQpdcehmyyexoY\n', 'utf8');
-  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript('opencode', '/workspace/app', openCodeStartedAtFilePath, openCodeOutputFilePath, openCodeSessionFilePath)], {
-    cwd: openCodeCaptureDir,
-    env: { ...process.env, HOME: openCodeCaptureDir }
-  });
-  assert.equal(
-    JSON.parse(fs.readFileSync(openCodeSessionFilePath, 'utf8')).sessionId,
-    'ses_13abdae1dffekQpdcehmyyexoY'
-  );
-  const grokCaptureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-grok-capture-'));
-  const grokOutputFilePath = path.join(grokCaptureDir, 'output.log');
-  const grokStartedAtFilePath = path.join(grokCaptureDir, 'started_at');
-  const grokSessionFilePath = path.join(grokCaptureDir, 'session.json');
-  const plannedGrokSessionId = '019ecd99-4325-7050-8e71-7def92359c9a';
-  fs.writeFileSync(grokStartedAtFilePath, '', 'utf8');
-  fs.writeFileSync(grokOutputFilePath, 'Tool output contains unrelated UUID 019ecd99-4325-7050-8e71-7def92359c9b\n', 'utf8');
-  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript(
-    'grok', '/workspace/app', grokStartedAtFilePath, grokOutputFilePath, grokSessionFilePath, plannedGrokSessionId
-  )], {
-    cwd: grokCaptureDir,
-    env: { ...process.env, HOME: grokCaptureDir, GROK_HOME: path.join(grokCaptureDir, '.grok') }
-  });
-  assert.equal(fs.existsSync(grokSessionFilePath), false, 'a failed Grok launch must not expose a nonexistent session');
-  const grokSummaryDir = path.join(grokCaptureDir, '.grok', 'sessions', '%2Fworkspace%2Fapp', plannedGrokSessionId);
-  fs.mkdirSync(grokSummaryDir, { recursive: true });
-  fs.writeFileSync(path.join(grokSummaryDir, 'summary.json'), JSON.stringify({
-    info: { id: plannedGrokSessionId, cwd: '/workspace/app' }
-  }), 'utf8');
-  childProcess.execFileSync('bash', ['-lc', extensionModule.__buildSessionCaptureScript(
-    'grok', '/workspace/app', grokStartedAtFilePath, grokOutputFilePath, grokSessionFilePath, plannedGrokSessionId
-  )], {
-    cwd: grokCaptureDir,
-    env: { ...process.env, HOME: grokCaptureDir, GROK_HOME: path.join(grokCaptureDir, '.grok') }
-  });
-  assert.deepEqual(JSON.parse(fs.readFileSync(grokSessionFilePath, 'utf8')), {
-    sessionId: plannedGrokSessionId,
-    source: 'grok-session-store'
-  });
   assert.equal(
     extensionModule.__extractCodexSessionIdFromOutputText('Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11\nsession id: 019ecd99-4325-7050-8e71-7def92359c9f'),
     '019ecd99-4325-7050-8e71-7def92359c9f'
@@ -6838,7 +6811,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     JSON.stringify(sidebarModule.__getAgentCliCandidates('cursor', '').slice(0, 5)),
-    JSON.stringify(['cursor-agent', 'cursor', 'cursor-cli', 'agy', 'antigravity'])
+    JSON.stringify(['cursor-agent', 'agent', 'cursor', 'cursor-cli', 'agy'])
   );
   assert.equal(JSON.stringify(sidebarModule.__getCliVersionArgs('agy')), JSON.stringify(['--version']));
   assert.match(sidebarModule.__formatCliTestMessage('agy', '1.0.1\n', ''), /agy · 1\.0\.1/);
@@ -6915,7 +6888,13 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /sessionFilePath/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /sessionMode/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /commandFilePath/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.codex\/sessions/);
+  assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.codex\/sessions|latest_session|generic-output/);
+  const codexPreparingBinding = JSON.parse(fs.readFileSync(path.join(shellRoot, '.solopreneur', 'agent-runs', '2', 'session.json'), 'utf8'));
+  assert.equal(codexPreparingBinding.version, 2);
+  assert.equal(codexPreparingBinding.headRevision, 1);
+  assert.equal(codexPreparingBinding.resumableRevision, undefined);
+  assert.equal(codexPreparingBinding.revisions[0].state, 'preparing');
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), new RegExp(codexPreparingBinding.bindingNonce));
   const referencedSessionId = '019dc472-6a80-7c70-99a4-b2593a641d11';
   const referencedShellScript = extensionModule.__buildAgentShellScript(
     'codex', '', 'Start an independent conversation.', shellRoot, 'reference', 44, '', undefined,
@@ -6930,8 +6909,10 @@ test('agent command builder keeps background one-shot commands and uses native i
     referencedSessionId, `codex resume ${referencedSessionId}`, 'solo_continue'
   );
   const continuedRunScript = fs.readFileSync(continuedShellScript.runScriptPath, 'utf8');
-  assert.match(continuedRunScript, new RegExp(`"nativeSessionId":"${referencedSessionId}"`));
-  assert.match(continuedRunScript, /"nativeSessionIdIsCurrent":true/);
+  assert.match(continuedRunScript, new RegExp(`"plannedNativeSessionId":"${referencedSessionId}"`));
+  assert.match(continuedRunScript, /"nativeSessionId":""/);
+  assert.match(continuedRunScript, /"nativeSessionIdIsCurrent":false/);
+  assert.match(continuedRunScript, /"sessionMode":"resume"/);
   const grokShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-grok-shell-'));
   const grokShellScript = extensionModule.__buildAgentShellScript(
     'grok', '', 'Review this project.', grokShellRoot, '__solo__', 43, '', undefined, '', '', 'solo'
@@ -6941,9 +6922,51 @@ test('agent command builder keeps background one-shot commands and uses native i
   const plannedSessionMatch = grokCommand.match(/--session-id '([0-9a-f-]{36})'/);
   assert.ok(plannedSessionMatch, 'Grok launch must receive a client-planned session UUID');
   assert.match(grokRunScript, new RegExp(`'${plannedSessionMatch[1]}'`));
-  assert.match(grokRunScript, /summary\.json/);
+  const grokBinding = JSON.parse(fs.readFileSync(path.join(grokShellRoot, '.solopreneur', 'agent-runs', '__solo__', 'session.json'), 'utf8'));
+  assert.equal(grokBinding.headRevision, 2);
+  assert.equal(grokBinding.revisions[1].sessionId, plannedSessionMatch[1]);
+  assert.equal(grokBinding.revisions[1].state, 'planned');
+  assert.doesNotMatch(grokRunScript, /summary\.json|latest_session/);
   assert.doesNotMatch(grokRunScript, new RegExp(`"nativeSessionId":"${plannedSessionMatch[1]}"`));
   assert.doesNotMatch(grokRunScript, /session_source="generic-output"/);
+  for (const [callerAssignedCli, runId] of [['claude', 46], ['copilot', 47]]) {
+    const callerAssignedRoot = fs.mkdtempSync(path.join(os.tmpdir(), `solopreneur-${callerAssignedCli}-shell-`));
+    const callerAssignedShell = extensionModule.__buildAgentShellScript(
+      callerAssignedCli, '', 'Keep this native conversation open.', callerAssignedRoot, '__solo__', runId, '', undefined, '', '', 'solo'
+    );
+    const callerAssignedCommand = fs.readFileSync(callerAssignedShell.commandFilePath, 'utf8');
+    const callerAssignedRunScript = fs.readFileSync(callerAssignedShell.runScriptPath, 'utf8');
+    const callerAssignedSessionMatch = callerAssignedCommand.match(/--session-id '([0-9a-f-]{36})'/);
+    assert.ok(callerAssignedSessionMatch, `${callerAssignedCli} launch must receive a client-planned session UUID`);
+    assert.match(
+      callerAssignedRunScript,
+      new RegExp(`"plannedNativeSessionId":"${callerAssignedSessionMatch[1]}"`)
+    );
+    assert.match(callerAssignedRunScript, new RegExp(`'${callerAssignedCli}' --help`));
+    assert.match(callerAssignedRunScript, /identity_capability_missing/);
+    assert.doesNotMatch(callerAssignedRunScript, /session_source="generic-output"/);
+  }
+  const cursorShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-session-shell-'));
+  const cursorShell = extensionModule.__buildAgentShellScript(
+    'cursor-agent', '', 'Keep this Cursor conversation open.', cursorShellRoot, '__solo__', 48, '', undefined, '', '', 'solo'
+  );
+  const cursorRunScript = fs.readFileSync(cursorShell.runScriptPath, 'utf8');
+  assert.match(cursorRunScript, /'cursor-agent' create-chat --help/);
+  assert.match(cursorRunScript, /'cursor-agent' --help/);
+  assert.match(cursorRunScript, /identity_capability_missing/);
+  assert.match(cursorRunScript, /'cursor-agent' create-chat/);
+  assert.match(cursorRunScript, /--resume "\$solomap_cursor_session_id"/);
+  assert.match(cursorRunScript, /plannedNativeSessionId/);
+  assert.doesNotMatch(cursorRunScript, /session_source="generic-output"/);
+  assert.doesNotMatch(cursorRunScript, /\bacp\b/i);
+  const cursorAgentAliasRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-agent-alias-'));
+  const cursorAgentAliasShell = extensionModule.__buildAgentShellScript(
+    'agent', '', 'Keep this Cursor conversation open.', cursorAgentAliasRoot, '__solo__', 481, '', undefined, '', '', 'solo'
+  );
+  const cursorAgentAliasRunScript = fs.readFileSync(cursorAgentAliasShell.runScriptPath, 'utf8');
+  assert.match(cursorAgentAliasRunScript, /'agent' create-chat --help/);
+  assert.match(cursorAgentAliasRunScript, /--resume "\$solomap_cursor_session_id"/);
+  assert.doesNotMatch(cursorAgentAliasRunScript, /\bacp\b/i);
   const globalShellScript = extensionModule.__buildAgentShellScript(
     'codex',
     'Use the configured global memory path.',
@@ -7501,16 +7524,20 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(preservedMcpHealth.version, '0.1.0');
   assert.equal(preservedMcpSourceLock.packages[0].version, '0.1.0');
 
+  const agyShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agy-shell-'));
   const agyShellScript = extensionModule.__buildAgentShellScript(
     'agy',
     'Ship the MVP',
-    fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agy-shell-')),
+    agyShellRoot,
     '2',
     43,
     ''
   );
-  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-cli\/cache\/last_conversations\.json/);
-  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /antigravity-log/);
+  assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /last_conversations\.json|antigravity-log|generic-output/);
+  const agyBinding = JSON.parse(fs.readFileSync(path.join(agyShellRoot, '.solopreneur', 'agent-runs', '2', 'session.json'), 'utf8'));
+  assert.equal(agyBinding.headRevision, 1);
+  assert.equal(agyBinding.revisions[0].method, 'provider_callback');
+  assert.equal(agyBinding.revisions[0].state, 'preparing');
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --prompt-interactive --dangerously-skip-permissions --add-dir/);
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
@@ -8234,6 +8261,194 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(methodologyInstructions, /completion criteria/);
 });
 
+test('tracked native continuation creates a version 2 binding for the exact resume target', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-v2-continuation-run-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '86');
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '86.json');
+  const sessionId = '019ecd99-4325-7050-8e71-7def92359d23';
+  const fakeClaudePath = path.join(workspaceRoot, 'bin', 'claude');
+  fs.mkdirSync(path.dirname(fakeClaudePath), { recursive: true });
+  fs.writeFileSync(fakeClaudePath, [
+    '#!/bin/sh',
+    'case " $* " in',
+    "  *' --help '*) printf '%s\\n' 'Usage: claude --session-id <uuid>'; exit 0 ;;",
+    'esac',
+    "printf '%s\\n' 'continued exact session'"
+  ].join('\n'), 'utf8');
+  fs.chmodSync(fakeClaudePath, 0o755);
+  const directCommand = `'${fakeClaudePath}' --resume '${sessionId}' --add-dir '${workspaceRoot}'`;
+
+  const built = extensionModule.__buildAgentShellScript(
+    fakeClaudePath,
+    '',
+    'Continue the existing native conversation.',
+    workspaceRoot,
+    '__solo__',
+    86,
+    '继续当前 Agent 对话',
+    undefined,
+    sessionId,
+    directCommand,
+    'solo_continue',
+    '',
+    '',
+    'auto',
+    '',
+    'off',
+    {},
+    runDir,
+    statusFilePath
+  );
+  childProcess.execFileSync('bash', [built.runScriptPath], { cwd: workspaceRoot, stdio: 'pipe' });
+
+  const binding = JSON.parse(fs.readFileSync(path.join(runDir, 'session.json'), 'utf8'));
+  const status = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(binding.version, 2);
+  assert.equal(binding.runId, '86');
+  assert.equal(binding.headRevision, 2);
+  assert.equal(binding.revisions[1].state, 'planned');
+  assert.equal(binding.revisions[1].sessionId, sessionId);
+  assert.equal(status.plannedNativeSessionId, sessionId);
+  assert.equal(status.nativeSessionIdIsCurrent, false);
+  assert.equal(status.sessionMode, 'resume');
+});
+
+test('session capture writer never emits legacy guessed identities for new runs', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;'
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-no-legacy-session-write-'));
+  const outputFilePath = path.join(workspaceRoot, 'output.log');
+  const startedAtFilePath = path.join(workspaceRoot, 'started_at');
+  const sessionFilePath = path.join(workspaceRoot, 'session.json');
+  fs.writeFileSync(outputFilePath, 'unrelated UUID 019ecd99-4325-7050-8e71-7def92359d24\n', 'utf8');
+  fs.writeFileSync(startedAtFilePath, '', 'utf8');
+
+  const captureScript = extensionModule.__buildSessionCaptureScript(
+    'codex',
+    workspaceRoot,
+    startedAtFilePath,
+    outputFilePath,
+    sessionFilePath
+  );
+  childProcess.execFileSync('bash', ['-lc', captureScript], { cwd: workspaceRoot });
+
+  assert.equal(captureScript, ':');
+  assert.equal(fs.existsSync(sessionFilePath), false);
+});
+
+test('generated Cursor launcher passes the provider-created chat ID into the native TUI resume command', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-launch-sim-'));
+  const fakeBinRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-bin-'));
+  const fakeCursorPath = path.join(fakeBinRoot, 'cursor-agent');
+  const capturedArgsPath = path.join(workspaceRoot, 'cursor-args.txt');
+  const createdSessionId = '019ecd99-4325-7050-8e71-7def92359cb0';
+  fs.writeFileSync(fakeCursorPath, [
+    '#!/usr/bin/env bash',
+    'if [ "$1" = "create-chat" ] && [ "$2" = "--help" ]; then',
+    '  printf \'%s\\n\' \'Create a new empty chat and return its ID\'',
+    '  exit 0',
+    'fi',
+    'if [ "$1" = "--help" ]; then',
+    '  printf \'%s\\n\' \'--resume [chatId]\'',
+    '  exit 0',
+    'fi',
+    'if [ "$1" = "create-chat" ]; then',
+    `  printf '%s\\n' '${createdSessionId}'`,
+    '  exit 0',
+    'fi',
+    'printf \'%s\\n\' "$@" > "$SOLOMAP_CURSOR_FAKE_ARGS"'
+  ].join('\n'), { encoding: 'utf8', mode: 0o755 });
+  const shell = extensionModule.__buildAgentShellScript(
+    fakeCursorPath,
+    '',
+    'Keep this Cursor conversation open.',
+    workspaceRoot,
+    '__solo__',
+    49,
+    '',
+    undefined,
+    '',
+    '',
+    'solo'
+  );
+
+  const result = childProcess.spawnSync('bash', [shell.runScriptPath], {
+    cwd: workspaceRoot,
+    encoding: 'utf8',
+    env: { ...process.env, SOLOMAP_CURSOR_FAKE_ARGS: capturedArgsPath }
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const resumedArgs = fs.readFileSync(capturedArgsPath, 'utf8').split(/\r?\n/).filter(Boolean);
+  assert.deepEqual(resumedArgs.slice(0, 2), ['--resume', createdSessionId]);
+  const session = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', 'session.json'), 'utf8'));
+  assert.equal(session.version, 2);
+  assert.equal(session.headRevision, 2);
+  assert.equal(session.resumableRevision, undefined);
+  assert.equal(session.revisions[1].sessionId, createdSessionId);
+  assert.equal(session.revisions[1].method, 'provider_created');
+  assert.equal(session.revisions[1].state, 'planned');
+});
+
+test('Cursor creation failures finalize the version 2 binding as unavailable', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+  );
+  const scenarios = [
+    { name: 'create-failed', createBody: "printf '%s\\n' 'not authenticated'; exit 7", errorCode: 'native_session_creation_failed' },
+    { name: 'ambiguous-id', createBody: "printf '%s\\n' 'chat-id extra-output'; exit 0", errorCode: 'native_session_id_ambiguous' }
+  ];
+  for (const scenario of scenarios) {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), `solopreneur-cursor-${scenario.name}-`));
+    const fakeBinRoot = fs.mkdtempSync(path.join(os.tmpdir(), `solopreneur-cursor-${scenario.name}-bin-`));
+    const fakeCursorPath = path.join(fakeBinRoot, 'cursor-agent');
+    fs.writeFileSync(fakeCursorPath, [
+      '#!/usr/bin/env bash',
+      'if [ "$1" = "create-chat" ] && [ "$2" = "--help" ]; then exit 0; fi',
+      'if [ "$1" = "--help" ]; then printf \'%s\\n\' \'--resume [chatId]\'; exit 0; fi',
+      `if [ "$1" = "create-chat" ]; then ${scenario.createBody}; fi`,
+      'exit 99'
+    ].join('\n'), { encoding: 'utf8', mode: 0o755 });
+    const shell = extensionModule.__buildAgentShellScript(
+      fakeCursorPath,
+      '',
+      'Keep this Cursor conversation open.',
+      workspaceRoot,
+      '__solo__',
+      scenario.name === 'create-failed' ? 491 : 492,
+      '',
+      undefined,
+      '',
+      '',
+      'solo'
+    );
+
+    const result = childProcess.spawnSync('bash', [shell.runScriptPath], {
+      cwd: workspaceRoot,
+      encoding: 'utf8'
+    });
+
+    assert.equal(result.status, 126, result.stderr || result.stdout);
+    const binding = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', 'session.json'), 'utf8'));
+    const status = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.agent_status.json'), 'utf8'));
+    assert.equal(binding.headRevision, 2);
+    assert.equal(binding.revisions[1].state, 'unavailable');
+    assert.equal(binding.revisions[1].errorCode, scenario.errorCode);
+    assert.equal(status.failureCode, scenario.errorCode);
+  }
+});
+
 test('documentation manifest indexes project docs and flags noisy docs after runs', () => {
   const documentation = require(path.join(projectRoot, 'out/documentationManifest.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-doc-manifest-'));
@@ -8881,6 +9096,759 @@ test('interactive start checkpoint opens a new tracked turn under the same termi
   assert.equal(logged[0].status, 'Running');
   assert.match(logged[0].output, /Continuation parent conversation: 61/);
   assert.match(logged[0].output, /继续审计剩余风险/);
+});
+
+test('interactive start checkpoint confirms the caller-assigned native session before the terminal closes', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-caller-assigned-confirm-'));
+  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '71');
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '71.json');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  const plannedSessionId = '019ecd99-4325-7050-8e71-7def92359c9f';
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  identity.createSessionBinding(sessionFilePath, {
+    runId: '71',
+    provider: 'claude',
+    workspaceRoot: projectRoot,
+    cliPath: 'claude',
+    bindingNonce: 'claude-test-nonce',
+    method: 'caller_assigned',
+    contract: 'official_stable'
+  });
+  identity.appendSessionBindingRevision(sessionFilePath, 1, {
+    sessionId: plannedSessionId,
+    method: 'caller_assigned',
+    contract: 'official_stable',
+    state: 'planned'
+  });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Turn Started',
+    agentCli: 'claude',
+    sessionProvider: 'claude',
+    sessionFilePath,
+    plannedNativeSessionId: plannedSessionId,
+    providerReportedSessionId: plannedSessionId,
+    nativeSessionId: '',
+    nativeSessionIdIsCurrent: false,
+    executionLogId: 71,
+    rootExecutionLogId: 71,
+    interactiveSession: true,
+    checkpointMessage: '开始首轮',
+    turnStartedAt: '2026-09-01T00:01:00.000Z'
+  }), 'utf8');
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 71, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
+    getAgentExecutions: () => [],
+    logAgentExecution: () => 72
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const running = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(fs.existsSync(sessionFilePath), true, 'the start checkpoint must persist the planned session');
+  const session = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+  assert.equal(running.nativeSessionId, plannedSessionId);
+  assert.equal(running.nativeSessionIdIsCurrent, true);
+  assert.equal(session.version, 2);
+  assert.equal(session.headRevision, 3);
+  assert.equal(session.resumableRevision, 3);
+  assert.equal(session.revisions[2].sessionId, plannedSessionId);
+  assert.equal(session.revisions[2].state, 'confirmed');
+  assert.equal(session.revisions[2].method, 'caller_assigned');
+
+  const cursorRunDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '73');
+  const cursorStatusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '73.json');
+  const cursorSessionFilePath = path.join(cursorRunDir, 'session.json');
+  const cursorSessionId = '019ecd99-4325-7050-8e71-7def92359ca0';
+  fs.mkdirSync(cursorRunDir, { recursive: true });
+  identity.createSessionBinding(cursorSessionFilePath, {
+    runId: '73',
+    provider: 'cursor',
+    workspaceRoot: projectRoot,
+    cliPath: 'cursor-agent',
+    bindingNonce: 'cursor-test-nonce',
+    method: 'provider_created',
+    contract: 'official_stable'
+  });
+  identity.appendSessionBindingRevision(cursorSessionFilePath, 1, {
+    sessionId: cursorSessionId,
+    method: 'provider_created',
+    contract: 'official_stable',
+    state: 'planned'
+  });
+  fs.writeFileSync(cursorStatusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Turn Started',
+    agentCli: 'cursor-agent',
+    sessionProvider: 'cursor',
+    sessionFilePath: cursorSessionFilePath,
+    plannedNativeSessionId: cursorSessionId,
+    nativeSessionId: '',
+    nativeSessionIdIsCurrent: false,
+    executionLogId: 73,
+    rootExecutionLogId: 73,
+    interactiveSession: true,
+    checkpointMessage: '开始 Cursor 首轮',
+    turnStartedAt: '2026-09-01T00:02:00.000Z'
+  }), 'utf8');
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 73, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
+    getAgentExecutions: () => [],
+    logAgentExecution: () => 74
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(cursorStatusFilePath);
+
+  const cursorRunning = JSON.parse(fs.readFileSync(cursorStatusFilePath, 'utf8'));
+  const cursorSession = JSON.parse(fs.readFileSync(cursorSessionFilePath, 'utf8'));
+  assert.equal(cursorRunning.nativeSessionId, cursorSessionId);
+  assert.equal(cursorRunning.nativeSessionIdIsCurrent, true);
+  assert.equal(cursorSession.headRevision, 3);
+  assert.equal(cursorSession.resumableRevision, 3);
+  assert.equal(cursorSession.revisions[2].sessionId, cursorSessionId);
+  assert.equal(cursorSession.revisions[2].state, 'confirmed');
+  assert.equal(cursorSession.revisions[2].method, 'provider_created');
+
+  const mismatchRunDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '75');
+  const mismatchStatusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '75.json');
+  const mismatchSessionFilePath = path.join(mismatchRunDir, 'session.json');
+  const expectedClaudeSessionId = '019ecd99-4325-7050-8e71-7def92359ca1';
+  fs.mkdirSync(mismatchRunDir, { recursive: true });
+  identity.createSessionBinding(mismatchSessionFilePath, {
+    runId: '75',
+    provider: 'claude',
+    workspaceRoot: projectRoot,
+    cliPath: 'claude',
+    bindingNonce: 'claude-mismatch-nonce',
+    method: 'caller_assigned',
+    contract: 'official_stable'
+  });
+  identity.appendSessionBindingRevision(mismatchSessionFilePath, 1, {
+    sessionId: expectedClaudeSessionId,
+    method: 'caller_assigned',
+    contract: 'official_stable',
+    state: 'planned'
+  });
+  fs.writeFileSync(mismatchStatusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Turn Started',
+    agentCli: 'claude',
+    sessionProvider: 'claude',
+    sessionFilePath: mismatchSessionFilePath,
+    plannedNativeSessionId: expectedClaudeSessionId,
+    providerReportedSessionId: '019ecd99-4325-7050-8e71-7def92359ca2',
+    nativeSessionId: '',
+    nativeSessionIdIsCurrent: false,
+    executionLogId: 75,
+    rootExecutionLogId: 75,
+    interactiveSession: true,
+    checkpointMessage: '开始不匹配首轮',
+    turnStartedAt: '2026-09-01T00:03:00.000Z'
+  }), 'utf8');
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 75, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
+    getAgentExecutions: () => [],
+    logAgentExecution: () => 76
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(mismatchStatusFilePath);
+
+  const mismatchRunning = JSON.parse(fs.readFileSync(mismatchStatusFilePath, 'utf8'));
+  const mismatchBinding = JSON.parse(fs.readFileSync(mismatchSessionFilePath, 'utf8'));
+  assert.equal(mismatchRunning.nativeSessionId, '');
+  assert.equal(mismatchRunning.nativeSessionIdIsCurrent, false);
+  assert.equal(mismatchBinding.resumableRevision, undefined);
+  assert.equal(mismatchBinding.revisions[2].state, 'conflict');
+  assert.equal(mismatchBinding.revisions[2].errorCode, 'identity_provider_mismatch');
+});
+
+test('the pre-registered first completion confirms its planned native session', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-first-complete-confirm-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '79');
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '79.json');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  const sessionId = '019ecd99-4325-7050-8e71-7def92359d19';
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  identity.createSessionBinding(sessionFilePath, {
+    runId: '79',
+    provider: 'claude',
+    workspaceRoot,
+    cliPath: 'claude',
+    bindingNonce: 'first-complete-confirm-nonce',
+    method: 'caller_assigned',
+    contract: 'official_stable'
+  });
+  identity.appendSessionBindingRevision(sessionFilePath, 1, {
+    sessionId,
+    method: 'caller_assigned',
+    contract: 'official_stable',
+    state: 'planned'
+  });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  fs.writeFileSync(outputFilePath, 'First native turn completed.\n', 'utf8');
+  fs.writeFileSync(changesFilePath, '', 'utf8');
+  fs.writeFileSync(touchedFilesPath, '', 'utf8');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    agentCli: 'claude',
+    sessionProvider: 'claude',
+    sessionFilePath,
+    plannedNativeSessionId: sessionId,
+    providerReportedSessionId: sessionId,
+    nativeSessionId: '',
+    nativeSessionIdIsCurrent: false,
+    executionLogId: 79,
+    rootExecutionLogId: 79,
+    interactiveSession: true,
+    checkpointOutcome: 'partial',
+    checkpointSummary: '首轮完成',
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath
+  }), 'utf8');
+  const logs = [{ id: 79, nodeId: '__solo__', agentCli: 'claude', command: 'claude', output: 'Interactive session state: Running', status: 'Running' }];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => logs,
+    getAgentExecutions: () => [],
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      const entry = logs.find((candidate) => candidate.id === id);
+      if (entry) Object.assign(entry, { agentCli, command, output, status });
+      return Boolean(entry);
+    },
+    logAgentExecution: () => 79
+  }, workspaceRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+  const stored = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json'), 'utf8'));
+  assert.equal(binding.headRevision, 3);
+  assert.equal(binding.resumableRevision, 3);
+  assert.equal(binding.revisions[2].state, 'confirmed');
+  assert.equal(stored.sessions.claude.sessionId, sessionId);
+  assert.equal(stored.sessions.claude.runId, '79');
+  assert.equal(stored.sessions.claude.revision, 3);
+});
+
+test('unvalidated OpenCode and Antigravity bindings become unavailable after the first checkpoint', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  for (const [provider, method, runId] of [
+    ['opencode', 'provider_created', 791],
+    ['antigravity', 'provider_callback', 792]
+  ]) {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), `solopreneur-${provider}-unavailable-`));
+    const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', String(runId));
+    const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', `${runId}.json`);
+    const sessionFilePath = path.join(runDir, 'session.json');
+    const outputFilePath = path.join(runDir, 'output.log');
+    const changesFilePath = path.join(runDir, 'changes.txt');
+    const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+    identity.createSessionBinding(sessionFilePath, {
+      runId: String(runId),
+      provider,
+      workspaceRoot,
+      cliPath: provider,
+      bindingNonce: `${provider}-unavailable-binding-nonce`,
+      method,
+      contract: 'official_stable'
+    });
+    fs.writeFileSync(outputFilePath, `${provider} completed its first turn.\n`, 'utf8');
+    fs.writeFileSync(changesFilePath, '', 'utf8');
+    fs.writeFileSync(touchedFilesPath, '', 'utf8');
+    fs.writeFileSync(statusFilePath, JSON.stringify({
+      workspaceRoot,
+      nodeId: '__solo__',
+      runKind: 'solo',
+      status: 'In Progress',
+      agentCli: provider,
+      sessionProvider: provider,
+      sessionFilePath,
+      sessionBindingHeadRevision: 1,
+      executionLogId: runId,
+      rootExecutionLogId: runId,
+      interactiveSession: true,
+      checkpointOutcome: 'partial',
+      checkpointSummary: '首轮完成',
+      outputFilePath,
+      changesFilePath,
+      touchedFilesPath
+    }), 'utf8');
+    const logs = [{ id: runId, nodeId: '__solo__', agentCli: provider, command: provider, output: 'Interactive session state: Running', status: 'Running' }];
+    extensionModule.__setRuntimeForTest({
+      getNodes: () => [],
+      getProjectAgentExecutions: () => logs,
+      getAgentExecutions: () => [],
+      updateAgentExecution: (id, agentCli, command, output, status) => {
+        const entry = logs.find((candidate) => candidate.id === id);
+        if (entry) Object.assign(entry, { agentCli, command, output, status });
+        return Boolean(entry);
+      },
+      logAgentExecution: () => runId
+    }, workspaceRoot, {
+      sendNodesToWebview() {},
+      sendSoloConversationHistory() {},
+      async refreshProjectConversationSnapshotAfterStatusChange() {},
+      sendLocalProjects() {}
+    });
+
+    await extensionModule.__processAgentStatusFile(statusFilePath);
+
+    const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+    assert.equal(binding.headRevision, 2);
+    assert.equal(binding.revisions[1].state, 'unavailable');
+    assert.equal(binding.revisions[1].errorCode, 'identity_capability_unverified');
+    assert.equal(binding.resumableRevision, undefined);
+  }
+});
+
+test('Codex start checkpoint confirms only the unique nonce-correlated transcript', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-nonce-confirm-'));
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-nonce-home-'));
+  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '81');
+  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '81.json');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  const bindingNonce = 'f0f1f2f3f4f5f6f7f8f9a0a1a2a3a4a5';
+  const sessionId = '019ecd99-4325-7050-8e71-7def92359d20';
+  const transcriptRoot = path.join(codexHome, 'sessions', '2026', '09', '02');
+  fs.mkdirSync(transcriptRoot, { recursive: true });
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const transcriptPath = path.join(transcriptRoot, `rollout-${sessionId}.jsonl`);
+  fs.writeFileSync(transcriptPath, [
+    JSON.stringify({
+      timestamp: '2026-09-02T00:00:01.000Z',
+      type: 'session_meta',
+      payload: { id: sessionId, session_id: sessionId, cwd: projectRoot }
+    }),
+    JSON.stringify({
+      timestamp: '2026-09-02T00:00:01.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: `SoloMap binding nonce: ${bindingNonce}.` }]
+      }
+    })
+  ].join('\n'), 'utf8');
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  identity.createSessionBinding(sessionFilePath, {
+    runId: '81',
+    provider: 'codex',
+    workspaceRoot: projectRoot,
+    cliPath: 'codex',
+    bindingNonce,
+    method: 'transcript_correlated_compat',
+    contract: 'compatibility',
+    createdAt: '2026-09-02T00:00:00.000Z',
+    providerContext: { codex: { codexHome } }
+  });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Turn Started',
+    agentCli: 'codex',
+    sessionProvider: 'codex',
+    sessionFilePath,
+    plannedNativeSessionId: '',
+    nativeSessionId: '',
+    nativeSessionIdIsCurrent: false,
+    executionLogId: 81,
+    rootExecutionLogId: 81,
+    interactiveSession: true,
+    checkpointMessage: '开始 Codex 首轮',
+    turnStartedAt: '2026-09-02T00:00:02.000Z'
+  }), 'utf8');
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => [{ id: 81, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
+    getAgentExecutions: () => [],
+    logAgentExecution: () => 82
+  }, projectRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const running = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+  assert.equal(running.nativeSessionId, sessionId);
+  assert.equal(running.nativeSessionIdIsCurrent, true);
+  assert.equal(binding.headRevision, 3);
+  assert.equal(binding.resumableRevision, 3);
+  assert.equal(binding.revisions[1].evidence.transcriptPath, transcriptPath);
+  assert.equal(binding.revisions[2].state, 'confirmed');
+  assert.equal(binding.revisions[2].method, 'transcript_correlated_compat');
+});
+
+test('Codex completion retries nonce correlation before saving the resumable session', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-complete-confirm-'));
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-complete-home-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '83');
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '83.json');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  const bindingNonce = '00112233445566778899aabbccddeeff';
+  const sessionId = '019ecd99-4325-7050-8e71-7def92359d21';
+  const transcriptRoot = path.join(codexHome, 'sessions', '2026', '09', '02');
+  fs.mkdirSync(transcriptRoot, { recursive: true });
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(path.join(transcriptRoot, `rollout-${sessionId}.jsonl`), [
+    JSON.stringify({
+      timestamp: '2026-09-02T00:10:01.000Z',
+      type: 'session_meta',
+      payload: { id: sessionId, session_id: sessionId, cwd: workspaceRoot }
+    }),
+    JSON.stringify({
+      timestamp: '2026-09-02T00:10:01.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: `SoloMap binding nonce: ${bindingNonce}.` }]
+      }
+    })
+  ].join('\n'), 'utf8');
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  identity.createSessionBinding(sessionFilePath, {
+    runId: '83',
+    provider: 'codex',
+    workspaceRoot,
+    cliPath: 'codex',
+    bindingNonce,
+    method: 'transcript_correlated_compat',
+    contract: 'compatibility',
+    createdAt: '2026-09-02T00:10:00.000Z',
+    providerContext: { codex: { codexHome } }
+  });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const commandFilePath = path.join(runDir, 'command.txt');
+  const changesFilePath = path.join(runDir, 'changes.txt');
+  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
+  fs.writeFileSync(outputFilePath, `Codex completed the first turn for nonce ${bindingNonce}.\n`, 'utf8');
+  fs.writeFileSync(commandFilePath, `codex --no-alt-screen 'SoloMap binding nonce: ${bindingNonce}.'\n`, 'utf8');
+  fs.writeFileSync(changesFilePath, '', 'utf8');
+  fs.writeFileSync(touchedFilesPath, '', 'utf8');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'In Progress',
+    agentCli: 'codex',
+    commandPreview: 'codex [fresh]',
+    commandFilePath,
+    sessionProvider: 'codex',
+    sessionFilePath,
+    nativeSessionId: '',
+    nativeSessionIdIsCurrent: false,
+    executionLogId: 83,
+    rootExecutionLogId: 83,
+    interactiveSession: true,
+    checkpointOutcome: 'partial',
+    checkpointSummary: '首轮完成',
+    outputFilePath,
+    changesFilePath,
+    touchedFilesPath,
+    startedAt: '2026-09-02T00:10:00.000Z'
+  }), 'utf8');
+  const logs = [{ id: 83, nodeId: '__solo__', agentCli: 'codex', command: 'codex', output: 'Interactive session state: Running', status: 'Running' }];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => logs,
+    getAgentExecutions: () => [],
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      const entry = logs.find((candidate) => candidate.id === id);
+      if (entry) Object.assign(entry, { agentCli, command, output, status });
+      return Boolean(entry);
+    },
+    logAgentExecution: () => 83
+  }, workspaceRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+  const stored = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json'), 'utf8'));
+  assert.equal(binding.headRevision, 3);
+  assert.equal(binding.resumableRevision, 3);
+  assert.equal(binding.revisions[2].sessionId, sessionId);
+  assert.equal(stored.sessions.codex.sessionId, sessionId);
+  assert.equal(stored.sessions.codex.runId, '83');
+  assert.equal(stored.sessions.codex.revision, 3);
+  assert.equal(logs[0].command, 'codex [fresh]');
+  assert.doesNotMatch(logs[0].output, new RegExp(bindingNonce));
+});
+
+test('closing Codex without an exact nonce match records unavailable and never guesses a session', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-close-unavailable-'));
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-close-home-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '84');
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '84.json');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  identity.createSessionBinding(sessionFilePath, {
+    runId: '84',
+    provider: 'codex',
+    workspaceRoot,
+    cliPath: 'codex',
+    bindingNonce: 'ffeeddccbbaa99887766554433221100',
+    method: 'transcript_correlated_compat',
+    contract: 'compatibility',
+    createdAt: '2026-09-02T00:20:00.000Z',
+    providerContext: { codex: { codexHome } }
+  });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Session Closed',
+    agentCli: 'codex',
+    sessionProvider: 'codex',
+    sessionFilePath,
+    nativeSessionId: '019ecd99-4325-7050-8e71-7def92359fff',
+    nativeSessionIdIsCurrent: true,
+    executionLogId: 84,
+    rootExecutionLogId: 84,
+    interactiveSession: true
+  }), 'utf8');
+  const logs = [{ id: 84, nodeId: '__solo__', agentCli: 'codex', command: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' }];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => logs,
+    getAgentExecutions: () => [],
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      const entry = logs.find((candidate) => candidate.id === id);
+      if (entry) Object.assign(entry, { agentCli, command, output, status });
+      return Boolean(entry);
+    }
+  }, workspaceRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+  const status = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(binding.version, 2);
+  assert.equal(binding.headRevision, 2);
+  assert.equal(binding.revisions[1].state, 'unavailable');
+  assert.equal(binding.revisions[1].errorCode, 'identity_not_observed');
+  assert.equal(binding.resumableRevision, undefined);
+  assert.equal(status.nativeSessionId, '');
+  assert.equal(fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json')), false);
+});
+
+test('a damaged version 2 binding never falls back to a stale native session ID', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-damaged-v2-binding-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '841');
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '841.json');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  const staleSessionId = '019ecd99-4325-7050-8e71-7def92359bad';
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(sessionFilePath, '{"version":2,"revisions":', 'utf8');
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Session Closed',
+    agentCli: 'codex',
+    sessionProvider: 'codex',
+    sessionFilePath,
+    sessionBindingHeadRevision: 1,
+    nativeSessionId: staleSessionId,
+    nativeSessionIdIsCurrent: true,
+    executionLogId: 841,
+    rootExecutionLogId: 841,
+    interactiveSession: true
+  }), 'utf8');
+  const logs = [{ id: 841, nodeId: '__solo__', agentCli: 'codex', command: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' }];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => logs,
+    getAgentExecutions: () => [],
+    updateAgentExecution: (id, agentCli, command, output, status) => {
+      const entry = logs.find((candidate) => candidate.id === id);
+      if (entry) Object.assign(entry, { agentCli, command, output, status });
+      return Boolean(entry);
+    }
+  }, workspaceRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const status = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(status.nativeSessionId, '');
+  assert.equal(fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json')), false);
+  assert.equal(fs.readFileSync(sessionFilePath, 'utf8'), '{"version":2,"revisions":');
+});
+
+test('closing a confirmed interactive session preserves the run revision pointer', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
+    ].join('\n')
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-confirmed-close-pointer-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '85');
+  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '85.json');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  const sessionId = '019ecd99-4325-7050-8e71-7def92359d22';
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  identity.createSessionBinding(sessionFilePath, {
+    runId: '85',
+    provider: 'claude',
+    workspaceRoot,
+    cliPath: 'claude',
+    bindingNonce: 'confirmed-close-pointer-nonce',
+    method: 'caller_assigned',
+    contract: 'official_stable'
+  });
+  identity.appendSessionBindingRevision(sessionFilePath, 1, {
+    sessionId,
+    method: 'caller_assigned',
+    contract: 'official_stable',
+    state: 'planned'
+  });
+  identity.confirmSessionBinding(sessionFilePath, 2, sessionId);
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Session Closed',
+    agentCli: 'claude',
+    sessionProvider: 'claude',
+    sessionFilePath,
+    executionLogId: 85,
+    rootExecutionLogId: 85,
+    interactiveSession: true
+  }), 'utf8');
+  const logs = [{ id: 85, nodeId: '__solo__', agentCli: 'claude', command: 'claude', output: 'Interactive session state: Waiting', status: 'Completed' }];
+  extensionModule.__setRuntimeForTest({
+    getNodes: () => [],
+    getProjectAgentExecutions: () => logs,
+    getAgentExecutions: () => [],
+    updateAgentExecution: () => true
+  }, workspaceRoot, {
+    sendNodesToWebview() {},
+    sendSoloConversationHistory() {},
+    async refreshProjectConversationSnapshotAfterStatusChange() {},
+    sendLocalProjects() {}
+  });
+
+  await extensionModule.__processAgentStatusFile(statusFilePath);
+
+  const stored = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json'), 'utf8'));
+  assert.equal(stored.version, 2);
+  assert.equal(stored.sessions.claude.sessionId, sessionId);
+  assert.equal(stored.sessions.claude.runId, '85');
+  assert.equal(stored.sessions.claude.revision, 3);
 });
 
 test('interactive completion recovers a distinct ledger turn when the Agent omitted start', async () => {

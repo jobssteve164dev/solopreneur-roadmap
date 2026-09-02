@@ -180,6 +180,7 @@ if (action === 'start') {
     checkpointOutcome: '',
     checkpointSummary: '',
     checkpointNext: '',
+    providerReportedSessionId: String(process.env.CLAUDE_CODE_SESSION_ID || '').trim(),
     turnStartedAt: now,
     startedAt: now,
     finishedAt: ''
@@ -217,6 +218,7 @@ if (action === 'complete') {
     checkpointOutcome: outcome,
     checkpointSummary: summary,
     checkpointNext: String(args.next || '').trim(),
+    providerReportedSessionId: String(process.env.CLAUDE_CODE_SESSION_ID || '').trim(),
     checkpointAt: now,
     turnStartedAt: implicitTurn ? now : String(status.turnStartedAt || status.startedAt || now),
     startedAt: implicitTurn ? now : String(status.startedAt || status.turnStartedAt || now),

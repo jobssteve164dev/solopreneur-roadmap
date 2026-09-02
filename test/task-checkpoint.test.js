@@ -46,6 +46,26 @@ test('interactive user conversations do not use one-shot CLI modes', () => {
   assert.doesNotMatch(resumed, /\bexec\b/);
 });
 
+test('caller-assigned interactive providers launch with the exact planned session ID', () => {
+  const workspaceRoot = '/workspace/app';
+  const promptFilePath = '/workspace/app/.solopreneur/agent-runs/2/prompt.txt';
+  const plannedSessionId = '019ecd99-4325-7050-8e71-7def92359c9f';
+
+  const claude = buildInteractiveAgentCommandForPromptFile(
+    'claude', promptFilePath, workspaceRoot, 'auto', '', plannedSessionId
+  );
+  const copilot = buildInteractiveAgentCommandForPromptFile(
+    'copilot', promptFilePath, workspaceRoot, 'auto', '', plannedSessionId
+  );
+  const grok = buildInteractiveAgentCommandForPromptFile(
+    'grok', promptFilePath, workspaceRoot, 'auto', '', plannedSessionId
+  );
+
+  assert.match(claude, /--session-id '019ecd99-4325-7050-8e71-7def92359c9f'/);
+  assert.match(copilot, /--session-id '019ecd99-4325-7050-8e71-7def92359c9f'/);
+  assert.match(grok, /--session-id '019ecd99-4325-7050-8e71-7def92359c9f'/);
+});
+
 test('checkpoint command scopes writes, records a turn, and captures its workspace delta', () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-checkpoint-'));
   const runtimePath = ensureTaskCheckpointRuntime(workspaceRoot);
@@ -82,7 +102,8 @@ test('checkpoint command scopes writes, records a turn, and captures its workspa
     ...process.env,
     SOLOMAP_TASK_COMMAND: runtimePath,
     SOLOMAP_TASK_STATUS_FILE: statusFilePath,
-    SOLOMAP_TASK_CHECKPOINT_TOKEN: 'expected-token'
+    SOLOMAP_TASK_CHECKPOINT_TOKEN: 'expected-token',
+    CLAUDE_CODE_SESSION_ID: '019ecd99-4325-7050-8e71-7def92359cf0'
   };
   const started = cp.spawnSync(process.execPath, [runtimePath, 'start', '--message', '继续修正'], {
     cwd: workspaceRoot,
@@ -93,6 +114,7 @@ test('checkpoint command scopes writes, records a turn, and captures its workspa
   const startedStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
   assert.equal(startedStatus.status, 'Turn Started');
   assert.equal(startedStatus.checkpointMessage, '继续修正');
+  assert.equal(startedStatus.providerReportedSessionId, '019ecd99-4325-7050-8e71-7def92359cf0');
 
   fs.writeFileSync(statusFilePath, JSON.stringify({ ...startedStatus, status: 'Running' }), 'utf8');
   fs.writeFileSync(path.join(workspaceRoot, 'existing.txt'), 'after and longer\n', 'utf8');
@@ -170,7 +192,8 @@ test('completion checkpoint recovers a missing start without overwriting the pre
       ...process.env,
       SOLOMAP_TASK_COMMAND: runtimePath,
       SOLOMAP_TASK_STATUS_FILE: statusFilePath,
-      SOLOMAP_TASK_CHECKPOINT_TOKEN: 'recovery-token'
+      SOLOMAP_TASK_CHECKPOINT_TOKEN: 'recovery-token',
+      CLAUDE_CODE_SESSION_ID: '019ecd99-4325-7050-8e71-7def92359cf1'
     },
     encoding: 'utf8'
   });
@@ -182,4 +205,5 @@ test('completion checkpoint recovers a missing start without overwriting the pre
   assert.equal(completedStatus.checkpointImplicitTurn, true);
   assert.equal(completedStatus.checkpointMessage, '补充审计结果');
   assert.equal(completedStatus.checkpointEventId, '5:complete');
+  assert.equal(completedStatus.providerReportedSessionId, '019ecd99-4325-7050-8e71-7def92359cf1');
 });

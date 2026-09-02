@@ -1,5 +1,7 @@
 # SoloMap OpenCode 深度适配设计
 
+> 交互式身份更新（2026-09-01）：用户主动发起的 OpenCode 原生交互终端如何创建并绑定 Session，以[交互式 Agent 会话身份稳定绑定设计](./interactive-agent-session-identity-design.zh.md)为准；本文继续负责 OpenCode 的供应商、模型、凭据和无人值守结构化运行边界。
+
 ## 这份文档解决什么判断
 
 这份文档固定 SoloMap 如何在不破坏任何既有 Agent CLI 能力的前提下，为 OpenCode 增加供应商切换、模型发现、结构化运行和稳定续接能力。
@@ -19,7 +21,7 @@
 - 使用结构化事件跟踪任务、会话和失败原因。
 - 继续由独立安装的 OpenCode 获取上游更新和新增供应商能力。
 
-用户不需要理解 adapter、ACP、JSON event、模型目录来源或 OpenCode 配置文件结构。
+用户不需要理解 adapter、JSON event、模型目录来源或 OpenCode 配置文件结构。
 
 ## 不变量
 
@@ -222,15 +224,9 @@ opencode run --format json --model <provider/model> --title <run-title> <prompt>
 
 完整任务继续由 `prompt.txt` 承载。适配器不得把多行 prompt 拼进 shell 命令，也不得依赖 `$(cat ...)`。如果 OpenCode 当前公开入口只能接收消息参数，传入的消息只是一条稳定 wrapper，要求读取绝对路径的 `prompt.txt`；必须用包含空格、引号、Unicode 和长路径的最终命令回归验证。
 
-### ACP 后续升级条件
+### 交互协议边界更新
 
-`opencode acp` 是公开的 stdin/stdout NDJSON 入口，可在需要双向审批、统一交互事件或长期会话时替换第一阶段的 `run --format json`。ACP 不是首版前置条件，只有以下条件全部通过后才能成为正式路径：
-
-- 当前稳定 OpenCode 版本完成初始化、任务、续接、取消和异常恢复验证。
-- 事件能够稳定映射到 SoloMap 现有 run、conversation 和 completion contract。
-- Webview 重建与扩展重载不会创建重复 session 或重发 prompt。
-- 用户可见终端仍满足从点击开始 5 秒内可见并确认 Agent 已启动的体验基线。
-- ACP 失败可以回退到同一 OpenCode session 的公开 CLI 路径，且不会重复副作用。
+ACP 已被明确禁止，不再是 OpenCode 的后续升级、备选、兼容或评估路径。用户主动对话继续使用 OpenCode 原生 TUI；首次 Session 的创建、绑定和恢复统一遵循[交互式 Agent 会话身份稳定绑定设计](./interactive-agent-session-identity-design.zh.md)中的官方 Server + `attach --session` 路径。无人值守任务继续使用本文既有的公开结构化 `run` 路径，两者都不得转向 ACP。
 
 ## 结构化事件与完成判断
 
@@ -379,10 +375,10 @@ Codex、Claude、Cursor、Copilot、Agy / Antigravity、自定义 CLI 至少逐�
 - 用结构化事件替代 OpenCode 的终端文本 session 捕获和完成猜测。
 - 覆盖取消、异常退出、重载和并发。
 
-### 阶段 O4：只读复核与 ACP 评估
+### 阶段 O4：只读复核
 
 - 只有在运行级只读权限验证通过后开放 OpenCode 复核。
-- 独立验证 ACP 的双向交互、恢复和终端体验；通过门禁后再决定是否替换结构化 `run` 路径。
+- 不评估、不引入 ACP；交互式恢复只消费已确认的原生 Session 绑定。
 
 每个阶段都必须单独通过旧 CLI 零回归矩阵。后续阶段不能以“最终会统一”为理由推迟修复已经出现的旧 CLI 回归。
 

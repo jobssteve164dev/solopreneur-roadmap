@@ -2,11 +2,16 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { AgentConversation } from './db/types';
+import { getAgentCliVersion, resolveExecutableIdentityPath, resolveExecutablePath } from './agentCli';
+import { getResumableSession, NativeSessionBinding, readCompatibleSessionId, readSessionBinding } from './sessionIdentity';
 
 export interface AgentStepSession {
   agentCli: string;
   provider: string;
   sessionId: string;
+  runId?: string;
+  revision?: number;
+  runStartedAt?: string;
   updatedAt: string;
 }
 
@@ -25,6 +30,7 @@ const codexRunSessionIndexCache = new Map<string, {
   expiresAt: number;
   entries: Map<string, CodexRunSessionIndexEntry>;
 }>();
+const stepSessionLeaseWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 
 export type ContinuableAgentConversation = AgentConversation & {
   resumableNativeSessionId?: string;
@@ -36,7 +42,7 @@ export function getContinuationAgentProvider(agentCli: string): string {
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return 'codex';
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return 'cursor';
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
@@ -79,7 +85,7 @@ export function readStepSessionState(filePath: string, nodeId: string): StepSess
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     const sessions = parsed && typeof parsed.sessions === 'object' && parsed.sessions ? parsed.sessions : {};
     return {
-      version: 1,
+      version: Number(parsed.version || 1),
       nodeId: String(parsed.nodeId || nodeId),
       sessions
     };
@@ -88,41 +94,156 @@ export function readStepSessionState(filePath: string, nodeId: string): StepSess
   }
 }
 
+function withStepSessionLease<T>(filePath: string, action: () => T): T {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const leaseFilePath = `${filePath}.lease`;
+  const deadline = Date.now() + 2000;
+  let leaseFd = -1;
+  while (leaseFd < 0) {
+    try {
+      leaseFd = fs.openSync(leaseFilePath, 'wx');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for the step session lease: ${filePath}`);
+      }
+      Atomics.wait(stepSessionLeaseWaitBuffer, 0, 0, 10);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    fs.closeSync(leaseFd);
+    try {
+      fs.unlinkSync(leaseFilePath);
+    } catch {
+      // Losing an already released ephemeral lease cannot change the committed pointer.
+    }
+  }
+}
+
 export function getStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string): AgentStepSession | null {
   const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
   const state = readStepSessionState(filePath, nodeId);
   const session = state.sessions[getAgentSessionKey(agentCli)];
-  return session && session.sessionId ? session : null;
+  if (!session || !session.sessionId) {
+    return null;
+  }
+  if (session.runId || session.revision) {
+    if (!session.runId || !Number.isInteger(session.revision)) {
+      return null;
+    }
+    const bindingFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(session.runId), 'session.json');
+    const resumable = getResumableSession(bindingFilePath);
+    let binding: NativeSessionBinding;
+    try {
+      binding = readSessionBinding(bindingFilePath);
+    } catch {
+      return null;
+    }
+    const currentCliPath = resolveExecutableIdentityPath(agentCli) || resolveExecutablePath(agentCli) || agentCli;
+    const currentCliVersion = getAgentCliVersion(currentCliPath);
+    if (!resumable
+      || resumable.runId !== session.runId
+      || resumable.revision !== session.revision
+      || resumable.sessionId !== session.sessionId
+      || resumable.provider !== getContinuationAgentProvider(agentCli)
+      || path.resolve(resumable.workspaceRoot) !== path.resolve(workspaceRoot)
+      || path.resolve(resumable.cliPath) !== path.resolve(currentCliPath)
+      || (binding.cliVersion !== undefined && binding.cliVersion !== currentCliVersion)) {
+      return null;
+    }
+  }
+  return session;
 }
 
-export function updateStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string, sessionId: string): StepSessionState {
+export function updateStoredAgentSession(
+  workspaceRoot: string,
+  nodeId: string,
+  agentCli: string,
+  sessionId: string,
+  pointer: { runId?: string; revision?: number } = {}
+): StepSessionState {
   const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
-  const state = readStepSessionState(filePath, nodeId);
-  const sessionKey = getAgentSessionKey(agentCli);
-  state.version = 1;
-  state.nodeId = nodeId;
-  state.sessions[sessionKey] = {
-    agentCli,
-    provider: getContinuationAgentProvider(agentCli),
-    sessionId,
-    updatedAt: new Date().toISOString()
-  };
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf8');
-  return state;
+  return withStepSessionLease(filePath, () => {
+    const state = readStepSessionState(filePath, nodeId);
+    const sessionKey = getAgentSessionKey(agentCli);
+    const existing = state.sessions[sessionKey];
+    let runStartedAt = '';
+    if (pointer.runId && Number.isInteger(pointer.revision)) {
+      const bindingFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, pointer.runId, 'session.json');
+      const binding = readSessionBinding(bindingFilePath);
+      const resumable = getResumableSession(bindingFilePath);
+      if (!resumable
+        || binding.runId !== pointer.runId
+        || resumable.revision !== pointer.revision
+        || resumable.sessionId !== sessionId) {
+        return state;
+      }
+      runStartedAt = binding.createdAt;
+      if (existing?.runId && existing.runId !== pointer.runId) {
+        let existingRunStartedAt = String(existing.runStartedAt || '');
+        if (!existingRunStartedAt) {
+          try {
+            existingRunStartedAt = readSessionBinding(path.join(
+              workspaceRoot,
+              '.solopreneur',
+              'agent-runs',
+              nodeId,
+              existing.runId,
+              'session.json'
+            )).createdAt;
+          } catch {
+            existingRunStartedAt = '';
+          }
+        }
+        const incomingTime = Date.parse(runStartedAt);
+        const existingTime = Date.parse(existingRunStartedAt);
+        const existingIsNewer = Number.isFinite(incomingTime) && Number.isFinite(existingTime)
+          ? existingTime > incomingTime
+            || (existingTime === incomingTime && existing.runId.localeCompare(pointer.runId, undefined, { numeric: true }) > 0)
+          : Boolean(existingRunStartedAt);
+        if (existingIsNewer) {
+          return state;
+        }
+      }
+    } else if (existing?.runId) {
+      return state;
+    }
+    state.version = pointer.runId && Number.isInteger(pointer.revision) ? 2 : 1;
+    state.nodeId = nodeId;
+    state.sessions[sessionKey] = {
+      agentCli,
+      provider: getContinuationAgentProvider(agentCli),
+      sessionId,
+      ...(pointer.runId ? { runId: pointer.runId } : {}),
+      ...(Number.isInteger(pointer.revision) ? { revision: pointer.revision } : {}),
+      ...(runStartedAt ? { runStartedAt } : {}),
+      updatedAt: new Date().toISOString()
+    };
+    const tempFilePath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tempFilePath, JSON.stringify(state, null, 2), 'utf8');
+    fs.renameSync(tempFilePath, filePath);
+    return state;
+  });
 }
 
 export function clearStoredAgentSession(workspaceRoot: string, nodeId: string, agentCli: string): boolean {
   const filePath = getStepSessionFilePath(workspaceRoot, nodeId);
-  const state = readStepSessionState(filePath, nodeId);
-  const sessionKey = getAgentSessionKey(agentCli);
-  if (!state.sessions[sessionKey]) {
-    return false;
-  }
-  delete state.sessions[sessionKey];
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf8');
-  return true;
+  return withStepSessionLease(filePath, () => {
+    const state = readStepSessionState(filePath, nodeId);
+    const sessionKey = getAgentSessionKey(agentCli);
+    if (!state.sessions[sessionKey]) {
+      return false;
+    }
+    delete state.sessions[sessionKey];
+    const tempFilePath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tempFilePath, JSON.stringify(state, null, 2), 'utf8');
+    fs.renameSync(tempFilePath, filePath);
+    return true;
+  });
 }
 
 export function stripAnsiControlCodes(text: string): string {
@@ -174,8 +295,21 @@ export function extractNativeSessionIdFromConversation(conversation: AgentConver
 }
 
 export function extractContinuationParentConversationId(output: string): number {
-  const match = String(output || '').match(/Continuation parent conversation:\s*(\d+)/);
-  return match ? Number(match[1]) : 0;
+  const text = String(output || '');
+  const userBoundary = [
+    text.indexOf('\n\nUser supplement:\n'),
+    text.indexOf('\n\nUser request:\n'),
+    text.indexOf('\n\nUser message:\n')
+  ].filter((index) => index >= 0).sort((left, right) => left - right)[0];
+  const trustedPrefix = userBoundary === undefined ? text : text.slice(0, userBoundary);
+  const match = trustedPrefix.match(/(?:^|\n)Continuation parent conversation:\s*(\d+)(?:\n|$)/);
+  if (!match || match.index === undefined) {
+    return 0;
+  }
+  const markerIndex = trustedPrefix.indexOf('Agent continuation started.');
+  return match.index === 0 || (markerIndex >= 0 && markerIndex < match.index)
+    ? Number(match[1])
+    : 0;
 }
 
 const codexTranscriptFilesCache = new Map<string, { expiresAt: number; files: string[] }>();
@@ -400,15 +534,15 @@ export function readRunTextFile(workspaceRoot: string, nodeId: string, conversat
 }
 
 export function readRunSessionId(workspaceRoot: string, nodeId: string, conversationId: number): string {
-  const sessionText = readRunTextFile(workspaceRoot, nodeId, conversationId, 'session.json');
-  if (!sessionText) {
-    return '';
-  }
+  return readCompatibleSessionId(path.join(getConversationRunDir(workspaceRoot, nodeId, conversationId), 'session.json'));
+}
+
+function blocksLegacySessionFallback(filePath: string): boolean {
   try {
-    const parsed = JSON.parse(sessionText);
-    return String(parsed?.sessionId || '').trim();
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Record<string, unknown>;
+    return value.version === 2;
   } catch {
-    return '';
+    return fs.existsSync(filePath);
   }
 }
 
@@ -417,20 +551,7 @@ export function recoverInterruptedNativeSessionId(
   nodeId: string,
   conversation: AgentConversation | null
 ): string {
-  if (!conversation || !workspaceRoot) {
-    return '';
-  }
-  const conversationId = Number(conversation.id || 0);
-  const runSessionId = readRunSessionId(workspaceRoot, nodeId, conversationId);
-  if (runSessionId) {
-    return runSessionId;
-  }
-  if (getContinuationAgentProvider(conversation.agentCli || '') === 'codex') {
-    return extractCodexSessionIdFromOutputText(
-      readRunTextFile(workspaceRoot, nodeId, conversationId, 'output.log')
-    );
-  }
-  return '';
+  return resolveNativeSessionIdForConversation(workspaceRoot, nodeId, conversation);
 }
 
 export function resolveContinuationLeafConversationFromList(
@@ -536,89 +657,69 @@ export function resolveContinuationRootConversationFromList(conversations: Agent
   return start;
 }
 
-function shouldRecoverCodexRunSessionIdentity(conversation: AgentConversation): boolean {
-  if (getContinuationAgentProvider(conversation.agentCli || '') !== 'codex') {
-    return false;
-  }
-  const output = String(conversation.output || '');
-  const hasInteractiveRunEvidence = /Interactive session (?:root|state):|Starting a new native\s+\S+\s+session\./i.test(output)
-    || /--no-alt-screen\b/.test(String(conversation.command || ''));
-  if (!hasInteractiveRunEvidence) {
-    return false;
-  }
-  const savedSessionId = extractSavedNativeSessionIdFromExecutionOutput(output);
-  const hasUnverifiedBareSessionMarker = /Native Agent session saved:\s*[A-Za-z0-9_.:-]+\s*(?:\r?\n|$)/.test(output);
-  return !savedSessionId || hasUnverifiedBareSessionMarker;
-}
-
 export function resolveNativeSessionIdForConversation(workspaceRoot: string, nodeId: string, conversation: AgentConversation | null): string {
-  if (!conversation) {
+  if (!conversation || !workspaceRoot) {
     return '';
   }
-  const savedSessionId = extractSavedNativeSessionIdFromExecutionOutput(conversation.output || '');
-  const continuationSessionId = extractContinuationSessionIdFromExecutionOutput(conversation.output || '');
-  const commandSessionId = extractNativeSessionIdFromConversation(conversation);
   const conversationId = Number(conversation.id || 0);
-  const runSessionId = workspaceRoot ? readRunSessionId(workspaceRoot, nodeId, conversationId) : '';
-  if (getContinuationAgentProvider(conversation.agentCli || '') !== 'codex' || !workspaceRoot) {
-    return runSessionId || savedSessionId || continuationSessionId || commandSessionId;
+  const runSessionFilePath = path.join(getConversationRunDir(workspaceRoot, nodeId, conversationId), 'session.json');
+  if (!fs.existsSync(runSessionFilePath)) {
+    return '';
+  }
+  try {
+    const binding = readSessionBinding(runSessionFilePath);
+    const resumable = getResumableSession(runSessionFilePath);
+    if (!resumable) {
+      return '';
+    }
+    const provider = getContinuationAgentProvider(conversation.agentCli || '');
+    const currentCliPath = resolveExecutableIdentityPath(conversation.agentCli || '')
+      || resolveExecutablePath(conversation.agentCli || '')
+      || String(conversation.agentCli || '');
+    const currentCliVersion = getAgentCliVersion(currentCliPath);
+    const head = binding.revisions[binding.headRevision - 1];
+    const codexContext = head?.providerContext?.codex as Record<string, unknown> | undefined;
+    const recordedCodexHome = String(codexContext?.codexHome || '').trim();
+    const currentCodexHome = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
+    if (binding.runId !== String(conversationId)
+      || resumable.runId !== String(conversationId)
+      || binding.provider !== provider
+      || path.resolve(binding.workspaceRoot) !== path.resolve(workspaceRoot)
+      || path.resolve(binding.cliPath) !== path.resolve(currentCliPath)
+      || (binding.cliVersion !== undefined && binding.cliVersion !== currentCliVersion)
+      || (provider === 'codex' && (!recordedCodexHome || path.resolve(recordedCodexHome) !== currentCodexHome))) {
+      return '';
+    }
+    return resumable.sessionId;
+  } catch {
+    if (blocksLegacySessionFallback(runSessionFilePath)) {
+      return '';
+    }
+  }
+  const runSessionId = readRunSessionId(workspaceRoot, nodeId, conversationId);
+  if (!runSessionId) {
+    return '';
+  }
+  if (getContinuationAgentProvider(conversation.agentCli || '') !== 'codex') {
+    return runSessionId;
   }
   const recordedCodexHome = readRunTextFile(workspaceRoot, nodeId, conversationId, 'codex-home.txt').trim();
   const codexHome = recordedCodexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-  const runDir = getConversationRunDir(workspaceRoot, nodeId, conversationId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const runStartedAtMatch = String(conversation.output || '').match(/Run started at:\s*([^\n]+)/);
-  let runStartedAt = String(runStartedAtMatch?.[1] || conversation.timestamp || '').trim();
-  try {
-    const startedAtPath = path.join(runDir, 'started_at');
-    if (fs.existsSync(startedAtPath)) {
-      runStartedAt = fs.statSync(startedAtPath).mtime.toISOString();
-    }
-  } catch {
-    // Fall back to the persisted conversation start time.
-  }
-  if (shouldRecoverCodexRunSessionIdentity(conversation)) {
-    const liveRunSessionId = findCodexSessionIdForRun(
-      codexHome,
-      workspaceRoot,
-      promptFilePath,
-      runStartedAt
-    );
-    if (liveRunSessionId) {
-      return liveRunSessionId;
-    }
-  }
-  const outputText = readRunTextFile(workspaceRoot, nodeId, conversationId, 'output.log');
-  const outputSessionId = extractCodexSessionIdFromOutputText(outputText);
-  const candidates = [runSessionId, outputSessionId, savedSessionId, continuationSessionId, commandSessionId]
-    .map((sessionId) => String(sessionId || '').trim())
-    .filter(Boolean)
-    .filter((sessionId, index, all) => all.indexOf(sessionId) === index);
-  for (const sessionId of candidates) {
-    if (findCodexTranscriptFile(codexHome, sessionId)) {
-      return sessionId;
-    }
-  }
-  return '';
+  return findCodexTranscriptFile(codexHome, runSessionId) ? runSessionId : '';
 }
 
 export function hydrateConversationContinuations(
   workspaceRoot: string,
   nodeId: string,
   conversations: AgentConversation[],
-  options: { validateCodexTranscript?: boolean; recoverRunSessionIdentity?: boolean } = {}
+  _options: { validateCodexTranscript?: boolean; recoverRunSessionIdentity?: boolean } = {}
 ): ContinuableAgentConversation[] {
   return conversations.map((conversation) => {
     const rootConversation = resolveContinuationRootConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
     const sessionConversation = resolveContinuationSessionConversationFromList(conversations, Number(conversation.id || 0)) || conversation;
-    const shouldResolveDirectSession = options.validateCodexTranscript !== false
-      || (options.recoverRunSessionIdentity === true && shouldRecoverCodexRunSessionIdentity(conversation));
-    const directSessionId = shouldResolveDirectSession
-      ? resolveNativeSessionIdForConversation(workspaceRoot, nodeId, conversation)
-      : extractNativeSessionIdFromConversation(conversation);
-    const sessionId = directSessionId || (options.validateCodexTranscript === false
-      ? extractNativeSessionIdFromConversation(sessionConversation)
-      : resolveNativeSessionIdForConversation(workspaceRoot, nodeId, sessionConversation));
+    const directSessionId = resolveNativeSessionIdForConversation(workspaceRoot, nodeId, conversation);
+    const sessionId = directSessionId
+      || resolveNativeSessionIdForConversation(workspaceRoot, nodeId, sessionConversation);
     return {
       ...conversation,
       ...(sessionId ? { resumableNativeSessionId: sessionId } : {}),

@@ -28,7 +28,7 @@ export function getTaskPermissionDetectionTokens(agentCli: string): string[] {
     '--always-approve',
     '--yolo'
   ];
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return ['--force'];
   }
   return commonTokens;
@@ -67,7 +67,7 @@ export function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return '--dangerously-bypass-approvals-and-sandbox';
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return '--force';
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -232,11 +232,56 @@ export function resolveExecutablePath(command: string): string {
   return resolveCommandOnSearchPath(trimmed) || expandHomePath(trimmed);
 }
 
+export function resolveExecutableIdentityPath(command: string): string {
+  const resolved = resolveExecutablePath(command);
+  if (!resolved) {
+    return '';
+  }
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return path.resolve(resolved);
+  }
+}
+
+const agentCliVersionCache = new Map<string, { mtimeMs: number; size: number; version: string }>();
+
+export function getAgentCliVersion(agentCli: string): string {
+  const executablePath = resolveExecutableIdentityPath(agentCli);
+  if (!executablePath) {
+    return '';
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(executablePath);
+  } catch {
+    return '';
+  }
+  const cached = agentCliVersionCache.get(executablePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.version;
+  }
+  const result = childProcess.spawnSync(executablePath, getCliVersionArgs(executablePath), {
+    encoding: 'utf8',
+    timeout: 3000,
+    windowsHide: true
+  });
+  const version = result.status === 0
+    ? String(result.stdout || result.stderr || '')
+      .replace(/\x1b\[[0-9;]*m/g, '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) || ''
+    : '';
+  agentCliVersionCache.set(executablePath, { mtimeMs: stat.mtimeMs, size: stat.size, version });
+  return version;
+}
+
 export function getAgentCliFamily(command: string): string {
   const name = path.basename((command || '').trim()).toLowerCase();
   if (['codex', 'codex-cli'].includes(name)) return 'codex';
   if (['claude', 'claude-code', 'claude-code-cli'].includes(name)) return 'claude';
-  if (['cursor', 'cursor-cli', 'cursor-agent'].includes(name)) return 'cursor';
+  if (['agent', 'cursor', 'cursor-cli', 'cursor-agent'].includes(name)) return 'cursor';
   if (['copilot', 'copilot-cli'].includes(name)) return 'copilot';
   if (['opencode', 'open-code', 'open-code-cli'].includes(name)) return 'opencode';
   if (name === 'grok') return 'grok';
@@ -262,7 +307,7 @@ export function getAgentModelFlag(agentCli: string, selectedModel = ''): string 
 export function getKnownAgentCliCandidates(family: string): string[] {
   if (family === 'codex') return ['codex', 'codex-cli'];
   if (family === 'claude') return ['claude', 'claude-code', 'claude-code-cli'];
-  if (family === 'cursor') return ['cursor-agent', 'cursor', 'cursor-cli'];
+  if (family === 'cursor') return ['cursor-agent', 'agent', 'cursor', 'cursor-cli'];
   if (family === 'copilot') return ['copilot', 'copilot-cli'];
   if (family === 'opencode') return ['opencode', 'open-code', 'open-code-cli'];
   if (family === 'grok') return ['grok'];
@@ -343,7 +388,7 @@ export function getAgentProvider(agentCli: string): string {
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return 'codex';
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return 'cursor';
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
@@ -376,7 +421,7 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPrompt}`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPrompt}`;
   }
 
@@ -413,7 +458,7 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPromptFileInstruction}`;
   }
 
@@ -436,30 +481,31 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
-export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = ''): string {
+export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', bindingNonce = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
   const newSessionSegment = newSessionId.trim() ? ` --session-id ${shellQuote(newSessionId)}` : '';
-  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.`;
+  const bindingInstruction = bindingNonce.trim() ? ` SoloMap binding nonce: ${bindingNonce}.` : '';
+  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.${bindingInstruction}`;
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `${quotedCli} --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedInstruction}`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${permissionSegment}${modelSegment} ${quotedInstruction})`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `${quotedCli} --prompt-interactive${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+    return `${quotedCli}${newSessionSegment}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
-    return `${quotedCli} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
+    return `${quotedCli}${newSessionSegment} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${modelSegment} --prompt ${quotedInstruction})`;
@@ -469,6 +515,25 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
   }
 
   return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} ${quotedInstruction})`;
+}
+
+export function buildInteractiveCursorCommandForPromptFileWithSessionEnv(
+  agentCli: string,
+  promptFilePath: string,
+  workspaceRoot: string,
+  sessionEnvName: string,
+  taskPermissionMode = 'auto',
+  selectedModel = ''
+): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(sessionEnvName)) {
+    throw new Error(`Invalid Cursor session environment variable: ${sessionEnvName}`);
+  }
+  const quotedCli = shellQuote(agentCli);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
+  const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
+  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.`;
+  return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume "$${sessionEnvName}"${permissionSegment}${modelSegment} ${shellQuote(promptFileInstruction)})`;
 }
 
 export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = ''): string {
@@ -487,7 +552,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `${quotedCli} resume --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedSessionId} ${quotedInstruction}`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction})`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
@@ -522,7 +587,7 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `cat ${quotedPromptFile} | ${quotedCli} --print --mode plan --sandbox --print-timeout 5m${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p --mode plan --sandbox enabled${modelSegment} --output-format text ${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
@@ -551,7 +616,7 @@ export function buildAgentContinuationCommandForPromptFile(agentCli: string, pro
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `cat ${quotedPromptFile} | ${quotedCli} --print --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p --resume ${quotedSessionId}${permissionSegment}${modelSegment} --output-format text ${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
@@ -577,7 +642,7 @@ export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: s
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${promptExpression}`;
   }
 
@@ -610,7 +675,7 @@ export function buildNativeContinueCommand(agentCli: string, sessionId: string, 
   if (executableName === 'codex' || executableName === 'codex-cli') {
     return `${quotedCli} resume --include-non-interactive --all -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
   }
-  if (executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
+  if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId})`;
   }
 
