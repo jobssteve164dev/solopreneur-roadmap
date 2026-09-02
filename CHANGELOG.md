@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.454 - 2026-09-02
+
+### Fixed
+- preserve native sessions across cli upgrades (63d93e1)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.453 - 2026-09-02
 
 ### Fixed
