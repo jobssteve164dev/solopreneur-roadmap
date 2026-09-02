@@ -230,6 +230,7 @@ import {
   extractSavedNativeSessionIdFromExecutionOutput,
   findCodexTranscriptFile,
   getAgentSessionKey,
+  getConversationRunDir,
   getStepSessionFilePath,
   getStoredAgentSession,
   readRunSessionId,
@@ -254,7 +255,7 @@ import {
   SessionIdentityContract,
   SessionIdentityMethod
 } from './sessionIdentity';
-import { locateCodexSessionByBindingNonce } from './codexSessionIdentity';
+import { locateCodexSessionByBindingNonce, readCodexTurnCompletionSince } from './codexSessionIdentity';
 
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
@@ -3800,6 +3801,76 @@ function resolveNativeSessionIdForConversation(nodeId: string, conversation: Age
   return resolveNativeSessionIdForConversationFromWorkspace(activeProjectRoot || '', nodeId, conversation);
 }
 
+async function recoverCodexSessionIdentityForConversation(
+  nodeId: string,
+  conversation: AgentConversation | null
+): Promise<void> {
+  const workspaceRoot = activeProjectRoot || '';
+  if (!workspaceRoot || !conversation || getAgentProvider(String(conversation.agentCli || '')) !== 'codex') return;
+  const sessionFilePath = path.join(
+    getConversationRunDir(workspaceRoot, nodeId, Number(conversation.id || 0)),
+    'session.json'
+  );
+  if (!fs.existsSync(sessionFilePath)) return;
+  try {
+    await observeCodexCompatibilitySession(sessionFilePath, workspaceRoot);
+  } catch {
+    // Continue remains unavailable unless the exact binding can be confirmed.
+  }
+}
+
+function getConfirmedCodexResumeContext(
+  workspaceRoot: string,
+  nodeId: string,
+  conversation: AgentConversation | null,
+  sessionId: string
+): { transcriptPath: string } | null {
+  if (
+    !workspaceRoot
+    || !conversation
+    || !sessionId
+    || getAgentProvider(String(conversation.agentCli || '')) !== 'codex'
+  ) {
+    return null;
+  }
+  const conversations = syncEngine?.getAgentExecutions(nodeId) || [];
+  const byId = new Map<number, AgentConversation>();
+  conversations.forEach((entry) => byId.set(Number(entry.id || 0), entry));
+  byId.set(Number(conversation.id || 0), conversation);
+  const seen = new Set<number>();
+  let current: AgentConversation | null = conversation;
+  while (current) {
+    const conversationId = Number(current.id || 0);
+    if (!conversationId || seen.has(conversationId)) break;
+    seen.add(conversationId);
+    const sessionFilePath = path.join(
+      getConversationRunDir(workspaceRoot, nodeId, conversationId),
+      'session.json'
+    );
+    try {
+      const binding = readSessionBinding(sessionFilePath);
+      const resumable = getResumableSession(sessionFilePath);
+      const head = binding.revisions[binding.headRevision - 1];
+      const transcriptPath = String(head?.evidence?.transcriptPath || '').trim();
+      if (
+        binding.provider === 'codex'
+        && binding.runId === String(conversationId)
+        && path.resolve(binding.workspaceRoot) === path.resolve(workspaceRoot)
+        && resumable?.sessionId === sessionId
+        && transcriptPath
+        && fs.statSync(transcriptPath).isFile()
+      ) {
+        return { transcriptPath: path.resolve(transcriptPath) };
+      }
+    } catch {
+      // Continue through the declared parent lineage only.
+    }
+    const parentId = extractContinuationParentConversationId(String(current.output || ''));
+    current = parentId ? byId.get(Number(parentId)) || null : null;
+  }
+  return null;
+}
+
 function buildWorkspaceSnapshotScript(workspaceRoot: string, snapshotFilePath: string): string {
   return `node -e ${shellQuote([
     'const fs=require("fs");',
@@ -4802,6 +4873,22 @@ function buildAgentShellScript(
     ? 'resume'
     : effectiveNativeSessionId.trim() ? 'fresh-with-reference' : 'fresh';
   const startedAt = new Date().toISOString();
+  const codexResumeTranscriptPath = agentProvider === 'codex' && trackedNativeContinuation
+    ? String(statusMetadata.codexResumeTranscriptPath || '').trim()
+    : '';
+  let codexResumeTranscriptCursor = 0;
+  let confirmedCodexContinuation = false;
+  if (codexResumeTranscriptPath) {
+    try {
+      const transcriptStat = fs.statSync(codexResumeTranscriptPath);
+      if (transcriptStat.isFile()) {
+        codexResumeTranscriptCursor = transcriptStat.size;
+        confirmedCodexContinuation = true;
+      }
+    } catch {
+      // A continuation without its confirmed transcript stays non-resumable.
+    }
+  }
   const defaultExecutionCommand = providerCreatedCursorSession
     ? buildInteractiveCursorCommandForPromptFileWithSessionEnv(agentCli, promptFilePath, effectiveWorkspaceRoot, 'solomap_cursor_session_id', effectiveTaskPermissionMode, effectiveSelectedModel)
     : interactiveSession
@@ -4810,11 +4897,6 @@ function buildAgentShellScript(
   const loggedCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
-  const nativeSessionIdIsCurrent = Boolean(
-    effectiveDirectExecutionCommand
-    && effectiveNativeSessionId.trim()
-    && !version2IdentityBinding
-  );
   let sessionBindingHeadRevision = 0;
   if (version2IdentityBinding) {
     createSessionBinding(sessionFilePath, {
@@ -4841,9 +4923,28 @@ function buildAgentShellScript(
         evidence: { source: trackedNativeContinuation ? 'confirmed_resume_target' : 'official_cli_parameter' }
       });
       sessionBindingHeadRevision = 2;
+      if (confirmedCodexContinuation) {
+        const confirmed = confirmSessionBinding(
+          sessionFilePath,
+          sessionBindingHeadRevision,
+          plannedNativeSessionId,
+          startedAt,
+          {
+            source: 'confirmed_resume_target',
+            transcriptPath: path.resolve(codexResumeTranscriptPath)
+          }
+        );
+        sessionBindingHeadRevision = confirmed.headRevision;
+      }
     }
   }
-  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, previousNativeSessionId: effectiveNativeSessionId, plannedNativeSessionId, nativeSessionId: nativeSessionIdIsCurrent ? effectiveNativeSessionId : '', nativeSessionIdIsCurrent, sessionBindingHeadRevision, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...statusMetadata };
+  const nativeSessionIdIsCurrent = Boolean(
+    effectiveDirectExecutionCommand
+    && effectiveNativeSessionId.trim()
+    && (!version2IdentityBinding || confirmedCodexContinuation)
+  );
+  const { codexResumeTranscriptPath: _codexResumeTranscriptPath, ...persistedStatusMetadata } = statusMetadata;
+  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, previousNativeSessionId: effectiveNativeSessionId, plannedNativeSessionId, nativeSessionId: nativeSessionIdIsCurrent ? effectiveNativeSessionId : '', nativeSessionIdIsCurrent, sessionBindingHeadRevision, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...(confirmedCodexContinuation ? { codexTranscriptCursor: codexResumeTranscriptCursor } : {}), ...persistedStatusMetadata };
   const runningStatus = JSON.stringify({
     ...statusBase,
     status: interactiveSession && statusMetadata.startWaiting === true ? 'Waiting' : 'Running'
@@ -6695,9 +6796,17 @@ async function handleContinueConversationTurn(
     return;
   }
   const sessionConversation = resolveContinuationSessionConversation(nodeId, parentConversationId) || parentConversation;
+  await recoverCodexSessionIdentityForConversation(nodeId, sessionConversation);
   const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
   if (!sessionId) {
     vscode.window.showErrorMessage('No resumable native Agent session ID was recorded for this conversation.');
+    return;
+  }
+  const codexResumeContext = getAgentProvider(agentCli) === 'codex'
+    ? getConfirmedCodexResumeContext(activeProjectRoot, nodeId, sessionConversation, sessionId)
+    : null;
+  if (getAgentProvider(agentCli) === 'codex' && !codexResumeContext) {
+    vscode.window.showErrorMessage('No confirmed native Codex transcript was recorded for this conversation.');
     return;
   }
 
@@ -6774,7 +6883,8 @@ async function handleContinueConversationTurn(
     settings.collaborationReviewMode,
     settings.enabledEnhancements,
     runDir,
-    statusFilePath
+    statusFilePath,
+    codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}
   );
   await launchAgentConversationTerminal({
     workspaceRoot: activeProjectRoot,
@@ -6815,6 +6925,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   }
 
   const sessionConversation = resolveContinuationSessionConversation(nodeId, conversationId) || conversation;
+  await recoverCodexSessionIdentityForConversation(nodeId, sessionConversation);
   const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
   if (!sessionId) {
     vscode.window.showInformationMessage('No native Agent session ID was recorded for this conversation.');
@@ -6824,6 +6935,13 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   const agentCli = resolveAgentCli(sessionConversation.agentCli || conversation.agentCli || '', '');
   if (!commandExists(agentCli)) {
     vscode.window.showErrorMessage(`Agent CLI not found for native continuation: ${conversation.agentCli || agentCli}`);
+    return;
+  }
+  const codexResumeContext = getAgentProvider(agentCli) === 'codex'
+    ? getConfirmedCodexResumeContext(activeProjectRoot, nodeId, sessionConversation, sessionId)
+    : null;
+  if (getAgentProvider(agentCli) === 'codex' && !codexResumeContext) {
+    vscode.window.showErrorMessage('No confirmed native Codex transcript was recorded for this conversation.');
     return;
   }
 
@@ -6871,7 +6989,8 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     settings.collaborationReviewMode,
     settings.enabledEnhancements,
     runDir,
-    statusFilePath
+    statusFilePath,
+    codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}
   );
   await launchAgentConversationTerminal({
     workspaceRoot: activeProjectRoot,
@@ -8774,10 +8893,10 @@ function ensureInteractiveTurnExecution(
   return { executionLogId, userMessage, startedAt };
 }
 
-function observeCodexCompatibilitySession(
+async function observeCodexCompatibilitySession(
   sessionFilePath: string,
   workspaceRoot: string
-): { state: 'confirmed' | 'conflict' | 'preparing'; sessionId: string; headRevision: number } {
+): Promise<{ state: 'confirmed' | 'conflict' | 'preparing'; sessionId: string; headRevision: number }> {
   const binding = readSessionBinding(sessionFilePath);
   const resumable = getResumableSession(sessionFilePath);
   if (resumable) {
@@ -8793,7 +8912,7 @@ function observeCodexCompatibilitySession(
   }
   const codexContext = head.providerContext?.codex as Record<string, unknown> | undefined;
   const codexHome = String(codexContext?.codexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
-  const located = locateCodexSessionByBindingNonce({
+  const located = await locateCodexSessionByBindingNonce({
     codexHome,
     workspaceRoot,
     bindingNonce: binding.bindingNonce,
@@ -8850,6 +8969,90 @@ function observeCodexCompatibilitySession(
     evidence
   );
   return { state: 'confirmed', sessionId: located.sessionId, headRevision: confirmed.headRevision };
+}
+
+async function promoteCompletedNativeCodexTurn(
+  statusFilePath: string,
+  statusData: Record<string, any>,
+  workspaceRoot: string
+): Promise<boolean> {
+  if (
+    statusData.interactiveSession !== true
+    || String(statusData.sessionProvider || '') !== 'codex'
+    || !statusData.sessionFilePath
+  ) {
+    return false;
+  }
+  const sessionFilePath = String(statusData.sessionFilePath);
+  try {
+    const observation = await observeCodexCompatibilitySession(sessionFilePath, workspaceRoot);
+    if (observation.state !== 'confirmed' || !observation.sessionId) return false;
+    const binding = readSessionBinding(sessionFilePath);
+    const head = binding.revisions[binding.headRevision - 1];
+    const transcriptPath = String(head?.evidence?.transcriptPath || '').trim();
+    const currentStatus = readAgentStatus(statusFilePath);
+    if (
+      String(currentStatus?.status || '') !== 'Running'
+      || Number(currentStatus?.executionLogId || 0) !== Number(statusData.executionLogId || 0)
+      || Number(currentStatus?.checkpointSequence || 0) !== Number(statusData.checkpointSequence || 0)
+    ) {
+      return false;
+    }
+    const completionRead = await readCodexTurnCompletionSince(
+      transcriptPath,
+      String(statusData.turnStartedAt || statusData.startedAt || binding.createdAt),
+      Number(currentStatus.codexTranscriptCursor || 0)
+    );
+    const latestStatus = readAgentStatus(statusFilePath);
+    if (
+      String(latestStatus?.status || '') !== 'Running'
+      || Number(latestStatus?.executionLogId || 0) !== Number(currentStatus.executionLogId || 0)
+      || Number(latestStatus?.checkpointSequence || 0) !== Number(currentStatus.checkpointSequence || 0)
+    ) {
+      return false;
+    }
+    const completion = completionRead.completion;
+    if (!completion?.turnId) {
+      if (
+        Number(latestStatus.codexTranscriptCursor || 0) !== completionRead.nextOffset
+        || String(latestStatus.nativeSessionId || '') !== observation.sessionId
+        || Number(latestStatus.sessionBindingHeadRevision || 0) !== observation.headRevision
+      ) {
+        const observedStatus = {
+          ...latestStatus,
+          plannedNativeSessionId: observation.sessionId,
+          nativeSessionId: observation.sessionId,
+          nativeSessionIdIsCurrent: true,
+          sessionBindingHeadRevision: observation.headRevision,
+          codexTranscriptCursor: completionRead.nextOffset
+        };
+        writeAgentStatus(statusFilePath, observedStatus);
+        Object.assign(statusData, observedStatus);
+      }
+      return false;
+    }
+    const nextStatus = {
+      ...latestStatus,
+      status: 'In Progress',
+      plannedNativeSessionId: observation.sessionId,
+      nativeSessionId: observation.sessionId,
+      nativeSessionIdIsCurrent: true,
+      sessionBindingHeadRevision: observation.headRevision,
+      codexTranscriptCursor: completionRead.nextOffset,
+      checkpointSequence: Number(latestStatus.checkpointSequence || 0) + 1,
+      checkpointEventId: `codex:${observation.sessionId}:${completion.turnId}`,
+      checkpointOutcome: 'partial',
+      checkpointSummary: compactLine(completion.lastAgentMessage || '本轮回复已完成。', 500),
+      checkpointNext: '',
+      checkpointAt: completion.completedAt,
+      checkpointImplicitTurn: false
+    };
+    writeAgentStatus(statusFilePath, nextStatus);
+    Object.assign(statusData, nextStatus);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function markSessionBindingUnavailable(sessionFilePath: string, errorCode = 'identity_not_observed'): void {
@@ -8947,13 +9150,20 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       }
       return;
     }
-    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId: statusExecutionLogId, userMessage: statusUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, nativeSessionIdIsCurrent, sessionMode, startedAt: statusStartedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId, reviewMainAgentCli, reviewMainNativeSessionId, reviewAttempt, reviewTaskGoal, reviewCompletionCriteria } = statusData;
+    const { nodeId, runKind, roadmapBackupFilePath, globalDataPath, status: recordedStatus, agentCli, command, commandPreview, commandFilePath, promptFilePath, executionLogId: statusExecutionLogId, userMessage: statusUserMessage, outputFilePath, changesFilePath, touchedFilesPath, completionDecisionFilePath, sessionFilePath, codexHomeFilePath, nativeSessionId, nativeSessionIdIsCurrent, sessionMode, startedAt: statusStartedAt, reviewerCliPath, collaborationReviewMode, reviewResultFilePath, reviewTargetStatus, reviewOfExecutionLogId, reviewMainAgentCli, reviewMainNativeSessionId, reviewAttempt, reviewTaskGoal, reviewCompletionCriteria } = statusData;
     let executionLogId = Number(statusExecutionLogId || 0);
     let userMessage = String(statusUserMessage || '');
     let startedAt = String(statusStartedAt || '');
+    let status = String(recordedStatus || '');
 
-    if (!nodeId || !status || status === 'Running' || status === 'Waiting' || status === 'Processed') {
+    if (!nodeId || !status || status === 'Waiting' || status === 'Processed') {
       return;
+    }
+    if (status === 'Running') {
+      if (!await promoteCompletedNativeCodexTurn(normalizedStatusFilePath, statusData, workspaceRoot)) {
+        return;
+      }
+      status = 'In Progress';
     }
     let statusSyncEngine = isActiveProject ? syncEngine : null;
     if (!statusSyncEngine && workspaceRoot && extensionContextRef) {
@@ -8990,7 +9200,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           const binding = readSessionBinding(String(sessionFilePath));
           hasVersion2SessionBinding = true;
           if (binding.provider === 'codex') {
-            observeCodexCompatibilitySession(String(sessionFilePath), workspaceRoot);
+            await observeCodexCompatibilitySession(String(sessionFilePath), workspaceRoot);
           }
           capturedSessionId = readCompatibleSessionId(String(sessionFilePath));
           if (!capturedSessionId) {
@@ -9072,7 +9282,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       let codexConfirmedSessionId = '';
       if (sessionProvider === 'codex' && sessionFilePath) {
         try {
-          const observation = observeCodexCompatibilitySession(String(sessionFilePath), workspaceRoot);
+          const observation = await observeCodexCompatibilitySession(String(sessionFilePath), workspaceRoot);
           confirmedBindingHeadRevision = observation.headRevision;
           if (observation.state === 'confirmed') {
             codexConfirmedSessionId = observation.sessionId;
@@ -9199,7 +9409,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       try {
         const binding = readSessionBinding(String(sessionFilePath));
         if (statusData.interactiveSession === true && binding.provider === 'codex') {
-          observeCodexCompatibilitySession(String(sessionFilePath), workspaceRoot);
+          await observeCodexCompatibilitySession(String(sessionFilePath), workspaceRoot);
         }
         if (!getResumableSession(String(sessionFilePath))) {
           confirmPlannedSessionFromCheckpoint(
@@ -9887,7 +10097,15 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 function isPendingAgentStatusFile(statusFilePath: string): boolean {
   const statusData = readAgentStatus(statusFilePath);
   const status = String(statusData?.status || '');
-  return Boolean(statusData?.nodeId && status && !['Running', 'Waiting', 'Processed'].includes(status));
+  if (status === 'Running') {
+    return Boolean(
+      statusData?.nodeId
+      && statusData?.interactiveSession === true
+      && String(statusData?.sessionProvider || '') === 'codex'
+      && statusData?.sessionFilePath
+    );
+  }
+  return Boolean(statusData?.nodeId && status && !['Waiting', 'Processed'].includes(status));
 }
 
 function migrateLegacyActiveConversations(context: vscode.ExtensionContext): void {
