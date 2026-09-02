@@ -6467,7 +6467,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommand('opencode', 'Ship the MVP', '/workspace/app'),
-    "(cd '/workspace/app' && 'opencode' run 'Ship the MVP')"
+    "(cd '/workspace/app' && 'opencode' run --auto 'Ship the MVP')"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
@@ -6498,7 +6498,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('opencode', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "(cd '/workspace/app' && 'opencode' run 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.')"
+    "(cd '/workspace/app' && 'opencode' run --auto 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.')"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto', 'gpt-5.5'),
@@ -6617,7 +6617,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__getTaskPermissionArgs('opencode', 'always'),
-    ''
+    '--auto'
   );
   const configuredAgyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agy-wrapper-'));
   const configuredAgyPath = path.join(configuredAgyDir, 'agy');
@@ -6648,7 +6648,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('opencode', 'agent_prompt', '/workspace/app'),
-    "'opencode' run \"$agent_prompt\""
+    "'opencode' run --auto \"$agent_prompt\""
   );
   assert.equal(
     JSON.stringify(extensionModule.__getAgentCliCandidates('antigravity-cli', 'agy').slice(0, 4)),
@@ -6820,7 +6820,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(sidebarModule.__buildAgentInstallCommand('copilot'), /npm install -g @github\/copilot/);
   assert.match(sidebarModule.__buildAgentInstallCommand('opencode'), /npm install -g opencode-ai/);
   assert.match(sidebarModule.__buildAgentInstallCommand('agy'), /https:\/\/antigravity\.google\/cli\/install\.sh/);
-  assert.match(sidebarModule.__buildAgentInstallCommand('cursor'), /Cursor CLI/);
+  assert.match(sidebarModule.__buildAgentInstallCommand('cursor'), /https:\/\/cursor\.com\/install/);
 
   const cliHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cli-home-'));
   const fakeCliPath = path.join(cliHome, '.local', 'bin', 'solo-test-agent');

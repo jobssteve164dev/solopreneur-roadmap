@@ -31,6 +31,9 @@ export function getTaskPermissionDetectionTokens(agentCli: string): string[] {
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return ['--force'];
   }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return ['--auto'];
+  }
   return commonTokens;
 }
 
@@ -78,6 +81,9 @@ export function getTaskPermissionArgs(agentCli: string, mode = 'auto'): string {
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return '--allow-all --no-ask-user';
+  }
+  if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
+    return '--auto';
   }
   if (executableName === 'grok') {
     return '--always-approve';
@@ -435,7 +441,7 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
     return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPrompt})`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${permissionSegment}${modelSegment} ${quotedPrompt})`;
   }
   if (executableName === 'grok') {
     return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format plain -p ${quotedPrompt}`;
@@ -472,7 +478,7 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
     return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${modelSegment} ${quotedPromptFileInstruction})`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} run${permissionSegment}${modelSegment} ${quotedPromptFileInstruction})`;
   }
   if (executableName === 'grok') {
     return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)}${newSessionSegment}${permissionSegment}${modelSegment} --output-format plain -p ${quotedPromptFileInstruction}`;
@@ -508,7 +514,7 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
     return `${quotedCli}${newSessionSegment} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${modelSegment} --prompt ${quotedInstruction})`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${permissionSegment}${modelSegment} --prompt ${quotedInstruction})`;
   }
   if (executableName === 'grok') {
     return `${quotedCli} --no-auto-update --no-alt-screen --cwd ${shellQuote(workspaceRoot)}${newSessionSegment}${permissionSegment}${modelSegment} ${quotedInstruction}`;
@@ -565,7 +571,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
     return `${quotedCli} --resume=${quotedSessionId} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --session ${quotedSessionId}${modelSegment} --prompt ${quotedInstruction})`;
+    return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --session ${quotedSessionId}${permissionSegment}${modelSegment} --prompt ${quotedInstruction})`;
   }
   if (executableName === 'grok') {
     return `${quotedCli} --no-auto-update --no-alt-screen --cwd ${shellQuote(workspaceRoot)} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction}`;
@@ -656,7 +662,7 @@ export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: s
     return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
   }
   if (executableName === 'opencode' || executableName === 'open-code' || executableName === 'open-code-cli') {
-    return `${quotedCli} run${modelSegment} ${promptExpression}`;
+    return `${quotedCli} run${permissionSegment}${modelSegment} ${promptExpression}`;
   }
   if (executableName === 'grok') {
     return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format plain -p ${promptExpression}`;

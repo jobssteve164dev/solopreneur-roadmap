@@ -116,10 +116,13 @@ export function buildAgentInstallCommand(cliPath: string): string {
   const family = getAgentCliFamily(cliPath || 'agy');
   const verifyCandidates = getKnownAgentCliCandidates(family)
     .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+  const userLocalFallback = family === 'cursor'
+    ? 'if [ -z "$resolved_cli" ] && [ -x "$HOME/.local/bin/$c" ]; then resolved_cli="$HOME/.local/bin/$c"; fi; '
+    : '';
   const verifyScript = [
     'echo ""',
     'echo "SoloMap: verifying Agent CLI..."',
-    `for c in ${verifyCandidates.map(shellQuote).join(' ')}; do if command -v "$c" >/dev/null 2>&1; then echo "SoloMap: found $(command -v "$c")"; "$c" --version || true; exit 0; fi; done`,
+    `for c in ${verifyCandidates.map(shellQuote).join(' ')}; do resolved_cli="$(command -v "$c" 2>/dev/null || true)"; ${userLocalFallback}if [ -n "$resolved_cli" ]; then echo "SoloMap: found $resolved_cli"; "$resolved_cli" --version || true; exit 0; fi; done`,
     'echo "SoloMap: install command finished, but the CLI is not visible in this terminal PATH yet."',
     'echo "SoloMap: restart VS Code/code-server or paste the executable absolute path into SoloMap settings."'
   ].join('; ');
@@ -130,13 +133,7 @@ export function buildAgentInstallCommand(cliPath: string): string {
   if (family === 'opencode') return `npm install -g opencode-ai; ${verifyScript}`;
   if (family === 'antigravity') return `curl -fsSL https://antigravity.google/cli/install.sh | bash; ${verifyScript}`;
   if (family === 'grok') return `curl -fsSL https://x.ai/cli/install.sh | bash; ${verifyScript}`;
-  if (family === 'cursor') {
-    return [
-      'echo "SoloMap: Cursor CLI is installed from the Cursor app command palette."',
-      'echo "Open Cursor, run the command to install the cursor command, then return here and click Check."',
-      'echo "If the command already exists, paste its absolute path into SoloMap settings."'
-    ].join('; ');
-  }
+  if (family === 'cursor') return `curl https://cursor.com/install -fsS | bash; ${verifyScript}`;
   return [
     `echo "SoloMap: no built-in installer is available for ${String(cliPath || 'this custom CLI').replace(/"/g, '\\"')}."`,
     'echo "Install that CLI with its official installer, then paste its executable absolute path into SoloMap settings."'
@@ -169,7 +166,10 @@ export function buildAgentAutomationWrapper(
   const wrapperDir = path.join(normalizeGlobalDataPath(globalDataPath, projects), 'agent-cli');
   const wrapperPath = path.join(wrapperDir, wrapperName);
   fs.mkdirSync(wrapperDir, { recursive: true });
-  fs.writeFileSync(wrapperPath, `#!/bin/sh\nexec ${shellQuote(agentCli)} ${automation.permissionArgs} "$@"\n`, {
+  const wrapperScript = family === 'opencode'
+    ? `#!/bin/sh\nif [ "$1" = "run" ]; then\n  shift\n  exec ${shellQuote(agentCli)} run ${automation.permissionArgs} "$@"\nfi\nexec ${shellQuote(agentCli)} ${automation.permissionArgs} "$@"\n`
+    : `#!/bin/sh\nexec ${shellQuote(agentCli)} ${automation.permissionArgs} "$@"\n`;
+  fs.writeFileSync(wrapperPath, wrapperScript, {
     encoding: 'utf8',
     mode: 0o755
   });
