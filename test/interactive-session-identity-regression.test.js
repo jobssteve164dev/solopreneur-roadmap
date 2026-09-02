@@ -370,7 +370,7 @@ test('the official Cursor agent alias resumes its confirmed version 2 binding', 
   }), sessionId);
 });
 
-test('a confirmed binding cannot resume after the CLI at the same path changes version', () => {
+test('a confirmed binding remains resumable after the CLI at the same path changes version', () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cli-version-binding-'));
   const fakeBinRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cli-version-bin-'));
   const fakeClaudePath = path.join(fakeBinRoot, 'claude');
@@ -404,7 +404,7 @@ test('a confirmed binding cannot resume after the CLI at the same path changes v
     command: `${fakeClaudePath} --resume`,
     output: '',
     status: 'Completed'
-  }), '');
+  }), sessionId);
 });
 
 test('the step session index is only a pointer to the still-confirmed run binding', () => {

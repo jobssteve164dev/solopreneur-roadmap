@@ -10106,6 +10106,75 @@ test('closing Codex without an exact nonce match records unavailable and never g
   assert.equal(fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json')), false);
 });
 
+test('a confirmed Codex conversation remains resumable after the CLI is upgraded', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__resolveNativeSessionIdForConversation = resolveNativeSessionIdForConversation;',
+      'module.exports.__setActiveProjectRootForSessionTest = (projectRoot) => { activeProjectRoot = projectRoot; };'
+    ].join('\n')
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-upgrade-resume-'));
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-upgrade-home-'));
+  const cliRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-upgrade-cli-'));
+  const mockCodexPath = path.join(cliRoot, 'codex');
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '341');
+  const sessionFilePath = path.join(runDir, 'session.json');
+  const sessionId = '01a0604c-9356-7643-aa7a-fa8a9510ba7a';
+  const transcriptPath = path.join(codexHome, 'sessions', '2026', '09', '02', `rollout-${sessionId}.jsonl`);
+  fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(mockCodexPath, '#!/bin/sh\necho codex-cli 0.152.1\n', 'utf8');
+  fs.chmodSync(mockCodexPath, 0o755);
+  fs.writeFileSync(transcriptPath, JSON.stringify({
+    timestamp: '2026-09-02T04:07:06.360Z',
+    type: 'session_meta',
+    payload: { id: sessionId, session_id: sessionId, cwd: workspaceRoot }
+  }) + '\n', 'utf8');
+
+  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
+  identity.createSessionBinding(sessionFilePath, {
+    runId: '341',
+    provider: 'codex',
+    workspaceRoot,
+    cliPath: mockCodexPath,
+    cliVersion: 'codex-cli 0.151.0',
+    bindingNonce: '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+    method: 'transcript_correlated_compat',
+    contract: 'compatibility',
+    providerContext: { codex: { codexHome } }
+  });
+  identity.appendSessionBindingRevision(sessionFilePath, 1, {
+    sessionId,
+    method: 'transcript_correlated_compat',
+    contract: 'compatibility',
+    state: 'planned',
+    providerContext: { codex: { codexHome } },
+    evidence: { source: 'codex_transcript_binding_nonce', transcriptPath }
+  });
+  identity.confirmSessionBinding(sessionFilePath, 2, sessionId, '2026-09-02T04:07:16.092Z', {
+    source: 'codex_transcript_binding_nonce',
+    transcriptPath
+  });
+
+  extensionModule.__setActiveProjectRootForSessionTest(workspaceRoot);
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  try {
+    assert.equal(extensionModule.__resolveNativeSessionIdForConversation('__solo__', {
+      id: 341,
+      nodeId: '__solo__',
+      agentCli: mockCodexPath,
+      command: 'codex',
+      output: 'Interactive session state: Closed',
+      status: 'Completed'
+    }), sessionId);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+  }
+});
+
 test('a damaged version 2 binding never falls back to a stale native session ID', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',

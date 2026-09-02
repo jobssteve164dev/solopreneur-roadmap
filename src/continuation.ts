@@ -676,7 +676,6 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
     const currentCliPath = resolveExecutableIdentityPath(conversation.agentCli || '')
       || resolveExecutablePath(conversation.agentCli || '')
       || String(conversation.agentCli || '');
-    const currentCliVersion = getAgentCliVersion(currentCliPath);
     const head = binding.revisions[binding.headRevision - 1];
     const codexContext = head?.providerContext?.codex as Record<string, unknown> | undefined;
     const recordedCodexHome = String(codexContext?.codexHome || '').trim();
@@ -686,7 +685,6 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
       || binding.provider !== provider
       || path.resolve(binding.workspaceRoot) !== path.resolve(workspaceRoot)
       || path.resolve(binding.cliPath) !== path.resolve(currentCliPath)
-      || (binding.cliVersion !== undefined && binding.cliVersion !== currentCliVersion)
       || (provider === 'codex' && (!recordedCodexHome || path.resolve(recordedCodexHome) !== currentCodexHome))) {
       return '';
     }
