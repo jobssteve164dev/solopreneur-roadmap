@@ -11653,6 +11653,115 @@ test('continuing a stopped interactive conversation opens a new terminal and set
     && Number(message.conversationId) === 336));
 });
 
+test('continuing an earlier turn reuses the open root session terminal', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
+      'module.exports.__setOpenLineageContinueRuntimeForTest = (engine, projectRoot, rootConversationId, terminal, reveal, continueConversation, registerTurn) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(rootConversationId), terminal.name); agentTerminalProjectRootsByConversationId.set(Number(rootConversationId), projectRoot); vscode.window.terminals.push(terminal); revealAgentStartupTerminal = reveal; ensureActionProject = async () => projectRoot; handleContinueNativeConversation = continueConversation; registerInteractiveConversationTurn = registerTurn; postNodeConversations = () => {}; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-open-lineage-'));
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '336.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: tempRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Waiting',
+    executionLogId: 340,
+    rootExecutionLogId: 336,
+    interactiveSession: true,
+    interactiveSessionClosed: false,
+    terminalName: 'solomap open root terminal'
+  }), 'utf8');
+  const conversations = [
+    { id: 336, nodeId: '__solo__', agentCli: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' },
+    { id: 338, nodeId: '__solo__', agentCli: 'codex', output: 'Agent continuation started.\n\nContinuation parent conversation: 336', status: 'Completed' },
+    { id: 340, nodeId: '__solo__', agentCli: 'codex', output: 'Agent continuation started.\n\nContinuation parent conversation: 338', status: 'Completed' }
+  ];
+  let terminalShown = 0;
+  let startupTerminalRevealed = 0;
+  let nativeContinuationStarted = 0;
+  const registrations = [];
+  extensionModule.__setOpenLineageContinueRuntimeForTest(
+    { getAgentExecutions: () => conversations, getProjectAgentExecutions: () => conversations },
+    tempRoot,
+    336,
+    { name: 'solomap open root terminal', show() { terminalShown += 1; } },
+    async () => { startupTerminalRevealed += 1; },
+    async () => { nativeContinuationStarted += 1; },
+    async (workspaceRoot, conversationId) => { registrations.push({ workspaceRoot, conversationId }); return true; }
+  );
+
+  await extensionModule.__handleSharedWebviewAction(
+    { globalState: { get: () => ({}) } },
+    { command: 'conversation.continue', projectPath: tempRoot, nodeId: '__solo__', conversationId: 338 },
+    'sidebar',
+    { postMessage() { return Promise.resolve(true); } }
+  );
+
+  assert.equal(startupTerminalRevealed, 0);
+  assert.equal(nativeContinuationStarted, 0);
+  assert.equal(terminalShown, 1);
+  assert.deepEqual(registrations, [{ workspaceRoot: tempRoot, conversationId: 336 }]);
+});
+
+test('continuing a conversation never reuses a same-numbered terminal from another project', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
+      'module.exports.__setCrossProjectContinueRuntimeForTest = (engine, activeRoot, conversationId, mappedRoot, terminals, registerTurn) => { syncEngine = engine; activeProjectRoot = activeRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminals[0].name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), mappedRoot); vscode.window.terminals.push(...terminals); registerInteractiveConversationTurn = registerTurn; postNodeConversations = () => {}; };'
+    ].join('\n')
+  );
+  const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-project-a-'));
+  const projectB = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-project-b-'));
+  for (const [workspaceRoot, terminalName] of [[projectA, 'project A terminal'], [projectB, 'project B terminal']]) {
+    const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '336.json');
+    fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+    fs.writeFileSync(statusFilePath, JSON.stringify({
+      workspaceRoot,
+      nodeId: '__solo__',
+      runKind: 'solo',
+      status: 'Waiting',
+      executionLogId: 336,
+      rootExecutionLogId: 336,
+      interactiveSession: true,
+      interactiveSessionClosed: false,
+      terminalName
+    }), 'utf8');
+  }
+  let projectATerminalShown = 0;
+  let projectBTerminalShown = 0;
+  const registrations = [];
+  extensionModule.__setCrossProjectContinueRuntimeForTest(
+    {
+      getAgentExecutions: () => [{ id: 336, nodeId: '__solo__', agentCli: 'codex', status: 'Completed' }],
+      getProjectAgentExecutions: () => []
+    },
+    projectB,
+    336,
+    projectA,
+    [
+      { name: 'project A terminal', show() { projectATerminalShown += 1; } },
+      { name: 'project B terminal', show() { projectBTerminalShown += 1; } }
+    ],
+    async (workspaceRoot, conversationId) => { registrations.push({ workspaceRoot, conversationId }); return true; }
+  );
+
+  await extensionModule.__handleSharedWebviewAction(
+    { globalState: { get: () => ({}) } },
+    { command: 'conversation.continue', projectPath: projectB, nodeId: '__solo__', conversationId: 336 },
+    'sidebar',
+    { postMessage() { return Promise.resolve(true); } }
+  );
+
+  assert.equal(projectATerminalShown, 0);
+  assert.equal(projectBTerminalShown, 1);
+  assert.deepEqual(registrations, [{ workspaceRoot: projectB, conversationId: 336 }]);
+});
+
 test('window reload keeps a running Agent conversation recoverable', async () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   assert.match(extensionSource, /handleAgentTerminalClosed\(terminal\.name, terminal\.exitStatus\?\.reason\)/);

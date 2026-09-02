@@ -976,13 +976,14 @@ async function handleSharedWebviewAction(
       try {
         const nodeId = String(request.nodeId || '');
         const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
-        const terminalProjectRoot = agentTerminalProjectRootsByConversationId.get(conversationId)
-          || String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-        const existingTerminal = findReusableAgentTerminal(terminalProjectRoot, conversationId);
+        const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
+        const rootConversationId = Number(rootConversation?.id || conversationId);
+        const terminalProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+        const existingTerminal = findReusableAgentTerminal(terminalProjectRoot, rootConversationId);
         if (existingTerminal) {
           const registered = await registerInteractiveConversationTurn(
             terminalProjectRoot,
-            conversationId,
+            rootConversationId,
             '继续当前 Agent 对话'
           );
           if (registered) {
@@ -1028,7 +1029,9 @@ async function handleSharedWebviewAction(
       const conversationId = Number(request.conversationId || 0);
       const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
       const requestedProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      if (!findReusableAgentTerminal(requestedProjectRoot, conversationId)) {
+      const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
+      const rootConversationId = Number(rootConversation?.id || conversationId);
+      if (!findReusableAgentTerminal(requestedProjectRoot, rootConversationId)) {
         await revealAgentStartupTerminal(context, requestedProjectRoot, 'continue', String(conversation?.agentCli || ''), String(request.model || ''));
       }
       const projectPath = await ensureActionProject(context, request.projectPath || '');
@@ -5974,8 +5977,7 @@ function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefine
 }
 
 function findReusableAgentTerminal(workspaceRoot: string, conversationId: number): vscode.Terminal | undefined {
-  const terminal = findActiveAgentTerminal(conversationId);
-  if (!terminal || !workspaceRoot || !conversationId) {
+  if (!workspaceRoot || !conversationId) {
     return undefined;
   }
   const statusData = findAgentStatusForConversation(workspaceRoot, conversationId);
@@ -5984,9 +5986,34 @@ function findReusableAgentTerminal(workspaceRoot: string, conversationId: number
   }
   const status = String(statusData.status || '');
   if (statusData.interactiveSession === true) {
-    return ['Running', 'Turn Started', 'In Progress', 'Waiting'].includes(status) ? terminal : undefined;
+    if (!['Running', 'Turn Started', 'In Progress', 'Waiting'].includes(status)) {
+      return undefined;
+    }
+  } else if (status !== 'Running') {
+    return undefined;
   }
-  return status === 'Running' ? terminal : undefined;
+  const terminals = [...vscode.window.terminals];
+  const normalizedWorkspaceRoot = path.resolve(workspaceRoot);
+  const mappedConversationIds = [...new Set([
+    Number(conversationId),
+    Number(statusData.rootExecutionLogId || 0)
+  ].filter(Boolean))];
+  for (const mappedConversationId of mappedConversationIds) {
+    const mappedProjectRoot = agentTerminalProjectRootsByConversationId.get(mappedConversationId);
+    const mappedName = agentTerminalNamesByConversationId.get(mappedConversationId);
+    if (mappedProjectRoot
+      && mappedName
+      && path.resolve(mappedProjectRoot) === normalizedWorkspaceRoot) {
+      const mappedTerminal = terminals.find((candidate) => candidate.name === mappedName);
+      if (mappedTerminal) {
+        return mappedTerminal;
+      }
+    }
+  }
+  const statusTerminalName = String(statusData.terminalName || '');
+  return statusTerminalName
+    ? terminals.find((candidate) => candidate.name === statusTerminalName)
+    : undefined;
 }
 
 function createAgentTerminal(
@@ -6935,7 +6962,9 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
     return;
   }
-  const existingTerminal = findReusableAgentTerminal(activeProjectRoot, conversationId);
+  const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
+  const rootConversationId = Number(rootConversation.id || conversationId);
+  const existingTerminal = findReusableAgentTerminal(activeProjectRoot, rootConversationId);
   if (existingTerminal) {
     existingTerminal.show(true);
     return;
@@ -6963,8 +6992,6 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   }
 
   const settings = getPersistedSettings(context);
-  const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
-  const rootConversationId = Number(rootConversation.id || conversationId);
   const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
