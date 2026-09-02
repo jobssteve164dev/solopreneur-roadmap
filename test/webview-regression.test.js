@@ -11554,6 +11554,105 @@ test('stopping an Agent run records the user decision on the active conversation
   );
 });
 
+test('a closed interactive conversation cannot reuse its stale terminal when continuing', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__findReusableAgentTerminal = findReusableAgentTerminal;',
+      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot, terminal) => { activeProjectRoot = projectRoot; agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stale-terminal-'));
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '336.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: tempRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Processed',
+    executionLogId: 336,
+    rootExecutionLogId: 336,
+    interactiveSession: true,
+    interactiveSessionClosed: true,
+    terminalName: 'solomap stale terminal'
+  }), 'utf8');
+  const staleTerminal = {
+    name: 'solomap stale terminal',
+    show() { throw new Error('the closed terminal must not be shown'); }
+  };
+  extensionModule.__setAgentTerminalForTest(336, staleTerminal.name, tempRoot, staleTerminal);
+
+  assert.equal(extensionModule.__findReusableAgentTerminal(tempRoot, 336), undefined);
+
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: tempRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Waiting',
+    executionLogId: 336,
+    rootExecutionLogId: 336,
+    interactiveSession: true,
+    interactiveSessionClosed: false,
+    terminalName: staleTerminal.name
+  }), 'utf8');
+
+  assert.equal(extensionModule.__findReusableAgentTerminal(tempRoot, 336), staleTerminal);
+});
+
+test('continuing a stopped interactive conversation opens a new terminal and settles the button action', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
+      'module.exports.__setStoppedContinueRuntimeForTest = (engine, projectRoot, conversationId, terminal, reveal, continueConversation) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminal.name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); revealAgentStartupTerminal = reveal; ensureActionProject = async () => projectRoot; handleContinueNativeConversation = continueConversation; postNodeConversations = () => {}; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stopped-continue-'));
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '336.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: tempRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Processed',
+    executionLogId: 336,
+    rootExecutionLogId: 336,
+    interactiveSession: true,
+    interactiveSessionClosed: true,
+    terminalName: 'solomap stopped terminal'
+  }), 'utf8');
+  let staleTerminalShown = false;
+  let startupTerminalRevealed = 0;
+  let nativeContinuationStarted = 0;
+  extensionModule.__setStoppedContinueRuntimeForTest(
+    {
+      getAgentExecutions: () => [{ id: 336, nodeId: '__solo__', agentCli: 'codex', status: 'Failed' }],
+      getProjectAgentExecutions: () => []
+    },
+    tempRoot,
+    336,
+    { name: 'solomap stopped terminal', show() { staleTerminalShown = true; } },
+    async () => { startupTerminalRevealed += 1; },
+    async () => { nativeContinuationStarted += 1; }
+  );
+  const posted = [];
+
+  const handled = await extensionModule.__handleSharedWebviewAction(
+    { globalState: { get: () => ({}) } },
+    { command: 'conversation.continue', projectPath: tempRoot, nodeId: '__solo__', conversationId: 336 },
+    'sidebar',
+    { postMessage(message) { posted.push(message); return Promise.resolve(true); } }
+  );
+
+  assert.equal(handled, true);
+  assert.equal(staleTerminalShown, false);
+  assert.equal(startupTerminalRevealed, 1);
+  assert.equal(nativeContinuationStarted, 1);
+  assert.ok(posted.some((message) => message.command === 'conversationActionSettled'
+    && message.action === 'continue'
+    && Number(message.conversationId) === 336));
+});
+
 test('window reload keeps a running Agent conversation recoverable', async () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   assert.match(extensionSource, /handleAgentTerminalClosed\(terminal\.name, terminal\.exitStatus\?\.reason\)/);

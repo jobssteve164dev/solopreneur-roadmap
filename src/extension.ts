@@ -976,10 +976,10 @@ async function handleSharedWebviewAction(
       try {
         const nodeId = String(request.nodeId || '');
         const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
-        const existingTerminal = findActiveAgentTerminal(conversationId);
+        const terminalProjectRoot = agentTerminalProjectRootsByConversationId.get(conversationId)
+          || String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+        const existingTerminal = findReusableAgentTerminal(terminalProjectRoot, conversationId);
         if (existingTerminal) {
-          const terminalProjectRoot = agentTerminalProjectRootsByConversationId.get(conversationId)
-            || String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
           const registered = await registerInteractiveConversationTurn(
             terminalProjectRoot,
             conversationId,
@@ -1027,8 +1027,9 @@ async function handleSharedWebviewAction(
       const nodeId = String(request.nodeId || '');
       const conversationId = Number(request.conversationId || 0);
       const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
-      if (!findActiveAgentTerminal(conversationId)) {
-        await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue', String(conversation?.agentCli || ''), String(request.model || ''));
+      const requestedProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      if (!findReusableAgentTerminal(requestedProjectRoot, conversationId)) {
+        await revealAgentStartupTerminal(context, requestedProjectRoot, 'continue', String(conversation?.agentCli || ''), String(request.model || ''));
       }
       const projectPath = await ensureActionProject(context, request.projectPath || '');
       if (!projectPath && request.projectPath) return;
@@ -5972,6 +5973,22 @@ function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefine
   return terminals.reverse().find((candidate) => candidate.name.includes(agentTerminalBaseName));
 }
 
+function findReusableAgentTerminal(workspaceRoot: string, conversationId: number): vscode.Terminal | undefined {
+  const terminal = findActiveAgentTerminal(conversationId);
+  if (!terminal || !workspaceRoot || !conversationId) {
+    return undefined;
+  }
+  const statusData = findAgentStatusForConversation(workspaceRoot, conversationId);
+  if (!statusData || statusData.interactiveSessionClosed === true) {
+    return undefined;
+  }
+  const status = String(statusData.status || '');
+  if (statusData.interactiveSession === true) {
+    return ['Running', 'Turn Started', 'In Progress', 'Waiting'].includes(status) ? terminal : undefined;
+  }
+  return status === 'Running' ? terminal : undefined;
+}
+
 function createAgentTerminal(
   workspaceRoot: string,
   label: string,
@@ -6780,7 +6797,7 @@ async function handleContinueConversationTurn(
     request,
     attachedFiles.length > 0 ? `补充文件（开始前先读取）：\n${attachedFiles.map((file) => `- ${file}`).join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
-  const activeTerminal = findActiveAgentTerminal(rootConversationId);
+  const activeTerminal = findReusableAgentTerminal(activeProjectRoot, rootConversationId);
   if (activeTerminal) {
     if (await registerInteractiveConversationTurn(activeProjectRoot, rootConversationId, terminalMessage)) {
       activeTerminal.show(true);
@@ -6918,7 +6935,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
     return;
   }
-  const existingTerminal = findActiveAgentTerminal(conversationId);
+  const existingTerminal = findReusableAgentTerminal(activeProjectRoot, conversationId);
   if (existingTerminal) {
     existingTerminal.show(true);
     return;
