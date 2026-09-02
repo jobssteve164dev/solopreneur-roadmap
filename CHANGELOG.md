@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.452 - 2026-09-02
+
+### Changed
+- SoloMap pre-session auto-backup [2026-09-02T03:53:55.159Z] (e9ebcb3)
+
+### Fixed
+- reopen stopped interactive conversations (aabee18)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.451 - 2026-09-02
 
 ### Fixed
