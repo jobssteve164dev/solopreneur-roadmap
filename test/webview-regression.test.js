@@ -8,6 +8,16 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 
+function getProcessBirthMarker(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fieldsAfterCommand = stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/);
+    if (fieldsAfterCommand[19]) return `proc:${fieldsAfterCommand[19]}`;
+  } catch {}
+  const startedAt = childProcess.execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+  return `ps:${startedAt}`;
+}
+
 test('Agent CLI upgrade action delegates every installed CLI to the Agent', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'agentCliUpgrade.ts'), 'utf8');
   const { buildAgentCliUpgradePrompt } = require(path.join(projectRoot, 'out', 'agentCliUpgrade.js'));
@@ -6920,12 +6930,17 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -f -e -c/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /tee .*output\.log/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /codex' --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /exec .*codex.*--no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /FORCE_COLOR/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /timed out waiting for response|Error: timed out/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /SOLOMAP_TASK_COMMAND/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /session-close --code/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /agent\.pid/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\/proc\/\$\$\/stat/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /ps -o lstart= -p/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /"\$\$".*agent\.pid.*exec .*codex/s);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /"agentProcessPidFilePath":/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /\.agent_status\.json/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /executionLogId/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /workspaceRoot/);
@@ -7582,7 +7597,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(agyBinding.headRevision, 1);
   assert.equal(agyBinding.revisions[0].method, 'provider_callback');
   assert.equal(agyBinding.revisions[0].state, 'preparing');
-  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --prompt-interactive --dangerously-skip-permissions --add-dir/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /exec .*agy.*--prompt-interactive --dangerously-skip-permissions --add-dir/);
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$\(cat/);
@@ -11908,6 +11923,268 @@ test('window reload keeps a running Agent conversation recoverable', async () =>
   assert.equal(handled, false);
   assert.equal(executionUpdated, false);
   assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Running');
+});
+
+test('closing an interactive terminal terminates its tracked Agent process before settling the session', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
+      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
+      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-process-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '52');
+  fs.mkdirSync(runDir, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
+  fs.writeFileSync(outputFilePath, 'Working inside native session.\n', 'utf8');
+  const child = childProcess.spawn(process.execPath, ['-e', [
+    "const { spawn } = require('child_process');",
+    "const nested = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+    "process.stdout.write(String(nested.pid));",
+    'setInterval(() => {}, 1000);'
+  ].join(' ')], {
+    stdio: ['ignore', 'pipe', 'ignore']
+  });
+  assert.ok(child.pid);
+  const nestedPid = Number(await new Promise((resolve) => child.stdout.once('data', (chunk) => resolve(String(chunk)))));
+  assert.ok(nestedPid);
+  const childBirthMarker = getProcessBirthMarker(child.pid);
+  fs.writeFileSync(agentProcessPidFilePath, `${child.pid}\n${childBirthMarker}\n`, 'utf8');
+  const childExit = new Promise((resolve) => child.once('exit', () => resolve(true)));
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '52.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: tempRoot,
+    nodeId: '__solo__',
+    runKind: 'solo',
+    status: 'Waiting',
+    executionLogId: 52,
+    rootExecutionLogId: 52,
+    interactiveSession: true,
+    interactiveSessionClosed: false,
+    outputFilePath,
+    agentProcessPidFilePath,
+    startedAt: '2026-09-04T00:00:00.000Z'
+  }), 'utf8');
+  extensionModule.__setRuntimeForTest({
+    getAgentExecutions: () => [{ id: 52, nodeId: '__solo__', status: 'Running' }],
+    updateAgentExecution: () => true
+  }, tempRoot);
+  extensionModule.__setAgentTerminalForTest(52, 'solomap process cleanup test', tempRoot);
+
+  let exited = false;
+  try {
+    const handled = await extensionModule.__handleAgentTerminalClosed('solomap process cleanup test');
+    exited = await Promise.race([
+      childExit,
+      new Promise((resolve) => setTimeout(() => resolve(false), 1000))
+    ]);
+
+    assert.equal(handled, true);
+    assert.equal(exited, true, 'the tracked Agent process must release its native session writer');
+    assert.throws(() => process.kill(nestedPid, 0), /ESRCH/);
+    const settledStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+    assert.equal(settledStatus.status, 'Processed');
+    assert.equal(settledStatus.interactiveSessionClosed, true);
+  } finally {
+    if (!exited) child.kill('SIGKILL');
+    try { process.kill(nestedPid, 'SIGKILL'); } catch {}
+  }
+});
+
+test('closing a terminal after switching projects keeps the persisted conversation lineage for cleanup retry', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
+      'module.exports.__setCrossProjectCloseRuntimeForTest = (engine, activeRoot, conversationId, terminalName, terminalRoot) => { syncEngine = engine; activeProjectRoot = activeRoot; agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), terminalRoot); processRegisteredStatusFile = async () => {}; };'
+    ].join('\n')
+  );
+  const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-project-a-'));
+  const projectB = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-project-b-'));
+  const runDir = path.join(projectA, '.solopreneur', 'agent-runs', '__solo__', '54');
+  fs.mkdirSync(runDir, { recursive: true });
+  const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
+  fs.writeFileSync(agentProcessPidFilePath, `${process.pid}\nproc:not-this-process\n`, 'utf8');
+  const statusFilePath = path.join(projectA, '.solopreneur', 'agent-status', '54.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: projectA,
+    nodeId: '__solo__',
+    runKind: 'solo_continue',
+    status: 'Waiting',
+    executionLogId: 54,
+    rootExecutionLogId: 54,
+    lineageRootExecutionLogId: 53,
+    interactiveSession: true,
+    agentProcessPidFilePath
+  }), 'utf8');
+  const projectBConversations = [
+    { id: 88, nodeId: '__solo__', status: 'Completed' },
+    { id: 54, nodeId: '__solo__', output: 'Continuation parent conversation: 88', status: 'Completed' }
+  ];
+  extensionModule.__setCrossProjectCloseRuntimeForTest(
+    {
+      getAgentExecutions: () => projectBConversations,
+      getProjectAgentExecutions: () => projectBConversations,
+      updateAgentExecution: () => true
+    },
+    projectB,
+    54,
+    'solomap project A continuation',
+    projectA
+  );
+
+  const handled = await extensionModule.__handleAgentTerminalClosed('solomap project A continuation');
+
+  assert.equal(handled, true);
+  const settledStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
+  assert.equal(settledStatus.failureCode, 'agent_process_cleanup_failed');
+  assert.equal(settledStatus.cleanupRootConversationId, 53);
+});
+
+test('continuing a root conversation immediately after its continuation terminal closes waits for the previous writer', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
+      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
+      'module.exports.__setCloseThenContinueRuntimeForTest = (engine, projectRoot, conversationId, terminal, reveal, continueConversation) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminal.name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); revealAgentStartupTerminal = reveal; ensureActionProject = async () => projectRoot; handleContinueNativeConversation = continueConversation; postNodeConversations = () => {}; };'
+    ].join('\n')
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-continue-'));
+  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '54');
+  fs.mkdirSync(runDir, { recursive: true });
+  const outputFilePath = path.join(runDir, 'output.log');
+  const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
+  fs.writeFileSync(outputFilePath, 'Waiting for another turn.\n', 'utf8');
+  const child = childProcess.spawn(process.execPath, [
+    '-e',
+    "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 200)); process.stdout.write('ready'); setInterval(() => {}, 1000)"
+  ], { stdio: ['ignore', 'pipe', 'ignore'] });
+  assert.ok(child.pid);
+  await new Promise((resolve) => child.stdout.once('data', resolve));
+  const childBirthMarker = getProcessBirthMarker(child.pid);
+  fs.writeFileSync(agentProcessPidFilePath, `${child.pid}\n${childBirthMarker}\n`, 'utf8');
+  let childExited = false;
+  child.once('exit', () => { childExited = true; });
+  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '54.json');
+  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
+  fs.writeFileSync(statusFilePath, JSON.stringify({
+    workspaceRoot: tempRoot,
+    nodeId: '__solo__',
+    runKind: 'solo_continue',
+    status: 'Waiting',
+    executionLogId: 54,
+    rootExecutionLogId: 54,
+    interactiveSession: true,
+    interactiveSessionClosed: false,
+    outputFilePath,
+    agentProcessPidFilePath,
+    startedAt: '2026-09-04T00:00:00.000Z'
+  }), 'utf8');
+  const conversations = [
+    { id: 53, nodeId: '__solo__', agentCli: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' },
+    { id: 54, nodeId: '__solo__', agentCli: 'codex', output: 'Agent continuation started.\n\nContinuation parent conversation: 53', status: 'Completed' }
+  ];
+  let continuedBeforeWriterExit = false;
+  extensionModule.__setCloseThenContinueRuntimeForTest(
+    {
+      getAgentExecutions: () => conversations,
+      getProjectAgentExecutions: () => conversations,
+      updateAgentExecution: () => true
+    },
+    tempRoot,
+    54,
+    { name: 'solomap close then continue test' },
+    async () => {},
+    async () => { continuedBeforeWriterExit = !childExited; }
+  );
+
+  try {
+    const closePromise = extensionModule.__handleAgentTerminalClosed('solomap close then continue test');
+    const continuePromise = extensionModule.__handleSharedWebviewAction(
+      { globalState: { get: () => ({}) } },
+      { command: 'conversation.continue', projectPath: tempRoot, nodeId: '__solo__', conversationId: 53 },
+      'sidebar',
+      { postMessage() { return Promise.resolve(true); } }
+    );
+    await Promise.all([closePromise, continuePromise]);
+
+    assert.equal(childExited, true);
+    assert.equal(continuedBeforeWriterExit, false, 'resume must not start while the previous writer is alive');
+  } finally {
+    if (!childExited) child.kill('SIGKILL');
+  }
+});
+
+test('Agent cleanup refuses an unverified reused PID without signaling that process', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__terminateTrackedAgentProcess = terminateTrackedAgentProcess;'
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-unverified-pid-'));
+  const pidFilePath = path.join(tempRoot, 'agent.pid');
+  const child = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  assert.ok(child.pid);
+  fs.writeFileSync(pidFilePath, `${child.pid}\nproc:not-the-process-birth\n`, 'utf8');
+
+  try {
+    await assert.rejects(
+      extensionModule.__terminateTrackedAgentProcess(pidFilePath),
+      /identity could not be verified/
+    );
+    assert.doesNotThrow(() => process.kill(child.pid, 0));
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+test('a later retry cleans the newest failed continuation writer and resolves only that failure', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__waitForAgentProcessCleanup = waitForAgentProcessCleanup;'
+  );
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-retry-cleanup-'));
+  const statusRoot = path.join(tempRoot, '.solopreneur', 'agent-status');
+  fs.mkdirSync(statusRoot, { recursive: true });
+  const oldPidFilePath = path.join(tempRoot, 'old-agent.pid');
+  fs.writeFileSync(oldPidFilePath, '', 'utf8');
+  fs.writeFileSync(path.join(statusRoot, '54.json'), JSON.stringify({
+    executionLogId: 54,
+    rootExecutionLogId: 54,
+    cleanupRootConversationId: 53,
+    failureCode: 'agent_process_cleanup_failed',
+    agentProcessPidFilePath: oldPidFilePath
+  }), 'utf8');
+  const child = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  assert.ok(child.pid);
+  const latestPidFilePath = path.join(tempRoot, 'latest-agent.pid');
+  fs.writeFileSync(latestPidFilePath, `${child.pid}\n${getProcessBirthMarker(child.pid)}\n`, 'utf8');
+  const latestStatusFilePath = path.join(statusRoot, '55.json');
+  fs.writeFileSync(latestStatusFilePath, JSON.stringify({
+    executionLogId: 55,
+    rootExecutionLogId: 55,
+    cleanupRootConversationId: 53,
+    failureCode: 'agent_process_cleanup_failed',
+    failureReason: 'previous cleanup failed',
+    agentProcessPidFilePath: latestPidFilePath
+  }), 'utf8');
+  let exited = false;
+  child.once('exit', () => { exited = true; });
+
+  try {
+    await extensionModule.__waitForAgentProcessCleanup(tempRoot, 53);
+
+    assert.equal(exited, true);
+    assert.equal(JSON.parse(fs.readFileSync(latestStatusFilePath, 'utf8')).failureCode, undefined);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(statusRoot, '54.json'), 'utf8')).failureCode, 'agent_process_cleanup_failed');
+  } finally {
+    if (!exited) child.kill('SIGKILL');
+  }
 });
 
 test('stopping a continuation records it without marking the task failed', async () => {

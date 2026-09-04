@@ -329,6 +329,7 @@ let scheduledAutomationPoller: NodeJS.Timeout | null = null;
 let scheduledAutomationNextAt = '';
 const agentTerminalNamesByConversationId = new Map<number, string>();
 const agentTerminalProjectRootsByConversationId = new Map<number, string>();
+const agentProcessCleanupByConversationKey = new Map<string, Promise<void>>();
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
@@ -979,6 +980,12 @@ async function handleSharedWebviewAction(
         const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
         const rootConversationId = Number(rootConversation?.id || conversationId);
         const terminalProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+        try {
+          await waitForAgentProcessCleanup(terminalProjectRoot, rootConversationId);
+        } catch {
+          vscode.window.showErrorMessage('上一个 Agent 进程仍未退出，暂时无法续聊。请稍后重试。');
+          return;
+        }
         const existingTerminal = findReusableAgentTerminal(terminalProjectRoot, rootConversationId);
         if (existingTerminal) {
           const registered = await registerInteractiveConversationTurn(
@@ -1031,6 +1038,12 @@ async function handleSharedWebviewAction(
       const requestedProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
       const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
       const rootConversationId = Number(rootConversation?.id || conversationId);
+      try {
+        await waitForAgentProcessCleanup(requestedProjectRoot, rootConversationId);
+      } catch {
+        vscode.window.showErrorMessage('上一个 Agent 进程仍未退出，暂时无法续聊。请稍后重试。');
+        return;
+      }
       if (!findReusableAgentTerminal(requestedProjectRoot, rootConversationId)) {
         await revealAgentStartupTerminal(context, requestedProjectRoot, 'continue', String(conversation?.agentCli || ''), String(request.model || ''));
       }
@@ -4848,6 +4861,7 @@ function buildAgentShellScript(
   const finishedAtFilePath = path.join(runDir, 'finished_at');
   const sessionFilePath = path.join(runDir, 'session.json');
   const codexHomeFilePath = path.join(runDir, 'codex-home.txt');
+  const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
   const decisionFilePath = effectiveCompletionDecisionFilePath || path.join(runDir, 'completion.json');
   const agentProvider = getAgentProvider(agentCli);
   const sessionKey = getAgentSessionKey(agentCli);
@@ -4948,7 +4962,7 @@ function buildAgentShellScript(
     && (!version2IdentityBinding || confirmedCodexContinuation)
   );
   const { codexResumeTranscriptPath: _codexResumeTranscriptPath, ...persistedStatusMetadata } = statusMetadata;
-  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, previousNativeSessionId: effectiveNativeSessionId, plannedNativeSessionId, nativeSessionId: nativeSessionIdIsCurrent ? effectiveNativeSessionId : '', nativeSessionIdIsCurrent, sessionBindingHeadRevision, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...(confirmedCodexContinuation ? { codexTranscriptCursor: codexResumeTranscriptCursor } : {}), ...persistedStatusMetadata };
+  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, agentProcessPidFilePath, previousNativeSessionId: effectiveNativeSessionId, plannedNativeSessionId, nativeSessionId: nativeSessionIdIsCurrent ? effectiveNativeSessionId : '', nativeSessionIdIsCurrent, sessionBindingHeadRevision, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...(confirmedCodexContinuation ? { codexTranscriptCursor: codexResumeTranscriptCursor } : {}), ...persistedStatusMetadata };
   const runningStatus = JSON.stringify({
     ...statusBase,
     status: interactiveSession && statusMetadata.startWaiting === true ? 'Waiting' : 'Running'
@@ -4998,18 +5012,19 @@ function buildAgentShellScript(
       `${shellQuote(process.execPath)} -e ${shellQuote('const fs=require("fs");const path=require("path");const identity=require(process.argv[1]);const statusFile=process.argv[2];const sessionFile=process.argv[3];const sessionId=process.argv[4];identity.appendSessionBindingRevision(sessionFile,1,{sessionId,method:"provider_created",contract:"official_stable",state:"planned",evidence:{source:"cursor_create_chat"}});const status=JSON.parse(fs.readFileSync(statusFile,"utf8"));status.plannedNativeSessionId=sessionId;status.sessionBindingHeadRevision=2;const tmp=statusFile+"."+process.pid+".tmp";fs.writeFileSync(tmp,JSON.stringify(status));fs.renameSync(tmp,statusFile);')} ${shellQuote(path.join(__dirname, 'sessionIdentity.js'))} ${shellQuote(statusFilePath)} ${shellQuote(sessionFilePath)} "$solomap_cursor_session_id"`
     ]
     : [];
+  const trackedExecutionCommand = `if [ -r "/proc/$$/stat" ]; then solomap_agent_birth="proc:$(awk '{print \$22}' "/proc/$$/stat")"; else solomap_agent_birth="ps:$(ps -o lstart= -p "$$" 2>/dev/null)"; fi; printf '%s\n%s\n' "$$" "$solomap_agent_birth" > ${shellQuote(agentProcessPidFilePath)}; exec sh -c ${shellQuote(executionCommand)}`;
   const terminalExecutionScript = interactiveSession
     ? [
       'if command -v script >/dev/null 2>&1; then',
-      `script -q -f -e -c ${shellQuote(executionCommand)} ${shellQuote(outputFilePath)};`,
+      `script -q -f -e -c ${shellQuote(trackedExecutionCommand)} ${shellQuote(outputFilePath)};`,
       'status=$?;',
       'else',
-      `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
+      `sh -c ${shellQuote(trackedExecutionCommand)} 2>&1 | tee ${shellQuote(outputFilePath)};`,
       'status=${PIPESTATUS[0]};',
       'fi'
     ].join(' ')
     : [
-      `(${executionCommand}) 2>&1 | tee ${shellQuote(outputFilePath)};`,
+      `sh -c ${shellQuote(trackedExecutionCommand)} 2>&1 | tee ${shellQuote(outputFilePath)};`,
       'status=${PIPESTATUS[0]}'
     ].join(' ');
   fs.mkdirSync(runDir, { recursive: true });
@@ -5036,6 +5051,7 @@ function buildAgentShellScript(
     ...enhancementContextPreflight,
     ...promptExportScript,
     terminalExecutionScript,
+    `printf '' > ${shellQuote(agentProcessPidFilePath)}`,
     `${shellQuote(process.execPath)} -e ${shellQuote('process.stdout.write(new Date().toISOString())')} > ${shellQuote(finishedAtFilePath)}`,
     `kill "$solomap_status_heartbeat_pid" 2>/dev/null || true`,
     sessionCaptureScript,
@@ -6165,6 +6181,212 @@ async function launchAgentConversationTerminal(input: {
   return terminal;
 }
 
+function getAgentProcessCleanupKey(workspaceRoot: string, conversationId: number): string {
+  return `${path.resolve(workspaceRoot)}:${Number(conversationId)}`;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function readProcessBirthMarker(pid: number): string {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fieldsAfterCommand = stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/);
+    const startTicks = fieldsAfterCommand[19];
+    if (startTicks) return `proc:${startTicks}`;
+  } catch {
+    // Non-Linux hosts use the process start timestamp below.
+  }
+  try {
+    const startedAt = childProcess.execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    return startedAt ? `ps:${startedAt}` : '';
+  } catch {
+    return '';
+  }
+}
+
+function readTrackedAgentProcess(pidFilePath: string): {
+  state: 'absent' | 'gone' | 'verified' | 'unverified';
+  pid: number;
+} {
+  if (!pidFilePath || !fs.existsSync(pidFilePath)) {
+    return { state: 'absent', pid: 0 };
+  }
+  try {
+    const content = fs.readFileSync(pidFilePath, 'utf8');
+    if (!content.trim()) return { state: 'absent', pid: 0 };
+    const [pidText, expectedBirthMarker = ''] = content.split(/\r?\n/);
+    const pid = Number(pidText);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid || !expectedBirthMarker.trim()) {
+      return { state: 'unverified', pid: Number.isSafeInteger(pid) ? pid : 0 };
+    }
+    if (!isProcessAlive(pid)) return { state: 'gone', pid };
+    return readProcessBirthMarker(pid) === expectedBirthMarker.trim()
+      ? { state: 'verified', pid }
+      : { state: 'unverified', pid };
+  } catch {
+    return { state: 'unverified', pid: 0 };
+  }
+}
+
+function collectProcessTree(rootPid: number): number[] {
+  const childrenByParent = new Map<number, number[]>();
+  try {
+    const table = childProcess.execFileSync('ps', ['-A', '-o', 'pid=,ppid='], {
+      encoding: 'utf8',
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    for (const line of table.split(/\r?\n/)) {
+      const [pidText, parentPidText] = line.trim().split(/\s+/);
+      const pid = Number(pidText);
+      const parentPid = Number(parentPidText);
+      if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parentPid)) continue;
+      const children = childrenByParent.get(parentPid) || [];
+      children.push(pid);
+      childrenByParent.set(parentPid, children);
+    }
+  } catch {
+    return [rootPid];
+  }
+  const ordered: number[] = [];
+  const visit = (pid: number) => {
+    for (const childPid of childrenByParent.get(pid) || []) visit(childPid);
+    ordered.push(pid);
+  };
+  visit(rootPid);
+  return ordered;
+}
+
+async function waitForProcessesToExit(pids: number[], timeoutMs: number): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let remaining = pids.filter(isProcessAlive);
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    remaining = remaining.filter(isProcessAlive);
+  }
+  return remaining;
+}
+
+async function terminateTrackedAgentProcess(pidFilePath: string): Promise<void> {
+  const trackedProcess = readTrackedAgentProcess(pidFilePath);
+  if (trackedProcess.state === 'absent' || trackedProcess.state === 'gone') {
+    return;
+  }
+  if (trackedProcess.state !== 'verified') {
+    throw new Error('Agent process identity could not be verified; cleanup was not attempted.');
+  }
+  const rootPid = trackedProcess.pid;
+  const processTree = collectProcessTree(rootPid);
+  for (const pid of processTree) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // The process may have exited between discovery and signaling.
+    }
+  }
+  const remaining = await waitForProcessesToExit(processTree, 1500);
+  for (const pid of remaining) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // The process may have exited while the forced cleanup was starting.
+    }
+  }
+  const forcedRemaining = await waitForProcessesToExit(remaining, 500);
+  if (forcedRemaining.length > 0) {
+    throw new Error(`Agent process cleanup did not finish for PID ${rootPid}.`);
+  }
+  fs.writeFileSync(pidFilePath, '', 'utf8');
+}
+
+function beginAgentProcessCleanup(
+  workspaceRoot: string,
+  conversationIds: number | number[],
+  pidFilePath: string
+): Promise<void> {
+  const keys = [...new Set((Array.isArray(conversationIds) ? conversationIds : [conversationIds])
+    .filter(Boolean)
+    .map((conversationId) => getAgentProcessCleanupKey(workspaceRoot, conversationId)))];
+  const existing = keys.map((key) => agentProcessCleanupByConversationKey.get(key)).find(Boolean);
+  if (existing) {
+    for (const key of keys) agentProcessCleanupByConversationKey.set(key, existing);
+    const releaseAliases = () => {
+      for (const key of keys) {
+        if (agentProcessCleanupByConversationKey.get(key) === existing) {
+          agentProcessCleanupByConversationKey.delete(key);
+        }
+      }
+    };
+    void existing.then(releaseAliases, releaseAliases);
+    return existing;
+  }
+  let cleanup!: Promise<void>;
+  cleanup = (async () => {
+    try {
+      await terminateTrackedAgentProcess(pidFilePath);
+    } finally {
+      for (const key of keys) {
+        if (agentProcessCleanupByConversationKey.get(key) === cleanup) {
+          agentProcessCleanupByConversationKey.delete(key);
+        }
+      }
+    }
+  })();
+  for (const key of keys) agentProcessCleanupByConversationKey.set(key, cleanup);
+  return cleanup;
+}
+
+async function waitForAgentProcessCleanup(workspaceRoot: string, conversationId: number): Promise<void> {
+  let cleanup = agentProcessCleanupByConversationKey.get(getAgentProcessCleanupKey(workspaceRoot, conversationId));
+  if (!cleanup) {
+    const cleanupFailure = getAgentStatusFilePaths(workspaceRoot)
+      .map((statusFilePath) => ({ statusFilePath, statusData: readAgentStatus(statusFilePath) }))
+      .filter(({ statusData }) => (
+        String(statusData?.failureCode || '') === 'agent_process_cleanup_failed'
+        && Number(statusData?.cleanupRootConversationId || 0) === Number(conversationId)
+      ))
+      .sort((left, right) => Number(right.statusData?.executionLogId || 0) - Number(left.statusData?.executionLogId || 0))[0];
+    if (cleanupFailure) {
+      cleanup = beginAgentProcessCleanup(
+        workspaceRoot,
+        [
+          Number(conversationId),
+          Number(cleanupFailure.statusData.rootExecutionLogId || 0),
+          Number(cleanupFailure.statusData.executionLogId || 0)
+        ],
+        String(cleanupFailure.statusData.agentProcessPidFilePath || '')
+      );
+      await cleanup;
+      const latestStatus = readAgentStatus(cleanupFailure.statusFilePath);
+      if (String(latestStatus?.failureCode || '') === 'agent_process_cleanup_failed') {
+        const {
+          failureCode: _failureCode,
+          failureReason: _failureReason,
+          cleanupRootConversationId: _cleanupRootConversationId,
+          ...resolvedStatus
+        } = latestStatus;
+        writeAgentStatus(cleanupFailure.statusFilePath, {
+          ...resolvedStatus,
+          processCleanupResolvedAt: new Date().toISOString()
+        });
+      }
+      return;
+    }
+  }
+  if (cleanup) await cleanup;
+}
+
 async function handleAgentTerminalClosed(
   terminalName: string,
   exitReason?: vscode.TerminalExitReason
@@ -6180,8 +6402,9 @@ async function handleAgentTerminalClosed(
       reservedAgentTerminalsByProject.delete(workspaceRoot);
     }
   }
-  const matched = [...agentTerminalNamesByConversationId.entries()]
-    .find(([, name]) => name === terminalName);
+  const matchedConversations = [...agentTerminalNamesByConversationId.entries()]
+    .filter(([, name]) => name === terminalName);
+  const matched = matchedConversations[0];
   if (!matched) {
     return false;
   }
@@ -6202,6 +6425,22 @@ async function handleAgentTerminalClosed(
     return false;
   }
   const statusFilePath = getAgentStatusFilePath(workspaceRoot, Number(runningStatus.rootExecutionLogId || runningStatus.executionLogId || conversationId));
+  const rootExecutionLogId = Number(runningStatus.rootExecutionLogId || runningStatus.executionLogId || conversationId);
+  const lineageRootExecutionLogId = Number(
+    runningStatus.lineageRootExecutionLogId
+    || resolveContinuationRootConversation(String(runningStatus.nodeId || ''), Number(conversationId))?.id
+    || rootExecutionLogId
+  );
+  let processCleanupError = '';
+  try {
+    await beginAgentProcessCleanup(
+      workspaceRoot,
+      [rootExecutionLogId, lineageRootExecutionLogId, ...matchedConversations.map(([mappedConversationId]) => mappedConversationId)],
+      String(runningStatus.agentProcessPidFilePath || '')
+    );
+  } catch (error) {
+    processCleanupError = error instanceof Error ? error.message : String(error);
+  }
   const isContinuationRun = isContinuationRunKind(String(runningStatus.runKind || ''));
   const finishedAt = new Date().toISOString();
   if (runningStatus.outputFilePath) {
@@ -6215,8 +6454,13 @@ async function handleAgentTerminalClosed(
   const settledInteractiveSession = isInteractiveSession && ['Waiting', 'Processed'].includes(currentStatus);
   fs.writeFileSync(statusFilePath, JSON.stringify({
     ...runningStatus,
-    status: settledInteractiveSession ? 'Session Closed' : isInteractiveSession ? 'Failed' : isContinuationRun ? 'In Progress' : 'Failed',
-    ...(settledInteractiveSession ? {
+    status: processCleanupError ? 'Failed' : settledInteractiveSession ? 'Session Closed' : isInteractiveSession ? 'Failed' : isContinuationRun ? 'In Progress' : 'Failed',
+    ...(processCleanupError ? {
+      failureCode: 'agent_process_cleanup_failed',
+      failureReason: processCleanupError,
+      cleanupRootConversationId: lineageRootExecutionLogId,
+      ...(isInteractiveSession ? { interactiveSessionClosed: true } : {})
+    } : settledInteractiveSession ? {
       sessionClosePreviousStatus: currentStatus,
       interactiveSessionClosed: true
     } : isContinuationRun && !isInteractiveSession ? {} : {
@@ -6932,7 +7176,10 @@ async function handleContinueConversationTurn(
     settings.enabledEnhancements,
     runDir,
     statusFilePath,
-    codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}
+    {
+      ...(codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}),
+      lineageRootExecutionLogId: rootConversationId
+    }
   );
   await launchAgentConversationTerminal({
     workspaceRoot: activeProjectRoot,
@@ -7038,7 +7285,10 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     settings.enabledEnhancements,
     runDir,
     statusFilePath,
-    codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}
+    {
+      ...(codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}),
+      lineageRootExecutionLogId: rootConversationId
+    }
   );
   await launchAgentConversationTerminal({
     workspaceRoot: activeProjectRoot,
@@ -7143,6 +7393,32 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
       finishedAt
     }), 'utf8');
     const rootExecutionLogId = Number(runningStatus.rootExecutionLogId || conversationId);
+    const lineageRootExecutionLogId = Number(
+      runningStatus.lineageRootExecutionLogId
+      || resolveContinuationRootConversation(String(runningStatus.nodeId || nodeId), Number(conversationId))?.id
+      || rootExecutionLogId
+    );
+    try {
+      await beginAgentProcessCleanup(
+        activeProjectRoot,
+        [rootExecutionLogId, lineageRootExecutionLogId, Number(conversationId)],
+        String(runningStatus.agentProcessPidFilePath || '')
+      );
+    } catch (error) {
+      const processCleanupError = error instanceof Error ? error.message : String(error);
+      fs.writeFileSync(statusFilePath, JSON.stringify({
+        ...runningStatus,
+        status: 'Failed',
+        failureCode: 'agent_process_cleanup_failed',
+        failureReason: processCleanupError,
+        cleanupRootConversationId: lineageRootExecutionLogId,
+        ...(isInteractiveSession ? { interactiveSessionClosed: true } : {}),
+        finishedAt
+      }), 'utf8');
+      vscode.window.showErrorMessage('Agent 进程仍未退出，本次停止尚未完成，请稍后重试。');
+      await processRegisteredStatusFile(extensionContextRef, statusFilePath, true);
+      return;
+    }
     agentTerminalNamesByConversationId.delete(rootExecutionLogId);
     agentTerminalNamesByConversationId.delete(Number(conversationId));
     agentTerminalProjectRootsByConversationId.delete(rootExecutionLogId);
