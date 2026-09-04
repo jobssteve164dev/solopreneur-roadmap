@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.456 - 2026-09-04
+
+### Changed
+- Fix Agent cleanup before conversation resume (5b42cc7)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.455 - 2026-09-02
 
 ### Fixed
