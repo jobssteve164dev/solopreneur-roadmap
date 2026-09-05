@@ -1,3 +1,4 @@
+import { storage as sqlStorage } from './helpers/projection-storage.js';
 import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
@@ -112,15 +113,8 @@ test("analytics endpoint rejects missing consent and enqueues an allowed anonymo
 });
 
 test("Blog projection activates a complete candidate atomically and deduplicates its event", async () => {
-  const values = new Map();
-  const storage = {
-    async get(key) { return values.get(key); },
-    async put(key, value) {
-      if (typeof key === "object") for (const [name, item] of Object.entries(key)) values.set(name, item);
-      else values.set(key, value);
-    }
-  };
-  const object = new BlogProjection({ storage });
+  const storage = sqlStorage();
+  const object = new BlogProjection({ storage }, {});
   const event = {
     event_id: "event-1",
     event_type: "post.published",
@@ -136,13 +130,16 @@ test("Blog projection activates a complete candidate atomically and deduplicates
       canonical_url: post.canonicalUrl
     }
   };
-  const activate = () => object.fetch(new Request("https://blog-projection/activate", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ event, posts: [post] })
-  }));
-  const first = await activate();
-  assert.equal(first.status, 200);
-  assert.equal((await first.json()).status, "activated");
+  const fetcher = async (url) => Response.json({ site_key: 'solomap', next_cursor: null, posts: new URL(url).searchParams.get('locale') === 'en' ? [{
+    id: post.id, version_id: post.versionId, content_digest: post.contentDigest, locale: post.locale,
+    slug: post.slug, title: post.title, description: post.description, content_markdown: post.contentMarkdown,
+    canonical_url: post.canonicalUrl, published_at: post.publishedAt, updated_at: post.updatedAt,
+  }] : [] });
+  const activate = () => object.handle(event, fetcher);
+  assert.equal((await activate()).status, 'activated');
   const snapshot = await (await object.fetch(new Request("https://blog-projection/snapshot"))).json();
   assert.equal(snapshot.posts[0].versionId, "version-1");
-  assert.equal((await (await activate()).json()).status, "already_current");
+  assert.equal((await activate()).status, "already_current");
+  event.event_id = "another-event-for-identical-content";
+  assert.equal((await activate()).status, "already_current");
 });

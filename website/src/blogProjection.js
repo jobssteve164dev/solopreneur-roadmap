@@ -1,3 +1,5 @@
+import { createProjectionObject, projectionStub as sharedProjectionStub } from "./blog-projection-store.js";
+
 const BLOG_CONTRACT_VERSION = "2026-08-20";
 const BLOG_PROJECT_KEY = "solomap";
 const BLOG_SITE_KEY = "solomap";
@@ -120,46 +122,14 @@ async function secretMatches(expected, supplied) {
   return diff === 0;
 }
 
-export class BlogProjection {
-  constructor(state) {
-    this.state = state;
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/snapshot") {
-      return json(await this.state.storage.get("active") || {
-        contractVersion: BLOG_CONTRACT_VERSION,
-        generatedAt: null,
-        sourceEventId: null,
-        posts: []
-      });
-    }
-    if (request.method !== "POST" || url.pathname !== "/activate") return json({ error: "Not found" }, 404);
-    const { event, posts } = await request.json();
-    validateEvent(event);
-    if (!Array.isArray(posts)) throw new Error("Projection candidate is invalid");
-    const seen = await this.state.storage.get("eventIds") || [];
-    if (seen.includes(event.event_id)) return json({ accepted: true, status: "already_current" });
-    const status = validateEventAgainstSnapshot(event, posts);
-    if (status === "superseded") {
-      await this.state.storage.put("eventIds", [...seen, event.event_id].slice(-200));
-      return json({ accepted: true, status });
-    }
-    const candidate = {
-      contractVersion: BLOG_CONTRACT_VERSION,
-      generatedAt: new Date().toISOString(),
-      sourceEventId: event.event_id,
-      posts
-    };
-    await this.state.storage.put({ active: candidate, eventIds: [...seen, event.event_id].slice(-200) });
-    return json({ accepted: true, status, postCount: posts.length });
-  }
-}
+export const BlogProjection = createProjectionObject({
+  validateEvent,
+  fetchPosts: (_env, fetcher) => fetchCompleteBlogProjection(fetcher),
+  validateSnapshot: validateEventAgainstSnapshot,
+});
 
 function projectionStub(env) {
-  const id = env.BLOG_PROJECTION.idFromName("solomap-active");
-  return env.BLOG_PROJECTION.get(id);
+  return sharedProjectionStub(env.BLOG_PROJECTION, BLOG_SITE_KEY);
 }
 
 export async function getActiveBlogProjection(env) {
@@ -179,11 +149,11 @@ export async function handleBlogLifecycle(request, env) {
     return json({ error: "Lifecycle headers do not match the event" }, 400);
   }
   try {
-    const posts = await fetchCompleteBlogProjection();
+    validateEvent(event);
     const response = await projectionStub(env).fetch("https://blog-projection/activate", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ event, posts })
+      body: JSON.stringify({ event })
     });
     return new Response(response.body, { status: response.status, headers: response.headers });
   } catch (error) {
