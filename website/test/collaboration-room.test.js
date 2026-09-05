@@ -11,6 +11,7 @@ import {
   handleCollaborationLobbySession,
   handleCollaborationRoomCreate
 } from "../src/collaborationRelay.js";
+import { buildCollaborationLobbyPage } from "../src/collaborationPage.js";
 
 function createDurableState(getWebSockets = () => []) {
   const values = new Map();
@@ -94,7 +95,7 @@ const TEST_QUOTA_POLICY = {
   paid: { tier: "paid", maxActiveRooms: 20, maxDailyRooms: 100, maxLifetimeMs: 72 * 60 * 60 * 1000 }
 };
 
-test("the public lobby rejects signed-out users and issues only hourly tickets to accounts", async () => {
+test("the public lobby rejects signed-out users and issues six-hour tickets to accounts", async () => {
   const env = createProtectedEnv();
   const signedOut = await worker.fetch(new Request("https://solomap.app/api/collaboration/lobby/session", {
     method: "POST",
@@ -112,15 +113,15 @@ test("the public lobby rejects signed-out users and issues only hourly tickets t
   const result = await response.json();
   assert.equal(response.status, 200);
   assert.equal(result.ok, true);
-  assert.equal(result.sessionEndsAt - result.sessionStartedAt, 60 * 60 * 1000);
-  assert.equal(result.sessionStartedAt % (60 * 60 * 1000), 0);
+  assert.equal(result.sessionEndsAt - result.sessionStartedAt, 6 * 60 * 60 * 1000);
+  assert.equal(result.sessionStartedAt % (6 * 60 * 60 * 1000), 0);
   const ticket = await collaborationRelayInternals.verifyLobbyTicket(env, result.ticket);
   assert.equal(ticket.nickname, "Solo Builder");
   assert.equal(ticket.memberId, result.memberId);
   assert.equal(await collaborationRelayInternals.verifyLobbyTicket(env, `${result.ticket.slice(0, -1)}x`), null);
 });
 
-test("lobby messages are bounded per account and the hourly alarm clears all retained data", async () => {
+test("lobby messages are bounded per account and the six-hour alarm clears all retained data", async () => {
   const storage = createDurableState();
   const lobby = new CollaborationLobby(storage.state);
   const { sessionStartedAt, sessionEndsAt } = collaborationRelayInternals.currentLobbySession();
@@ -145,8 +146,180 @@ test("lobby messages are bounded per account and the hourly alarm clears all ret
   }
   assert.equal((await storage.state.storage.get("messages")).length, 6);
   assert.equal(sent.at(-1).error, "message_rate_limited");
-  await lobby.alarm();
-  assert.equal(storage.values.size, 0);
+  const originalNow = Date.now;
+  Date.now = () => sessionEndsAt;
+  try {
+    await lobby.alarm();
+    assert.equal(storage.values.size, 0);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("the public lobby explains the six-hour reset in both supported languages", () => {
+  const zhHtml = buildCollaborationLobbyPage("zh");
+  assert.match(zhHtml, /每 6 小时开启新一轮/);
+  assert.match(zhHtml, /每 6 小时永久清空/);
+
+  const enHtml = buildCollaborationLobbyPage("en");
+  assert.match(enHtml, /new lobby session starts every 6 hours/i);
+  assert.match(enHtml, /permanently cleared every 6 hours/i);
+});
+
+test("a six-hour lobby extends a legacy hourly alarm without losing retained messages", async () => {
+  const storage = createDurableState();
+  const lobby = new CollaborationLobby(storage.state);
+  const { sessionStartedAt, sessionEndsAt } = collaborationRelayInternals.currentLobbySession();
+  const messages = [{ id: "message000000000", text: "Keep this" }];
+  await storage.state.storage.put({
+    session: { sessionStartedAt, sessionEndsAt: sessionStartedAt + 60 * 60 * 1000 },
+    messages,
+    memberUsage: {},
+    nextSequence: 2
+  });
+
+  const OriginalResponse = globalThis.Response;
+  const OriginalWebSocketPair = globalThis.WebSocketPair;
+  globalThis.Response = class {
+    constructor(_body, init = {}) {
+      this.status = init.status;
+      this.webSocket = init.webSocket;
+    }
+  };
+  globalThis.WebSocketPair = class {
+    constructor() {
+      this[0] = {};
+      this[1] = { send() {}, serializeAttachment() {} };
+    }
+  };
+
+  try {
+    const response = await lobby.connect(new Request("https://collaboration-lobby.internal/connect", {
+      headers: {
+        upgrade: "websocket",
+        "x-solomap-member-id": "m".repeat(32),
+        "x-solomap-nickname": "Builder",
+        "x-solomap-session-start": String(sessionStartedAt),
+        "x-solomap-session-end": String(sessionEndsAt)
+      }
+    }));
+    assert.equal(response.status, 101);
+    assert.deepEqual(await storage.state.storage.get("session"), { sessionStartedAt, sessionEndsAt });
+    assert.equal(await storage.state.storage.get("alarm"), sessionEndsAt);
+    assert.deepEqual(await storage.state.storage.get("messages"), messages);
+  } finally {
+    globalThis.Response = OriginalResponse;
+    globalThis.WebSocketPair = OriginalWebSocketPair;
+  }
+});
+
+test("a legacy hourly alarm cannot clear an active six-hour lobby", async () => {
+  const originalNow = Date.now;
+  const sessionStartedAt = Date.UTC(2026, 8, 5, 12, 0, 0);
+  const sessionEndsAt = sessionStartedAt + 6 * 60 * 60 * 1000;
+  const legacySessionStartedAt = sessionStartedAt + 60 * 60 * 1000;
+  Date.now = () => legacySessionStartedAt + 60 * 60 * 1000;
+  let closed = false;
+  const storage = createDurableState(() => [{ close() { closed = true; } }]);
+  const lobby = new CollaborationLobby(storage.state);
+  const messages = [{ id: "message000000000", text: "Keep this" }];
+  await storage.state.storage.put({
+    session: { sessionStartedAt: legacySessionStartedAt, sessionEndsAt: legacySessionStartedAt + 60 * 60 * 1000 },
+    messages,
+    memberUsage: { member: { messageTimes: [], total: 1 } },
+    nextSequence: 2
+  });
+
+  try {
+    await lobby.alarm();
+    assert.deepEqual(await storage.state.storage.get("session"), { sessionStartedAt, sessionEndsAt });
+    assert.equal(await storage.state.storage.get("alarm"), sessionEndsAt);
+    assert.deepEqual(await storage.state.storage.get("messages"), messages);
+    assert.equal(closed, false);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a legacy lobby connection can keep posting throughout the active six-hour window", async () => {
+  const originalNow = Date.now;
+  const sessionStartedAt = Date.UTC(2026, 8, 5, 12, 0, 0);
+  const sessionEndsAt = sessionStartedAt + 6 * 60 * 60 * 1000;
+  const legacySessionStartedAt = sessionStartedAt + 60 * 60 * 1000;
+  Date.now = () => legacySessionStartedAt + 60 * 60 * 1000;
+  const storage = createDurableState();
+  const lobby = new CollaborationLobby(storage.state);
+  await storage.state.storage.put({
+    session: { sessionStartedAt: legacySessionStartedAt, sessionEndsAt: legacySessionStartedAt + 60 * 60 * 1000 },
+    messages: [],
+    memberUsage: {},
+    nextSequence: 1
+  });
+  let closed = false;
+  const socket = {
+    deserializeAttachment() { return { memberId: "m".repeat(32), nickname: "Builder" }; },
+    send() {},
+    close() { closed = true; }
+  };
+
+  try {
+    await lobby.webSocketMessage(socket, JSON.stringify({
+      type: "message",
+      id: "message000000001",
+      text: "Still here"
+    }));
+    assert.deepEqual(await storage.state.storage.get("session"), { sessionStartedAt, sessionEndsAt });
+    assert.equal(await storage.state.storage.get("alarm"), sessionEndsAt);
+    const messages = await storage.state.storage.get("messages");
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].text, "Still here");
+    assert.equal(closed, false);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a stale lobby session with a non-legacy duration is not silently extended", async () => {
+  const originalNow = Date.now;
+  const sessionStartedAt = Date.UTC(2026, 8, 5, 12, 0, 0);
+  Date.now = () => sessionStartedAt + 2 * 60 * 60 * 1000;
+  let closed = false;
+  const storage = createDurableState(() => [{ close() { closed = true; } }]);
+  const lobby = new CollaborationLobby(storage.state);
+  await storage.state.storage.put({
+    session: { sessionStartedAt, sessionEndsAt: sessionStartedAt + 2 * 60 * 60 * 1000 },
+    messages: [{ id: "message000000000", text: "Expired" }]
+  });
+
+  try {
+    await lobby.alarm();
+    assert.equal(storage.values.size, 0);
+    assert.equal(closed, true);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("a one-hour lobby session that did not start on the hour is not silently extended", async () => {
+  const originalNow = Date.now;
+  const bucketStartedAt = Date.UTC(2026, 8, 5, 12, 0, 0);
+  const storedStart = bucketStartedAt + 75 * 60 * 1000;
+  Date.now = () => storedStart + 60 * 60 * 1000;
+  let closed = false;
+  const storage = createDurableState(() => [{ close() { closed = true; } }]);
+  const lobby = new CollaborationLobby(storage.state);
+  await storage.state.storage.put({
+    session: { sessionStartedAt: storedStart, sessionEndsAt: storedStart + 60 * 60 * 1000 },
+    messages: [{ id: "message000000000", text: "Invalid legacy window" }]
+  });
+
+  try {
+    await lobby.alarm();
+    assert.equal(storage.values.size, 0);
+    assert.equal(closed, true);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 async function registerDevice(env) {
@@ -237,7 +410,8 @@ test("the signed-in workbench co-create space keeps the lobby and private rooms 
   assert.match(html, /<div class="desk shell">\s*<aside class="desk-side">/);
   assert.match(html, /class="active" aria-current="page"[^>]*>共创空间<\/a>/);
   assert.match(html, /<h1>共创大厅<\/h1>/);
-  assert.match(html, /每小时整点开启新一轮/);
+  assert.match(html, /每 6 小时开启新一轮/);
+  assert.match(html, /每 6 小时永久清空/);
   assert.doesNotMatch(html, /<aside class="recent"/);
   assert.doesNotMatch(html, /workspace-nav|workspace-account|SoloMap · 个人工作台/);
   assert.match(html, /const nickname = "独立开发者"/);
@@ -278,7 +452,7 @@ test("the signed-in workbench co-create space keeps the lobby and private rooms 
   }), env, { waitUntil() {} });
   const lobbySession = await lobbySessionResponse.json();
   assert.equal(lobbySessionResponse.status, 200);
-  assert.equal(lobbySession.sessionEndsAt - lobbySession.sessionStartedAt, 60 * 60 * 1000);
+  assert.equal(lobbySession.sessionEndsAt - lobbySession.sessionStartedAt, 6 * 60 * 60 * 1000);
   assert.equal(env.COLLABORATION_ROOMS.allocations, 0);
 });
 

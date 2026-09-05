@@ -198,7 +198,7 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
   const copy = zh ? {
     pageTitle: "共创大厅 · SoloMap",
     title: "共创大厅",
-    lead: "和此刻在线的 SoloMap 用户自由交流。大厅每小时整点开启新一轮。",
+    lead: "和此刻在线的 SoloMap 用户自由交流。大厅每 6 小时开启新一轮。",
     connecting: "正在进入大厅",
     connected: "已连接",
     offline: "连接已断开",
@@ -211,14 +211,14 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
     messageLabel: "消息",
     messagePlaceholder: "分享一个想法或问题…",
     send: "发送",
-    privacy: "大厅消息公开可见，并会在整点永久清空。",
+    privacy: "大厅消息公开可见，并会每 6 小时永久清空。",
     rateLimited: "发言太快，请稍后再继续。",
     unavailable: "暂时无法进入大厅，请稍后重试。",
     joinRoom: "加入临时共创"
   } : {
     pageTitle: "Co-create lobby · SoloMap",
     title: "Co-create lobby",
-    lead: "Talk freely with SoloMap users who are online now. A new lobby session starts every hour.",
+    lead: "Talk freely with SoloMap users who are online now. A new lobby session starts every 6 hours.",
     connecting: "Entering lobby",
     connected: "Connected",
     offline: "Disconnected",
@@ -231,7 +231,7 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
     messageLabel: "Message",
     messagePlaceholder: "Share an idea or question…",
     send: "Send",
-    privacy: "Lobby messages are public and permanently cleared on the hour.",
+    privacy: "Lobby messages are public and permanently cleared every 6 hours.",
     rateLimited: "You are posting too quickly. Continue in a moment.",
     unavailable: "The lobby is unavailable right now. Try again shortly.",
     joinRoom: "Join a private room"

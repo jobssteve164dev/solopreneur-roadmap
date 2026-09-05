@@ -21,7 +21,8 @@ const GLOBAL_ANONYMOUS_QUOTA = Object.freeze({
 });
 
 const MAX_DAILY_DEVICE_REGISTRATIONS = 2000;
-const LOBBY_SESSION_MS = 60 * 60 * 1000;
+const LEGACY_LOBBY_SESSION_MS = 60 * 60 * 1000;
+const LOBBY_SESSION_MS = 6 * 60 * 60 * 1000;
 const LOBBY_TICKET_LIFETIME_MS = 5 * 60 * 1000;
 const LOBBY_MAX_CONNECTIONS = 80;
 const LOBBY_MAX_CONNECTIONS_PER_MEMBER = 2;
@@ -717,7 +718,7 @@ export class CollaborationLobby {
     const server = pair[1];
     this.state.acceptWebSocket(server);
     if (typeof server.serializeAttachment === "function") server.serializeAttachment({ memberId, nickname });
-    const storedSession = await this.state.storage.get("session");
+    const storedSession = await this.readSessionWithLegacyExtension(now);
     if (!storedSession) {
       await this.state.storage.put({
         session: { sessionStartedAt, sessionEndsAt },
@@ -734,8 +735,8 @@ export class CollaborationLobby {
   }
 
   async webSocketMessage(socket, rawMessage) {
-    const session = await this.state.storage.get("session");
     const now = Date.now();
+    const session = await this.readSessionWithLegacyExtension(now);
     if (!session || Number(session.sessionEndsAt) <= now) {
       socket.close(4001, "Lobby session ended");
       await this.expireSession();
@@ -803,7 +804,30 @@ export class CollaborationLobby {
   }
 
   async alarm() {
+    const now = Date.now();
+    const session = await this.readSessionWithLegacyExtension(now);
+    if (session && Number(session.sessionEndsAt) > now) return;
     await this.expireSession();
+  }
+
+  async readSessionWithLegacyExtension(now) {
+    const session = await this.state.storage.get("session");
+    if (!session) return null;
+    const currentSession = currentLobbySession(now);
+    const storedStart = Number(session.sessionStartedAt);
+    const storedEnd = Number(session.sessionEndsAt);
+    const isLegacyHourlySession = Number.isFinite(storedStart)
+      && Number.isFinite(storedEnd)
+      && storedEnd - storedStart === LEGACY_LOBBY_SESSION_MS
+      && storedStart % LEGACY_LOBBY_SESSION_MS === 0
+      && storedStart >= currentSession.sessionStartedAt
+      && storedEnd <= currentSession.sessionEndsAt;
+    if (!isLegacyHourlySession) {
+      return session;
+    }
+    await this.state.storage.put("session", currentSession);
+    await this.state.storage.setAlarm(currentSession.sessionEndsAt);
+    return currentSession;
   }
 
   broadcast(payload) {

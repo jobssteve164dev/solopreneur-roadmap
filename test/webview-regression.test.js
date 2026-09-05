@@ -974,8 +974,11 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /data-open-account-settings/);
   assert.match(script, /command: 'collaboration\.joinLobby'/);
   assert.match(script, /collaborationLobbyTitle: '共创大厅'/);
+  assert.match(script, /collaborationLobbyDetail: '登录用户自由加入 · 每 6 小时清空'/);
   assert.match(script, /collaborationLobbySignedOut: '登录后即可进入，未登录用户不能查看或发言。'/);
-  assert.match(script, /collaborationLobbyPrivacy: '公开大厅 · 消息服务端可见 · 整点永久清空 · 参与者不能控制 Agent'/);
+  assert.match(script, /collaborationLobbyPrivacy: '公开大厅 · 消息服务端可见 · 每 6 小时永久清空 · 参与者不能控制 Agent'/);
+  assert.match(script, /collaborationLobbyDetail: 'Open to signed-in users · cleared every 6 hours'/);
+  assert.match(script, /collaborationLobbyPrivacy: 'Public lobby · server-visible messages · permanently cleared every 6 hours · participants cannot control the Agent'/);
   assert.match(script, /collaborationActiveRoom\.isLobby/);
   assert.match(script, /class="collaboration-message-actions"' \+ \(expanded \? '' : ' hidden'\)/);
   assert.match(script, /data-collaboration-message-menu/);
