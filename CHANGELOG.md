@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.457 - 2026-09-05
+
+### Fixed
+- reset collaboration lobby every six hours (caeeddc)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.456 - 2026-09-04
 
 ### Changed
