@@ -9056,7 +9056,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           \` : \`
           \${activeMode === 'continue' ? \`
           <div class="portfolio-compose-step-row">
-            <span id="portfolio-compose-step-label">\${currentLanguage === 'zh' ? '路线图环节' : 'Roadmap step'}</span>
             \${renderSoloSelect('portfolio-compose-step', 'data-project-continue-step data-project-path="' + escapeHtml(projectPath) + '"', availableNodes.map(candidate => ({ value: String(candidate.id), label: candidate.id + ' · ' + candidate.title + ' · ' + (t('status')[candidate.status] || candidate.status) })), false, node?.id)}
           </div>
           \` : ''}
@@ -9102,7 +9101,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (trigger) {
           const label = select.querySelector('[data-solo-label]');
           label?.setAttribute('id', 'portfolio-compose-step-value');
-          trigger.setAttribute('aria-labelledby', 'portfolio-compose-step-label portfolio-compose-step-value');
+          trigger.setAttribute('aria-labelledby', 'portfolio-compose-step-value');
           trigger.setAttribute('title', select.querySelector('[data-solo-label]')?.textContent || '');
         }
         const positionMenu = () => {
