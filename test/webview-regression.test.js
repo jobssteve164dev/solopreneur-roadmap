@@ -661,6 +661,93 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
   };
 }
 
+test('sidebar step picker switches the composer target and keeps the choice across refreshes', () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, elements, dispatchMessage, postedMessages } = runScriptWithMinimalDom(script, ids, `
+    globalThis.pickerTest = {
+      render: renderProjectConversationComposer,
+      bind: bindProjectContinueComposer,
+      remember: rememberProjectConversationInput,
+      restore: restoreProjectConversationInputState,
+      setup(project) {
+        Object.assign(currentProjects, { portfolio: [project], selectedProjectPath: project.path });
+        currentNodes = project.nodes;
+        activeProjectPath = project.path;
+      }
+    };
+  `);
+  const project = { path: '/workspace/app', name: 'app', nodes: [
+    { id: '1', title: 'First', status: 'Pending', dependencies: '' },
+    { id: '2', title: 'Second', status: 'Pending', dependencies: '' }
+  ] };
+  context.pickerTest.setup(project);
+  const initial = context.pickerTest.render(project, project.nodes);
+  assert.match(initial, /data-project-continue-step/, 'the composer must offer a step picker');
+  assert.doesNotMatch(initial, /<select\b/);
+  const select = createElement('step-picker');
+  select.addEventListener = (type, listener) => {
+    const previous = select.listeners[type];
+    select.listeners[type] = event => { previous?.(event); listener(event); };
+  };
+  select.setAttribute('data-project-path', project.path);
+  select.setAttribute('data-value', '1');
+  const option = createElement('second-option');
+  option.setAttribute('data-solo-option-value', '2');
+  option.closest = selector => selector === '[data-solo-option-value]' ? option : null;
+  select.querySelectorAll = () => [option];
+  const container = createElement('composer');
+  container.querySelectorAll = selector => selector === '[data-project-continue-step]' ? [select] : [];
+  context.pickerTest.bind(container);
+  select.listeners.click({ stopPropagation() {}, target: option });
+  const selected = context.pickerTest.render(project, project.nodes);
+  assert.match(selected, /data-next-node-id="2"/);
+  assert.match(selected, /data-project-conversation-input data-conversation-target-id="2"/);
+  const input = createElement('step-input');
+  input.setAttribute('data-project-path', project.path);
+  input.setAttribute('data-conversation-mode', 'continue');
+  input.setAttribute('data-conversation-target-id', '1');
+  input.value = 'First draft';
+  context.pickerTest.remember(input);
+  input.setAttribute('data-conversation-target-id', '2');
+  input.value = 'Second draft';
+  context.pickerTest.remember(input);
+  elements['portfolio-list'].querySelector = selector => selector === '[data-project-conversation-input]' ? input : null;
+  dispatchMessage({ command: 'soloSupplementFilesSelected', targetId: '1', files: ['first.md'] });
+  dispatchMessage({ command: 'pastedAttachmentsSaved', targetId: '1', files: ['first.png'] });
+  option.setAttribute('data-solo-option-value', '1');
+  select.listeners.click({ stopPropagation() {}, target: option });
+  assert.match(context.pickerTest.render(project, project.nodes), />First draft<\/textarea>/, 'late attachment must not copy the newly selected step draft');
+  option.setAttribute('data-solo-option-value', '2');
+  select.listeners.click({ stopPropagation() {}, target: option });
+  const send = createElement('send');
+  const sendMarkup = context.pickerTest.render(project, project.nodes).match(/<button[^>]*data-project-continue-send[^>]*>/)[0];
+  for (const [, name, value] of sendMarkup.matchAll(/([\w-]+)="([^"]*)"/g)) send.setAttribute(name, value);
+  send.closest = () => ({ querySelector: selector => selector === '[data-project-conversation-input]' ? input : null });
+  const sendContainer = createElement('send-container');
+  sendContainer.querySelectorAll = selector => selector === '[data-project-continue-send]' ? [send] : [];
+  context.pickerTest.bind(sendContainer);
+  send.listeners.click({ stopPropagation() {} });
+  const message = postedMessages.find(message => message.command === 'conversation.runStep');
+  assert.equal(message.nodeId, '2');
+  assert.equal(message.userMessage, 'Second draft');
+  assert.deepEqual(Array.from(message.supplementFiles), []);
+  project.nodes[0].status = 'Running';
+  context.pickerTest.setup(project);
+  assert.match(context.pickerTest.render(project, project.nodes), /data-next-node-id="2"/);
+  const other = { ...project, path: '/workspace/other' };
+  assert.match(context.pickerTest.render(other, other.nodes), /data-next-node-id="1"/);
+  project.nodes = project.nodes.slice(0, 1);
+  assert.match(context.pickerTest.render(project, project.nodes), /data-next-node-id="1"/);
+  input.setAttribute('data-conversation-target-id', '1');
+  input.value = 'First draft';
+  elements['portfolio-list'].querySelectorAll = () => [input];
+  context.pickerTest.restore({ projectPath: project.path, mode: 'continue', targetId: '2', value: 'Removed step draft' });
+  assert.equal(input.value, 'First draft', 'removed selection must not carry its draft into the fallback step');
+});
+
 test('extension manifest uses SoloMap visible branding', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
 
@@ -2797,7 +2884,7 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /isConversationCardInteractionActive\(\)[\s\S]*?pendingAsyncPortfolioRender/);
   assert.match(html, /portfolioList\.addEventListener\('pointerover'[\s\S]*?hoveredConversationCard/);
   assert.match(html, /portfolioList\.addEventListener\('focusin'[\s\S]*?focusedConversationCard/);
-  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
+  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.soloConversations[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.flowConversations/);
@@ -2814,7 +2901,7 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function renderSidebarStepHistoryContent[\s\S]*?sidebarFlowConversations\[key\]/);
   assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
-  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
+  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?sameConversations\(sidebarProjectConversations\[message\.projectPath\], message\.conversations \|\| \[\]\)/);
   assert.match(html, /function pruneSidebarConversationExpansionState\(conversations\)/);
   assert.match(html, /class="delivery-toggle-btn" data-conversation-expand-id/);

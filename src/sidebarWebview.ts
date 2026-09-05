@@ -2995,6 +2995,25 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       margin-bottom: 7px;
     }
 
+    .portfolio-compose-step-row {
+      display: grid;
+      gap: 5px;
+      margin-bottom: 8px;
+      min-width: 0;
+      font-size: 11px;
+    }
+
+    .portfolio-compose-step .solo-select-option {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      flex-shrink: 0;
+    }
+
+    .portfolio-compose-step.open-above .solo-select-menu {
+      top: auto;
+      bottom: calc(100% + 4px);
+    }
+
     .portfolio-compose-model {
       min-width: 0;
     }
@@ -4657,6 +4676,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let lastDependencyStatus = null;
     let selectedEnhancementId = '';
     const projectConversationModes = {};
+    const projectContinueNodeSelections = {};
     const agentModelCatalogs = {};
     const agentModelPreferenceMap = {};
     const projectConversationModelSelections = {};
@@ -5340,7 +5360,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         (candidate.getAttribute('data-project-path') || '') === state.projectPath
         && (candidate.getAttribute('data-conversation-mode') || 'continue') === state.mode
         && (candidate.getAttribute('data-conversation-target-id') || '') === state.targetId
-      )) || (state.mode === 'continue'
+      )) || (state.mode === 'continue' && !projectContinueNodeSelections[state.projectPath]
         ? inputs.find(candidate => (
           (candidate.getAttribute('data-project-path') || '') === state.projectPath
           && (candidate.getAttribute('data-conversation-mode') || 'continue') === 'continue'
@@ -8103,7 +8123,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               projectSoloFiles[message.targetId] = mergeAttachmentFiles(projectSoloFiles[message.targetId] || [], message.files || []);
             } else {
               const input = portfolioList.querySelector('[data-project-conversation-input]');
-              projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
+              if (input?.getAttribute('data-conversation-target-id') === String(message.targetId)) {
+                projectContinueDrafts[message.targetId] = input.value;
+              }
               projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
             }
             renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
@@ -8119,7 +8141,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           } else if (message.targetId) {
             const input = portfolioList.querySelector('[data-project-conversation-input]');
-            projectContinueDrafts[message.targetId] = input ? input.value : (projectContinueDrafts[message.targetId] || '');
+            if (input?.getAttribute('data-conversation-target-id') === String(message.targetId)) {
+              projectContinueDrafts[message.targetId] = input.value;
+            }
             projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
             renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           }
@@ -8704,7 +8728,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const conversations = [
         ...(sidebarProjectConversations[key] || []),
         ...(sidebarFlowConversations[key] || [])
-      ];
+      ].filter(conversation => !projectContinueNodeSelections[key] || String(conversation.nodeId) === String(node?.id));
       if (!conversations || conversations.length === 0) {
         return '<div class="sidebar-solo-history-title">' + escapeHtml(t('continueHistory')) + '</div><div class="sidebar-solo-empty">' + escapeHtml(t('noContinueConversations')) + '</div>';
       }
@@ -8983,11 +9007,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return 'solo:' + String(projectPath || '');
     }
 
+    function getProjectContinueNode(projectPath, nodes) {
+      return (nodes || []).find(node => String(node.id) === projectContinueNodeSelections[projectPath])
+        || getNextActionNode(nodes);
+    }
+
     function renderProjectConversationComposer(project, nodes) {
       const projectPath = project.path || '';
       const localNodes = Array.isArray(project.nodes) ? project.nodes : [];
       const availableNodes = Array.isArray(nodes) && nodes.length > 0 ? nodes : localNodes;
-      const node = getNextActionNode(availableNodes);
+      const node = getProjectContinueNode(projectPath, availableNodes);
       const mode = projectConversationModes[projectPath] || (projectSoloDrafts[projectPath] ? 'solo' : 'continue');
       const soloTargetId = projectSoloTargetId(projectPath);
       const activeMode = mode === 'flow'
@@ -9001,7 +9030,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         ? (projectSoloDrafts[projectPath] || '')
         : activeMode === 'flow'
           ? (projectContinueDrafts['flow:' + projectPath] || '')
-          : (projectContinueDrafts[targetId] || projectContinueDrafts[getProjectContinueDraftKey(projectPath)] || '');
+          : (projectContinueDrafts[targetId] ?? (projectContinueNodeSelections[projectPath] ? '' : projectContinueDrafts[getProjectContinueDraftKey(projectPath)]) ?? '');
       const agentOptions = activeMode === 'solo'
         ? getAgentOptions({ agentCli: getEffectiveSettingCliPath() || 'agy' })
         : activeMode === 'flow'
@@ -9025,6 +9054,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               </div>
             </div>
           \` : \`
+          \${activeMode === 'continue' ? \`
+          <div class="portfolio-compose-step-row">
+            <span id="portfolio-compose-step-label">\${currentLanguage === 'zh' ? '路线图环节' : 'Roadmap step'}</span>
+            \${renderSoloSelect('portfolio-compose-step', 'data-project-continue-step data-project-path="' + escapeHtml(projectPath) + '"', availableNodes.map(candidate => ({ value: String(candidate.id), label: candidate.id + ' · ' + candidate.title + ' · ' + (t('status')[candidate.status] || candidate.status) })), false, node?.id)}
+          </div>
+          \` : ''}
           <div class="portfolio-compose-agent-row">
             \${renderSoloSelect('portfolio-compose-agent', 'data-project-continue-agent data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', agentOptions, composerDisabled, selectedAgentCli)}
             \${renderSoloSelect('portfolio-compose-model', 'data-project-continue-model data-conversation-target-id="' + escapeHtml(modelTargetId) + '"', getAgentModelOptions(selectedAgentCli), composerDisabled, getTargetModelValue(modelTargetId, selectedAgentCli))}
@@ -9061,6 +9096,51 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function bindProjectContinueComposer(container) {
+      container.querySelectorAll('[data-project-continue-step]').forEach(select => {
+        const projectPath = select.getAttribute('data-project-path') || '';
+        const trigger = select.querySelector('[data-solo-trigger]');
+        if (trigger) {
+          const label = select.querySelector('[data-solo-label]');
+          label?.setAttribute('id', 'portfolio-compose-step-value');
+          trigger.setAttribute('aria-labelledby', 'portfolio-compose-step-label portfolio-compose-step-value');
+          trigger.setAttribute('title', select.querySelector('[data-solo-label]')?.textContent || '');
+        }
+        const positionMenu = () => {
+          if (!select.classList.contains('open')) return;
+          const menu = select.querySelector('[data-solo-menu]');
+          if (!menu) return;
+          const rect = select.getBoundingClientRect();
+          const below = window.innerHeight - rect.bottom - 64;
+          const above = rect.top - 12;
+          const openAbove = below < Math.min(190, menu.scrollHeight) && above > below;
+          select.classList.toggle('open-above', openAbove);
+          menu.style.maxHeight = Math.max(24, Math.min(190, openAbove ? above : below)) + 'px';
+        };
+        select.querySelectorAll('[data-solo-option-value]').forEach(option => option.setAttribute('role', 'option'));
+        bindSoloSelect(select, value => {
+          projectContinueNodeSelections[projectPath] = value;
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath, false);
+          container.querySelector('[data-project-continue-step] [data-solo-trigger]')?.focus();
+        });
+        select.addEventListener('click', positionMenu);
+        select.addEventListener('keydown', event => {
+          const options = Array.from(select.querySelectorAll('[data-solo-option-value]'));
+          const index = options.indexOf(document.activeElement);
+          if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+            event.preventDefault();
+            select.classList.add('open');
+            trigger?.setAttribute('aria-expanded', 'true');
+            positionMenu();
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
+              : event.key === 'ArrowUp' ? (index <= 0 ? options.length - 1 : index - 1) : (index + 1) % options.length;
+            options[next]?.focus();
+          } else if (event.key === 'Escape') {
+            trigger?.focus();
+          } else if (event.key === 'Tab') {
+            closeSoloSelects();
+          }
+        });
+      });
       container.querySelectorAll('[data-project-conversation-mode]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -9204,7 +9284,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const project = portfolioProjects.length > 0
           ? portfolioProjects.find(p => p.path === projectPath)
           : null;
-        const node = project ? getNextActionNode(project.nodes || []) : null;
+        const node = project ? getProjectContinueNode(projectPath, currentNodes.length ? currentNodes : project.nodes || []) : null;
         if (node) {
           bindConversationsTree(container, projectPath, node.id, false);
         }
@@ -10354,7 +10434,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       \`;
     }
 
-    function renderPortfolio(portfolio, selectedProjectPath) {
+    function renderPortfolio(portfolio, selectedProjectPath, preserveComposerInput = true) {
       const preservedComposerState = captureProjectConversationInputState();
       hoveredConversationCard = null;
       focusedConversationCard = null;
@@ -10884,7 +10964,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         });
       });
       bindProjectContinueComposer(portfolioList);
-      restoreProjectConversationInputState(preservedComposerState);
+      if (preserveComposerInput) restoreProjectConversationInputState(preservedComposerState);
     }
 
     function activateProjectInSidebar(projectPath, preservePortfolioFilter = false) {
