@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.460 - 2026-09-08
+
+### Added
+- connect manual experience reviews to task and GitHub evidence (9471200)
+
+### Fixed
+- hard-cut to incremental SQLite projection (568a2f6)
+
+### Docs
+- define task reports and manual experience review (89bf6db)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.459 - 2026-09-05
 
 ### Fixed
