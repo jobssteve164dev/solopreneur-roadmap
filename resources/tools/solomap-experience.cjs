@@ -242,7 +242,8 @@ function retrieveLessons(candidates, records, query, projectRoot, limit) {
       confidence: candidate.confidence || 'unknown',
       status: candidate.status || 'candidate',
       projectName: candidate.projectName || '',
-      evidence: (candidate.evidenceRefs || []).filter((ref) => ref.type === 'run_digest' || ref.type === 'command').slice(0, 3)
+      evidence: (candidate.evidenceRefs || []).filter((ref) => candidate.semanticReview?.schemaVersion === 2 || ref.type === 'run_digest' || ref.type === 'command').slice(0, 3),
+      doesNotApplyWhen: candidate.doesNotApplyWhen || ''
     }));
   const evidenceLeads = records
     .map((record) => {
@@ -394,7 +395,9 @@ function renderMarkdown(title, payload) {
     if (payload.lessons.length === 0) lines.push('No high-value lesson matched.', '');
     payload.lessons.forEach((item, index) => {
       lines.push(`### ${index + 1}. ${item.lesson}`);
+      lines.push(`- Experience ID: ${item.id}`);
       lines.push(`- Applies when: ${item.appliesWhen}`);
+      if (item.doesNotApplyWhen) lines.push(`- Does not apply when: ${item.doesNotApplyWhen}`);
       lines.push(`- Do: ${item.doThis}`);
       lines.push(`- Avoid: ${item.avoidThis}`);
       lines.push(`- Confidence: ${item.confidence} · status: ${item.status} · relevance: ${item.relevance}`);

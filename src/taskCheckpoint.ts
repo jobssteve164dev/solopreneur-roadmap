@@ -202,6 +202,12 @@ if (action === 'complete') {
   const checkpointMessage = String(args.message || '').trim()
     || (implicitTurn ? '终端内继续对话（Agent 未登记开始检查点）' : String(status.checkpointMessage || status.userMessage || '').trim());
   const snapshot = writeWorkspaceDiff(status);
+  let taskReport = { taskReportStatus: 'missing', taskReportPath: '', taskReportError: '' };
+  try {
+    taskReport = require(${JSON.stringify(path.join(__dirname, 'taskReport.js'))}).recordTaskReport(status, args, sequence);
+  } catch (error) {
+    taskReport = { taskReportStatus: 'save_failed', taskReportPath: '', taskReportError: String(error.message || error) };
+  }
   if (status.completionDecisionFilePath) {
     atomicWriteJson(status.completionDecisionFilePath, outcome === 'candidate_complete'
       ? { markCompleted: true, reason: summary, source: 'agent_checkpoint' }
@@ -216,6 +222,7 @@ if (action === 'complete') {
     checkpointImplicitTurn: implicitTurn,
     checkpointMessage,
     checkpointOutcome: outcome,
+    ...taskReport,
     checkpointSummary: summary,
     checkpointNext: String(args.next || '').trim(),
     providerReportedSessionId: String(process.env.CLAUDE_CODE_SESSION_ID || '').trim(),

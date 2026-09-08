@@ -30,6 +30,8 @@ export interface LearningEvent {
 }
 
 export interface LessonCandidate {
+  verification?: string;
+  doesNotApplyWhen?: string;
   schemaVersion: 1;
   id: string;
   projectId: string;
@@ -388,7 +390,6 @@ export function appendLearningEvent(
     fs.writeFileSync(sourcePath, JSON.stringify(input.sourcePayload, null, 2) + '\n', 'utf8');
   }
   updateLedgerIndex(paths, event);
-  extractLessonCandidatesFromEvent(workspaceRoot, globalDataPath, event);
   return event;
 }
 
@@ -578,7 +579,9 @@ function readCandidates(paths: ReturnType<typeof getLearningLedgerPaths>): Lesso
   const roots = [paths.candidatesRoot, paths.approvedRoot];
   return roots
     .flatMap((root) => listJsonFiles(root).map((file) => safeReadJson<LessonCandidate>(file)).filter((item): item is LessonCandidate => Boolean(item && item.schemaVersion === 1)))
-    .filter((candidate) => !isTrashOrLocalPrivate(candidate));
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+    .filter((candidate, index, all) => all.findIndex(item => item.id === candidate.id) === index)
+    .filter((candidate) => candidate.status !== 'rejected' && !isTrashOrLocalPrivate(candidate));
 }
 
 function readCandidateDecisions(paths: ReturnType<typeof getLearningLedgerPaths>): LearningCandidateDecision[] {
@@ -739,7 +742,6 @@ export function buildLearningRetrievalContext(workspaceRoot: string, globalDataP
   } catch {
     return '';
   }
-  reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
   const scored = readCandidates(paths)
     .map((candidate) => ({ candidate, score: scoreCandidate(candidate, query) }))
     .filter((entry) => entry.score >= 6 && !isTrashOrLocalPrivate(entry.candidate))
@@ -766,75 +768,21 @@ export function buildLearningRetrievalContext(workspaceRoot: string, globalDataP
     'SoloMap 统一学习账本召回：',
     ...candidates.map((candidate, index) => [
       `${index + 1}. ${candidate.summary}`,
+      `   - 经验标识：${candidate.id}`,
       `   - 类型：${candidate.lessonType} / 状态：${candidate.status} / 置信度：${candidate.confidence}`,
       `   - 适用：${candidate.appliesWhen}`,
       `   - 本轮应做：${candidate.doThis}`,
-      `   - 避免：${candidate.avoidThis}`
+      `   - 避免：${candidate.avoidThis}`,
+      ...(candidate.doesNotApplyWhen ? [`   - 不适用：${candidate.doesNotApplyWhen}`] : []),
+      ...(candidate.verification ? [`   - 验证：${candidate.verification}`] : []),
+      `   - 证据：${candidate.evidenceRefs.map(ref => ref.ref).join('；')}`
     ].join('\n'))
   ].join('\n');
 }
 
 export function buildLearningPromotionContext(workspaceRoot: string, globalDataPath: string, limit = 5): string {
-  let paths: ReturnType<typeof getLearningLedgerPaths>;
-  try {
-    paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
-  } catch {
-    return '';
-  }
-  reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
-  maybeWritePromotionSuggestions(workspaceRoot, globalDataPath, readCandidates(paths).filter((candidate) => candidate.status === 'candidate'));
-  
-  const rawSuggestions = readPromotionSuggestions(paths)
-    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
-
-  const seenTargets = new Set<string>();
-  const suggestions: LearningPromotionSuggestion[] = [];
-  for (const sug of rawSuggestions) {
-    const draftText = sug.draftMarkdown.toLowerCase();
-    if (isLowValueLearningText(draftText)) {
-      continue;
-    }
-    if (
-      sug.promotionTarget === 'pattern' ||
-      sug.promotionTarget === 'operating_rule' ||
-      sug.promotionTarget === 'decision' ||
-      sug.promotionTarget === 'domain'
-    ) {
-      if (
-        draftText.includes('/home/') ||
-        draftText.includes('/users/') ||
-        draftText.includes('/tmp/') ||
-        draftText.includes('__solo__') ||
-        draftText.includes('/agent-runs/')
-      ) {
-        continue;
-      }
-    }
-    const cleanDraft = sug.draftMarkdown.replace(/-\s+Source candidate:\s+[^\n]+/gi, '').trim().toLowerCase();
-    const key = `${sug.targetPath}|${cleanDraft}`;
-    if (seenTargets.has(key)) {
-      continue;
-    }
-    seenTargets.add(key);
-    suggestions.push(sug);
-    if (suggestions.length >= limit) {
-      break;
-    }
-  }
-
-  if (suggestions.length === 0) {
-    return '';
-  }
-  return [
-    'SoloMap 自动晋升建议（插件侧生成）：',
-    ...suggestions.map((suggestion, index) => [
-      `${index + 1}. ${suggestion.reason} -> ${suggestion.promotionTarget}`,
-      `   - 候选：${suggestion.candidateId}`,
-      `   - 目标位置：${suggestion.targetPath}`,
-      `   - 摘要：${compactLine(suggestion.draftMarkdown.replace(/\s+/g, ' '), 260)}`
-    ].join('\n')),
-    '   - 执行规则：如本轮继续验证该建议成立，Agent 应直接写入目标位置；若证据不足，保留建议，不要求用户手工筛选。'
-  ].join('\n');
+  // Semantic promotion is only performed by the manual experience review.
+  return '';
 }
 
 export function readLearningSummary(workspaceRoot: string, globalDataPath = ''): LearningSummary {
@@ -856,7 +804,6 @@ export function readLearningSummary(workspaceRoot: string, globalDataPath = ''):
       projectSignals: []
     };
   }
-  reconcileLearningCandidateDecisionsBestEffort(workspaceRoot, globalDataPath);
   const events = readJsonl<LearningEvent>(paths.eventsPath, 1000).filter((event) => event && event.schemaVersion === 1);
   const candidates = readCandidates(paths);
   const candidateDecisions = readCandidateDecisions(paths);

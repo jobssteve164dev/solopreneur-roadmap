@@ -198,6 +198,7 @@ function loadCompiledModule(relativePath, exportPatch) {
     exports,
     module,
     require: (id) => {
+      if (['./taskReport.js', './learningReview.js', './learningReviewRunner.js'].includes(id)) return require(path.join(projectRoot, 'out', id));
       if (id === 'child_process') {
         const cp = require('child_process');
         return new Proxy(cp, {
@@ -380,7 +381,7 @@ function loadCompiledModule(relativePath, exportPatch) {
           return require(path.join(projectRoot, 'out/agentCliUpgrade.js'));
         }
         if (id === './agentCli') {
-          return require(path.join(projectRoot, 'out/agentCli.js'));
+          return { ...require(path.join(projectRoot, 'out/agentCli.js')) };
         }
         if (id === './taskCheckpoint') {
           return require(path.join(projectRoot, 'out/taskCheckpoint.js'));
@@ -3205,118 +3206,16 @@ test('daily review prompt switches modes by engineering rhythm and signals', () 
   assert.doesNotMatch(prompt, /portfolio\.csv|dependencies\.csv/);
 });
 
-test('learning ledger writes events, extracts candidates, and retrieves reusable context', () => {
+test('learning ledger keeps events as materials until manual review', () => {
   const ledger = require(path.join(projectRoot, 'out', 'learningLedger.js'));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-learning-ledger-'));
-  const projectPath = path.join(root, 'app');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-materials-'));
   const globalRoot = path.join(root, '.solomap-global');
-  fs.mkdirSync(projectPath, { recursive: true });
-
-  const event = ledger.appendLearningEvent(projectPath, globalRoot, {
-    sourceType: 'flow_loop',
-    sourceRef: 'flow-1:loop-1:verifier:1',
-    eventType: 'deviated',
-    summary: 'Verifier found implemented_unverified because final UI was not rendered.',
-    evidenceRefs: [{ type: 'trace', ref: 'implemented_unverified', summary: 'H/I/J scoring reason' }],
-    tags: ['flow', 'verifier'],
-    metadata: {
-      role: 'verifier',
-      recommendedStatus: 'implemented_unverified',
-      failures: ['final UI was not rendered'],
-      verification: []
-    }
-  });
-
-  const eventsPath = path.join(globalRoot, 'learning', 'ledger', 'events.jsonl');
-  const candidatesDir = path.join(globalRoot, 'learning', 'candidates');
-  const candidateDecisionsDir = path.join(globalRoot, 'learning', 'candidate-decisions');
-  const promotionSuggestionsDir = path.join(globalRoot, 'learning', 'promotion-suggestions');
-  assert.ok(fs.existsSync(eventsPath));
-  assert.match(fs.readFileSync(eventsPath, 'utf8'), new RegExp(event.id));
-  const candidateFiles = fs.readdirSync(candidatesDir).filter((name) => name.endsWith('.json'));
-  assert.ok(candidateFiles.length >= 1);
-  const candidateDecisionFiles = fs.readdirSync(candidateDecisionsDir).filter((name) => name.endsWith('.json'));
-  assert.ok(candidateDecisionFiles.length >= 1);
-  const createdDecision = JSON.parse(fs.readFileSync(path.join(candidateDecisionsDir, candidateDecisionFiles[0]), 'utf8'));
-  assert.equal(createdDecision.decision, 'created');
-  assert.ok(createdDecision.candidateIds.length >= 1);
-  const promotionSuggestionFiles = fs.readdirSync(promotionSuggestionsDir).filter((name) => name.endsWith('.json'));
-  assert.ok(promotionSuggestionFiles.length >= 1);
-  const promotionSuggestion = JSON.parse(fs.readFileSync(path.join(promotionSuggestionsDir, promotionSuggestionFiles[0]), 'utf8'));
-  assert.equal(promotionSuggestion.promotionTarget, 'project_memory');
-  assert.match(promotionSuggestion.reason, /high_confidence_with_evidence/);
-  assert.match(promotionSuggestion.targetPath, /memory\/projects\/app\.md/);
-
-  const summary = ledger.readLearningSummary(projectPath, globalRoot);
-  assert.equal(summary.eventCount, 1);
-  assert.equal(summary.candidateCount >= 1, true);
-  assert.equal(summary.candidateDecisionCount >= 1, true);
-  assert.equal(summary.projectSignals[0].riskSignals >= 1, true);
-
-  const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
-    projectPath,
-    runKind: 'flow',
-    role: 'planner',
-    contextText: 'implemented_unverified final UI rendered verifier',
-    files: [],
-    limit: 3
-  });
-  assert.match(retrieval, /统一学习账本召回/);
-  assert.match(retrieval, /Flow 验证暴露未闭环风险/);
-  const promotionContext = ledger.buildLearningPromotionContext(projectPath, globalRoot);
-  assert.match(promotionContext, /SoloMap 自动晋升建议/);
-  assert.match(promotionContext, /project_memory/);
-
-  const skippedEvent = ledger.appendLearningEvent(projectPath, globalRoot, {
-    sourceType: 'solo',
-    sourceRef: 'solo-no-learning-signal',
-    eventType: 'partial',
-    summary: 'User discussed a temporary idea without reusable execution signal.',
-    evidenceRefs: [{ type: 'user', ref: 'temporary discussion', summary: 'No durable lesson' }],
-    tags: ['solo'],
-    metadata: {
-      verification: [],
-      failures: []
-    }
-  });
-  const afterSkippedDecisionFiles = fs.readdirSync(candidateDecisionsDir).filter((name) => name.endsWith('.json'));
-  const skippedDecisions = afterSkippedDecisionFiles
-    .map((name) => JSON.parse(fs.readFileSync(path.join(candidateDecisionsDir, name), 'utf8')))
-    .filter((decision) => decision.eventId === skippedEvent.id);
-  assert.equal(skippedDecisions.length, 1);
-  assert.equal(skippedDecisions[0].decision, 'skipped');
-  assert.match(skippedDecisions[0].reason, /no_reusable_candidate_signal_matched/);
-
-  const reconciled = ledger.reconcileLearningCandidateDecisions(projectPath, globalRoot);
-  assert.equal(reconciled.eventsChecked >= 2, true);
-
-  const existingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-existing-learning-ledger-'));
-  const existingProjectPath = path.join(existingRoot, 'existing-app');
-  const existingGlobalRoot = path.join(existingRoot, '.solomap-global');
-  fs.mkdirSync(path.join(existingGlobalRoot, 'learning', 'candidates'), { recursive: true });
-  fs.writeFileSync(path.join(existingGlobalRoot, 'learning', 'candidates', 'existing-candidate.json'), JSON.stringify({
-    schemaVersion: 1,
-    id: 'lesson-existing',
-    projectId: 'existing-app',
-    projectPath: existingProjectPath,
-    projectName: 'existing-app',
-    sourceEventIds: ['evt-existing'],
-    sourceType: 'solo',
-    lessonType: 'user_preference',
-    summary: '用户纠偏应成为后续执行约束：不要把明确目标降级成最小工程动作。',
-    appliesWhen: '后续用户已经把目标说清时。',
-    doThis: '按用户语义本身交付完整可验证结果。',
-    avoidThis: '不要只改提示词或交给下一轮 Agent。',
-    evidenceRefs: [{ type: 'user', ref: 'explicit correction', summary: 'User correction' }],
-    confidence: 'high',
-    status: 'candidate',
-    promotionTarget: 'operating_rule',
-    createdAt: '2026-06-27T00:00:00.000Z',
-    updatedAt: '2026-06-27T00:00:00.000Z'
-  }, null, 2), 'utf8');
-  const existingPromotionContext = ledger.buildLearningPromotionContext(existingProjectPath, existingGlobalRoot);
-  assert.match(existingPromotionContext, /operating_rule/);
-  assert.ok(fs.readdirSync(path.join(existingGlobalRoot, 'learning', 'promotion-suggestions')).some((name) => name.endsWith('.json')));
+  const event = ledger.appendLearningEvent(root, globalRoot, { sourceType: 'flow_loop', sourceRef: 'flow:1', eventType: 'deviated', summary: 'Final UI not rendered', evidenceRefs: [{ type: 'trace', ref: 'flow:1' }], tags: [], metadata: { role: 'verifier', recommendedStatus: 'implemented_unverified', failures: ['UI unverified'] } });
+  assert.ok(fs.readFileSync(path.join(globalRoot, 'learning/ledger/events.jsonl'), 'utf8').includes(event.id));
+  assert.equal(ledger.readLearningSummary(root, globalRoot).eventCount, 1);
+  assert.deepEqual(fs.readdirSync(path.join(globalRoot, 'learning/candidates')), []);
+  assert.deepEqual(fs.readdirSync(path.join(globalRoot, 'learning/candidate-decisions')), []);
+  assert.equal(ledger.buildLearningPromotionContext(root, globalRoot), '');
 });
 
 test('adding a project asks for a global methodology project type', () => {
@@ -7191,8 +7090,8 @@ test('agent command builder keeps background one-shot commands and uses native i
     '2026-05-31T00:00:00.000Z'
   );
   assert.match(fs.readFileSync(path.join(ensuredMemory.globalRoot, 'metrics', 'execution-speed.csv'), 'utf8'), /反馈与规模化.*1234/);
-  assert.ok(fs.readdirSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates')).some((name) => name.endsWith('.md') && name !== '_example.md'));
-  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /待审核学习候选：1/);
+  assert.equal(fs.readdirSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates')).some((name) => name.endsWith('.md') && name !== '_example.md'), false);
+  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /待审核学习候选：0/);
   assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /低频指标已记录/);
   assert.doesNotMatch(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /最近执行速度记录|最近复用记录|反馈与规模化.*1234/);
   const defaultMemoryPrompt = extensionModule.__buildSoloMapSystemMemoryPrompt('/workspace/app', memoryRoot);
@@ -7227,7 +7126,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(startupPack, /projects\/app\.md/);
   assert.match(startupPack, /problem-closure-mindset\.md/);
   assert.match(startupPack, /SoloMap 统一学习账本召回/);
-  assert.match(startupPack, /自动建议写入合适的 memory\/pattern\/decision\/domain 或学习候选/);
+  assert.match(startupPack, /候选提炼和晋升由用户手动“复盘经验”处理/);
 
   const skillStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-skill-store-'));
   const maintenanceWorkspace = extensionModule.__ensureSolomapMaintenanceWorkspace('/workspace/app', skillStoreRoot);
@@ -7783,7 +7682,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(prompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
   assert.match(prompt, /运行类型：step/);
   assert.match(prompt, /\.solomap-global\/memory/);
-  assert.match(prompt, /学习候选的晋升不要求用户手工确认/);
+  assert.doesNotMatch(prompt, /学习候选的晋升不要求用户手工确认/);
 
   const followupPrompt = extensionModule.__buildAgentConversationPrompt(
     {
@@ -8084,8 +7983,8 @@ test('agent command builder keeps background one-shot commands and uses native i
   const verificationNode = Object.values(graphFile.experienceNodes).find((node) => node.type === 'verification');
   assert.ok(verificationNode);
   assert.match(verificationNode.centralMeaning, /npm test/);
-  assert.equal(verificationNode.stats.uses >= 1, true);
-  assert.equal(verificationNode.stats.winRate > 0.5, true);
+  assert.equal(verificationNode.stats.uses, 0);
+  assert.equal(verificationNode.stats.winRate, 0.5);
   assert.ok(graphFile.indexes.byExperience[verificationNode.id].includes(digest.runId));
   const experiencePrompt = extensionModule.__buildExecutionExperiencePrompt(digestRoot, {
     nodeId: '2',
@@ -8097,7 +7996,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(experiencePrompt, /修复 src\/extension\.ts/);
   assert.match(experiencePrompt, /src\/extension\.ts/);
   assert.match(experiencePrompt, /经验节点/);
-  assert.match(experiencePrompt, /%\/1次/);
+  assert.doesNotMatch(experiencePrompt, /%\/\d+次/);
   assert.match(experiencePrompt, /下一位 Agent 交接/);
   assert.match(experiencePrompt, /建议先看/);
   assert.match(experiencePrompt, /npm test passed/);
@@ -12675,39 +12574,16 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), 'Project growth data refreshed: 4 files, 3 modules.');
 });
 
-test('global prompt experience review uses a validated result instead of editing the generated prompt index', () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__buildGlobalPromptReviewPrompt = buildGlobalPromptReviewPrompt;',
-      'module.exports.__readGlobalPromptReviewResult = readGlobalPromptReviewResult;'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-prompt-review-'));
-  const resultFile = path.join(tempRoot, 'result.json');
-  const prompt = extensionModule.__buildGlobalPromptReviewPrompt('/workspace/project', tempRoot, 'Keep scope small.', resultFile);
-  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
-  const handlerSource = extensionSource.slice(
-    extensionSource.indexOf('async function handleReviewGlobalPrompt('),
-    extensionSource.indexOf('function buildSoloContextIndex(')
-  );
-
-  assert.match(handlerSource, /const \{ maintenanceRoot, runsRoot \} = ensureSolomapMaintenanceWorkspace/);
-  assert.match(handlerSource, /const runDir = path\.join\(runsRoot, runId\)/);
-  assert.doesNotMatch(handlerSource, /path\.join\(globalRoot, 'runs'/);
-  assert.match(prompt, /memory[\\/]profile\.md/);
-  assert.match(prompt, /memory[\\/]operating-rules\.md/);
-  assert.match(prompt, /不要修改任何记忆文件、项目文件、VS Code 配置或派生的 global-default-prompt\.md/);
-  assert.match(prompt, /Keep scope small\./);
-  assert.match(prompt, new RegExp(resultFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-
-  fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: '  Preserve user intent.  ' }), 'utf8');
-  const result = extensionModule.__readGlobalPromptReviewResult(resultFile);
-  assert.equal(result.ok, true);
-  assert.equal(result.globalPrompt, 'Preserve user intent.');
-  assert.equal(result.message, '默认指令已根据记忆复盘更新。');
-  fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: '   ' }), 'utf8');
-  assert.equal(extensionModule.__readGlobalPromptReviewResult(resultFile).ok, false);
+test('manual experience review is routed from the existing settings action', async () => {
+  const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__review = handleReviewGlobalPrompt;');
+  assert.equal(typeof extensionModule.__review, 'function');
+  const { buildLearningReviewPrompt } = require('../out/learningReviewApply.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const manifest = { schemaVersion: 1, runId: 'review-1', globalRoot: '/global', globalPrompt: 'Keep scope.', promptHash: reviewHash('Keep scope.'), projects: [], sources: [], memory: [], gaps: [] };
+  const prompt = buildLearningReviewPrompt('/review/manifest.json', manifest, '/review/proposal.json');
+  assert.match(prompt, /manifest\.json/);
+  assert.match(prompt, /schemaVersion:2/);
+  assert.match(prompt, /不要修改任何记忆文件/);
 });
 
 test('concurrent settings patches serialize without restoring stale values', async () => {
@@ -13104,4 +12980,40 @@ test('Flow role output validation error triggers self-correction loop', async ()
   assert.equal(startRoleRunCalled, true);
   assert.equal(startRoleRunPayload.role, 'planner');
   assert.match(startRoleRunPayload.prompt, /自检修正/);
+});
+
+test('settings review executes generated CLI scripts and preserves an unchanged editor draft', async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-settings-'));
+  const globalRoot = path.join(workspace, '.solomap-global');
+  const fakeAgent = path.join(workspace, 'review-agent.cjs');
+  fs.writeFileSync(fakeAgent, `const fs=require('fs'),path=require('path'),crypto=require('crypto');
+const prompt=process.argv[2], dir=path.dirname(prompt), m=JSON.parse(fs.readFileSync(path.join(dir,'manifest.json')));
+const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
+const checking=path.basename(prompt).startsWith('review-prompt');
+const proposal={schemaVersion:2,runId:m.runId,manifestHash:hash(m),globalPrompt:null,memoryChanges:[],lessons:[],processedSources:[],unresolved:[]};
+const value=checking?{schemaVersion:1,runId:m.runId,manifestHash:hash(m),proposalHash:hash(JSON.parse(fs.readFileSync(path.join(dir,'proposal-1.json')))),verdict:'pass',summary:'No new evidence',checks:[{target:'overall',safe:true,reason:'No changes warranted',evidence:[]}]}:proposal;
+fs.writeFileSync(path.join(dir,checking?'review-1.json':'proposal-1.json'),JSON.stringify(value));`);
+  const extensionModule = loadCompiledModule('out/extension.js', [
+    'module.exports.__review = handleReviewGlobalPrompt;',
+    `getSkillInstallWorkspaceRoot = () => ${JSON.stringify(workspace)};`,
+    'getProjects = () => [];',
+    'agentCli_1.resolveAgentCli = () => "test-cli";',
+    'agentCli_1.commandExists = () => true;',
+    'agentCli_1.ensureAgentTaskAutomation = () => ({ok:true});',
+    `agentCli_1.buildAgentCommandForPromptFile = (_cli, prompt) => agentCli_1.shellQuote(process.execPath) + ' ' + agentCli_1.shellQuote(${JSON.stringify(fakeAgent)}) + ' ' + agentCli_1.shellQuote(prompt);`,
+    'createAgentTerminal = () => ({show(){}, sendText(command){ require("child_process").execFileSync("bash", ["-c", command]); }});'
+  ].join('\n'));
+  const saved = { cliPath: 'test-cli', globalDataPath: globalRoot, globalPrompt: 'Saved instruction.' };
+  const context = { extensionPath: projectRoot, globalState: { get(key) { return key === 'solopreneur.settings' ? saved : undefined; }, async update(_key, value) { Object.assign(saved, value); } } };
+  const messages = [];
+  await extensionModule.__review(context, 'Current unsaved instruction.', { postMessage(value) { messages.push(value); return Promise.resolve(true); } });
+  const final = messages.find(message => message.command === 'globalPromptReviewCompleted');
+  assert.equal(final?.success, true, final?.message);
+  assert.equal(final.globalPrompt, 'Current unsaved instruction.');
+  assert.equal(saved.globalPrompt, 'Saved instruction.');
+  const runs = path.join(globalRoot, 'maintenance/runs');
+  const dir = path.join(runs, fs.readdirSync(runs)[0]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'application.json'))).status, 'applied');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'proposal-1.json.done.json'))).exitCode, 0);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'review-1.json.done.json'))).exitCode, 0);
 });

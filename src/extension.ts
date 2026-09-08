@@ -30,6 +30,9 @@ import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocu
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import { createPreSessionGitCommit } from './preSessionGit';
+import { buildTaskReportInstructions, registerLearningTask, recordTaskReport, readLearningJson } from './taskReport.js';
+import { reviewHash } from './learningReview.js';
+import { runManualLearningReview, buildLearningReviewRunScript } from './learningReviewRunner.js';
 import {
   closeProjectIssue,
   closeProjectPullRequest,
@@ -4347,44 +4350,6 @@ function writeSoloGlobalPromptIndex(workspaceRoot: string, globalDataPath: strin
   }
 }
 
-function buildGlobalPromptReviewPrompt(
-  workspaceRoot: string,
-  globalRoot: string,
-  currentGlobalPrompt: string,
-  resultFilePath: string
-): string {
-  const memoryRoot = path.join(globalRoot, 'memory');
-  return [
-    '你正在为 SoloMap 复盘长期经验，并更新插件的全局默认提示词约束。',
-    '',
-    '目标：读取当前插件记忆文件中已经确认、跨任务仍有价值的约束，将其上提、去重并整合成一份可直接注入每次 Agent 对话的全局默认提示词。',
-    '',
-    `当前项目：${workspaceRoot}`,
-    `全局记忆目录：${memoryRoot}`,
-    `当前全局默认提示词：\n${currentGlobalPrompt.trim() || '（空）'}`,
-    '',
-    '执行要求：',
-    `1. 完整检查 ${path.join(memoryRoot, 'profile.md')}、${path.join(memoryRoot, 'operating-rules.md')}、${path.join(memoryRoot, 'projects')}、${path.join(memoryRoot, 'decisions')}、${path.join(memoryRoot, 'patterns')}、${path.join(memoryRoot, 'domains')} 和 ${path.join(memoryRoot, 'active')} 中存在的 Markdown 文件。`,
-    '2. 只上提已经明确确认、未来跨任务仍适用的用户偏好和执行约束；项目事实、临时状态、一次性事故细节、具体接口名、路径、供应方和实现机制不得混入通用提示词。',
-    '3. 保留当前提示词中仍然成立且未被更高优先级证据否定的约束，合并重复内容；不得擅自放宽安全边界或改变用户目标。',
-    '4. 不要修改任何记忆文件、项目文件、VS Code 配置或派生的 global-default-prompt.md。插件会在结果校验通过后写入真正的持久设置。',
-    `5. 唯一允许写入的文件是 ${resultFilePath}。写入严格 JSON：{"globalPrompt":"最终完整提示词"}。globalPrompt 必须是非空字符串，不得包含复盘说明、Markdown 代码围栏或待办事项。`,
-    '6. 写完后重新读取该 JSON，确认可解析且内容完整，然后正常退出。'
-  ].join('\n');
-}
-
-function readGlobalPromptReviewResult(resultFilePath: string): { ok: boolean; globalPrompt?: string; message: string } {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(resultFilePath, 'utf8'));
-    const globalPrompt = typeof parsed?.globalPrompt === 'string' ? parsed.globalPrompt.trim() : '';
-    if (!globalPrompt) return { ok: false, message: 'Agent 未生成有效的默认指令。' };
-    if (globalPrompt.length > 100_000) return { ok: false, message: 'Agent 生成的默认指令过长，未自动应用。' };
-    return { ok: true, globalPrompt, message: '默认指令已根据记忆复盘更新。' };
-  } catch (error: any) {
-    return { ok: false, message: `无法读取 Agent 复盘结果：${String(error?.message || error)}` };
-  }
-}
-
 async function handleReviewGlobalPrompt(
   context: vscode.ExtensionContext,
   currentGlobalPrompt: string,
@@ -4394,75 +4359,67 @@ async function handleReviewGlobalPrompt(
   const settings = getPersistedSettings(context);
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
   const { maintenanceRoot, runsRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
-  const requestedAgentCli = (settings.cliPath || 'agy').trim();
-  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  const agentCli = resolveAgentCli((settings.cliPath || 'agy').trim(), settings.cliPath);
   if (!commandExists(agentCli)) {
-    const message = `Agent CLI not found. Tried: ${getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ')}.`;
-    vscode.window.showErrorMessage(message);
-    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message });
+    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message: '找不到当前 Agent CLI，请检查 Agent 设置。' });
     return;
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    vscode.window.showErrorMessage(automation.message);
     await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message: automation.message });
     return;
   }
-
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   const runId = `global-prompt-review-${Date.now()}`;
   const runDir = path.join(runsRoot, runId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const outputFilePath = path.join(runDir, 'output.log');
-  const resultFilePath = path.join(runDir, 'result.json');
-  const runScriptPath = path.join(runDir, 'run.sh');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(promptFilePath, buildGlobalPromptReviewPrompt(workspaceRoot, globalRoot, currentGlobalPrompt || settings.globalPrompt, resultFilePath), 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
-  const script = [
-    `cd ${shellQuote(maintenanceRoot)}`,
-    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
-    'export DISABLE_TELEMETRY=1',
-    `mkdir -p ${shellQuote(runDir)}`,
-    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`
-  ].join('; ');
-  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
-  const terminal = createAgentTerminal(maintenanceRoot, `prompt-review-${runId.slice(-6)}`);
-  terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
   await postWebviewMessage(target, { command: 'globalPromptReviewStarted' });
-  vscode.window.showInformationMessage('SoloMap 已开始复盘经验，完成后会自动更新默认指令。');
-
-  const startedAt = Date.now();
-  const poller = setInterval(() => {
-    if (!fs.existsSync(resultFilePath)) {
-      if (Date.now() - startedAt > 30 * 60 * 1000) {
-        clearInterval(poller);
-        const message = '复盘仍未生成结果，请查看 Agent 终端。';
-        vscode.window.showWarningMessage(message);
-        void postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message });
+  try {
+    const result = await runManualLearningReview({
+      runDir, globalRoot, projects: getProjects(context).map(project => project.path),
+      globalPrompt: currentGlobalPrompt,
+      persistedGlobalPrompt: settings.globalPrompt || '',
+      getGlobalPrompt: () => getPersistedSettings(context).globalPrompt || '',
+      setGlobalPrompt: async (value, expectedHash) => {
+        const latest = getPersistedSettings(context);
+        if (latest.globalDataPath !== settings.globalDataPath || reviewHash(latest.globalPrompt || '') !== expectedHash) throw new Error('默认指令或记忆位置已被修改，请重新复盘以保留最新内容。');
+        await updatePersistedSettings(context, { globalPrompt: value });
+        writeSoloGlobalPromptIndex(workspaceRoot, settings.globalDataPath, getPersistedSettings(context).globalPrompt || '');
+      },
+      launch: async (promptFilePath, resultFilePath) => {
+        const doneFile = `${resultFilePath}.done.json`;
+        const outputFile = `${resultFilePath}.output.log`;
+        const scriptFile = `${resultFilePath}.run.sh`;
+        const command = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
+        fs.writeFileSync(scriptFile, buildLearningReviewRunScript(command, maintenanceRoot, outputFile, doneFile, shellQuote), { encoding: 'utf8', mode: 0o755 });
+        const terminal = createAgentTerminal(maintenanceRoot, `prompt-review-${path.basename(resultFilePath, '.json')}`);
+        terminal.show(true);
+        if (!await sendTextWhenTerminalReady(terminal, `bash ${shellQuote(scriptFile)}`)) throw new Error('复盘命令未能发送到终端，请重试。');
+        await new Promise<void>((resolve, reject) => {
+          const poller = setInterval(() => {
+            const done = readLearningJson(doneFile);
+            if (done) {
+              clearInterval(poller);
+              if (done.exitCode === 0 && fs.existsSync(resultFilePath)) resolve();
+              else reject(new Error('复盘运行未完成，请查看 Agent 终端；已有材料已保留。'));
+            } else if (terminal.exitStatus) {
+              clearInterval(poller);
+              reject(new Error('复盘终端已关闭，已有材料已保留。'));
+            }
+          }, 1000);
+        });
       }
-      return;
-    }
-    clearInterval(poller);
-    void (async () => {
-      const result = readGlobalPromptReviewResult(resultFilePath);
-      if (!result.ok || !result.globalPrompt) {
-        vscode.window.showErrorMessage(result.message);
-        await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message: result.message });
-        return;
-      }
-      await updatePersistedSettings(context, { globalPrompt: result.globalPrompt });
-      writeSoloGlobalPromptIndex(workspaceRoot, settings.globalDataPath, result.globalPrompt);
-      await broadcastSettings(context);
-      await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: true, globalPrompt: result.globalPrompt, message: result.message });
-      vscode.window.showInformationMessage(result.message);
-    })().catch(async (error: any) => {
-      const message = `应用复盘结果失败：${String(error?.message || error)}`;
-      vscode.window.showErrorMessage(message);
-      await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message });
     });
-  }, 2000);
+    await broadcastSettings(context);
+    const message = result.status === 'applied' ? '经验复盘已完成，记忆与默认指令已按结果更新。' : '部分复盘结果尚未应用，已有结果已保留。';
+    const latestPrompt = getPersistedSettings(context).globalPrompt || '';
+    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: result.status === 'applied', globalPrompt: latestPrompt === (settings.globalPrompt || '') ? currentGlobalPrompt : latestPrompt, message });
+    if (result.status === 'applied') vscode.window.showInformationMessage(message);
+    else vscode.window.showWarningMessage(`${message} ${result.errors.join('；')}`);
+  } catch (error: any) {
+    const message = `经验复盘尚未完成：${String(error?.message || error)}`;
+    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message });
+    vscode.window.showWarningMessage(message);
+  }
 }
 
 function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, globalPromptPath = ''): string {
@@ -4962,9 +4919,20 @@ function buildAgentShellScript(
     && (!version2IdentityBinding || confirmedCodexContinuation)
   );
   const { codexResumeTranscriptPath: _codexResumeTranscriptPath, ...persistedStatusMetadata } = statusMetadata;
-  const statusBase = { workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, agentProcessPidFilePath, previousNativeSessionId: effectiveNativeSessionId, plannedNativeSessionId, nativeSessionId: nativeSessionIdIsCurrent ? effectiveNativeSessionId : '', nativeSessionIdIsCurrent, sessionBindingHeadRevision, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...(confirmedCodexContinuation ? { codexTranscriptCursor: codexResumeTranscriptCursor } : {}), ...persistedStatusMetadata };
+  let learningTaskId = '';
+  try {
+    learningTaskId = registerLearningTask(effectiveWorkspaceRoot, {
+      executionLogId: effectiveExecutionLogId, runDir, userMessage: effectiveUserMessage, startedAt,
+      parentExecutionLogId: Number(statusMetadata.lineageRootExecutionLogId || 0)
+    });
+    effectiveConversationPrompt += '\n\n' + buildTaskReportInstructions(learningTaskId, path.join(runDir, 'task-report-input.json'), interactiveSession);
+  } catch (error) {
+    console.warn('SoloMap task report registration unavailable:', error);
+  }
+  const statusBase = { learningTaskId, workspaceRoot: effectiveWorkspaceRoot, nodeId: effectiveNodeId, runKind: effectiveRunKind, roadmapBackupFilePath: effectiveRoadmapBackupFilePath, globalDataPath: effectiveGlobalDataPath, agentCli, selectedModel: effectiveSelectedModel, commandPreview, commandFilePath, promptFilePath, executionLogId: effectiveExecutionLogId, rootExecutionLogId: effectiveExecutionLogId, userMessage: effectiveUserMessage, outputFilePath, changesFilePath, touchedFilesPath, workspaceSnapshotPath, completionDecisionFilePath: decisionFilePath, sessionFilePath, codexHomeFilePath, agentProcessPidFilePath, previousNativeSessionId: effectiveNativeSessionId, plannedNativeSessionId, nativeSessionId: nativeSessionIdIsCurrent ? effectiveNativeSessionId : '', nativeSessionIdIsCurrent, sessionBindingHeadRevision, sessionKey, sessionProvider: agentProvider, sessionMode, startedAt, reviewerCliPath: effectiveReviewerCliPath, collaborationReviewMode: effectiveCollaborationReviewMode, interactiveSession, taskCheckpointCommandPath, checkpointToken, checkpointSequence: 0, ...(confirmedCodexContinuation ? { codexTranscriptCursor: codexResumeTranscriptCursor } : {}), ...persistedStatusMetadata };
   const runningStatus = JSON.stringify({
     ...statusBase,
+    learningTaskId,
     status: interactiveSession && statusMetadata.startWaiting === true ? 'Waiting' : 'Running'
   });
   const completedStatus = JSON.stringify({ ...statusBase, status: 'In Progress' });
@@ -9723,6 +9691,9 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       ].filter(Boolean).join(' ');
     }
 
+    if (statusData.interactiveSession !== true && statusData.learningTaskId) {
+      Object.assign(statusData, recordTaskReport(statusData, { 'report-file': path.join(path.dirname(outputFilePath), 'task-report-input.json'), outcome: nextStatus === 'Failed' ? 'failed' : 'partial' }, 1));
+    }
     const outputTail = redactSessionBindingNonce(
       getOutputTail(outputFilePath),
       String(sessionFilePath || '')
@@ -10084,7 +10055,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
             ? 'roadmap_revision'
             : 'step_run';
       const eventType = nextStatus === 'Completed'
-        ? (verificationSignals.length > 0 ? 'verified' : 'completed')
+        ? 'completed'
         : nextStatus === 'Failed'
           ? 'failed'
           : nextStatus === 'In Progress'
@@ -10110,6 +10081,10 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
             nextStatus
           ],
           metadata: {
+            learningTaskId: statusData.learningTaskId || '',
+            taskReportStatus: statusData.taskReportStatus || 'missing',
+            taskReportPath: statusData.taskReportPath || '',
+            verificationSource: 'legacy_text_signal',
             nodeId,
             runKind,
             status: nextStatus,

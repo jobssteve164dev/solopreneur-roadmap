@@ -69,44 +69,9 @@ test('buildLearningRetrievalContext filters out trash, local private data and ap
   const globalRoot = path.join(root, '.solomap-global');
   fs.mkdirSync(projectPath, { recursive: true });
 
-  // 写入两个一模一样的有效 event 导致重复候选
-  for (let i = 0; i < 2; i++) {
-    ledger.appendLearningEvent(projectPath, globalRoot, {
-      sourceType: 'user_correction',
-      sourceRef: `ref-${i}`,
-      eventType: 'corrected',
-      summary: 'Same duplicate rule to check',
-      evidenceRefs: [{ type: 'user', ref: 'user' }],
-      tags: ['test'],
-      metadata: {}
-    });
-  }
-
-  // 写入一个包含垃圾占位符的 event
-  ledger.appendLearningEvent(projectPath, globalRoot, {
-    sourceType: 'flow_loop',
-    sourceRef: 'trash-ref',
-    eventType: 'verified',
-    summary: 'Junk verification',
-    evidenceRefs: [],
-    tags: ['test'],
-    metadata: {
-      verification: ['Run completed without explicit verification signal in captured tail']
-    }
-  });
-
-  // 写入一个含有特定本地绝对路径的 event，但是其 promotionTarget 是 pattern
-  ledger.appendLearningEvent(projectPath, globalRoot, {
-    sourceType: 'flow_loop',
-    sourceRef: 'private-ref',
-    eventType: 'verified',
-    summary: 'Private path test',
-    evidenceRefs: [],
-    tags: ['test'],
-    metadata: {
-      verification: ['Command: cat /home/ubuntu/project/.solopreneur/agent-runs/__solo__/153/prompt.txt']
-    }
-  });
+  const paths = ledger.ensureLearningLedgerStore(projectPath, globalRoot);
+  const summaries = ['Same duplicate rule to check', 'Same duplicate rule to check', 'Run completed without explicit verification signal in captured tail', 'Private /home/ubuntu/project'];
+  summaries.forEach((summary, i) => fs.writeFileSync(path.join(paths.candidatesRoot, `fixture-${i}.json`), JSON.stringify({ schemaVersion: 1, id: `fixture-${i}`, projectPath, summary, appliesWhen: 'Duplicate rule check', doThis: 'Check actual outcomes', avoidThis: 'Do not guess', evidenceRefs: [], status: 'candidate', promotionTarget: 'pattern', updatedAt: '2026-09-08' })));
 
   const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
     projectPath,
@@ -172,8 +137,7 @@ test('agent dispatch commands and empty verification placeholders do not become 
   const candidateDecisionFiles = fs.readdirSync(path.join(globalRoot, 'learning', 'candidate-decisions')).filter((name) => name.endsWith('.json'));
   const decisions = candidateDecisionFiles
     .map((name) => JSON.parse(fs.readFileSync(path.join(globalRoot, 'learning', 'candidate-decisions', name), 'utf8')));
-  assert.equal(decisions.find((decision) => decision.eventId === placeholderEvent.id).decision, 'skipped');
-  assert.equal(decisions.find((decision) => decision.eventId === dispatchEvent.id).decision, 'skipped');
+  assert.deepEqual(decisions, [], 'no semantic decisions before manual review');
 
   const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
     projectPath,
@@ -191,7 +155,7 @@ test('agent dispatch commands and empty verification placeholders do not become 
   assert.equal(summary.projectSignals[0].verificationSignals, 0);
 });
 
-test('buildLearningPromotionContext filters suggestions and applies deduplication', () => {
+test('ordinary prompt construction does not propose automatic promotion', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-promotion-test-'));
   const projectPath = path.join(root, 'app');
   const globalRoot = path.join(root, '.solomap-global');
@@ -215,7 +179,8 @@ test('buildLearningPromotionContext filters suggestions and applies deduplicatio
   // 检查：
   // 1. 去重，"Duplicate rule to promote" 的晋升建议应该只出现一次
   const occurrences = (promotionContext.match(/Duplicate rule to promote/g) || []).length;
-  assert.equal(occurrences, 1);
+  assert.equal(occurrences, 0);
+  assert.equal(promotionContext, '');
 });
 
 test('buildExecutionExperiencePrompt filters compiler artifacts and temp files from file lists and commands', () => {

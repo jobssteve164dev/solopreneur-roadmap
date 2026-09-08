@@ -914,33 +914,7 @@ export function recordSolomapLearningCycle(
     [projectName, '', node.title || '', nextStatus, finishedAt]
   );
 
-  if (nextStatus !== 'Completed' && nextStatus !== 'In Progress') {
-    return;
-  }
-  const slug = sanitizeAttachmentScope(`${projectName}-${node.id}-${Date.parse(finishedAt) || Date.now()}`);
-  const candidatePath = path.join(learningCandidatesDir, `${slug}.md`);
-  writeFileIfMissing(candidatePath, [
-    `# Learning Candidate: ${node.title || node.id}`,
-    '',
-    '## Candidate Lesson',
-    `- A ${node.stage || 'roadmap'} step produced reusable execution evidence. Review whether this should become a pattern, decision, domain note, or project memory.`,
-    '',
-    '## Source Task',
-    `- Project: ${projectName}`,
-    `- Step: ${node.title || node.id}`,
-    `- Status: ${nextStatus}`,
-    `- Completed at: ${finishedAt}`,
-    '',
-    '## Evidence',
-    summarizeLearningEvidence(changedFilesSummary, touchedFilesSummary, outputTail),
-    '',
-    '## Applies When',
-    `- Future projects have a similar ${node.stage || 'roadmap'} step or need the same delivery pattern.`,
-    '',
-    '## Promotion Target',
-    '- memory/patterns | memory/decisions | memory/domains | memory/projects',
-    ''
-  ].join('\n'));
+  // Run metrics remain available; semantic candidates are created by manual review.
 }
 
 export function buildSolomapLearningContext(workspaceRoot: string, globalDataPath = ''): string {
@@ -1300,7 +1274,7 @@ export function buildSolomapStartupPackInstructions(input: {
     input.learningRetrievalContext ? ['', input.learningRetrievalContext].join('\n') : '',
     promotionContext ? ['', promotionContext].join('\n') : '',
     input.executionExperienceContext ? ['', input.executionExperienceContext].join('\n') : '',
-    '- 学习候选的晋升不要求用户手工确认；如果本轮验证出可复用规则，自动建议写入合适的 memory/pattern/decision/domain 或学习候选，并避免把审核负担转嫁给用户。',
+    '- 本轮经验采用与纠偏通过任务报告记录；候选提炼和晋升由用户手动“复盘经验”处理，不因本次召回自动晋升。',
     '- 经验库只能约束执行方式，不能覆盖本轮用户最新要求、当前代码、测试、日志和命令输出。'
   ].filter(Boolean).join('\n');
 }

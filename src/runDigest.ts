@@ -675,41 +675,11 @@ function mergeUnique(values: string[], additions: string[], limit: number, maxLe
 }
 
 function updateExperienceStats(stats: ExecutionExperienceStats, edge: ExecutionExperienceUsageEdge): ExecutionExperienceStats {
-  const next = {
-    ...stats,
-    uses: Number(stats.uses || 0) + 1,
-    wins: Number(stats.wins || 0),
-    losses: Number(stats.losses || 0),
-    neutral: Number(stats.neutral || 0),
-    alpha: Number(stats.alpha || 1),
-    beta: Number(stats.beta || 1),
-    lastUsed: String(edge.createdAt || stats.lastUsed || '')
-  };
-  if (edge.outcome === 'win') {
-    next.wins += 1;
-    next.alpha += 1;
-  } else if (edge.outcome === 'loss') {
-    next.losses += 1;
-    next.beta += 1;
-  } else {
-    next.neutral += 1;
-  }
-  const denominator = next.alpha + next.beta;
-  next.winRate = denominator > 0 ? Number((next.alpha / denominator).toFixed(4)) : 0.5;
-  if (String(stats.lastUsed || '') > String(next.lastUsed || '')) {
-    next.lastUsed = stats.lastUsed;
-  }
-  return next;
+  // Digest observations are provenance, not evidence of a later task adopting a lesson.
+  return { ...stats };
 }
 
 function experienceOutcomeForDigest(digest: RunDigest, positiveWhenCompleted = true): ExecutionExperienceOutcome {
-  const status = String(digest.status || '').toLowerCase();
-  if (status === 'failed') {
-    return 'loss';
-  }
-  if (positiveWhenCompleted && (status === 'completed' || status === 'recorded')) {
-    return 'win';
-  }
   return 'neutral';
 }
 
@@ -812,10 +782,10 @@ function buildExperienceNodeSeed(
 function buildExperienceEdgesForDigest(digest: RunDigest): Array<{ node: ExecutionExperienceNode; edge: ExecutionExperienceUsageEdge }> {
   const items: Array<{ type: ExecutionExperienceNodeType; signal: string; phase: ExecutionExperienceUsagePhase; outcome: ExecutionExperienceOutcome }> = [];
   for (const signal of digest.verification || []) {
-    items.push({ type: 'verification', signal, phase: 'verified', outcome: experienceOutcomeForDigest(digest, true) });
+    items.push({ type: 'verification', signal, phase: 'observed', outcome: experienceOutcomeForDigest(digest, true) });
   }
   for (const signal of digest.failures || []) {
-    items.push({ type: 'failure', signal, phase: 'failed', outcome: String(digest.status || '').toLowerCase() === 'failed' ? 'loss' : 'neutral' });
+    items.push({ type: 'failure', signal, phase: 'failed', outcome: 'neutral' });
   }
   for (const signal of digest.reusableSignals || []) {
     items.push({ type: 'reusable_signal', signal, phase: 'observed', outcome: experienceOutcomeForDigest(digest, true) });
@@ -945,11 +915,7 @@ function buildExecutionGraphExperienceHints(graph: ExecutionGraph, runId: string
       Number(b.stats?.uses || 0) - Number(a.stats?.uses || 0)
     )
     .slice(0, limit)
-    .map((node) => {
-      const winRate = Number(node.stats?.winRate || 0.5);
-      const uses = Number(node.stats?.uses || 0);
-      return `${node.centralMeaning}（${Math.round(winRate * 100)}%/${uses}次）`;
-    });
+    .map((node) => node.centralMeaning);
 }
 
 function scoreRunDigest(digest: RunDigest, query: ExecutionExperienceQuery): { score: number; reasons: string[] } {
