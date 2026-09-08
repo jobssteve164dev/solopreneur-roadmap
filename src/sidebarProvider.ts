@@ -29,6 +29,7 @@ import {
 } from './projectPortfolio';
 import {
   buildSidebarProjectSignature,
+  buildConversationDatabaseSignature,
   readCachedConversationSnapshot,
   readSidebarCoreSnapshot,
   SidebarConversationSnapshot,
@@ -68,6 +69,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _conversationSnapshotLoads = new Map<string, {
     promise: Promise<SidebarConversationSnapshot>;
     startedAt: number;
+    sourceSignature: string;
   }>();
   private readonly _latestConversationSnapshotRequest = new Map<string, number>();
   private _latestPortfolio: ProjectPortfolioSummary[] = [];
@@ -577,8 +579,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!force) return;
       }
       let snapshotLoad = this._conversationSnapshotLoads.get(projectPath);
-      if (!snapshotLoad || supersedeInFlight || (force && Date.now() - snapshotLoad.startedAt > 2_000)) {
+      if (!snapshotLoad || supersedeInFlight) {
         snapshotLoad = {
+          sourceSignature: buildConversationDatabaseSignature(projectPath),
           promise: this._getProjectConversationSnapshot(projectPath),
           startedAt: Date.now()
         };
@@ -587,6 +590,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       claimedSnapshotLoad = snapshotLoad.promise;
       const snapshot = await snapshotLoad.promise;
       if (this._latestConversationSnapshotRequest.get(projectPath) === requestId) {
+        if (snapshotLoad.sourceSignature !== buildConversationDatabaseSignature(projectPath)) {
+          await this.sendProjectConversationSnapshot(projectPath, true, true);
+          return;
+        }
         writeCachedConversationSnapshot(globalDataPath, projectPath, snapshot);
         this.postProjectConversationSnapshot(projectPath, snapshot);
       }

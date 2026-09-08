@@ -152,7 +152,10 @@ function bootstrapSoloMapWebviewRuntime(): void {
         select.classList.remove('open');
         const trigger = select.querySelector('[data-solo-trigger]');
         if (trigger) trigger.setAttribute('aria-expanded', 'false');
-        if (onChange && previousValue !== getSoloSelectValue(select)) onChange(getSoloSelectValue(select));
+        if (previousValue !== getSoloSelectValue(select)) {
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          if (onChange) onChange(getSoloSelectValue(select));
+        }
         return;
       }
       if (target.closest('[data-solo-trigger]') && !select.classList.contains('is-disabled')) {

@@ -4672,6 +4672,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let openCodeApiKeyRemovalRequested = false;
     let settingsFormDirty = false;
     let settingsSavePending = false;
+    let settingsEditRevision = 0;
+    let pendingSettingsSave = null;
+    let latestSettingsRequestId = '';
+    let globalPromptReviewDraft = null;
     let settingsRequestSeq = 0;
     let lastDependencyStatus = null;
     let selectedEnhancementId = '';
@@ -6694,7 +6698,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (collaborationPanel) collaborationPanel.style.display = 'none';
         if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
         settingsPanel.style.display = 'block';
-        settingsFormDirty = false;
         requestSettings();
         requestAgentImpact();
       }
@@ -7719,17 +7722,20 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
 
     function requestSettings() {
+      latestSettingsRequestId = 'sidebar-settings-' + (++settingsRequestSeq);
       vscode.postMessage({
         command: 'settings.get',
-        requestId: 'sidebar-settings-' + (++settingsRequestSeq)
+        requestId: latestSettingsRequestId
       });
     }
 
     if (settingsPanel) {
       settingsPanel.addEventListener('input', () => {
+        settingsEditRevision += 1;
         settingsFormDirty = true;
       });
       settingsPanel.addEventListener('change', () => {
+        settingsEditRevision += 1;
         settingsFormDirty = true;
       });
       settingsPanel.addEventListener('click', event => {
@@ -7764,11 +7770,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'settingsLoaded':
           settingsDataLoaded = true;
-          if (settingsSavePending && !message.requestId) {
-            settingsSavePending = false;
-            settingsFormDirty = false;
-          }
-          if (settingsSavePending || (settingsFormDirty && settingsPanel && settingsPanel.style.display === 'block')) {
+          if (message.requestId && message.requestId !== latestSettingsRequestId) break;
+          if (settingsSavePending || settingsFormDirty) {
             currentSettings = { ...currentSettings, ...(message.settings || {}) };
             renderProAccount(currentSettings);
             renderAbilitiesAndEnhancements(currentSettings);
@@ -7799,8 +7802,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'settingsSaved':
+          if (!pendingSettingsSave || pendingSettingsSave.requestId !== message.requestId) break;
           settingsSavePending = false;
-          settingsFormDirty = false;
+          settingsFormDirty = settingsEditRevision !== pendingSettingsSave.revision;
+          pendingSettingsSave = null;
+          latestSettingsRequestId = '';
+          if (settingsFormDirty) break;
           currentSettings = message.settings || currentSettings;
           openCodeApiKeyRemovalRequested = false;
           if (settingOpenCodeApiKey) {
@@ -7828,10 +7835,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'globalPromptReviewCompleted':
           if (btnReviewGlobalPrompt) btnReviewGlobalPrompt.disabled = false;
-          if (message.success && typeof message.globalPrompt === 'string') {
+          if (message.success && typeof message.globalPrompt === 'string' && settingGlobalPrompt.value === globalPromptReviewDraft) {
             settingGlobalPrompt.value = message.globalPrompt;
-            settingsFormDirty = false;
           }
+          globalPromptReviewDraft = null;
           if (cliTestBadge) {
             cliTestBadge.style.display = 'block';
             cliTestBadge.textContent = message.message || (message.success ? t('reviewGlobalPromptUpdated') : '');
@@ -8259,6 +8266,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const payload = buildSettingsUpdatePayload(collectAutomationSettings());
       payload.requestId = 'sidebar-settings-save-' + (++settingsRequestSeq);
       settingsSavePending = true;
+      pendingSettingsSave = { requestId: payload.requestId, revision: settingsEditRevision };
       vscode.postMessage(payload);
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
@@ -8267,6 +8275,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     if (btnReviewGlobalPrompt) {
       btnReviewGlobalPrompt.addEventListener('click', () => {
         btnReviewGlobalPrompt.disabled = true;
+        globalPromptReviewDraft = settingGlobalPrompt.value;
         vscode.postMessage({
           command: 'settings.reviewGlobalPrompt',
           globalPrompt: settingGlobalPrompt.value.trim()

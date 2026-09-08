@@ -507,6 +507,10 @@ function createElement(id) {
     addEventListener(type, listener) {
       this.listeners[type] = listener;
     },
+    dispatchEvent(event) {
+      this.listeners[event.type]?.(event);
+      return true;
+    },
     setAttribute(name, value) {
       this.attributes[name] = String(value);
     },
@@ -621,6 +625,7 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
     { value: 'prompt', label: '唤起新任务对话' }
   ]);
   const context = {
+    Event,
     document: {
       getElementById: (id) => elements[id] || null,
       createElement,
@@ -1429,6 +1434,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'settings.get'));
   assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
+  const savedSettingsRequest = postedMessages.find(message => message.command === 'settings.update');
+  dispatchMessage({ command: 'settingsSaved', requestId: savedSettingsRequest.requestId, settings: savedSettingsRequest });
   postedMessages.length = 0;
   elements['btn-open-pro-authorization'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'account.login'));
@@ -1600,6 +1607,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     && message.automationTasks.triggers.completed.sound === false
     && message.automationTasks.triggers.stopped.retry === true
   ));
+  const automationSave = postedMessages.find(message => message.command === 'settings.update');
+  dispatchMessage({ command: 'settingsSaved', requestId: automationSave.requestId, settings: automationSave });
   postedMessages.length = 0;
   dispatchMessage({
     command: 'settingsLoaded',
@@ -13068,4 +13077,97 @@ fs.writeFileSync(path.join(dir,checking?'review-1.json':'proposal-1.json'),JSON.
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'application.json'))).status, 'applied');
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'proposal-1.json.done.json'))).exitCode, 0);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'review-1.json.done.json'))).exitCode, 0);
+});
+
+test('slow forced conversation refresh reuses its in-flight read until an actual state write', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let release;
+  let reads = 0;
+  const snapshot = new Promise(resolve => { release = resolve; });
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: '/fixture/slow' }),
+    getProjectConversationSnapshot: () => { reads += 1; return snapshot; }
+  });
+  const messages = [];
+  provider._view = { webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } };
+  const first = provider.sendProjectConversationSnapshot('/fixture/slow', true);
+  provider._conversationSnapshotLoads.get('/fixture/slow').startedAt -= 3000;
+  const second = provider.sendProjectConversationSnapshot('/fixture/slow', true);
+  release({ solo: [], project: [], flow: [] });
+  await Promise.all([first, second]);
+  assert.equal(reads, 1);
+  assert.equal(messages.length, 1);
+});
+
+test('Flow authorization finishing after project selection cannot publish the old project state', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.prepare = (panel, gate) => {
+      activePanel = panel; activeProjectRoot = '/fixture/old'; projectSelectionGeneration = 1;
+      hasFlowModeAccess = () => gate;
+    };
+    module.exports.switchProject = () => { activeProjectRoot = '/fixture/new'; projectSelectionGeneration += 1; };
+    module.exports.postFlow = postFlowStateToWebview;
+  `);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const messages = [];
+  extension.prepare({ webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } }, gate);
+  const pending = extension.postFlow({});
+  extension.switchProject();
+  release(true);
+  await pending;
+  assert.deepEqual(messages, []);
+});
+
+test('conversation snapshots re-read when the database changes during their read', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-refresh-source-'));
+  const projectPath = path.join(tempRoot, 'project');
+  fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
+  const database = path.join(projectPath, '.solopreneur/project_journal.db');
+  fs.writeFileSync(database, 'before');
+  let reads = 0;
+  const messages = [];
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: path.join(tempRoot, 'global') }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: projectPath }),
+    getProjectConversationSnapshot: async () => {
+      reads += 1;
+      if (reads === 1) fs.writeFileSync(database, 'after a completed write');
+      return { solo: [{ id: 1, status: reads === 1 ? 'Running' : 'Completed' }], project: [], flow: [], revision: [] };
+    }
+  });
+  provider._view = { webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } };
+  await provider.sendProjectConversationSnapshot(projectPath, true);
+  assert.equal(messages.at(-1).soloConversations[0].status, 'Completed');
+  const cached = require('../out/sidebarSnapshotCache.js').readCachedConversationSnapshot(path.join(tempRoot, 'global'), projectPath);
+  assert.equal(cached.solo[0].status, 'Completed');
+  assert.equal(reads, 2);
+});
+
+test('old project initialization failure cannot replace the newly selected roadmap', async () => {
+  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-old-init-'));
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.startOldInit = (projectPath, panel, gate) => {
+      selectedProjectPathInMemory = projectPath; activePanel = panel;
+      getSelectedProjectPath = () => selectedProjectPathInMemory;
+      const Original = syncEngine_1.SyncEngine;
+      syncEngine_1.SyncEngine = class { getNodes() { return []; } initAndSync() { return gate; } };
+      try { return ensureSyncEngine({ extensionPath: ${JSON.stringify(projectRoot)}, globalState: { get() {} } }); }
+      finally { syncEngine_1.SyncEngine = Original; }
+    };
+    module.exports.switchToReady = () => { selectedProjectPathInMemory = '/fixture/new'; activeProjectRoot = '/fixture/new'; projectSelectionGeneration += 1; syncEngineReady = true; };
+    module.exports.isReady = () => syncEngineReady;
+  `);
+  let reject;
+  const gate = new Promise((_, fail) => { reject = fail; });
+  const messages = [];
+  const pending = extension.startOldInit(projectPath, { webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } }, gate);
+  messages.length = 0;
+  extension.switchToReady();
+  reject(new Error('Old project failed'));
+  await pending;
+  assert.equal(extension.isReady(), true);
+  assert.deepEqual(messages, []);
 });

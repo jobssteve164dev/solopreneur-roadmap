@@ -1270,13 +1270,17 @@ async function handleSharedWebviewAction(
     'project.select': async (request) => selectProject(context, String(request.projectPath || '')),
     'project.add': async () => addProjectFromDialog(context),
     'project.remove': async (request) => removeProject(context, String(request.projectPath || '')),
-    'project.updateMetadata': async (request) => updateProjectMetadata(context, String(request.projectPath || ''), {
-      name: request.name,
-      type: request.projectType,
-      priority: request.priority,
-      description: request.description,
-      notes: request.notes
-    }),
+    'project.updateMetadata': async (request) => {
+      const projectPath = String(request.projectPath || '');
+      await updateProjectMetadata(context, projectPath, {
+        name: request.name,
+        type: request.projectType,
+        priority: request.priority,
+        description: request.description,
+        notes: request.notes
+      });
+      await respond({ command: 'projectMetadataSaved', projectPath, requestId: String(request.requestId || '') });
+    },
     'project.togglePinned': async (request) => toggleProjectPinned(context, String(request.projectPath || '')),
     'project.openRoadmap': async (request) => {
       const projectPath = String(request.projectPath || '');
@@ -1564,17 +1568,21 @@ async function broadcastSettings(context: vscode.ExtensionContext): Promise<void
   }
   if (activePanel) {
     postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
-    if (activeProjectRoot) {
-      postFlowStateLoaded(activePanel.webview, buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context)));
-    }
+    await postFlowStateToWebview(context);
   }
 }
 
 async function postFlowStateToWebview(context: vscode.ExtensionContext): Promise<void> {
-  if (!activePanel || !activeProjectRoot) {
-    return;
-  }
-  postFlowStateLoaded(activePanel.webview, buildFlowStatePayload(activeProjectRoot, await hasFlowModeAccess(context)));
+  const panel = activePanel;
+  const projectPath = activeProjectRoot;
+  const generation = projectSelectionGeneration;
+  if (!panel || !projectPath) return;
+  const hasAccess = await hasFlowModeAccess(context);
+  if (panel !== activePanel || projectPath !== activeProjectRoot || generation !== projectSelectionGeneration) return;
+  await postWebviewMessage(panel.webview, {
+    command: 'flowStateLoaded', projectPath,
+    state: buildFlowStatePayload(projectPath, hasAccess)
+  });
 }
 
 function buildPassportCallbackUri(): string {
@@ -3095,6 +3103,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
       }, 0);
       return true;
     } catch (error) {
+      if (getSelectedProjectPath(context) !== projectRoot || projectSelectionGeneration !== initGeneration) return false;
       syncEngineReady = false;
       postRoadmapLoadFailed(projectRoot, error);
       vscode.window.showErrorMessage(`路线图本地数据加载失败：${formatLocalDataError(error)}`);
