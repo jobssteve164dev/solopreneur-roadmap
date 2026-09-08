@@ -1118,6 +1118,8 @@ export function getProjectGrowthWebviewHtml(
       box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32);
     }
 
+    .growth-v2-panel { margin-bottom: 20px; }
+
     .section-kicker,
     .detail-section-title {
       color: var(--accent);
@@ -1665,7 +1667,7 @@ export function getProjectGrowthWebviewHtml(
 
     .module-card {
       flex: var(--tile-weight, 1) 1 170px;
-      min-width: 150px;
+      min-width: min(240px, 100%);
       min-height: 118px;
       background: rgba(255, 255, 255, 0.018);
       border: 1px solid var(--border);
@@ -1674,6 +1676,8 @@ export function getProjectGrowthWebviewHtml(
       transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
       position: relative;
       overflow: hidden;
+      box-sizing: border-box;
+      overflow-wrap: anywhere;
     }
 
     .module-card.tile-dominant { min-height: 245px; flex-basis: 42%; }
@@ -1725,6 +1729,8 @@ export function getProjectGrowthWebviewHtml(
 
     .module-card-head {
       display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 12px;
@@ -1737,6 +1743,19 @@ export function getProjectGrowthWebviewHtml(
       align-items: center;
       gap: 6px;
       color: var(--fg);
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .module-title .codicon, .signal-mark { flex-shrink: 0; }
+    .module-card .signal-tag { flex-shrink: 0; }
+
+    @media (max-width: 600px) {
+      .module-card.tile-dominant, .module-card.tile-large,
+      .module-card.tile-medium, .module-card.tile-small {
+        flex-basis: 100%;
+        min-height: 0;
+      }
     }
 
     .signal-tag {

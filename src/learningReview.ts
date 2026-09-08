@@ -181,11 +181,52 @@ export interface ReviewManifest {
 
 export async function collectReviewManifest(input: { runId: string; globalRoot: string; globalPrompt: string; projects: string[]; api?: GithubRead; repositoryForProject?: (project: string) => Promise<string> }): Promise<ReviewManifest> {
   const manifest: ReviewManifest = { schemaVersion: 1, runId: input.runId, globalRoot: input.globalRoot, globalPrompt: input.globalPrompt, promptHash: reviewHash(input.globalPrompt), projects: input.projects, sources: [], memory: [], gaps: [] };
-  const addFile = (file: string, kind: string, projectPath?: string) => {
-    const content = fs.readFileSync(file, 'utf8');
-    manifest.sources.push({ id: `source-${reviewHash(file).slice(0, 24)}`, kind, projectPath, file, hash: reviewHash(content) });
+  const safeFile = (root: string, file: string): boolean => {
+    try {
+      const relative = path.relative(path.resolve(root), path.resolve(file));
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+      let current = path.resolve(root);
+      for (const part of relative.split(path.sep)) {
+        current = path.join(current, part);
+        if (fs.lstatSync(current).isSymbolicLink()) return false;
+      }
+      return fs.statSync(current).isFile();
+    } catch { return false; }
   };
+  const addFile = (file: string, kind: string, projectPath?: string) => {
+    if (manifest.sources.some(source => source.file === file && source.kind === kind)) return;
+    const content = fs.readFileSync(file, 'utf8');
+    const originalId = `source-${reviewHash(file).slice(0, 24)}`;
+    const id = manifest.sources.some(source => source.id === originalId) ? `source-${reviewHash(`${file}:${kind}`).slice(0, 24)}` : originalId;
+    manifest.sources.push({ id, kind, projectPath, file, hash: reviewHash(content) });
+  };
+  const addDirectoryFiles = (root: string, directory: string, kind: string, projectPath?: string, pattern = /\.json$/) => {
+    if (!fs.existsSync(directory)) return;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isFile() && pattern.test(entry.name) && safeFile(root, file)) addFile(file, kind, projectPath);
+    }
+  };
+  const promptMirror = path.join(input.globalRoot, 'context', 'global-default-prompt.md');
+  if (safeFile(input.globalRoot, promptMirror)) addFile(promptMirror, 'global_prompt_mirror');
   for (const project of input.projects) {
+    for (const name of ['agent.md', 'AGENTS.md']) {
+      const file = path.join(project, name);
+      if (safeFile(project, file)) addFile(file, 'project_constraint', project);
+    }
+    const legacyProjectMemory = path.join(project, 'PROJECT_MEMORY.md');
+    if (safeFile(project, legacyProjectMemory)) addFile(legacyProjectMemory, 'project_memory_legacy', project);
+    const documentationFile = path.join(project, '.solopreneur', 'documentation.json');
+    if (safeFile(project, documentationFile)) {
+      addFile(documentationFile, 'project_document_index', project);
+      const documentation = readLearningJson(documentationFile);
+      for (const item of Array.isArray(documentation?.documents) ? documentation.documents : []) {
+        if (item?.status !== 'active' || typeof item.path !== 'string') continue;
+        const file = path.resolve(project, item.path);
+        if (safeFile(project, file)) addFile(file, 'project_document', project);
+      }
+    }
+    addDirectoryFiles(project, path.join(project, '.solopreneur', 'run-digests'), 'run_digest', project);
     const taskRoot = learningTasksRoot(project);
     const { tasks, reports, observations } = await readRegisteredProjectSources(project, path.resolve(__dirname, '..'));
     for (const task of tasks) {
@@ -216,16 +257,23 @@ export async function collectReviewManifest(input: { runId: string; globalRoot: 
     }
   };
   walkMemory(path.join(input.globalRoot, 'memory'));
-  for (const dir of ['candidates', 'approved', 'promotion-suggestions', 'candidate-decisions']) {
+  addDirectoryFiles(input.globalRoot, path.join(input.globalRoot, 'memory', 'entries'), 'memory_entry');
+  for (const name of ['index.json', 'events.jsonl']) {
+    const file = path.join(input.globalRoot, 'learning', 'ledger', name);
+    if (safeFile(input.globalRoot, file)) addFile(file, 'learning_ledger');
+  }
+  addDirectoryFiles(input.globalRoot, path.join(input.globalRoot, 'learning', 'ledger', 'sources'), 'learning_event_source');
+  for (const dir of ['candidates', 'approved', 'rejected', 'promotion-suggestions', 'candidate-decisions']) {
     const root = path.join(input.globalRoot, 'learning', dir);
     if (!fs.existsSync(root)) continue;
     for (const name of fs.readdirSync(root).filter(name => name.endsWith('.json'))) {
       const file = path.join(root, name); const value = readLearningJson(file);
-      if (value?.schemaVersion === 1 && input.projects.includes(value?.projectPath)) addFile(file, `legacy_${dir}` , value.projectPath);
+      if (dir === 'candidate-decisions' && [1, 2].includes(value?.schemaVersion)) addFile(file, `legacy_${dir}`);
+      else if (value?.schemaVersion === 1 && input.projects.includes(value?.projectPath)) addFile(file, `legacy_${dir}` , value.projectPath);
     }
   }
   manifest.sources = manifest.sources.filter(source => {
-    if (source.kind === 'memory' || source.kind === 'task' || source.kind.startsWith('legacy_')) return true;
+    if (['memory', 'memory_entry', 'task', 'global_prompt_mirror', 'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document', 'run_digest', 'learning_ledger', 'learning_event_source'].includes(source.kind) || source.kind.startsWith('legacy_')) return true;
     const decision = readLearningJson(path.join(input.globalRoot, 'learning', 'candidate-decisions', `semantic-${reviewHash(`${source.id}:${source.hash}`)}.json`));
     return !(decision?.schemaVersion === 2 && decision.id === source.id && decision.hash === source.hash && ['created', 'skipped'].includes(decision.decision));
   });

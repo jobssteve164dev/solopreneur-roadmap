@@ -12631,7 +12631,11 @@ test('manual experience review is routed from the existing settings action', asy
   const prompt = buildLearningReviewPrompt('/review/manifest.json', manifest, '/review/proposal.json');
   assert.match(prompt, /manifest\.json/);
   assert.match(prompt, /schemaVersion:2/);
-  assert.match(prompt, /不要修改任何记忆文件/);
+  assert.match(prompt, /影响后续所有插件任务/);
+  assert.match(prompt, /\/global\/memory\/profile\.md/);
+  assert.match(prompt, /\/global\/learning\/ledger/);
+  assert.match(prompt, /生成阶段不要直接修改任何记忆文件/);
+  assert.match(prompt, /应用阶段只允许插件写 globalPrompt、分层 memory Markdown 和学习候选/);
 });
 
 test('concurrent settings patches serialize without restoring stale values', async () => {

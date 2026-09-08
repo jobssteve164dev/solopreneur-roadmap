@@ -78,7 +78,16 @@ SoloMap-Task: <插件提供的不含秘密的稳定任务标识>
 
 用户仍只需点击现有设置按钮，由现有复盘 Agent CLI 执行；任务完成、候选增加、查询经验、刷新侧边栏和 Daily Review 都不得触发额外语义复盘。
 
-一次复盘读取本次可用材料清单：主动报告、精确提交与检查证据、相关旧候选、现有分层记忆及当前全局指令。先按材料来源和已处理版本缩小范围，再读取正文。旧材料按需纳入，不批量重写整个历史。
+一次复盘治理的是插件后续所有任务会继承的稳定行为，不是某次对话的总结或单向上提。输入清单必须登记精确路径、来源类型和读写职责，并覆盖：
+
+- 插件设置中的当前全局约束及 `.solomap-global/context/global-default-prompt.md` 镜像。
+- `.solomap-global/memory/` 的 `profile.md`、`operating-rules.md`、`projects/`、`decisions/`、`patterns/`、`domains/`、`inbox/`、`active/` 与结构化 `entries/`。
+- `.solomap-global/learning/ledger/` 的事件索引、事件账本和 `sources/`，以及 `candidates/`、`approved/`、`rejected/`、`promotion-suggestions/`、`candidate-decisions/`。
+- 每个已登记项目的 `agent.md`、`AGENTS.md`、兼容 `PROJECT_MEMORY.md`、`.solopreneur/documentation.json` 指向的 active 正式文档、`.solopreneur/run-digests/`、任务报告及精确提交与检查证据。
+
+复盘 Agent 先读精简索引，并可使用 `.solomap-global/tools/solomap-memory.cjs` 与 `solomap-experience.cjs` 定位相关分层记忆、候选、run digest 和 SQLite 执行记录，再按 source id 核对原文。字符限制用于约束今后新产生的单份工作汇报与留档噪音，不能据此从全局复盘中删除旧报告、项目约束、记忆或反证。旧材料按来源版本和处置状态分批读取，不把整个历史正文一次塞入提示词，也不批量重写历史。
+
+`candidate-decisions/` 同时兼容旧 schemaVersion 1 条件抽取记录和 schemaVersion 2 语义复盘处置。后者不依赖 `projectPath`，作为全局处置依据登记；不能因缺少项目字段而从清单消失。
 
 复盘提示词必须要求：
 
@@ -94,7 +103,7 @@ SoloMap-Task: <插件提供的不含秘密的稳定任务标识>
 
 现有复盘输出已扩展为可核验的变更提案：输入版本、证据引用、逐项处置、目标记忆位置、全局指令变化及未解决问题。复盘 Agent 只写本次运行的结果文件，插件校验后沿既有持久设置入口应用全局指令，并在既有分层记忆范围内应用必要的精确补丁；不允许 Agent 直接随意覆盖文件。
 
-记忆写入范围为既有分层 memory 和学习候选状态；项目记忆只能写证据所属且本次复盘纳入的项目。技能、产品代码、项目 agent.md、路线图、发布配置及 CLI 私有记忆不在该按钮的写入范围内，相关建议仅作为建议保留。此边界不改变用户在普通任务中单独授权的记忆维护。
+记忆写入范围为插件设置中的全局约束、既有分层 memory Markdown 和学习候选状态；项目记忆只能写证据所属且本次复盘纳入的项目。结构化 memory entries、事件账本和处置记录由各自正式写入协议维护，不能被通用文件补丁直接覆盖。项目 `agent.md` / `AGENTS.md`、兼容 `PROJECT_MEMORY.md` 和正式项目文档在复盘中是必须可见的只读约束来源；技能、产品代码、路线图、发布配置及 CLI 私有记忆也不在该按钮的直接写入范围内。它们可以支撑分层记忆或全局约束提案，但不能被复盘 Agent 直接改写。此边界不改变用户在普通任务中单独授权的维护。
 
 应用前必须验证目标属于允许范围、引用可定位、源版本未变化、旧约束处置有依据。结构校验不能替代语义检查；用户约束是否保留、是否混入项目细节需要独立于生成步骤的第二遍复核，并仍在同一次手动复盘内完成，不要求用户逐条审核。
 

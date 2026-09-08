@@ -6,6 +6,81 @@ const test = require('node:test');
 const ledger = require('../out/learningLedger.js');
 const root = () => fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-learning-review-'));
 
+test('review retains legacy reports even when current intake limits are stricter', async () => {
+  const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+  const { collectReviewManifest } = require('../out/learningReview.js');
+  const { queryGrowthReports } = require('../out/growthReports.js');
+  const project = root(); const runDir = path.join(project, '.solopreneur/agent-runs/__solo__/1');
+  const taskId = registerLearningTask(project, { executionLogId: 1, runDir, userMessage: '改进导出', startedAt: '2026-09-08' });
+  const reports = [{ summary: '导出可按日期筛选。', verification: ['检查日志'.repeat(400)] }, { summary: '已补齐筛选测试。' }, { summary: '导出已改进。', commits: [{ repository: 'owner/repo', sha: 'a'.repeat(40), files: ['src/app.js'], note: '字'.repeat(501) }] }, { summary: '字'.repeat(120), verification: ['字'.repeat(380)], outputs: ['这是详细过程说明。'.repeat(40)] }];
+  reports.forEach((report, index) => writeLearningJson(path.join(runDir, `task-report-${index + 1}.json`), { schemaVersion: 1, projectPath: project, taskId, executionLogId: 1, turnId: `${index + 1}:complete`, createdAt: '2026-09-08', report }));
+  const manifest = await collectReviewManifest({ runId: 'bounded', globalRoot: path.join(project, '.global'), globalPrompt: '', projects: [project], repositoryForProject: async () => '' });
+  assert.equal(manifest.sources.filter(s => s.kind === 'agent_report').length, 4);
+  const page = await queryGrowthReports(project, path.resolve(__dirname, '..'), { taskId });
+  assert.equal(page.turns.length, 4, 'archive remains readable in the growth view');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(runDir, 'task-report-1.json'))).report.verification[0], reports[0].verification[0]);
+});
+
+test('global review indexes every memory and constraint layer with exact paths', async () => {
+  const { collectReviewManifest } = require('../out/learningReview.js');
+  const project = root(); const globalRoot = path.join(project, '.solomap-global');
+  fs.mkdirSync(path.join(project, '.solopreneur/run-digests'), { recursive: true });
+  fs.mkdirSync(path.join(project, 'docs'), { recursive: true });
+  fs.mkdirSync(path.join(globalRoot, 'memory/entries'), { recursive: true });
+  fs.mkdirSync(path.join(globalRoot, 'learning/ledger/sources'), { recursive: true });
+  fs.mkdirSync(path.join(globalRoot, 'learning/candidate-decisions'), { recursive: true });
+  fs.mkdirSync(path.join(globalRoot, 'context'), { recursive: true });
+  fs.writeFileSync(path.join(project, 'agent.md'), '# Project rules\n');
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Repository rules\n');
+  fs.writeFileSync(path.join(project, 'PROJECT_MEMORY.md'), '# Legacy project memory\n');
+  fs.writeFileSync(path.join(project, 'docs/boundary.md'), '# Product boundary\n');
+  fs.writeFileSync(path.join(project, '.solopreneur/documentation.json'), JSON.stringify({ schemaVersion: 1, documents: [{ path: 'docs/boundary.md', role: 'boundary', status: 'active', solves: 'product boundary' }] }));
+  fs.writeFileSync(path.join(project, '.solopreneur/run-digests/run-1.json'), '{}');
+  fs.writeFileSync(path.join(globalRoot, 'memory/profile.md'), '# Profile\n');
+  fs.writeFileSync(path.join(globalRoot, 'memory/entries/mem-1.json'), '{}');
+  fs.writeFileSync(path.join(globalRoot, 'learning/ledger/index.json'), '{}');
+  fs.writeFileSync(path.join(globalRoot, 'learning/ledger/events.jsonl'), '{}\n');
+  fs.writeFileSync(path.join(globalRoot, 'learning/ledger/sources/event-1.json'), '{}');
+  fs.writeFileSync(path.join(globalRoot, 'learning/candidate-decisions/semantic-1.json'), JSON.stringify({ schemaVersion: 2, runId: 'older-review', id: 'source-1', hash: 'a'.repeat(64), decision: 'skipped', reason: 'already reviewed' }));
+  fs.writeFileSync(path.join(globalRoot, 'context/global-default-prompt.md'), 'Global setting\n');
+  fs.writeFileSync(path.join(project, 'global-root-placeholder'), '');
+  fs.writeFileSync(path.join(project, 'agent-root.md'), '');
+  const manifest = await collectReviewManifest({ runId: 'layers', globalRoot, globalPrompt: 'Global setting', projects: [project], repositoryForProject: async () => '' });
+  const byKind = kind => manifest.sources.filter(source => source.kind === kind).map(source => source.file);
+  for (const name of ['agent.md', 'AGENTS.md']) assert.ok(byKind('project_constraint').includes(path.join(project, name)), name);
+  assert.ok(byKind('project_memory_legacy').includes(path.join(project, 'PROJECT_MEMORY.md')));
+  assert.ok(byKind('project_document_index').includes(path.join(project, '.solopreneur/documentation.json')));
+  assert.ok(byKind('project_document').includes(path.join(project, 'docs/boundary.md')));
+  assert.ok(byKind('run_digest').includes(path.join(project, '.solopreneur/run-digests/run-1.json')));
+  assert.ok(byKind('memory_entry').includes(path.join(globalRoot, 'memory/entries/mem-1.json')));
+  assert.ok(byKind('learning_ledger').includes(path.join(globalRoot, 'learning/ledger/index.json')));
+  assert.ok(byKind('learning_event_source').includes(path.join(globalRoot, 'learning/ledger/sources/event-1.json')));
+  assert.ok(byKind('legacy_candidate-decisions').includes(path.join(globalRoot, 'learning/candidate-decisions/semantic-1.json')));
+  assert.ok(byKind('global_prompt_mirror').includes(path.join(globalRoot, 'context/global-default-prompt.md')));
+});
+
+test('global review prompt names every path layer and its read or write role', () => {
+  const { buildLearningReviewPrompt } = require('../out/learningReviewApply.js');
+  const project = '/workspace/product'; const globalRoot = '/data/.solomap-global';
+  const manifest = { schemaVersion: 1, runId: 'review-paths', globalRoot, globalPrompt: 'Keep intent.', promptHash: 'hash', projects: [project], memory: [], gaps: [], sources: [
+    { kind: 'global_prompt_mirror', file: '/data/.solomap-global/context/global-default-prompt.md' }
+  ] };
+  const prompt = buildLearningReviewPrompt('/runs/manifest.json', manifest, '/runs/result.json');
+  for (const expected of [
+    '/data/.solomap-global/context/global-default-prompt.md', '/data/.solomap-global/memory/profile.md',
+    '/data/.solomap-global/memory/operating-rules.md', '/data/.solomap-global/memory/projects', '/data/.solomap-global/memory/decisions',
+    '/data/.solomap-global/memory/patterns', '/data/.solomap-global/memory/domains', '/data/.solomap-global/memory/inbox',
+    '/data/.solomap-global/memory/active', '/data/.solomap-global/memory/entries', '/data/.solomap-global/learning/ledger',
+    '/data/.solomap-global/learning/candidates', '/data/.solomap-global/learning/approved', '/data/.solomap-global/learning/rejected',
+    '/data/.solomap-global/learning/promotion-suggestions', '/data/.solomap-global/learning/candidate-decisions',
+    '/workspace/product/agent.md', '/workspace/product/AGENTS.md',
+    '/workspace/product/PROJECT_MEMORY.md', '/workspace/product/.solopreneur/documentation.json', '/workspace/product/.solopreneur/run-digests',
+    '/workspace/product/.solopreneur/agent-runs/learning-tasks', '项目 agent.md/AGENTS.md、PROJECT_MEMORY.md、正式文档',
+    '/data/.solomap-global/tools/solomap-memory.cjs', '/data/.solomap-global/tools/solomap-experience.cjs',
+    '形成或修订影响后续所有插件任务的稳定行为约束与分层经验'
+  ]) assert.ok(prompt.includes(expected), expected);
+});
+
 test('normal event writes and reads do not generate semantic candidates or promotion suggestions', () => {
   const project = root(); const global = path.join(project, '.solomap-global');
   ledger.appendLearningEvent(project, global, { sourceType: 'user_correction', sourceRef: 'test', eventType: 'corrected', summary: '保持用户选择', evidenceRefs: [{ type: 'user', ref: 'message:1' }] });
@@ -67,6 +142,12 @@ test('manual runner completes a no-change review through separate generation and
   let launches = 0;
   const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => { throw new Error('no changes'); }, launch: async (promptFile, resultFile) => {
     launches += 1;
+    const generatedPrompt = fs.readFileSync(promptFile, 'utf8');
+    if (launches === 1) {
+      assert.ok(generatedPrompt.includes(path.join(globalRoot, 'memory/profile.md')));
+      assert.ok(generatedPrompt.includes(path.join(globalRoot, 'learning/ledger')));
+      assert.ok(generatedPrompt.includes('影响后续所有插件任务'));
+    } else assert.ok(generatedPrompt.includes('项目记忆、项目约束、全局记忆与现有全局约束'));
     const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
     const manifestHash = reviewHash(JSON.stringify(manifest));
     if (launches === 1) fs.writeFileSync(resultFile, JSON.stringify({ schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] }));
