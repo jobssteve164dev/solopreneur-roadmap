@@ -1,5 +1,9 @@
 # SoloMap 全局执行经验层设计
 
+## 2026-09-08 设计更新
+
+后续学习改造以 [学习管线设计](learning-pipeline-design.zh.md) 为契约：现有命令主动汇报、GitHub 精确提交证据回读，统一由用户手动“复盘经验”进行语义提炼及记忆/全局指令更新。本轮仅改设计，尚未实施新运行时。日志和 digest 保留作证据与交接，不再把关键词抽取、运行状态或经验出现次数视为有效学习的证明。
+
 ## 这份文档解决什么判断
 
 这份文档固定 SoloMap 是否应该、以及如何把 Agent 运行日志转化为下一次任务可复用的执行经验。
@@ -50,7 +54,7 @@ SoloMap 首先依靠确定关系召回经验：项目、路线图环节、Issue�
 
 ### 4. 经验升级必须分层
 
-一次运行先进入 Run Digest；多次被召回或被验证有效后，才能提升为 memory、pattern、decision 或 skill。不能把单次日志直接写成长期规则。
+一次运行先保存报告与证据索引；在手动复盘中确认有复用价值并有证据后，才能提升为相应 memory、pattern 或 decision。多次被召回不是有效性证据。技能修改需单独任务授权，不属于本次复盘按钮的写入范围。
 
 ### 5. 用户不承担内部治理心智
 
@@ -61,12 +65,13 @@ SoloMap 首先依靠确定关系召回经验：项目、路线图环节、Issue�
 SoloMap 的执行经验层形成以下链路：
 
 ```text
-Agent 原始运行记录
-  -> Run Digest v2 / Agent Handoff
+Agent 命令报告 + 精确提交及验证证据
+  -> 既有账本 / Run Digest / Agent Handoff
+  -> 手动“复盘经验”：语义核对、经验与指令更新
   -> Execution Graph
   -> Retrieval Pack / CLI 查询
-  -> Agent prompt 启动注入
-  -> 稳定经验提升为 Memory / Skill / Decision / Pattern
+  -> Agent 按需读取并汇报实际采用情况
+  -> 下次手动复盘核对效果
 ```
 
 其中：
@@ -78,7 +83,7 @@ Agent 原始运行记录
 
 ## 当前落地边界
 
-当前已经落地为项目本地的完整闭环：
+已有项目本地记录与查询基础如下；它们不代表新设计已经闭环：
 
 - 每次路线图环节、Solo 对话或路线图调整 run 收尾时，插件从现有运行事实生成 `Run Digest` JSON。
 - Digest v2 保存到 `.solopreneur/run-digests/`，作为原始日志和长期记忆之间的中间层。
@@ -86,8 +91,8 @@ Agent 原始运行记录
 - 每次写入 digest 后，SoloMap 自动刷新 `.solopreneur/execution-graph.json`，按环节、Agent、文件、状态、失败和命令建立轻量索引。
 - Execution Graph 不只记录 run 索引，还从 digest 中抽取经验节点：验证动作、失败模式、可复用信号、handoff 动作和运行决策。
 - 每个经验节点都有中心语义、适用条件、建议动作、避免项、检查项、来源 run，以及使用边统计。
-- 使用边记录某个 run 如何命中经验节点，并用 `alpha/beta` 累计 win/loss/neutral，形成轻量胜率估计；它服务下一次召回排序和经验晋升判断，不作为用户前台概念。
-- 下一轮 Agent prompt 会按同任务入口、同运行类型、文件路径和关键词命中召回最多 3 条相关执行经验，并注入跨 Agent handoff 工具入口。
+- 当前 `alpha/beta` 与 win/loss/neutral 由 digest 状态及摘要信号推算，不能证明后续实际采用及效果。下一阶段须将其与有证据的采用反馈分开，不据此自动晋升。
+- 旧 prompt 构建器按入口、运行类型、文件和关键词召回；当前 Solo 已改用按需上下文索引。新学习设计保持该按需路径，不把旧自动注入描述当成所有入口现状。
 - `resources/tools/solomap-experience.cjs` 可从 digest、execution graph 和 SQLite `execution_logs` 生成 `handoff`、`summary`、`history`、`failures`、`latest-changes`、`search` 等查询结果。
 - `resources/skills/solomap-cross-agent-handoff/SKILL.md` 固定 Agent 接手另一位 Agent 工作时的查询顺序、验证边界和原始日志使用规则。
 - 注入内容只包含上次目标、结果、交接简报、相关文件、可复用信号、验证信号和风险信号，不注入原始日志全文。
@@ -154,7 +159,7 @@ Execution Graph 不是聊天搜索，也不是日志浏览器。它是为了在�
 - 应做/避免：召回后能直接影响动作。
 - 检查项：可复用命令或验证信号。
 - 来源与使用边：这条经验从哪些 run 来，在哪些 run 中被观察、验证或失败。
-- 胜率估计：用 beta 先验聚合 win/loss，避免单次成功被误判成稳定规则。
+- 采用结果：区分召回、报告采用及证据支持的效果，绑定具体经验、动作和版本；未知不能计成失败或成功。
 
 ## CodeGraph 的位置
 
@@ -204,7 +209,7 @@ SoloMap 可以对 Run Digest 的自然语言字段做 embedding，用于补充�
 - “已带入 3 条相关历史经验。”
 - “上次类似问题触碰了这些文件。”
 - “建议复用这些验证命令。”
-- “这条经验已多次命中，可提升为项目记忆。”
+- “这条经验已补充验证依据。”
 
 ## 禁止项
 

@@ -1,5 +1,9 @@
 # SoloMap 执行经验层方法论
 
+## 2026-09-08 设计更新
+
+下一阶段以 [学习管线设计](../architecture/learning-pipeline-design.zh.md) 的双入口和手动复盘契约为准，本轮不改运行时。Agent 主动解释产出及纠偏，插件回读精确 GitHub 提交与检查证据；日常保存材料，用户点击“复盘经验”后才做语义提炼及晋升。现有 digest/graph 字段是兼容基础，不是新设计已实现的证明。
+
 ## 这份文档解决什么判断
 
 这份文档说明 SoloMap 如何把每次 Agent 工作从原始日志转化为下一轮任务可复用的上下文、经验和方法包。
@@ -17,12 +21,12 @@
 执行经验层分为五层：
 
 ```text
-Raw Run
+命令主动报告 + GitHub 提交与检查证据 / Raw Run
   -> Run Digest v2 / Agent Handoff
+  -> 手动“复盘经验”：核对、提炼与分层沉淀
   -> Execution Graph
   -> Retrieval Pack / CLI Query
-  -> Prompt Injection
-  -> Stable Memory / Skill
+  -> Agent 按需使用与主动反馈
 ```
 
 ### 1. Raw Run
@@ -105,11 +109,11 @@ Execution Graph 是 digest 之间的关系索引。当前采用项目本地 `.so
 - handoff 动作。
 - 运行决策。
 
-经验节点必须有中心语义，不能只是 Markdown 段落。Graph 会记录 `run -> experience node` 的使用边，并按 win/loss/neutral 累计 beta 胜率估计。胜率不是替 Agent 做决定，而是帮助下一次召回时区分“多次有效的经验”和“一次性过程记录”。
+经验节点必须有中心语义及来源，不能只是 Markdown 段落。当前 Graph 按摘要信号和运行状态累计的 win/loss 不是后续采用效果；下一阶段应绑定主动报告中的经验标识、实际动作和结果证据。整个任务成功、候选反复出现或多次召回都不能直接计作经验有效。
 
 ### 4. Retrieval Pack
 
-Retrieval Pack 是下一轮 Agent 启动前注入的少量相关历史经验。
+Retrieval Pack 是供下一轮 Agent 按需查询的少量相关历史经验；当前 Solo 保持按需入口，不恢复默认正文注入。
 
 它必须短、可执行、可验证。建议最多 3 条，每条包含：
 
@@ -137,13 +141,13 @@ node resources/tools/solomap-experience.cjs handoff --project . --node <node-id>
 
 ### 5. Stable Memory / Skill
 
-当一个 lesson 被多次召回或被明确验证为跨任务有价值时，才提升：
+手动复盘确认 lesson 有复用价值且证据成立时，才按层沉淀；多次召回本身不能作为晋升依据：
 
 - 项目稳定事实 -> `memory/projects/<project>.md`
 - 跨任务规则 -> `memory/operating-rules.md`
 - 可复用做法 -> `memory/patterns/`
 - 已确认决策 -> `memory/decisions/`
-- 稳定流程 -> `skills/`
+- 稳定流程 -> 可保留技能改进建议；实际修改 `skills/` 需单独任务授权
 
 当前配套 skill 为 `resources/skills/solomap-cross-agent-handoff/SKILL.md`，用于固定跨 Agent 接手时的查询顺序和边界。
 
@@ -175,14 +179,14 @@ node resources/tools/solomap-experience.cjs handoff --project . --node <node-id>
 
 ## 召回顺序
 
-下一轮 Agent 启动前，按以下顺序召回经验：
+在接续、复核、重复故障或当前证据不足时按需查询；先判断具体目标、动作与经验适用条件，再使用以下索引定位证据，项目或运行类型相同不能单独证明相关：
 
 1. 当前路线图环节最近 digest。
 2. 同项目、同文件或同模块 digest。
 3. 同错误类型或同验证命令 digest。
 4. 同 skill 或同任务类型 digest。
 5. 同 Issue、同文档职责或同路线图阶段 digest。
-6. 如自动召回不足，Agent 使用 `solomap-experience` CLI 查询 handoff、failures、latest-changes 或 search。
+6. 如经验查询不足，Agent 使用 `solomap-experience` CLI 查询 handoff、failures、latest-changes 或 search 追溯证据。
 7. embedding 语义相似 digest（可选，作为补充）。
 
 召回结果必须经过去重和压缩，禁止超过主任务 prompt 的必要比例。
@@ -219,11 +223,11 @@ Embedding 只用于模糊召回，不承担最终排序和注入决策。
 
 ## 与 memory / skill 的升级规则
 
-Digest 进入长期经验前必须满足至少一个条件：
+Digest 中的判断进入长期经验前必须有可定位的证据并在手动复盘中核对；可支持判断的依据包括：
 
 - 同类任务多次命中并证明有用。
 - 用户明确确认这是长期规则或稳定偏好。
-- 失败模式具有跨任务复发风险。
+- 有证据支持失败原因及适用范围，不能只因怀疑复发就升级为规则。
 - 修复方式已经通过测试、构建、发布或真实运行验证。
 
 升级时必须选择正确位置：
@@ -235,37 +239,37 @@ Digest 进入长期经验前必须满足至少一个条件：
 | 项目稳定事实 | `memory/projects/<project>.md` |
 | 可复用排障或交付方式 | `memory/patterns/` |
 | 已确认长期决策 | `memory/decisions/` |
-| 稳定执行流程 | `skills/` |
+| 稳定执行流程 | 保留建议，另行授权技能修改 |
 | 未验证观察 | `memory/inbox/` 或 `learning/candidates/` |
 
 ## 当前可落地闭环
 
 当前闭环不需要 embedding，也不需要独立图数据库。插件采用项目本地 JSON digest、execution graph、SQLite log 查询工具和配套 skill 落地。
 
-已落地范围：
+已有记录和查询基础（不代表学习效果已核验）：
 
 1. 从现有 Raw Run 生成 digest v2 JSON。
 2. 保存到 `.solopreneur/run-digests/`。
 3. 每次 digest 写入后刷新 `.solopreneur/execution-graph.json`。
 4. 用文件路径、任务入口、运行类型、关键词做确定召回。
-5. Agent prompt 注入最多 3 条 Retrieval Pack，并注入跨 Agent handoff 工具入口。
+5. 旧 prompt 构建器有最多 3 条 Retrieval Pack 注入路径；当前 Solo 已使用按需上下文索引。
 6. `resources/tools/solomap-experience.cjs` 从 digest、execution graph 和 SQLite `execution_logs` 输出 handoff、summary、history、failures、latest-changes 和 search。
 7. `resources/skills/solomap-cross-agent-handoff/SKILL.md` 固定跨 Agent 接手规则，避免 Agent 直接复制原始 execution log 或用历史覆盖本轮目标。
 8. 注入时保留“历史摘要不能覆盖本轮事实”的优先级约束。
 
-下一阶段再补：
+下一阶段只沿已确认的双入口与手动复盘推进：
 
-1. 更稳定的失败类型、验证命令和修复动作抽取。
-2. 多次命中后的 memory / pattern / skill 提升提示。
-3. 代码结构维度的 CodeGraph 连接器。
-4. 结构化召回不足时的 embedding 辅助召回。
+1. 兼容现有命令的结构化汇报，以及任务与提交的明确关联规范。
+2. 手动复盘回读精确提交和检查证据，并语义阅读报告与差异。
+3. 按证据更新分层记忆及全局指令，保留版本、应用结果和纠偏来源。
+4. 后续报告经验采用情况，供下次手动复盘核对；CodeGraph、embedding 不属于本次实施范围。
 
 当前闭环成功标准：
 
 - Agent 少读重复文件。
 - 相同区域的问题能复用历史验证命令。
 - 用户纠偏不再只留在对话里。
-- 多次复用的经验能自然上提到 memory 或 skill。
+- 有证据的经验能在手动复盘中上提到对应 memory；技能修改另行授权。
 
 ## 禁止项
 
