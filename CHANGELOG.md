@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.462 - 2026-09-08
+
+### Fixed
+- refine growth reports and global review (3fe6c28)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.461 - 2026-09-08
 
 ### Added
