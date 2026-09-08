@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.461 - 2026-09-08
+
+### Added
+- connect task reports, evidence, and original-session actions (0f1dda0)
+
+### Docs
+- define work reports and evidence review boundaries (1904e24)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.460 - 2026-09-08
 
 ### Added
