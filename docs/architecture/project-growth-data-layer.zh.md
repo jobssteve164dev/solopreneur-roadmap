@@ -108,9 +108,13 @@ Git 失败或项目不是 Git 仓库时，生长层仍应可用，只是演化�
 
 这些信号用于判断代码是否支撑真实项目推进，而不是只在仓库里存在。
 
-### 6. 工作汇报与核验证据（2026-09 设计，待接入生长图）
+### 6. 工作汇报与核验证据（2026-09）
 
-现状锚点：`src/taskReport.ts` 已通过原 checkpoint 接收报告并登记独立任务，`src/learningReview.ts` 已在手动复盘中采集报告和 GitHub 精确提交证据；`src/projectGrowth.ts` 与 `src/projectGrowthWebview.ts` 尚未消费这些主动报告。下述是下一轮数据契约，不是已实现能力。
+现状锚点：`src/taskReport.ts` 沿原 checkpoint 接收报告；`src/growthReports.ts` 校验登记并维护 `project_growth.db` 内的可重建投影，`src/growthReportsWebview.ts` 提供台账与动作。`src/learningReview.ts` 的事实采集由手动复盘与用户主动更新验证结果共同复用。
+
+互动续聊的多个执行可能共享原运行目录；新轮次由宿主登记，旧记录可沿宿主保存的 continuation 关系恢复，不能相信报告自填的新执行身份。缺失、无效或保存失败由 checkpoint 的独立状态收据保留，不改变原结算结果。同轮修订保留内容版本和修订次序。
+
+GitHub 完整材料与轻量展示摘要分开缓存，提交、检查和状态各保留实际观察时间。覆盖结果绑定源码内容摘要；重新打开缓存视图仍重新核对版本，不以缓存生成时间冒充当前有效。页面查询只读取本地文件与 Git 对象，不触发模型、远端读取或测试。
 
 #### 事实源与身份
 

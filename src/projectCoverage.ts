@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFile } from 'child_process';
+import * as crypto from 'crypto';
+import { execFile, execFileSync } from 'child_process';
 import { createCoverageMap } from 'istanbul-lib-coverage';
 
 export type ProjectCoverageStatus = 'ready' | 'test_failed' | 'stale_failed' | 'unavailable';
@@ -29,6 +30,30 @@ export interface ProjectCoverageSnapshot {
   testPassed: boolean;
   files: ProjectFileCoverage[];
   error: string;
+  sourceVersion?: { gitHead: string; contentHash: string };
+}
+
+export function captureCoverageVersion(projectPath: string): { gitHead: string; contentHash: string } {
+  const digest = crypto.createHash('sha256');
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.isSymbolicLink() || ['node_modules', '.git', '.solopreneur', '.solomap-global', '.agents', 'out', 'dist', 'build', 'coverage', '.next'].includes(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(file);
+      else if (/\.(?:[cm]?[jt]sx?|json|ya?ml|sh|py|go|rs|java|swift|c|h|cpp|vue|svelte|html|css)$/.test(entry.name)) {
+        digest.update(path.relative(projectPath, file)); digest.update('\0'); digest.update(fs.readFileSync(file)); digest.update('\0');
+      }
+    }
+  };
+  walk(projectPath);
+  let gitHead = '';
+  try { gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* Non-Git projects still have a content identity. */ }
+  return { gitHead, contentHash: digest.digest('hex') };
+}
+
+export function coverageVersionState(projectPath: string, snapshot: Pick<ProjectCoverageSnapshot, 'sourceVersion'>): 'current' | 'stale' | 'unknown' {
+  if (!snapshot.sourceVersion?.contentHash) return 'unknown';
+  try { return captureCoverageVersion(projectPath).contentHash === snapshot.sourceVersion.contentHash ? 'current' : 'stale'; } catch { return 'unknown'; }
 }
 
 const coverageCache = new Map<string, { modifiedAt: number; snapshot: ProjectCoverageSnapshot }>();
@@ -183,6 +208,7 @@ async function executeCoverageRun(projectPath: string, extensionPath: string): P
   const startedAt = Date.now();
   const attemptedAt = new Date().toISOString();
   const previous = loadProjectCoverageSnapshot(projectPath);
+  const sourceVersion = captureCoverageVersion(projectPath);
   const testScript = readTestScript(projectPath);
   if (!testScript) {
     return preservePreviousCoverageFailure(projectPath, previous, attemptedAt, startedAt, '项目没有可运行的 npm test 脚本。');
@@ -237,6 +263,7 @@ async function executeCoverageRun(projectPath: string, extensionPath: string): P
       lastAttemptAt: attemptedAt,
       durationMs: Date.now() - startedAt,
       testPassed: !result.error,
+      sourceVersion,
       files,
       error: result.error?.message || ''
     };

@@ -2,6 +2,13 @@ import type { Terminal } from 'vscode';
 
 const terminalInputQueues = new WeakMap<Terminal, Promise<boolean>>();
 
+export function sendAgentTextWhenTerminalReady(terminal: Terminal, text: string, provider: string): Promise<boolean> {
+  // Codex buffers raw text bursts, including Enter. An explicit paste clears that
+  // suppression before the following submit key (Codex ChatComposer::handle_paste).
+  if (provider === 'codex') return sendTextWhenTerminalReady(terminal, `\x1b[200~${text.replace(/\x1b/g, '\\u001b')}\x1b[201~\r`, false);
+  return sendTextWhenTerminalReady(terminal, text);
+}
+
 async function deliverTerminalText(terminal: Terminal, text: string, addNewLine: boolean): Promise<boolean> {
   try {
     const processId = terminal.processId;

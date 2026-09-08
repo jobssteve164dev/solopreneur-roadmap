@@ -1,6 +1,7 @@
 import * as path from 'path';
 import type * as vscode from 'vscode';
 import { ProjectGrowthViewModel } from './projectGrowth';
+import { growthReportsScript, growthReportsStyles } from './growthReportsWebview.js';
 
 function joinExtensionUri(context: vscode.ExtensionContext, ...segments: string[]): vscode.Uri {
   const base = context.extensionUri as any;
@@ -53,10 +54,10 @@ const locales = {
     architectureJudgement: "协同判断",
     verificationMatrix: "架构与验证盲区",
     verificationMatrixHint: "逐个真实模块核对代码体量、直接测试关系与验证覆盖，优先处理核心但无证据的区域。",
-    covered: "生产文件已全部验证",
-    partialCoverage: "部分生产文件已验证",
+    covered: "全部生产文件有测试关联",
+    partialCoverage: "部分生产文件有测试关联",
     blindSpot: "验证盲区",
-    coverage: "直接文件覆盖率",
+    coverage: "静态测试关联比例",
     productionFiles: "生产文件",
     directlyTestedFiles: "已直接覆盖",
     directTestFiles: "关联测试文件",
@@ -105,7 +106,7 @@ const locales = {
     landingState: "落地状态",
     stepsCompleted: "个环节已完成",
     emptyModules: "当前项目未检测到模块。",
-    emptyGaps: "所有健康度与分析规则均已满足。无架构与验证盲区！",
+    emptyGaps: "暂无已识别的结构缺口；功能验收仍需核对。",
     emptyCaps: "没有关联路线图节点的特性。",
     emptyHistory: "暂无快照历史记录。",
     emptyEdges: "未计算出关键架构链路。",
@@ -230,10 +231,10 @@ const locales = {
     architectureJudgement: "Collaboration judgement",
     verificationMatrix: "Architecture & Verification Blind Spots",
     verificationMatrixHint: "Review each real module's code weight, direct test relationships, and verification coverage. Prioritize core areas without evidence.",
-    covered: "All production files verified",
-    partialCoverage: "Some production files verified",
+    covered: "All production files have test references",
+    partialCoverage: "Some production files have test references",
     blindSpot: "Blind spot",
-    coverage: "Direct file coverage",
+    coverage: "Static test reference ratio",
     productionFiles: "Production files",
     directlyTestedFiles: "Directly tested",
     directTestFiles: "Test files",
@@ -282,7 +283,7 @@ const locales = {
     landingState: "Evidence",
     stepsCompleted: "steps completed",
     emptyModules: "No modules detected in this project.",
-    emptyGaps: "All growth and health rules are satisfied. No architectural gaps found!",
+    emptyGaps: "No structural gaps identified; feature acceptance still needs verification.",
     emptyCaps: "No capabilities linked to the roadmap.",
     emptyHistory: "No history recorded yet.",
     emptyEdges: "No key architectural edges computed.",
@@ -491,12 +492,13 @@ export function getProjectGrowthWebviewHtml(
   const capabilityHealthHtml = viewModel.capabilityHealth && viewModel.capabilityHealth.length > 0
     ? viewModel.capabilityHealth.map((capability) => {
       return `
-        <div class="capability-health-card ${statusClass(capability.status)}">
+        <div class="capability-health-card ${statusClass(capability.status)}" data-growth-capability="${escapeHtml(capability.nodeId)}" tabindex="0">
           <div class="capability-health-head">
             <span class="capability-name">${escapeHtml(capability.label)}</span>
             <span class="roadmap-state ${escapeHtml(capability.roadmapStatus.toLowerCase().replace(/\s+/g, '-'))}">${escapeHtml(t.roadmapState)} · ${escapeHtml(formatMappedLabel(t.roadmapStatusLabels, capability.roadmapStatus))}</span>
           </div>
           <div class="capability-stage">${escapeHtml(capability.stage || '-')}</div>
+          <button type="button" class="report-filter" data-report-capability="${escapeHtml(capability.nodeId)}" data-report-label="${escapeHtml(capability.label)}">${escapeHtml(isZh ? '查看相关汇报' : 'View related reports')}</button>
           ${capability.description ? `<div class="capability-description">${escapeHtml(capability.description)}</div>` : ''}
           <div class="capability-state-line">
             <span>${escapeHtml(t.landingState)}</span>
@@ -561,7 +563,7 @@ export function getProjectGrowthWebviewHtml(
       const tileSize = index === 0 ? 'tile-dominant' : index < 3 ? 'tile-large' : index < 7 ? 'tile-medium' : 'tile-small';
       const signalLabel = formatMappedLabel(t.signalLabels, mod.signal);
       return `
-        <div class="module-card ${signalClass} ${tileSize}" style="--tile-weight:${tileWeight}" tabindex="0" role="group" aria-label="${escapeHtml(`${mod.label}, ${signalLabel}, ${mod.loc} ${t.lines}`)}">
+        <div class="module-card ${signalClass} ${tileSize}" data-growth-module="${escapeHtml(mod.nodeId)}" style="--tile-weight:${tileWeight}" tabindex="0" role="group" aria-label="${escapeHtml(`${mod.label}, ${signalLabel}, ${mod.loc} ${t.lines}`)}">
           <div class="module-card-head">
             <span class="module-title"><span class="codicon codicon-symbol-module"></span> ${escapeHtml(mod.label)}</span>
             <span class="signal-tag"><span class="signal-mark"></span>${escapeHtml(signalLabel)}</span>
@@ -571,6 +573,12 @@ export function getProjectGrowthWebviewHtml(
             <span>${mod.loc.toLocaleString()} ${escapeHtml(t.lines)}</span>
             ${mod.tests > 0 ? `<span>${mod.tests} ${escapeHtml(t.tests)}</span>` : ''}
           </div>
+          <button type="button" class="report-filter" data-report-module="${escapeHtml(mod.nodeId)}" data-report-label="${escapeHtml(mod.label)}">${escapeHtml(isZh ? '查看相关汇报' : 'View related reports')}</button>
+          <details data-module-details="${escapeHtml(mod.nodeId)}">
+            <summary>${escapeHtml(isZh ? '验证详情' : 'Verification details')}</summary>
+            <p>${escapeHtml(isZh ? `${mod.directlyTestedFiles}/${mod.productionFiles} 个生产文件存在测试关联` : `${mod.directlyTestedFiles}/${mod.productionFiles} production files have test references`)}</p>
+            ${viewModel.coverage.available ? `<p>${escapeHtml(isZh ? `${mod.runtimeCoveredFiles} 个文件被执行到；行覆盖 ${mod.lineCoveragePercent}%` : `${mod.runtimeCoveredFiles} files executed; line coverage ${mod.lineCoveragePercent}%`)}</p>` : ''}
+          </details>
         </div>
       `;
     }).join('');
@@ -745,9 +753,9 @@ export function getProjectGrowthWebviewHtml(
     const fileCoveragePercent = productionFiles > 0 ? Math.round((coveredFiles / productionFiles) * 100) : 0;
     const coverageState = productionFiles === 0 ? 'not-applicable' : fileCoveragePercent >= 100 ? 'covered' : fileCoveragePercent > 0 ? 'partial' : 'blind';
     const coverageLabel = coverageState === 'covered'
-      ? t.covered
+      ? (runtimeCoverageAvailable ? (isZh ? '全部生产文件被执行到' : 'All production files executed') : t.covered)
       : coverageState === 'partial'
-        ? t.partialCoverage
+        ? (runtimeCoverageAvailable ? (isZh ? '部分生产文件被执行到' : 'Some production files executed') : t.partialCoverage)
         : coverageState === 'not-applicable'
           ? t.noProductionFiles
           : t.blindSpot;
@@ -780,6 +788,8 @@ export function getProjectGrowthWebviewHtml(
         </div>
         <div class="coverage-source ${runtimeCoverageAvailable ? 'is-runtime' : ''}">
           <span>${escapeHtml(coverageStateCopy)}</span>
+          ${runtimeCoverageAvailable ? `<span>${escapeHtml(viewModel.coverage.versionState === 'current' ? (isZh ? '源码与分析时一致；执行覆盖不等于功能验收。' : 'Source matches the analysis; execution coverage is not feature acceptance.') : viewModel.coverage.versionState === 'stale' ? (isZh ? '源码已有变化，当前版本待验证。' : 'Source has changed; the current version awaits verification.') : (isZh ? '分析版本未知，当前版本待验证。' : 'Analysis version unknown; the current version awaits verification.'))}</span>` : ''}
+          ${viewModel.coverage.gitHead ? `<span>${escapeHtml(viewModel.coverage.gitHead)}</span>` : ''}
           ${coverageGeneratedAt ? `<time>${escapeHtml(coverageGeneratedAt)}</time>` : ''}
         </div>
       </div>
@@ -841,6 +851,7 @@ export function getProjectGrowthWebviewHtml(
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <title>solomap ${escapeHtml(t.title)}</title>
   <style>
+    ${growthReportsStyles}
     :root {
       --bg-dark: #0f111a;
       --fg: #e2e8f0;
@@ -2094,6 +2105,11 @@ export function getProjectGrowthWebviewHtml(
           <div class="capability-health-grid">${capabilityHealthHtml}</div>
         </section>
 
+        <section class="growth-v2-panel">
+          <h2 class="panel-title">${escapeHtml(isZh ? '工作汇报' : 'Work reports')}</h2>
+          <div id="growth-reports" aria-live="polite"></div>
+        </section>
+
         <section class="panel module-space-panel">
           <h2 class="panel-title"><span class="codicon codicon-layout"></span> ${escapeHtml(t.modulesSignalMatrix)}</h2>
           <div class="module-space-legend" aria-label="${escapeHtml(t.modulesSignalMatrix)}">
@@ -2153,6 +2169,7 @@ export function getProjectGrowthWebviewHtml(
 
   <script>
     const vscode = acquireVsCodeApi();
+    ${growthReportsScript(viewModel.projectPath, isZh)}
     document.getElementById('btn-refresh').addEventListener('click', () => {
       vscode.postMessage({ command: 'refreshGrowth' });
     });

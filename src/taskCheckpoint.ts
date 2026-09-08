@@ -176,6 +176,7 @@ if (action === 'start') {
     checkpointSequence: sequence,
     checkpointEventId: sequence + ':start',
     checkpointMessage: String(args.message || '').trim(),
+    checkpointPreserveRoadmapState: args['preserve-roadmap-state'] === 'true',
     checkpointImplicitTurn: false,
     checkpointOutcome: '',
     checkpointSummary: '',

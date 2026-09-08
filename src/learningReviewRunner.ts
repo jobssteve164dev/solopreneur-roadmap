@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { collectReviewManifest, GithubRead, reviewHash } from './learningReview.js';
+import { collectReviewManifest, GithubRead, ReviewManifest, reviewHash } from './learningReview.js';
 import { applyLearningReview, buildLearningReviewPrompt, buildLearningReviewCheckPrompt } from './learningReviewApply.js';
 import { readLearningJson, writeLearningJson } from './taskReport.js';
 
@@ -15,7 +15,6 @@ export function runManualLearningReview(input: {
   const existing = activeReviews.get(key);
   if (existing) return existing;
   const operation = Promise.resolve().then(async () => {
-    const runId = path.basename(input.runDir);
     const runsRoot = path.dirname(input.runDir);
     const pendingRuns = fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => path.join(runsRoot, entry.name)).sort().reverse() : [];
     for (const previousDir of pendingRuns) {
@@ -39,8 +38,16 @@ export function runManualLearningReview(input: {
         writeLearningJson(path.join(previousDir, 'application.json'), { ...journal, status: 'superseded', reason: String(error.message) });
       }
     }
+    const interrupted = pendingRuns.find(dir => {
+      const saved = readLearningJson(path.join(dir, 'manifest.json'));
+      return !readLearningJson(path.join(dir, 'result.json')) && saved?.schemaVersion === 1 && saved.globalRoot === input.globalRoot
+        && saved.globalPrompt === input.globalPrompt && saved.persistedPromptHash === reviewHash(input.persistedGlobalPrompt ?? input.globalPrompt)
+        && JSON.stringify([...saved.projects].sort()) === JSON.stringify([...input.projects].sort());
+    });
+    if (interrupted) input = { ...input, runDir: interrupted };
+    const runId = path.basename(input.runDir);
     fs.mkdirSync(input.runDir, { recursive: true });
-    const manifest = await collectReviewManifest({ runId, globalRoot: input.globalRoot, globalPrompt: input.globalPrompt, projects: input.projects, api: input.api });
+    const manifest: ReviewManifest = interrupted ? readLearningJson(path.join(interrupted, 'manifest.json'))! : await collectReviewManifest({ runId, globalRoot: input.globalRoot, globalPrompt: input.globalPrompt, projects: input.projects, api: input.api });
     manifest.persistedPromptHash = reviewHash(input.persistedGlobalPrompt ?? input.globalPrompt);
     const manifestFile = path.join(input.runDir, 'manifest.json');
     writeLearningJson(manifestFile, manifest);
@@ -51,7 +58,8 @@ export function runManualLearningReview(input: {
       constraints: manifest.globalPrompt.split('\n').filter(line => line.trim())
     });
     let feedback = '';
-    for (let attempt = 1; ; attempt += 1) {
+    const previousAttempts = fs.readdirSync(input.runDir).map(name => Number(name.match(/^(?:prompt|proposal|review|review-prompt)-(\d+)\./)?.[1] || 0));
+    for (let attempt = Math.max(0, ...previousAttempts) + 1; ; attempt += 1) {
       const proposalFile = path.join(input.runDir, `proposal-${attempt}.json`);
       const promptFile = path.join(input.runDir, `prompt-${attempt}.txt`);
       fs.writeFileSync(promptFile, buildLearningReviewPrompt(manifestFile, manifest, proposalFile) + feedback, 'utf8');

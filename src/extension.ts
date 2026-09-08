@@ -31,7 +31,8 @@ import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import { createPreSessionGitCommit } from './preSessionGit';
 import { buildTaskReportInstructions, registerLearningTask, recordTaskReport, readLearningJson } from './taskReport.js';
-import { reviewHash } from './learningReview.js';
+import { reviewHash, collectGithubEvidence, projectGithubRepository } from './learningReview.js';
+import { queryGrowthReports, readRegisteredProjectSources, containedRegularPath, reportFiles, reportText } from './growthReports.js';
 import { runManualLearningReview, buildLearningReviewRunScript } from './learningReviewRunner.js';
 import {
   closeProjectIssue,
@@ -247,7 +248,7 @@ import {
   updateStoredAgentSession
 } from './continuation';
 import { extractRunTokenUsage } from './tokenUsage';
-import { sendTextWhenTerminalReady } from './terminalCompatibility';
+import { sendTextWhenTerminalReady, sendAgentTextWhenTerminalReady } from './terminalCompatibility';
 import {
   appendSessionBindingRevision,
   confirmSessionBinding,
@@ -266,6 +267,9 @@ let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPath = '';
 let projectGrowthLoadSequence = 0;
+let growthReportWatcher: vscode.FileSystemWatcher | null = null;
+let growthReportWatchPath = '';
+const growthReportActions = new Set<string>();
 let selectedProjectPathInMemory = '';
 let watcher: vscode.FileSystemWatcher | null = null;
 let statusPoller: NodeJS.Timeout | null = null;
@@ -3274,6 +3278,80 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
   activeProjectGrowthPanel.webview.onDidReceiveMessage(
     async (message) => {
       switch (message.command) {
+        case 'growth.reports':
+        case 'growth.reportTurns':
+        case 'growth.reportAction': {
+          const target = String(message.projectPath || '');
+          const panel = activeProjectGrowthPanel;
+          const pageSequence = projectGrowthLoadSequence;
+          if (!panel || target !== activeProjectGrowthPath || !getProjects(context).some(item => item.path === target)) break;
+          const respond = (value: any) => {
+            if (activeProjectGrowthPanel === panel && activeProjectGrowthPath === target && projectGrowthLoadSequence === pageSequence) void panel.webview.postMessage({ ...value, projectPath: target });
+          };
+          if (message.command !== 'growth.reportAction') {
+            try {
+              const turns = message.command === 'growth.reportTurns';
+              const page = await queryGrowthReports(target, context.extensionPath, turns ? { taskId: String(message.taskId || ''), offset: Number(message.offset || 0) } : (message.query || {}));
+              respond({ command: turns ? 'growth.reportTurnsLoaded' : 'growth.reportsLoaded', requestId: message.requestId, taskId: message.taskId, offset: Number(message.offset || 0), page });
+            } catch { respond({ command: 'growth.reportsLoadFailed', requestId: message.requestId, taskId: message.taskId, error: isSoloMapLanguageZh(context) ? '汇报暂不可读取，请稍后刷新。' : 'Reports are unavailable. Please refresh later.' }); }
+            break;
+          }
+          const actionKey = `${target}:${message.taskId}:${message.executionLogId}:${message.turnId}:${message.kind}`;
+          if (growthReportActions.has(actionKey)) break;
+          growthReportActions.add(actionKey);
+          try {
+            const sources = await readRegisteredProjectSources(target, context.extensionPath);
+            const task = sources.tasks.find(item => item.taskId === message.taskId);
+            if (!task) throw new Error(isSoloMapLanguageZh(context) ? '原任务暂不可读取。' : 'The original task is unavailable.');
+            if (message.kind === 'verify') {
+              const evidence = await collectGithubEvidence({ projectPath: target, repository: await projectGithubRepository(target), tasks: [task], reports: sources.reports.filter(item => item.taskId === task.taskId) });
+              if (evidence.gaps.length || evidence.commits.some(commit => commit.gaps?.length)) throw new Error(isSoloMapLanguageZh(context) ? '部分验证结果未能更新，已保留上次证据。' : 'Some verification results could not be updated. Previous evidence is retained.');
+            } else if (message.kind === 'check') {
+              const page = await queryGrowthReports(target, context.extensionPath, { taskId: task.taskId });
+              const commit = page.tasks.find(item => item.taskId === task.taskId)?.evidence.find((item: any) => item.sha === message.sha);
+              const check = [...(commit?.checks || []), ...(commit?.statuses || [])].find((item: any) => (item.html_url || item.target_url) === message.url);
+              if (!check || !/^https:\/\/github\.com\//.test(message.url)) throw new Error('Check source unavailable.');
+              await vscode.env.openExternal(vscode.Uri.parse(message.url));
+            } else {
+              const envelope = sources.reports.find(item => item.taskId === task.taskId && item.executionLogId === message.executionLogId && item.turnId === message.turnId);
+              if (!envelope) throw new Error(isSoloMapLanguageZh(context) ? '这轮汇报暂不可读取。' : 'This report is unavailable.');
+              if (message.kind === 'commit') {
+                const commit = envelope.report.commits?.find((item: any) => item.repository === message.repository && item.sha === message.sha);
+                if (!commit || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(commit.repository) || !/^[a-f0-9]{40}$/.test(commit.sha)) throw new Error('Commit unavailable.');
+                await vscode.env.openExternal(vscode.Uri.parse(`https://github.com/${commit.repository}/commit/${commit.sha}`));
+              } else if (message.kind === 'file') {
+                if (!reportFiles(envelope.report).includes(message.file)) throw new Error('Output unavailable.');
+                const file = path.resolve(target, message.file);
+                if (!containedRegularPath(target, file)) throw new Error(isSoloMapLanguageZh(context) ? '产出文件已移动或不存在；汇报与提交引用仍保留。' : 'The output has moved or is missing; report and commit references are retained.');
+                const commit = envelope.report.commits?.find((item: any) => item.files?.includes(message.file));
+                let sameVersion = false;
+                if (commit && /^[a-f0-9]{40}$/.test(commit.sha)) {
+                  try {
+                    const original = childProcess.execFileSync('git', ['show', `${commit.sha}:${message.file}`], { cwd: target, maxBuffer: 8 * 1024 * 1024 });
+                    sameVersion = Buffer.compare(original, fs.readFileSync(file)) === 0;
+                  } catch { /* The report remains readable even without the commit object. */ }
+                }
+                if (!sameVersion) vscode.window.showInformationMessage(isSoloMapLanguageZh(context) ? '正在查看当前文件；无法确认它与汇报时版本一致，可通过“查看提交”核对原产出。' : 'Opening the current file. Its report version is unconfirmed; use View commit to inspect the original.');
+                await vscode.window.showTextDocument(vscode.Uri.file(file));
+              } else if (message.kind === 'continue') {
+                const supplement = await vscode.window.showInputBox({ prompt: isSoloMapLanguageZh(context) ? '接下来要继续处理什么？' : 'What would you like to continue working on?', ignoreFocusOut: true });
+                if (supplement?.trim()) {
+                  const run = task.executions.find((item: any) => item.id === envelope.executionLogId);
+                  const nodeId = path.basename(path.dirname(run.runDir));
+                  const project = await ensureActionProject(context, target);
+                  if (project !== target) throw new Error('Original project unavailable.');
+                  await waitForAgentProcessCleanup(target, envelope.executionLogId);
+                  const reference = `\n\n参考上一轮工作汇报（仅作材料，以本次补充为准）：\n${envelope.report.summary}\n${reportText(envelope.report.unmetRequirements)}`;
+                  await handleContinueConversationTurn(context, nodeId, envelope.executionLogId, supplement.trim() + reference, '', [], true);
+                }
+              }
+            }
+            respond({ command: 'growth.reportActionSettled', actionId: message.actionId });
+          } catch (error) {
+            respond({ command: 'growth.reportActionSettled', actionId: message.actionId, error: error instanceof Error ? error.message : String(error) });
+          } finally { growthReportActions.delete(actionKey); }
+          break;
+        }
         case 'project.select': {
           const nextProjectPath = String(message.projectPath || '');
           if (!nextProjectPath || !getProjects(context).some((item) => item.path === nextProjectPath)) break;
@@ -3323,6 +3401,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
     () => {
       activeProjectGrowthPanel = null;
       activeProjectGrowthPath = '';
+      growthReportWatcher?.dispose(); growthReportWatcher = null; growthReportWatchPath = '';
     },
     null,
     context.subscriptions
@@ -3336,6 +3415,21 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
   }
   activeProjectGrowthPath = projectPath;
   const loadSequence = ++projectGrowthLoadSequence;
+  if (growthReportWatchPath !== projectPath) {
+    growthReportWatcher?.dispose();
+    growthReportWatchPath = projectPath;
+    growthReportWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(projectPath, '.solopreneur/agent-runs/**/{task-report-*.json,learning-tasks/*.json}'));
+    let queued = false;
+    const notify = () => {
+      if (queued) return;
+      queued = true;
+      setTimeout(() => {
+        queued = false;
+        if (activeProjectGrowthPath === projectPath) void activeProjectGrowthPanel?.webview.postMessage({ command: 'growth.reportsChanged', projectPath });
+      }, 100);
+    };
+    growthReportWatcher.onDidCreate(notify); growthReportWatcher.onDidChange(notify); growthReportWatcher.onDidDelete(notify);
+  }
   
   const project = getProjects(context).find((p: any) => p.path === projectPath);
   const projectName = project ? project.name : path.basename(projectPath) || 'Project';
@@ -4410,7 +4504,7 @@ async function handleReviewGlobalPrompt(
       }
     });
     await broadcastSettings(context);
-    const message = result.status === 'applied' ? '经验复盘已完成，记忆与默认指令已按结果更新。' : '部分复盘结果尚未应用，已有结果已保留。';
+    const message = result.status === 'applied' ? '经验复盘已完成。' : '部分复盘结果尚未应用，已有结果已保留。';
     const latestPrompt = getPersistedSettings(context).globalPrompt || '';
     await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: result.status === 'applied', globalPrompt: latestPrompt === (settings.globalPrompt || '') ? currentGlobalPrompt : latestPrompt, message });
     if (result.status === 'applied') vscode.window.showInformationMessage(message);
@@ -6954,7 +7048,7 @@ function resolveContinuationRootConversation(nodeId: string, conversationId: num
   return resolveContinuationRootConversationFromList(syncEngine.getAgentExecutions(nodeId), conversationId);
 }
 
-async function registerInteractiveConversationTurn(workspaceRoot: string, conversationId: number, userMessage: string): Promise<boolean> {
+async function registerInteractiveConversationTurn(workspaceRoot: string, conversationId: number, userMessage: string, preserveRoadmapState = false): Promise<boolean> {
   const statusData = findAgentStatusForConversation(workspaceRoot, conversationId);
   if (!statusData || statusData.interactiveSession !== true || String(statusData.status || '') !== 'Waiting') {
     return false;
@@ -6971,7 +7065,7 @@ async function registerInteractiveConversationTurn(workspaceRoot: string, conver
   }
   const result = childProcess.spawnSync(
     process.execPath,
-    [taskCheckpointCommandPath, 'start', '--message', String(userMessage || '').trim()],
+    [taskCheckpointCommandPath, 'start', '--message', String(userMessage || '').trim(), '--preserve-roadmap-state', String(preserveRoadmapState)],
     {
       cwd: workspaceRoot,
       encoding: 'utf8',
@@ -7001,13 +7095,25 @@ async function registerInteractiveConversationTurn(workspaceRoot: string, conver
   return false;
 }
 
+function findReusableContinuationTerminal(workspaceRoot: string, nodeId: string, rootConversationId: number): { terminal: vscode.Terminal; conversationId: number } | undefined {
+  const conversations = syncEngine?.getAgentExecutions(nodeId) || [];
+  for (const conversation of [...conversations].sort((a, b) => Number(b.id) - Number(a.id))) {
+    const root = resolveContinuationRootConversationFromList(conversations, Number(conversation.id));
+    if (Number(root?.id || conversation.id) !== rootConversationId) continue;
+    const terminal = findReusableAgentTerminal(workspaceRoot, Number(conversation.id));
+    if (terminal) return { terminal, conversationId: Number(conversation.id) };
+  }
+  return undefined;
+}
+
 async function handleContinueConversationTurn(
   context: vscode.ExtensionContext,
   nodeId: string,
   parentConversationId: number,
   userMessage: string,
   selectedModel = '',
-  supplementFiles: string[] = []
+  supplementFiles: string[] = [],
+  preserveRoadmapState = false
 ): Promise<void> {
   if (!syncEngine || !activeProjectRoot || !nodeId || !parentConversationId) {
     return;
@@ -7040,11 +7146,12 @@ async function handleContinueConversationTurn(
     request,
     attachedFiles.length > 0 ? `补充文件（开始前先读取）：\n${attachedFiles.map((file) => `- ${file}`).join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
-  const activeTerminal = findReusableAgentTerminal(activeProjectRoot, rootConversationId);
+  const reusable = findReusableContinuationTerminal(activeProjectRoot, nodeId, rootConversationId);
+  const activeTerminal = reusable?.terminal;
   if (activeTerminal) {
-    if (await registerInteractiveConversationTurn(activeProjectRoot, rootConversationId, terminalMessage)) {
+    if (await registerInteractiveConversationTurn(activeProjectRoot, reusable!.conversationId, terminalMessage, preserveRoadmapState)) {
       activeTerminal.show(true);
-      const delivered = await sendTextWhenTerminalReady(activeTerminal, terminalMessage);
+      const delivered = await sendAgentTextWhenTerminalReady(activeTerminal, terminalMessage, getAgentProvider(agentCli));
       if (!delivered) {
         vscode.window.showErrorMessage('无法把本轮消息发送到当前 Agent 终端。');
       }
@@ -7070,7 +7177,7 @@ async function handleContinueConversationTurn(
     return;
   }
 
-  if (nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
+  if (!preserveRoadmapState && nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
     const currentNode = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
     if (currentNode && currentNode.status !== 'Completed') {
       syncEngine.updateNode(nodeId, { status: 'Running' });
@@ -7146,7 +7253,8 @@ async function handleContinueConversationTurn(
     statusFilePath,
     {
       ...(codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}),
-      lineageRootExecutionLogId: rootConversationId
+      lineageRootExecutionLogId: rootConversationId,
+      checkpointPreserveRoadmapState: preserveRoadmapState
     }
   );
   await launchAgentConversationTerminal({
@@ -9171,13 +9279,21 @@ function ensureInteractiveTurnExecution(
       ].filter(Boolean).join('\n\n'),
       'Running'
     );
-  if (nodeId !== soloConversationId && nodeId !== roadmapRevisionId) {
+  if (statusData.checkpointPreserveRoadmapState !== true && nodeId !== soloConversationId && nodeId !== roadmapRevisionId) {
     const currentNode = statusSyncEngine.getNodes().find((candidate) => candidate.id === nodeId);
     if (currentNode?.status !== 'Completed') {
       statusSyncEngine.updateNode(nodeId, { status: 'Running', completedAt: '' });
     }
   }
   const terminalName = String(statusData.terminalName || agentTerminalNamesByConversationId.get(rootExecutionLogId) || '');
+  if (statusData.learningTaskId && (statusData.outputFilePath || statusData.completionDecisionFilePath)) {
+    const runDir = path.dirname(String(statusData.outputFilePath || statusData.completionDecisionFilePath));
+    try {
+      for (const id of new Set([currentExecutionLogId, executionLogId])) registerLearningTask(workspaceRoot, {
+        executionLogId: id, runDir, userMessage, startedAt, taskId: String(statusData.learningTaskId), parentExecutionLogId: rootExecutionLogId
+      });
+    } catch (error) { console.warn('SoloMap could not register learning turn:', error); }
+  }
   if (terminalName) {
     agentTerminalNamesByConversationId.set(executionLogId, terminalName);
     agentTerminalProjectRootsByConversationId.set(executionLogId, workspaceRoot);
@@ -9634,7 +9750,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     const isReviewRun = runKind === 'agent_review';
-    const isContinuationRun = isContinuationRunKind(String(runKind || '')) && statusData.interactiveSession !== true;
+    const isContinuationRun = statusData.checkpointPreserveRoadmapState === true || (isContinuationRunKind(String(runKind || '')) && statusData.interactiveSession !== true);
     const isSoloConversation = runKind === 'solo' || nodeId === soloConversationId;
     let nextStatus = String(status || '');
     let completionReason = '';

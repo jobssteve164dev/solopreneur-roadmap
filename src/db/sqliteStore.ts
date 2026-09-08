@@ -95,7 +95,8 @@ export class SqliteStore {
       'growth_nodes',
       'growth_edges',
       'growth_signals',
-      'growth_module_labels'
+      'growth_module_labels',
+      ...(path.basename(this.dbFilePath) === 'project_growth.db' ? ['growth_report_projection'] : [])
     ];
     const requiredIndexes = [
       'idx_execution_logs_node_id',
@@ -333,6 +334,7 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_growth_module_labels_snapshot
       ON growth_module_labels (snapshotId, nodeId)
     `);
+    if (path.basename(this.dbFilePath) === 'project_growth.db') this.db.run('CREATE TABLE IF NOT EXISTS growth_report_projection (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     return schemaChanged;
   }
 
@@ -764,6 +766,7 @@ export class SqliteStore {
   }
 
   public writeGrowthSnapshot(data: GrowthSnapshotData): void {
+    this.reloadGrowthDatabase();
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -1322,6 +1325,60 @@ export class SqliteStore {
   /**
    * Closes the database.
    */
+  public reloadGrowthDatabase(): void {
+    if (path.basename(this.dbFilePath) !== 'project_growth.db' || !this.SQL || !fs.existsSync(this.dbFilePath)) return;
+    this.db?.close();
+    this.db = new this.SQL.Database(fs.readFileSync(this.dbFilePath));
+  }
+
+  public getGrowthReportProjection(prefix: string): { key: string; value: any }[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const statement = this.db.prepare('SELECT key, value FROM growth_report_projection WHERE substr(key, 1, ?) = ?');
+    const rows: { key: string; value: any }[] = [];
+    try {
+      statement.bind([prefix.length, prefix]);
+      while (statement.step()) {
+        const row = statement.getAsObject();
+        rows.push({ key: String(row.key), value: JSON.parse(String(row.value)) });
+      }
+    } finally { statement.free(); }
+    return rows;
+  }
+
+  public getGrowthRunFiles(): RunIndexFile[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const statement = this.db.prepare('SELECT executionLogId, filePath, role FROM run_files');
+    const rows: RunIndexFile[] = [];
+    try {
+      while (statement.step()) {
+        const row = statement.getAsObject();
+        rows.push({ executionLogId: Number(row.executionLogId), filePath: String(row.filePath), role: String(row.role) });
+      }
+    } finally { statement.free(); }
+    return rows;
+  }
+
+  public getGrowthConversationHeaders(): { id: number; nodeId: string; output: string }[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const statement = this.db.prepare('SELECT id, nodeId, substr(output, 1, 4096) AS output FROM execution_logs');
+    const rows: { id: number; nodeId: string; output: string }[] = [];
+    try { while (statement.step()) { const row = statement.getAsObject(); rows.push({ id: Number(row.id), nodeId: String(row.nodeId), output: String(row.output) }); } }
+    finally { statement.free(); }
+    return rows;
+  }
+
+  public putGrowthReportProjection(rows: { key: string; value: any }[]): void {
+    if (!rows.length) return;
+    this.reloadGrowthDatabase();
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run('BEGIN');
+    try {
+      for (const row of rows) this.db.run('INSERT OR REPLACE INTO growth_report_projection (key, value) VALUES (?, ?)', [row.key, JSON.stringify(row.value)]);
+      this.db.run('COMMIT');
+      this.save();
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
+  }
+
   public close(): void {
     if (this.db) {
       this.db.close();

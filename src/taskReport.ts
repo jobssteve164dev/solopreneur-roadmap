@@ -44,6 +44,7 @@ function text(value: unknown, field: string): string {
 export function validateTaskReport(value: any): any {
   if (!value || value.schemaVersion !== 1) throw new Error('report schemaVersion must be 1');
   const result: any = { schemaVersion: 1, summary: text(value.summary, 'summary') };
+  for (const field of ['outputs', 'artifacts']) if (Array.isArray(value[field])) result[field] = value[field];
   for (const field of ['unmetRequirements', 'decisions', 'corrections', 'verification', 'commits', 'experienceUsage', 'lessons']) {
     if (!Array.isArray(value[field])) throw new Error(`${field} must be an array`);
     result[field] = value[field];
@@ -60,14 +61,25 @@ export function validateTaskReport(value: any): any {
 }
 
 export function recordTaskReport(status: any, args: Record<string, string>, sequence: number): Record<string, string> {
-  if (!args['report-file']) return { taskReportStatus: 'missing', taskReportPath: '', taskReportError: '' };
+  const finish = (result: Record<string, string>) => {
+    try {
+      const runDir = path.dirname(status.outputFilePath || status.completionDecisionFilePath);
+      writeLearningJson(path.join(runDir, `task-report-status-${sequence}.json`), {
+        schemaVersion: 1, taskId: status.learningTaskId || '', projectPath: status.workspaceRoot,
+        executionLogId: status.executionLogId, turnId: `${sequence}:complete`, createdAt: new Date().toISOString(),
+        availability: result.taskReportStatus
+      });
+    } catch { /* A receipt failure cannot block the existing checkpoint. */ }
+    return result;
+  };
+  if (!args['report-file']) return finish({ taskReportStatus: 'missing', taskReportPath: '', taskReportError: '' });
   let report: any;
   try {
     const file = path.resolve(status.workspaceRoot, args['report-file']);
     if (fs.statSync(file).size > 1024 * 1024) throw new Error('report exceeds 1 MiB');
     report = validateTaskReport(JSON.parse(fs.readFileSync(file, 'utf8')));
   } catch (error: any) {
-    return { taskReportStatus: 'invalid', taskReportPath: '', taskReportError: String(error.message) };
+    return finish({ taskReportStatus: 'invalid', taskReportPath: '', taskReportError: String(error.message) });
   }
   try {
     const runDir = path.dirname(status.outputFilePath || status.completionDecisionFilePath);
@@ -77,9 +89,9 @@ export function recordTaskReport(status: any, args: Record<string, string>, sequ
       executionLogId: status.executionLogId, turnId: `${sequence}:complete`,
       createdAt: new Date().toISOString(), outcome: args.outcome || 'partial', report
     });
-    return { taskReportStatus: 'recorded', taskReportPath, taskReportError: '' };
+    return finish({ taskReportStatus: 'recorded', taskReportPath, taskReportError: '' });
   } catch (error: any) {
-    return { taskReportStatus: 'save_failed', taskReportPath: '', taskReportError: String(error.message) };
+    return finish({ taskReportStatus: 'save_failed', taskReportPath: '', taskReportError: String(error.message) });
   }
 }
 

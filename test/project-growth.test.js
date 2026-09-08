@@ -397,7 +397,7 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(zhHtml, /行覆盖/);
   assert.match(zhHtml, /分支覆盖/);
   assert.match(zhHtml, /函数覆盖/);
-  assert.match(zhHtml, /部分生产文件已验证/);
+  assert.match(zhHtml, /部分生产文件被执行到/);
   assert.match(zhHtml, />72\.5%<\/span>/);
   assert.match(zhHtml, />50%<\/strong>/);
   assert.match(zhHtml, /data-roadmap-target="roadmap-data"/);

@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as childProcess from 'child_process';
 import { learningTasksRoot, readLearningJson, writeLearningJson } from './taskReport.js';
+import { readRegisteredProjectSources } from './growthReports.js';
 
 export const reviewHash = (value: string): string => crypto.createHash('sha256').update(value).digest('hex');
 export type GithubRead = (endpoint: string) => Promise<any>;
@@ -26,9 +27,21 @@ function taskTrailers(message: string, known: Set<string>): string[] {
   return [...new Set(lastParagraph.split(/\r?\n/).map(line => line.match(/^SoloMap-Task:\s*(task-[A-Za-z0-9-]+)\s*$/)?.[1] || '').filter(id => known.has(id)))];
 }
 
-export async function collectGithubEvidence(input: {
+type EvidenceInput = {
   projectPath: string; repository: string; tasks: any[]; reports: any[]; api?: GithubRead;
-}): Promise<{ repository: string; commits: any[]; gaps: string[] }> {
+};
+type GithubEvidence = { repository: string; commits: any[]; gaps: string[] };
+const factRequests = new Map<string, Promise<GithubEvidence>>();
+
+export function collectGithubEvidence(input: EvidenceInput): Promise<GithubEvidence> {
+  const scope = reviewHash(input.tasks.map(task => task.taskId).sort().join('\n'));
+  const key = `${input.projectPath}:${input.repository}:${scope}`;
+  const pending = factRequests.get(key); if (pending) return pending;
+  const operation = collectGithubFacts(input, scope).finally(() => factRequests.delete(key));
+  factRequests.set(key, operation); return operation;
+}
+
+async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<GithubEvidence> {
   const { repository, tasks, reports } = input;
   const result: { repository: string; commits: any[]; gaps: string[] } = { repository, commits: [], gaps: [] };
   if (!repository) { result.gaps.push('No GitHub origin; only local reports are available.'); return result; }
@@ -36,7 +49,9 @@ export async function collectGithubEvidence(input: {
   const api = input.api || readGithubApi;
   const known = new Set<string>(tasks.map(task => task.taskId));
   const root = path.join(input.projectPath, '.solopreneur', 'agent-runs', 'learning-evidence');
-  const cursorFile = path.join(root, `${reviewHash(repository)}.json`);
+  const cursorFile = path.join(root, `${reviewHash(repository)}-${scope}.json`);
+  const factsFile = path.join(root, `${reviewHash(repository)}.facts.json`);
+  const previous = readLearningJson(factsFile);
   const cursor = readLearningJson(cursorFile) || { discovered: {}, coveredHead: '', page: 1, scanHead: '' };
   const discovered: Record<string, string[]> = cursor.discovered || {};
   const since = tasks.map(task => task.startedAt).filter(Boolean).sort()[0];
@@ -92,6 +107,9 @@ export async function collectGithubEvidence(input: {
         page += 1;
       }
       evidence.remoteExists = true;
+      evidence.commitObservedAt = evidence.observedAt;
+      const trailerParagraph = evidence.message.trim().split(/\r?\n\s*\r?\n/).pop() || '';
+      evidence.commitTaskIds = [...new Set(trailerParagraph.split(/\r?\n/).map((line: string) => line.match(/^SoloMap-Task:\s*(task-[A-Za-z0-9-]+)\s*$/)?.[1]).filter(Boolean))];
       evidence.diffComplete = evidence.gaps.length === 0 && evidence.files.every((file: any) => typeof file.patch === 'string' || file.changes === 0);
       if (!evidence.diffComplete) evidence.gaps.push('Some file patches are unavailable; inspect original artifacts before confirming their behavior.');
       const associatedReports = reports.filter(report => taskIds.includes(report.taskId)).flatMap(report => (report.report?.commits || []).filter((commit: any) => commit.sha === sha && commit.repository === repository).map((commit: any) => ({ taskId: report.taskId, files: commit.files })));
@@ -105,6 +123,7 @@ export async function collectGithubEvidence(input: {
         evidence.checks.push(...checks.check_runs);
         if (checks.check_runs.length < 100) break;
       }
+      evidence.checksObservedAt = evidence.observedAt;
     } catch (error: any) { evidence.gaps.push(String(error.message)); }
     try {
       for (let page = 1; ; page += 1) {
@@ -113,9 +132,44 @@ export async function collectGithubEvidence(input: {
         evidence.statuses.push(...statuses.statuses);
         if (statuses.statuses.length < 100) break;
       }
+      evidence.statusesObservedAt = evidence.observedAt;
     } catch (error: any) { evidence.gaps.push(String(error.message)); }
+    const old = previous?.commits?.find((item: any) => item.sha === sha && item.repository === repository);
+    for (const [timeKey, fields] of [
+      ['commitObservedAt', ['files', 'message', 'remoteExists', 'diffComplete', 'reportedScopes']],
+      ['checksObservedAt', ['checks']], ['statusesObservedAt', ['statuses']]
+    ] as [string, string[]][]) {
+      if (!evidence[timeKey] && old?.[timeKey]) {
+        evidence[timeKey] = old[timeKey];
+        for (const field of fields) evidence[field] = old[field];
+      }
+    }
     result.commits.push(evidence);
   }
+  // Read again at publication: another task scope may have completed while this request awaited GitHub.
+  const latest = readLearningJson(factsFile);
+  const merged = new Map<string, any>((latest?.commits || []).map((commit: any) => [commit.sha, commit]));
+  for (const commit of result.commits) {
+    const old = merged.get(commit.sha);
+    const combined = { ...commit, taskIds: [...new Set([...(old?.taskIds || []), ...commit.taskIds])] };
+    const scopes = new Map<string, any>([...(old?.reportedScopes || []), ...(commit.reportedScopes || [])].map((scope: any) => [`${scope.taskId}:${JSON.stringify(scope.files)}`, scope]));
+    combined.reportedScopes = [...scopes.values()];
+    for (const [timeKey, fields] of [['commitObservedAt', ['files', 'message', 'remoteExists', 'diffComplete']], ['checksObservedAt', ['checks']], ['statusesObservedAt', ['statuses']]] as [string, string[]][]) {
+      if (old?.[timeKey] && (!combined[timeKey] || old[timeKey] > combined[timeKey])) {
+        combined[timeKey] = old[timeKey]; for (const field of fields) combined[field] = old[field];
+      }
+    }
+    merged.set(commit.sha, combined);
+  }
+  writeLearningJson(factsFile, { schemaVersion: 1, repository, observedAt: new Date().toISOString(), commits: [...merged.values()], gaps: result.gaps });
+  writeLearningJson(factsFile.replace('.facts.json', '.summary.json'), {
+    schemaVersion: 1, repository, observedAt: new Date().toISOString(), gaps: result.gaps,
+    commits: [...merged.values()].map(({ message, files, checks, statuses, ...commit }) => ({
+      ...commit, files: (files || []).map((file: any) => ({ filename: file.filename, status: file.status, previous_filename: file.previous_filename })),
+      checks: (checks || []).map((check: any) => ({ id: check.id, head_sha: check.head_sha, name: check.name, status: check.status, conclusion: check.conclusion, html_url: check.html_url })),
+      statuses: (statuses || []).map((status: any) => ({ id: status.id, context: status.context, state: status.state, target_url: status.target_url }))
+    }))
+  });
   return result;
 }
 
@@ -133,18 +187,10 @@ export async function collectReviewManifest(input: { runId: string; globalRoot: 
   };
   for (const project of input.projects) {
     const taskRoot = learningTasksRoot(project);
-    const tasks = fs.existsSync(taskRoot) ? fs.readdirSync(taskRoot).filter(name => name.endsWith('.json')).map(name => readLearningJson(path.join(taskRoot, name))).filter(task => task?.schemaVersion === 1 && task.projectPath === project) : [];
-    const reports: any[] = [];
+    const { tasks, reports, observations } = await readRegisteredProjectSources(project, path.resolve(__dirname, '..'));
     for (const task of tasks) {
       addFile(path.join(taskRoot, `${task.taskId}.json`), 'task', project);
-      for (const run of task.executions || []) {
-        if (!fs.existsSync(run.runDir)) continue;
-        for (const name of fs.readdirSync(run.runDir).filter(name => /^task-report-\d+\.json$/.test(name))) {
-          const file = path.join(run.runDir, name); const report = readLearningJson(file);
-          if (report?.taskId !== task.taskId || report.projectPath !== project) continue;
-          reports.push(report); addFile(file, 'agent_report', project);
-        }
-      }
+      for (const observation of observations.filter(item => item.taskId === task.taskId && item.envelope)) addFile(observation.file, 'agent_report', project);
     }
     try {
       const repository = await (input.repositoryForProject || projectGithubRepository)(project);

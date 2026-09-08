@@ -10478,6 +10478,36 @@ test('a long-waiting interactive session can still register a new turn before de
   assert.equal(runningStatus.executionLogId, 72);
 });
 
+test('growth continuation keeps roadmap state and registers the actual new execution in the stable task', () => {
+  const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__ensureInteractiveTurnExecution = ensureInteractiveTurnExecution;');
+  const { ensureTaskCheckpointRuntime } = require('../out/taskCheckpoint.js');
+  const { registerLearningTask } = require('../out/taskReport.js');
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-continuation-'));
+  const runDir = path.join(workspaceRoot, '.solopreneur/agent-runs/node/1');
+  fs.mkdirSync(runDir, { recursive: true });
+  const taskId = registerLearningTask(workspaceRoot, { executionLogId: 1, runDir, userMessage: '原任务', startedAt: '2026-09-01' });
+  const statusFile = path.join(runDir, 'status.json');
+  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot, status: 'Waiting', nodeId: 'node', executionLogId: 1, rootExecutionLogId: 1,
+    checkpointToken: 'test', checkpointSequence: 1, interactiveSession: true, learningTaskId: taskId, outputFilePath: path.join(runDir, 'output.log') }));
+  const runtime = ensureTaskCheckpointRuntime(workspaceRoot);
+  const started = childProcess.spawnSync(process.execPath, [runtime, 'start', '--message', '从汇报继续', '--preserve-roadmap-state', 'true'], {
+    encoding: 'utf8', env: { ...process.env, SOLOMAP_TASK_STATUS_FILE: statusFile, SOLOMAP_TASK_CHECKPOINT_TOKEN: 'test' }
+  });
+  assert.equal(started.status, 0, started.stderr);
+  const status = JSON.parse(fs.readFileSync(statusFile));
+  assert.equal(status.checkpointPreserveRoadmapState, true);
+  const result = extensionModule.__ensureInteractiveTurnExecution({
+    getAgentExecutions: () => [{ id: 1, status: 'Completed' }],
+    logAgentExecution: () => 2,
+    getNodes: () => [{ id: 'node', status: 'Pending' }],
+    updateNode: () => assert.fail('viewing and continuing a report must not change roadmap state')
+  }, status, workspaceRoot);
+  assert.equal(result.executionLogId, 2);
+  const task = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur/agent-runs/learning-tasks', `${taskId}.json`)));
+  assert.deepEqual(task.executions.map(run => run.id), [1, 2]);
+  assert.ok(task.executions.every(run => run.runDir === runDir));
+});
+
 test('a checkpoint event arriving during settlement is queued and processed after the current event', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
@@ -11768,6 +11798,24 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   assert.ok(posted.some((message) => message.command === 'conversationActionSettled'
     && message.action === 'continue'
     && Number(message.conversationId) === 336));
+});
+
+test('growth continuation finds the live resumed descendant rather than starting a competing session', () => {
+  const extensionModule = loadCompiledModule('out/extension.js', [
+    'module.exports.__findReusableContinuationTerminal = findReusableContinuationTerminal;',
+    'module.exports.__setContinuationTerminalTest = (conversations, find) => { syncEngine = { getAgentExecutions: () => conversations }; findReusableAgentTerminal = find; };'
+  ].join('\n'));
+  const terminal = { name: 'resumed live terminal' };
+  const conversations = [
+    { id: 1, output: 'Initial task', status: 'Completed' },
+    { id: 3, output: 'Agent continuation started.\nContinuation parent conversation: 1', status: 'Completed' },
+    { id: 4, output: 'Agent continuation started.\nContinuation parent conversation: 3', status: 'Failed' },
+    { id: 5, output: 'Different task', status: 'Running' }
+  ];
+  extensionModule.__setContinuationTerminalTest(conversations, (_project, id) => id === 3 || id === 5 ? terminal : undefined);
+  const reusable = extensionModule.__findReusableContinuationTerminal('/project', '__solo__', 1);
+  assert.equal(reusable.terminal, terminal);
+  assert.equal(reusable.conversationId, 3);
 });
 
 test('continuing an earlier turn reuses the open root session terminal', async () => {

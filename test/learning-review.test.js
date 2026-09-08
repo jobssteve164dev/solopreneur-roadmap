@@ -79,6 +79,32 @@ test('manual runner completes a no-change review through separate generation and
   assert.equal(result.status, 'applied');
 });
 
+test('interrupted generation resumes the same review without overwriting previous attempts', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/review-original');
+  const input = { runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes') };
+  await assert.rejects(runManualLearningReview({ ...input, launch: async () => { throw new Error('interrupted'); } }), /interrupted/);
+  const original = fs.readFileSync(path.join(runDir, 'prompt-1.txt'), 'utf8');
+  const launchFiles = [];
+  const result = await runManualLearningReview({ ...input, runDir: path.join(globalRoot, 'maintenance/runs/review-new-request'), launch: async (prompt, file) => {
+    launchFiles.push(file);
+    assert.equal(path.dirname(file), runDir);
+    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
+    const manifestHash = reviewHash(JSON.stringify(manifest));
+    if (file.endsWith('proposal-2.json')) fs.writeFileSync(file, JSON.stringify({ schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: ['未声称原任务全部验收'] }));
+    else {
+      assert.match(fs.readFileSync(prompt, 'utf8'), /明确保留在 unresolved 或 deferred/);
+      const proposal = JSON.parse(fs.readFileSync(path.join(runDir, 'proposal-2.json')));
+      fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No unsupported changes or conclusions.', evidence: [] }] }));
+    }
+  } });
+  assert.equal(result.status, 'applied');
+  assert.equal(launchFiles.length, 2);
+  assert.equal(fs.readFileSync(path.join(runDir, 'prompt-1.txt'), 'utf8'), original);
+  assert.equal(fs.existsSync(path.join(globalRoot, 'maintenance/runs/review-new-request')), false);
+});
+
 test('completed digest text does not count as a successful experience use', () => {
   const digest = require('../out/runDigest.js');
   const project = root();

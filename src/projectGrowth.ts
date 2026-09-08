@@ -3,7 +3,7 @@ import * as path from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { SqliteStore } from './db/sqliteStore';
-import { loadProjectCoverageSnapshot, ProjectCoverageMetric } from './projectCoverage';
+import { loadProjectCoverageSnapshot, ProjectCoverageMetric, coverageVersionState } from './projectCoverage';
 import {
   GrowthEdgeRecord,
   GrowthModuleLabelRecord,
@@ -88,6 +88,8 @@ export interface ProjectGrowthModuleSummary {
 }
 
 export interface ProjectGrowthCoverageSummary {
+  versionState?: 'current' | 'stale' | 'unknown';
+  gitHead?: string;
   available: boolean;
   provider: string;
   status: string;
@@ -1612,10 +1614,9 @@ function signalWeight(signal: ProjectGrowthSummaryNode['colorSignal']): number {
 function signalStatusLabel(signal: ProjectGrowthSummaryNode['colorSignal'], directCoveragePercent: number, confidence: number): string {
   if (signal === 'blocked') return 'rework';
   if (signal === 'attention') return 'risk';
-  if (signal === 'watch') return directCoveragePercent >= 100 ? 'growing' : 'needs_verification';
+  if (signal === 'watch') return 'needs_verification';
   if (signal === 'growing') return 'growing';
-  if (directCoveragePercent >= 100 && confidence >= 0.75) return 'formed';
-  return 'stable';
+  return 'needs_verification';
 }
 
 function isPrimaryGrowthModule(module: ProjectGrowthModuleSummary): boolean {
@@ -1697,16 +1698,12 @@ function buildCapabilityHealth(
       .map((module) => module.signal)
       .sort((a, b) => signalWeight(b) - signalWeight(a))[0] || capability.signal;
     let status = roadmapStatus === 'Completed' ? 'not_observed' : 'unshaped';
-    if (displayModules.length > 0 && directCoveragePercent >= 100 && signalWeight(strongestSignal) <= signalWeight('watch')) {
-      status = 'formed';
-    } else if (displayModules.some((module) => module.signal === 'blocked')) {
+    if (displayModules.some((module) => module.signal === 'blocked')) {
       status = 'rework';
     } else if (displayModules.some((module) => module.signal === 'attention')) {
       status = 'risk';
-    } else if (displayModules.length > 0 && directCoveragePercent < 100) {
-      status = 'needs_verification';
     } else if (displayModules.length > 0) {
-      status = 'growing';
+      status = 'needs_verification';
     }
     const evidence = displayModules.slice(0, 4).map((module) => {
       const signals = nodeSignals.get(module.nodeId) || [];
@@ -2168,6 +2165,8 @@ export function buildProjectGrowthViewModel(
     diff: buildProjectGrowthDiff(options.previous || null, data),
     totals,
     coverage: {
+      versionState: coverageSnapshot ? coverageVersionState(data.snapshot.projectPath, coverageSnapshot) : 'unknown',
+      gitHead: coverageSnapshot?.sourceVersion?.gitHead || '',
       available: Boolean(coverageSnapshot?.generatedAt && coverageSnapshot.files.length > 0),
       provider: coverageSnapshot?.provider || '',
       status: coverageSnapshot?.status || 'unavailable',
@@ -2330,7 +2329,9 @@ export async function getProjectGrowthView(
   options: ProjectGrowthScanOptions = {}
 ): Promise<ProjectGrowthViewModel> {
   if (!options.forceRefresh && projectGrowthViewCache.has(projectPath)) {
-    return projectGrowthViewCache.get(projectPath)!;
+    const cached = projectGrowthViewCache.get(projectPath)!;
+    const coverage = loadProjectCoverageSnapshot(projectPath);
+    return { ...cached, coverage: { ...cached.coverage, versionState: coverage ? coverageVersionState(projectPath, coverage) : 'unknown' } };
   }
   const growthDbPath = path.join(projectPath, '.solopreneur', 'project_growth.db');
   const journalDbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
@@ -2369,6 +2370,7 @@ export async function getProjectGrowthView(
     const latest = store.getLatestGrowthSnapshot();
     if (!latest) {
       const view = emptyProjectGrowthViewModel();
+      view.projectPath = projectPath;
       projectGrowthViewCache.set(projectPath, view);
       return view;
     }

@@ -44,6 +44,13 @@ test('terminal commands remain compatible with hosts that do not expose processI
   assert.deepEqual(delivered, [{ text: 'codex --version', addNewLine: false }]);
 });
 
+test('Codex continuation uses one explicit paste followed by submit outside the paste', async () => {
+  const { sendAgentTextWhenTerminalReady } = require('../out/terminalCompatibility.js');
+  const delivered = []; const terminal = { processId: Promise.resolve(123), sendText: (text, addNewLine) => delivered.push({ text, addNewLine }) };
+  assert.equal(await sendAgentTextWhenTerminalReady(terminal, '第一行\n第二行', 'codex'), true);
+  assert.deepEqual(delivered, [{ text: '\x1b[200~第一行\n第二行\x1b[201~\r', addNewLine: false }]);
+});
+
 test('all SoloMap-created command windows use the shared terminal readiness gate', () => {
   for (const relativePath of ['src/extension.ts', 'src/dailyReview.ts', 'src/sidebarProvider.ts']) {
     const source = fs.readFileSync(path.join(projectRoot, relativePath), 'utf8');
