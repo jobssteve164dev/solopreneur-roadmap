@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.464 - 2026-09-10
+
+### Fixed
+- keep experience review in one agent session (d78fc2a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.463 - 2026-09-08
 
 ### Fixed
