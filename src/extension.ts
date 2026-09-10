@@ -4453,34 +4453,61 @@ function writeSoloGlobalPromptIndex(workspaceRoot: string, globalDataPath: strin
   }
 }
 
-async function handleReviewGlobalPrompt(
+type GlobalPromptReviewCompletion = { command: 'globalPromptReviewCompleted'; success: boolean; message: string; globalPrompt?: string };
+let activeGlobalPromptReview: { promise: Promise<GlobalPromptReviewCompletion>; globalPrompt: string } | undefined;
+
+function handleReviewGlobalPrompt(
   context: vscode.ExtensionContext,
   currentGlobalPrompt: string,
   target?: vscode.Webview
 ): Promise<void> {
-  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const settings = getPersistedSettings(context);
-  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
-  const { maintenanceRoot, runsRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
-  const agentCli = resolveAgentCli((settings.cliPath || 'agy').trim(), settings.cliPath);
-  if (!commandExists(agentCli)) {
-    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message: '找不到当前 Agent CLI，请检查 Agent 设置。' });
-    return;
+  if (activeGlobalPromptReview) {
+    void postWebviewMessage(target, { command: 'globalPromptReviewStarted' });
+    if (currentGlobalPrompt !== activeGlobalPromptReview.globalPrompt) {
+      return Promise.resolve(postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message: '另一份经验复盘正在进行；当前草稿保持不变，请稍后重试。' })).then(() => undefined);
+    }
+    return activeGlobalPromptReview.promise.then(message => Promise.resolve(postWebviewMessage(target, message))).then(() => undefined);
   }
-  const automation = ensureAgentTaskAutomation(agentCli);
-  if (!automation.ok) {
-    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message: automation.message });
-    return;
-  }
-  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
+  const operation = runGlobalPromptReview(context, currentGlobalPrompt);
+  void postWebviewMessage(target, { command: 'globalPromptReviewStarted' });
+  const active = { promise: operation, globalPrompt: currentGlobalPrompt };
+  activeGlobalPromptReview = active;
+  const clear = () => {
+    if (activeGlobalPromptReview === active) activeGlobalPromptReview = undefined;
+  };
+  void operation.then(clear, clear);
+  return operation.then(message => Promise.resolve(postWebviewMessage(target, message))).then(() => undefined);
+}
+
+async function runGlobalPromptReview(
+  context: vscode.ExtensionContext,
+  currentGlobalPrompt: string
+): Promise<GlobalPromptReviewCompletion> {
   const runId = `global-prompt-review-${Date.now()}`;
-  const runDir = path.join(runsRoot, runId);
-  await postWebviewMessage(target, { command: 'globalPromptReviewStarted' });
   try {
+    const terminal = createAgentTerminal(context.extensionPath, `prompt-review-${runId.slice(-6)}`);
+    terminal.show(true);
+    const terminalReady = sendTextWhenTerminalReady(terminal, `printf '%s\\n' ${shellQuote('SoloMap 正在准备经验复盘…')}`);
+    const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+    const settings = getPersistedSettings(context);
+    const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+    const maintenanceRoot = path.join(globalRoot, 'maintenance');
+    const runsRoot = path.join(maintenanceRoot, 'runs');
+    const runDir = path.join(runsRoot, runId);
+    let agentCli = '';
     const result = await runManualLearningReview({
-      runDir, globalRoot, projects: getProjects(context).map(project => project.path),
+      runDir, globalRoot, projects: [],
       globalPrompt: currentGlobalPrompt,
       persistedGlobalPrompt: settings.globalPrompt || '',
+      prepare: () => {
+        ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
+        agentCli = resolveAgentCli((settings.cliPath || 'agy').trim(), settings.cliPath);
+        if (!commandExists(agentCli)) throw new Error('找不到当前 Agent CLI，请检查 Agent 设置。');
+        const automation = ensureAgentTaskAutomation(agentCli);
+        if (!automation.ok) throw new Error(automation.message);
+        ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
+      },
+      getProjects: () => getProjects(context).map(project => project.path),
       getGlobalPrompt: () => getPersistedSettings(context).globalPrompt || '',
       setGlobalPrompt: async (value, expectedHash) => {
         const latest = getPersistedSettings(context);
@@ -4494,9 +4521,10 @@ async function handleReviewGlobalPrompt(
         const scriptFile = `${resultFilePath}.run.sh`;
         const command = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
         fs.writeFileSync(scriptFile, buildLearningReviewRunScript(command, maintenanceRoot, outputFile, doneFile, shellQuote), { encoding: 'utf8', mode: 0o755 });
-        const terminal = createAgentTerminal(maintenanceRoot, `prompt-review-${path.basename(resultFilePath, '.json')}`);
-        terminal.show(true);
-        if (!await sendTextWhenTerminalReady(terminal, `bash ${shellQuote(scriptFile)}`)) throw new Error('复盘命令未能发送到终端，请重试。');
+        if (terminal.exitStatus) throw new Error('复盘终端已关闭，请重新发起复盘。');
+        const activeTerminal = terminal;
+        if (!await terminalReady) throw new Error('复盘终端尚未就绪，请重试。');
+        if (!await sendTextWhenTerminalReady(activeTerminal, `bash ${shellQuote(scriptFile)}`)) throw new Error('复盘命令未能发送到终端，请重试。');
         await new Promise<void>((resolve, reject) => {
           const poller = setInterval(() => {
             const done = readLearningJson(doneFile);
@@ -4504,7 +4532,7 @@ async function handleReviewGlobalPrompt(
               clearInterval(poller);
               if (done.exitCode === 0 && fs.existsSync(resultFilePath)) resolve();
               else reject(new Error('复盘运行未完成，请查看 Agent 终端；已有材料已保留。'));
-            } else if (terminal.exitStatus) {
+            } else if (activeTerminal.exitStatus) {
               clearInterval(poller);
               reject(new Error('复盘终端已关闭，已有材料已保留。'));
             }
@@ -4515,13 +4543,13 @@ async function handleReviewGlobalPrompt(
     await broadcastSettings(context);
     const message = result.status === 'applied' ? '经验复盘已完成。' : '部分复盘结果尚未应用，已有结果已保留。';
     const latestPrompt = getPersistedSettings(context).globalPrompt || '';
-    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: result.status === 'applied', globalPrompt: latestPrompt === (settings.globalPrompt || '') ? currentGlobalPrompt : latestPrompt, message });
     if (result.status === 'applied') vscode.window.showInformationMessage(message);
     else vscode.window.showWarningMessage(`${message} ${result.errors.join('；')}`);
+    return { command: 'globalPromptReviewCompleted', success: result.status === 'applied', globalPrompt: latestPrompt === (settings.globalPrompt || '') ? currentGlobalPrompt : latestPrompt, message };
   } catch (error: any) {
     const message = `经验复盘尚未完成：${String(error?.message || error)}`;
-    await postWebviewMessage(target, { command: 'globalPromptReviewCompleted', success: false, message });
     vscode.window.showWarningMessage(message);
+    return { command: 'globalPromptReviewCompleted', success: false, message };
   }
 }
 

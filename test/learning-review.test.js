@@ -79,6 +79,38 @@ test('global review prompt names every path layer and its read or write role', (
     '/data/.solomap-global/tools/solomap-memory.cjs', '/data/.solomap-global/tools/solomap-experience.cjs',
     '形成或修订影响后续所有插件任务的稳定行为约束与分层经验'
   ]) assert.ok(prompt.includes(expected), expected);
+  assert.match(prompt, /逐个审查.*project_constraint.*跨项目成立.*上提/s);
+  assert.match(prompt, /只读.*不能修改项目文件.*不等于跳过上提判断/s);
+  const genericPrompt = buildLearningReviewPrompt('/runs/manifest.json', manifest, '/runs/result.json');
+  assert.match(genericPrompt, /\/runs\/review-result\.json/);
+});
+
+test('manual review reserves its single-flight UI before asynchronous preparation', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/immediate');
+  let starts = 0;
+  const operation = runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '',
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    onStart: () => { starts += 1; },
+    launch: async (_promptFile, resultFile) => {
+      const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review-1.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  });
+  assert.equal(starts, 1, 'the user-visible review start must happen before manifest collection yields');
+  const duplicate = runManualLearningReview({
+    runDir: path.join(globalRoot, 'maintenance/runs/duplicate'), globalRoot, projects: [], globalPrompt: '',
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('duplicate must share the first operation'),
+    onStart: () => assert.fail('a duplicate click must not start another visible review'),
+    launch: async () => assert.fail('a duplicate click must not start another Agent')
+  });
+  assert.equal(duplicate, operation);
+  await operation;
 });
 
 test('normal event writes and reads do not generate semantic candidates or promotion suggestions', () => {
@@ -133,7 +165,47 @@ test('manual review applies exact memory patch once and rejects stale or unrevie
   await assert.rejects(applyLearningReview({ ...options, proposal: invalid }), /review|proposal|target/i);
 });
 
-test('manual runner completes a no-change review through separate generation and verification', async () => {
+test('review rejects any project constraint that lacks a disposition or independent check', () => {
+  const { validateLearningReview } = require('../out/learningReviewApply.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const project = '/workspace/product';
+  const source = { id: 'project-rule-1', kind: 'project_constraint', projectPath: project, file: `${project}/agent.md`, hash: 'constraint-hash' };
+  const manifest = { schemaVersion: 1, runId: 'constraint-review', globalRoot: '/global', globalPrompt: '', promptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
+  const baseProposal = { schemaVersion: 2, runId: manifest.runId, manifestHash: reviewHash(JSON.stringify(manifest)), globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
+  const makeReview = (proposal, checks) => ({ schemaVersion: 1, runId: manifest.runId, manifestHash: proposal.manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks });
+  assert.throws(() => validateLearningReview(manifest, baseProposal, makeReview(baseProposal, [{ target: 'overall', safe: true, reason: 'checked' }])), /project constraint/i);
+  const proposal = { ...baseProposal, processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'Project-only rule.' }] };
+  assert.throws(() => validateLearningReview(manifest, proposal, makeReview(proposal, [{ target: 'overall', safe: true, reason: 'checked' }])), /source:project-rule-1/);
+  assert.doesNotThrow(() => validateLearningReview(manifest, proposal, makeReview(proposal, [
+    { target: `source:${source.id}`, safe: true, reason: 'Confirmed project-only scope.', evidence: [source.id] },
+    { target: 'overall', safe: true, reason: 'checked' }
+  ])));
+  const rejectedLesson = { projectPath: project, summary: 'Rejected rule.', appliesWhen: 'Never.', doesNotApplyWhen: 'Always.', doThis: 'Nothing.', avoidThis: 'Applying it.', verification: 'Not applicable.', reason: 'Rejected.', evidence: [source.id], status: 'rejected' };
+  const falsePromotion = { ...baseProposal, lessons: [rejectedLesson], processedSources: [{ id: source.id, hash: source.hash, decision: 'created', reason: 'Created a rejected lesson.' }] };
+  assert.throws(() => validateLearningReview(manifest, falsePromotion, makeReview(falsePromotion, [
+    { target: 'lesson:0', safe: true, reason: 'checked' },
+    { target: `source:${source.id}`, safe: true, reason: 'checked', evidence: [source.id] },
+    { target: 'overall', safe: true, reason: 'checked' }
+  ])), /global promotion/i);
+  const unchangedPrompt = { ...falsePromotion, globalPrompt: { value: manifest.globalPrompt, reason: 'No actual change.', evidence: [source.id], constraints: [] } };
+  assert.throws(() => validateLearningReview(manifest, unchangedPrompt, makeReview(unchangedPrompt, [
+    { target: 'globalPrompt', safe: true, reason: 'checked' },
+    { target: 'lesson:0', safe: true, reason: 'checked' },
+    { target: `source:${source.id}`, safe: true, reason: 'checked', evidence: [source.id] },
+    { target: 'overall', safe: true, reason: 'checked' }
+  ])), /global promotion/i);
+  const profileChange = { path: 'profile.md', baseHash: reviewHash(''), before: '', after: 'Prefer direct results.', reason: 'Cross-project preference.', evidence: [source.id] };
+  const promotedLesson = { ...rejectedLesson, summary: 'Direct results.', status: 'promoted', target: profileChange.path };
+  const profilePromotion = { ...baseProposal, memoryChanges: [profileChange], lessons: [promotedLesson], processedSources: [{ id: source.id, hash: source.hash, decision: 'created', reason: 'Promoted to profile.' }] };
+  assert.doesNotThrow(() => validateLearningReview(manifest, profilePromotion, makeReview(profilePromotion, [
+    { target: 'memory:0', safe: true, reason: 'checked' },
+    { target: 'lesson:0', safe: true, reason: 'checked' },
+    { target: `source:${source.id}`, safe: true, reason: 'checked', evidence: [source.id] },
+    { target: 'overall', safe: true, reason: 'checked' }
+  ])));
+});
+
+test('manual runner completes generation and subagent verification in one Agent launch', async () => {
   const file = path.resolve(__dirname, '../out/learningReviewRunner.js');
   assert.ok(fs.existsSync(file), 'manual entry runner must exist');
   const { runManualLearningReview } = require(file);
@@ -143,20 +215,18 @@ test('manual runner completes a no-change review through separate generation and
   const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => { throw new Error('no changes'); }, launch: async (promptFile, resultFile) => {
     launches += 1;
     const generatedPrompt = fs.readFileSync(promptFile, 'utf8');
-    if (launches === 1) {
-      assert.ok(generatedPrompt.includes(path.join(globalRoot, 'memory/profile.md')));
-      assert.ok(generatedPrompt.includes(path.join(globalRoot, 'learning/ledger')));
-      assert.ok(generatedPrompt.includes('影响后续所有插件任务'));
-    } else assert.ok(generatedPrompt.includes('项目记忆、项目约束、全局记忆与现有全局约束'));
+    assert.ok(generatedPrompt.includes(path.join(globalRoot, 'memory/profile.md')));
+    assert.ok(generatedPrompt.includes(path.join(globalRoot, 'learning/ledger')));
+    assert.ok(generatedPrompt.includes('影响后续所有插件任务'));
+    assert.match(generatedPrompt, /同一 Agent 会话.*子智能体.*独立只读复核/s);
+    assert.match(generatedPrompt, /SHA256\(JSON\.stringify\(JSON\.parse/);
     const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
     const manifestHash = reviewHash(JSON.stringify(manifest));
-    if (launches === 1) fs.writeFileSync(resultFile, JSON.stringify({ schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] }));
-    else {
-      const proposal = JSON.parse(fs.readFileSync(path.join(runDir, 'proposal-1.json')));
-      fs.writeFileSync(resultFile, JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No new evidence warrants changes.', evidence: [] }], summary: 'No changes' }));
-    }
+    const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
+    fs.writeFileSync(resultFile, `${JSON.stringify(proposal, null, 2)}\n`);
+    fs.writeFileSync(path.join(runDir, 'review-1.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No new evidence warrants changes.', evidence: [] }], summary: 'No changes' }));
   } });
-  assert.equal(launches, 2);
+  assert.equal(launches, 1);
   assert.equal(result.status, 'applied');
 });
 
@@ -173,15 +243,13 @@ test('interrupted generation resumes the same review without overwriting previou
     assert.equal(path.dirname(file), runDir);
     const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
     const manifestHash = reviewHash(JSON.stringify(manifest));
-    if (file.endsWith('proposal-2.json')) fs.writeFileSync(file, JSON.stringify({ schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: ['未声称原任务全部验收'] }));
-    else {
-      assert.match(fs.readFileSync(prompt, 'utf8'), /明确保留在 unresolved 或 deferred/);
-      const proposal = JSON.parse(fs.readFileSync(path.join(runDir, 'proposal-2.json')));
-      fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No unsupported changes or conclusions.', evidence: [] }] }));
-    }
+    assert.match(fs.readFileSync(prompt, 'utf8'), /明确保留在 unresolved 或 deferred/);
+    const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: ['未声称原任务全部验收'] };
+    fs.writeFileSync(file, JSON.stringify(proposal));
+    fs.writeFileSync(path.join(runDir, 'review-2.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No unsupported changes or conclusions.', evidence: [] }] }));
   } });
   assert.equal(result.status, 'applied');
-  assert.equal(launchFiles.length, 2);
+  assert.equal(launchFiles.length, 1);
   assert.equal(fs.readFileSync(path.join(runDir, 'prompt-1.txt'), 'utf8'), original);
   assert.equal(fs.existsSync(path.join(globalRoot, 'maintenance/runs/review-new-request')), false);
 });
@@ -315,11 +383,9 @@ test('review keeps the current editor draft separate from persisted instruction 
     const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
     assert.equal(manifest.globalPrompt, 'Unsaved user instruction');
     const manifestHash = reviewHash(JSON.stringify(manifest));
-    if (path.basename(resultFile).startsWith('proposal')) fs.writeFileSync(resultFile, JSON.stringify({ schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] }));
-    else {
-      const proposal = JSON.parse(fs.readFileSync(path.join(runDir, 'proposal-1.json')));
-      fs.writeFileSync(resultFile, JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', summary: 'No changes', checks: [{ target: 'overall', safe: true, reason: 'Retains draft', evidence: [] }] }));
-    }
+    const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
+    fs.writeFileSync(resultFile, JSON.stringify(proposal));
+    fs.writeFileSync(path.join(runDir, 'review-1.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', summary: 'No changes', checks: [{ target: 'overall', safe: true, reason: 'Retains draft', evidence: [] }] }));
   } });
   assert.equal(result.status, 'applied');
 });

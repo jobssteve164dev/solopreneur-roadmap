@@ -13050,24 +13050,45 @@ test('settings review executes generated CLI scripts and preserves an unchanged 
   fs.writeFileSync(fakeAgent, `const fs=require('fs'),path=require('path'),crypto=require('crypto');
 const prompt=process.argv[2], dir=path.dirname(prompt), m=JSON.parse(fs.readFileSync(path.join(dir,'manifest.json')));
 const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
-const checking=path.basename(prompt).startsWith('review-prompt');
 const proposal={schemaVersion:2,runId:m.runId,manifestHash:hash(m),globalPrompt:null,memoryChanges:[],lessons:[],processedSources:[],unresolved:[]};
-const value=checking?{schemaVersion:1,runId:m.runId,manifestHash:hash(m),proposalHash:hash(JSON.parse(fs.readFileSync(path.join(dir,'proposal-1.json')))),verdict:'pass',summary:'No new evidence',checks:[{target:'overall',safe:true,reason:'No changes warranted',evidence:[]}]}:proposal;
-fs.writeFileSync(path.join(dir,checking?'review-1.json':'proposal-1.json'),JSON.stringify(value));`);
+const review={schemaVersion:1,runId:m.runId,manifestHash:hash(m),proposalHash:hash(proposal),verdict:'pass',summary:'No new evidence',checks:[{target:'overall',safe:true,reason:'No changes warranted',evidence:[]}]};
+fs.writeFileSync(path.join(dir,'proposal-1.json'),JSON.stringify(proposal));
+fs.writeFileSync(path.join(dir,'review-1.json'),JSON.stringify(review));`);
   const extensionModule = loadCompiledModule('out/extension.js', [
+    'let reviewTerminalCount = 0;',
+    'let reviewAgentCommandCount = 0;',
+    'const reviewStartupOrder = [];',
     'module.exports.__review = handleReviewGlobalPrompt;',
+    'module.exports.__reviewTerminalCount = () => reviewTerminalCount;',
+    'module.exports.__reviewAgentCommandCount = () => reviewAgentCommandCount;',
+    'module.exports.__reviewStartupOrder = () => reviewStartupOrder;',
     `getSkillInstallWorkspaceRoot = () => ${JSON.stringify(workspace)};`,
-    'getProjects = () => [];',
-    'agentCli_1.resolveAgentCli = () => "test-cli";',
+    'const originalGetReviewSettings = getPersistedSettings; getPersistedSettings = (...args) => { reviewStartupOrder.push("settings"); return originalGetReviewSettings(...args); };',
+    'getProjects = () => { reviewStartupOrder.push("projects"); return []; };',
+    'agentCli_1.resolveAgentCli = () => { reviewStartupOrder.push("cli"); return "test-cli"; };',
     'agentCli_1.commandExists = () => true;',
     'agentCli_1.ensureAgentTaskAutomation = () => ({ok:true});',
     `agentCli_1.buildAgentCommandForPromptFile = (_cli, prompt) => agentCli_1.shellQuote(process.execPath) + ' ' + agentCli_1.shellQuote(${JSON.stringify(fakeAgent)}) + ' ' + agentCli_1.shellQuote(prompt);`,
-    'createAgentTerminal = () => ({show(){}, sendText(command){ require("child_process").execFileSync("bash", ["-c", command]); }});'
+    'createAgentTerminal = () => { reviewStartupOrder.push("terminal"); reviewTerminalCount += 1; return {show(){}, sendText(command){ if (/\\.run\\.sh/.test(command)) reviewAgentCommandCount += 1; require("child_process").execFileSync("bash", ["-c", command]); }}; };'
   ].join('\n'));
   const saved = { cliPath: 'test-cli', globalDataPath: globalRoot, globalPrompt: 'Saved instruction.' };
   const context = { extensionPath: projectRoot, globalState: { get(key) { return key === 'solopreneur.settings' ? saved : undefined; }, async update(_key, value) { Object.assign(saved, value); } } };
   const messages = [];
-  await extensionModule.__review(context, 'Current unsaved instruction.', { postMessage(value) { messages.push(value); return Promise.resolve(true); } });
+  const review = extensionModule.__review(context, 'Current unsaved instruction.', { postMessage(value) { messages.push(value); return Promise.resolve(true); } });
+  assert.equal(extensionModule.__reviewTerminalCount(), 1, 'the command window must open in the click turn');
+  assert.equal(extensionModule.__reviewStartupOrder()[0], 'terminal', 'the window must be revealed before settings, CLI resolution, project reads, or durable initialization');
+  const duplicateMessages = [];
+  const duplicate = extensionModule.__review(context, 'Current unsaved instruction.', { postMessage(value) { duplicateMessages.push(value); return Promise.resolve(true); } });
+  assert.equal(extensionModule.__reviewTerminalCount(), 1, 'a repeated click must not open another command window');
+  const differentDraftMessages = [];
+  await extensionModule.__review(context, 'A different unsaved instruction.', { postMessage(value) { differentDraftMessages.push(value); return Promise.resolve(true); } });
+  const rejectedDraft = differentDraftMessages.find(message => message.command === 'globalPromptReviewCompleted');
+  assert.equal(rejectedDraft?.success, false, 'a different draft must not inherit the active review result');
+  assert.match(rejectedDraft?.message || '', /草稿保持不变/);
+  await Promise.all([review, duplicate]);
+  assert.equal(duplicateMessages.find(message => message.command === 'globalPromptReviewCompleted')?.success, true, 'each waiting settings view must receive completion');
+  assert.equal(extensionModule.__reviewTerminalCount(), 1, 'generation and verification must reuse one command window');
+  assert.equal(extensionModule.__reviewAgentCommandCount(), 1, 'one click must start exactly one Agent process');
   const final = messages.find(message => message.command === 'globalPromptReviewCompleted');
   assert.equal(final?.success, true, final?.message);
   assert.equal(final.globalPrompt, 'Current unsaved instruction.');
@@ -13076,7 +13097,19 @@ fs.writeFileSync(path.join(dir,checking?'review-1.json':'proposal-1.json'),JSON.
   const dir = path.join(runs, fs.readdirSync(runs)[0]);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'application.json'))).status, 'applied');
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'proposal-1.json.done.json'))).exitCode, 0);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'review-1.json.done.json'))).exitCode, 0);
+  assert.equal(fs.existsSync(path.join(dir, 'review-1.json.done.json')), false);
+});
+
+test('settings review reports terminal startup failures back to the requesting view', async () => {
+  const extensionModule = loadCompiledModule('out/extension.js', [
+    'module.exports.__review = handleReviewGlobalPrompt;',
+    'createAgentTerminal = () => { throw new Error("terminal unavailable"); };'
+  ].join('\n'));
+  const messages = [];
+  await extensionModule.__review({ extensionPath: projectRoot }, '', { postMessage(value) { messages.push(value); return Promise.resolve(true); } });
+  const final = messages.find(message => message.command === 'globalPromptReviewCompleted');
+  assert.equal(final?.success, false);
+  assert.match(final?.message || '', /terminal unavailable/);
 });
 
 test('slow forced conversation refresh reuses its in-flight read until an actual state write', async () => {

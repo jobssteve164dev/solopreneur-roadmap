@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { collectReviewManifest, GithubRead, ReviewManifest, reviewHash } from './learningReview.js';
-import { applyLearningReview, buildLearningReviewPrompt, buildLearningReviewCheckPrompt } from './learningReviewApply.js';
+import { applyLearningReview, buildLearningReviewPrompt } from './learningReviewApply.js';
 import { readLearningJson, writeLearningJson } from './taskReport.js';
 
 const activeReviews = new Map<string, Promise<{ status: 'applied' | 'partial'; errors: string[] }>>();
@@ -9,12 +9,16 @@ const activeReviews = new Map<string, Promise<{ status: 'applied' | 'partial'; e
 export function runManualLearningReview(input: {
   runDir: string; globalRoot: string; projects: string[]; globalPrompt: string; persistedGlobalPrompt?: string;
   getGlobalPrompt: () => string; setGlobalPrompt: (value: string, expectedHash: string) => Promise<void>;
+  onStart?: () => void; prepare?: () => void | Promise<void>; getProjects?: () => string[];
   launch: (promptFile: string, resultFile: string) => Promise<void>; api?: GithubRead;
 }): Promise<{ status: 'applied' | 'partial'; errors: string[] }> {
   const key = path.resolve(input.globalRoot);
   const existing = activeReviews.get(key);
   if (existing) return existing;
+  input.onStart?.();
   const operation = Promise.resolve().then(async () => {
+    await input.prepare?.();
+    if (input.getProjects) input = { ...input, projects: input.getProjects() };
     const runsRoot = path.dirname(input.runDir);
     const pendingRuns = fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => path.join(runsRoot, entry.name)).sort().reverse() : [];
     for (const previousDir of pendingRuns) {
@@ -57,28 +61,20 @@ export function runManualLearningReview(input: {
       memory: manifest.memory.map(({ relativePath, hash }) => ({ relativePath, hash })),
       constraints: manifest.globalPrompt.split('\n').filter(line => line.trim())
     });
-    let feedback = '';
     const previousAttempts = fs.readdirSync(input.runDir).map(name => Number(name.match(/^(?:prompt|proposal|review|review-prompt)-(\d+)\./)?.[1] || 0));
-    for (let attempt = Math.max(0, ...previousAttempts) + 1; ; attempt += 1) {
-      const proposalFile = path.join(input.runDir, `proposal-${attempt}.json`);
-      const promptFile = path.join(input.runDir, `prompt-${attempt}.txt`);
-      fs.writeFileSync(promptFile, buildLearningReviewPrompt(manifestFile, manifest, proposalFile) + feedback, 'utf8');
-      await input.launch(promptFile, proposalFile);
-      const proposal = readLearningJson(proposalFile);
-      if (!proposal) throw new Error('复盘未生成完整结果，材料已保留。');
-      const checkFile = path.join(input.runDir, `review-${attempt}.json`);
-      const checkPrompt = path.join(input.runDir, `review-prompt-${attempt}.txt`);
-      fs.writeFileSync(checkPrompt, buildLearningReviewCheckPrompt(manifestFile, proposalFile, manifest, proposal, checkFile), 'utf8');
-      await input.launch(checkPrompt, checkFile);
-      const review = readLearningJson(checkFile);
-      if (!review) throw new Error('复盘复核未生成完整结果，材料已保留。');
-      if (review.verdict === 'revise') {
-        feedback = `\n上一版未通过独立复核。读取 ${checkFile} 和 ${proposalFile}，按证据修正；无法证实的判断保留 deferred 或 unresolved，不编造证据。`;
-        continue;
-      }
-      writeLearningJson(path.join(input.runDir, 'result.json'), { proposalFile, checkFile });
-      return applyLearningReview({ ...input, manifest, proposal, review });
-    }
+    const attempt = Math.max(0, ...previousAttempts) + 1;
+    const proposalFile = path.join(input.runDir, `proposal-${attempt}.json`);
+    const checkFile = path.join(input.runDir, `review-${attempt}.json`);
+    const promptFile = path.join(input.runDir, `prompt-${attempt}.txt`);
+    fs.writeFileSync(promptFile, buildLearningReviewPrompt(manifestFile, manifest, proposalFile, checkFile), 'utf8');
+    await input.launch(promptFile, proposalFile);
+    const proposal = readLearningJson(proposalFile);
+    if (!proposal) throw new Error('复盘未生成完整结果，材料已保留。');
+    const review = readLearningJson(checkFile);
+    if (!review) throw new Error('复盘子智能体未生成完整复核结果，材料已保留。');
+    if (review.verdict !== 'pass') throw new Error('复盘子智能体尚未通过最终提案，材料已保留。');
+    writeLearningJson(path.join(input.runDir, 'result.json'), { proposalFile, checkFile });
+    return applyLearningReview({ ...input, manifest, proposal, review });
   }).finally(() => { activeReviews.delete(key); });
   activeReviews.set(key, operation);
   return operation;
