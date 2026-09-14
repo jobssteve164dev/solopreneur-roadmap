@@ -13,6 +13,39 @@ const {
   ensureTaskCheckpointRuntime
 } = require('../out/taskCheckpoint.js');
 
+test('replacing a running session closes it without reporting a missing checkpoint failure', () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-session-restart-'));
+  const runtime = ensureTaskCheckpointRuntime(workspaceRoot);
+  const statusFile = path.join(workspaceRoot, 'status.json');
+  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot, nodeId: '__solo__', executionLogId: 1,
+    checkpointToken: 'restart-test', status: 'Running', interactiveSession: true, sessionRestartRequested: true }));
+  const result = cp.spawnSync(process.execPath, [runtime, 'session-close', '--code', '143'], {
+    encoding: 'utf8', env: { ...process.env, SOLOMAP_TASK_STATUS_FILE: statusFile, SOLOMAP_TASK_CHECKPOINT_TOKEN: 'restart-test' }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const status = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+  assert.equal(status.status, 'Session Closed');
+  assert.equal(status.failureCode, undefined);
+});
+
+test('session replacement preserves a completed checkpoint until its result is consumed', () => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-restart-result-'));
+  const runtime = ensureTaskCheckpointRuntime(workspaceRoot);
+  const statusFile = path.join(workspaceRoot, 'status.json');
+  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot, nodeId: '__solo__', executionLogId: 1,
+    checkpointToken: 'restart-test', status: 'In Progress', checkpointEventId: '1:complete', checkpointOutcome: 'partial',
+    checkpointSummary: 'Saved work', interactiveSession: true, sessionRestartRequested: true }));
+  const result = cp.spawnSync(process.execPath, [runtime, 'session-close', '--code', '143'], {
+    encoding: 'utf8', env: { ...process.env, SOLOMAP_TASK_STATUS_FILE: statusFile, SOLOMAP_TASK_CHECKPOINT_TOKEN: 'restart-test' }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const status = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+  assert.equal(status.status, 'In Progress');
+  assert.equal(status.checkpointEventId, '1:complete');
+  assert.equal(status.checkpointSummary, 'Saved work');
+  assert.equal(status.interactiveSessionClosed, true);
+});
+
 test('interactive user conversations do not use one-shot CLI modes', () => {
   const workspaceRoot = '/workspace/app';
   const promptFilePath = '/workspace/app/.solopreneur/agent-runs/2/prompt.txt';

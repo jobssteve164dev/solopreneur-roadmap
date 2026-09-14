@@ -6219,14 +6219,6 @@ test('agent launch path uses one terminal-first startup component', () => {
   assert.match(nativeContinuationBody, /updateAgentExecution\(executionLogId, agentCli, displayCommand, launchSummary, 'Running'\)/);
   assert.doesNotMatch(nativeContinuationBody, /startWaiting:\s*true|Interactive session state: Waiting/);
 
-  const continueActionBody = source.slice(
-    source.indexOf("'conversation.continue': async"),
-    source.indexOf("'conversation.stop': async")
-  );
-  assert.ok(
-    continueActionBody.indexOf('registerInteractiveConversationTurn(') < continueActionBody.indexOf('existingTerminal.show(true)'),
-    'the continue action must register a ledger turn before revealing an existing terminal for input'
-  );
   assertLaunchComponent(
     'agent review launch',
     'function startAgentReviewRun',
@@ -11827,7 +11819,7 @@ test('growth continuation finds the live resumed descendant rather than starting
   assert.equal(reusable.conversationId, 3);
 });
 
-test('continuing an earlier turn reuses the open root session terminal', async () => {
+test('continuing an earlier turn opens a new session terminal once for concurrent clicks', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -11868,17 +11860,89 @@ test('continuing an earlier turn reuses the open root session terminal', async (
     async (workspaceRoot, conversationId) => { registrations.push({ workspaceRoot, conversationId }); return true; }
   );
 
-  await extensionModule.__handleSharedWebviewAction(
+  const click = () => extensionModule.__handleSharedWebviewAction(
     { globalState: { get: () => ({}) } },
     { command: 'conversation.continue', projectPath: tempRoot, nodeId: '__solo__', conversationId: 338 },
     'sidebar',
     { postMessage() { return Promise.resolve(true); } }
   );
+  await Promise.all([click(), click()]);
 
-  assert.equal(startupTerminalRevealed, 0);
-  assert.equal(nativeContinuationStarted, 0);
-  assert.equal(terminalShown, 1);
-  assert.deepEqual(registrations, [{ workspaceRoot: tempRoot, conversationId: 336 }]);
+  assert.equal(startupTerminalRevealed, 1);
+  assert.equal(nativeContinuationStarted, 1);
+  assert.equal(terminalShown, 0);
+  assert.deepEqual(registrations, []);
+});
+
+test('new terminal names cannot collide with restored windows after extension reload', () => {
+  const extensionModule = loadCompiledModule('out/extension.js', [
+    'module.exports.__name = makeAgentTerminalName;',
+    'vscode.window.terminals.push({ name: "ST · continue · 1 (solomap)" }, { name: "ST · continue · 2 (solomap)" });'
+  ].join('\n'));
+  assert.equal(extensionModule.__name('/project/ST', 'continue'), 'ST · continue · 3 (solomap)');
+});
+
+test('native continuation stops old lineage processes before launching the same session and leaves other conversations alive', async () => {
+  const extensionModule = loadCompiledModule('out/extension.js', [
+    'module.exports.__continue = handleContinueNativeConversation;',
+    'module.exports.__setRestart = (root, logs, sessionId, terminal, launch, startupTerminal) => { activeProjectRoot = root; syncEngine = { getAgentExecutions: () => logs, getProjectAgentExecutions: () => logs, logAgentExecution: () => 80, updateAgentExecution: () => {} }; commandExists = () => true; recoverCodexSessionIdentityForConversation = async () => {}; resolveNativeSessionIdForConversation = () => sessionId; getConfirmedCodexResumeContext = () => ({ transcriptPath: "transcript" }); createPreSessionGitCommit = async () => ""; buildAgentShellScript = (...args) => ({ finalCommand: args[9] }); launchAgentConversationTerminal = launch; vscode.window.terminals.push(terminal, startupTerminal); reservedAgentTerminalsByProject.set(root, [{ terminal: startupTerminal, environmentSignature: "" }]); agentTerminalNamesByConversationId.set(53, terminal.name); agentTerminalProjectRootsByConversationId.set(53, root); };'
+  ].join('\n'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-restart-native-'));
+  const statuses = path.join(root, '.solopreneur', 'agent-status');
+  fs.mkdirSync(statuses, { recursive: true });
+  const sessionId = '01a09c9f-df1b-7253-ad44-3f4f0de671d5';
+  const children = [];
+  const exited = new Set();
+  let terminalDisposed = false;
+  let startupDisposed = false;
+  try {
+    for (const id of [53, 54, 99]) {
+      const child = childProcess.spawn(process.execPath, ['-e', "process.on('SIGTERM', () => { process.stdout.write('stopping'); setTimeout(() => process.exit(0), 120); }); process.stdout.write('ready'); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'pipe', 'ignore'] });
+      children.push(child);
+      child.once('exit', () => exited.add(id));
+      await new Promise((resolve) => child.stdout.once('data', resolve));
+      const pidFile = path.join(root, `${id}.pid`);
+      fs.writeFileSync(pidFile, `${child.pid}\n${getProcessBirthMarker(child.pid)}\n`);
+      fs.writeFileSync(path.join(statuses, `${id}.json`), JSON.stringify({ workspaceRoot: root, nodeId: '__solo__', executionLogId: id, rootExecutionLogId: id,
+        nativeSessionId: id === 99 ? 'another-session' : sessionId, status: 'Running', interactiveSession: true, agentProcessPidFilePath: pidFile,
+        terminalName: id === 53 ? 'old window' : '' }));
+      if (id === 54) child.stdout.on('data', () => {
+        const statusFile = path.join(statuses, '54.json');
+        const status = JSON.parse(fs.readFileSync(statusFile));
+        fs.writeFileSync(statusFile, JSON.stringify({ ...status, status: 'In Progress', checkpointEventId: '1:complete', checkpointOutcome: 'partial', checkpointSummary: 'saved result' }));
+      });
+    }
+    const logs = [
+      { id: 53, nodeId: '__solo__', agentCli: 'codex', status: 'Running', output: '' },
+      { id: 54, nodeId: '__solo__', agentCli: 'codex', status: 'Completed', output: 'Continuation parent conversation: 53' },
+      { id: 99, nodeId: '__solo__', agentCli: 'codex', status: 'Running', output: '' }
+    ];
+    const commands = [];
+    extensionModule.__setRestart(root, logs, sessionId, { name: 'old window', show() { assert.fail('must not reuse old window'); }, dispose() { terminalDisposed = true; } }, async ({ command }) => {
+      assert.ok(exited.has(53) && exited.has(54), 'all old writers must have exited before resume');
+      assert.ok(terminalDisposed);
+      assert.equal(startupDisposed, false, 'a new reserved terminal with the same name must stay open');
+      assert.equal(exited.has(99), false);
+      commands.push(command);
+    }, { name: 'old window', dispose() { startupDisposed = true; } });
+    await extensionModule.__continue({ globalState: { get: () => ({}) } }, '__solo__', 53);
+    assert.equal(commands.length, 1);
+    assert.match(commands[0], new RegExp(`resume .*${sessionId}`));
+    assert.equal(logs[0].status, 'Running', 'replacing a window must not mark the task failed');
+    for (const id of [53, 54]) {
+      const status = JSON.parse(fs.readFileSync(path.join(statuses, `${id}.json`)));
+      assert.equal(status.status, id === 54 ? 'In Progress' : 'Session Closed');
+      assert.equal(status.failureCode, undefined);
+      if (id === 54) assert.equal(status.checkpointSummary, 'saved result');
+    }
+    assert.equal(JSON.parse(fs.readFileSync(path.join(statuses, '99.json'))).sessionRestartRequested, undefined);
+    fs.writeFileSync(path.join(root, '53.pid'), `${children[2].pid}\nproc:wrong-birth-marker\n`);
+    await assert.rejects(extensionModule.__continue({ globalState: { get: () => ({}) } }, '__solo__', 53), /无法确认原会话进程身份/);
+    assert.equal(commands.length, 1, 'an unverified process must never be signaled or followed by a competing session');
+    assert.equal(exited.has(99), false);
+  } finally {
+    await Promise.all(children.map((child) => child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise((resolve) => { child.once('exit', resolve); child.kill('SIGKILL'); })));
+  }
 });
 
 test('continuing a conversation never reuses a same-numbered terminal from another project', async () => {
@@ -11886,7 +11950,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
     'out/extension.js',
     [
       'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
-      'module.exports.__setCrossProjectContinueRuntimeForTest = (engine, activeRoot, conversationId, mappedRoot, terminals, registerTurn) => { syncEngine = engine; activeProjectRoot = activeRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminals[0].name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), mappedRoot); vscode.window.terminals.push(...terminals); registerInteractiveConversationTurn = registerTurn; postNodeConversations = () => {}; };'
+      'module.exports.__setCrossProjectContinueRuntimeForTest = (engine, activeRoot, conversationId, mappedRoot, terminals, continueConversation) => { syncEngine = engine; activeProjectRoot = activeRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminals[0].name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), mappedRoot); vscode.window.terminals.push(...terminals); revealAgentStartupTerminal = async () => {}; ensureActionProject = async () => activeRoot; handleContinueNativeConversation = async (_context, _node, id) => continueConversation(activeProjectRoot, id); postNodeConversations = () => {}; };'
     ].join('\n')
   );
   const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-project-a-'));
@@ -11932,7 +11996,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   );
 
   assert.equal(projectATerminalShown, 0);
-  assert.equal(projectBTerminalShown, 1);
+  assert.equal(projectBTerminalShown, 0);
   assert.deepEqual(registrations, [{ workspaceRoot: projectB, conversationId: 336 }]);
 });
 
@@ -12165,6 +12229,24 @@ test('continuing a root conversation immediately after its continuation terminal
   } finally {
     if (!childExited) child.kill('SIGKILL');
   }
+});
+
+test('a delayed terminal close preserves a checkpoint arriving during process cleanup', async () => {
+  const extensionModule = loadCompiledModule('out/extension.js', [
+    'module.exports.__closed = handleAgentTerminalClosed;',
+    'module.exports.__setup = (root, statusFile) => { activeProjectRoot = root; agentTerminalNamesByConversationId.set(53, "old window"); agentTerminalProjectRootsByConversationId.set(53, root); beginAgentProcessCleanup = async () => { const current = JSON.parse(fs.readFileSync(statusFile, "utf8")); fs.writeFileSync(statusFile, JSON.stringify({ ...current, status: "In Progress", checkpointEventId: "1:complete", checkpointOutcome: "partial", checkpointSummary: "completed while closing" })); }; };'
+  ].join('\n'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-close-result-'));
+  const statusFile = path.join(root, '.solopreneur', 'agent-status', '53.json');
+  fs.mkdirSync(path.dirname(statusFile), { recursive: true });
+  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot: root, nodeId: '__solo__', executionLogId: 53,
+    rootExecutionLogId: 53, interactiveSession: true, sessionRestartRequested: true, status: 'Running' }));
+  extensionModule.__setup(root, statusFile);
+  await extensionModule.__closed('old window');
+  const result = JSON.parse(fs.readFileSync(statusFile));
+  assert.equal(result.status, 'In Progress');
+  assert.equal(result.checkpointEventId, '1:complete');
+  assert.equal(result.checkpointSummary, 'completed while closing');
 });
 
 test('Agent cleanup refuses an unverified reused PID without signaling that process', async () => {

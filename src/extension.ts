@@ -337,6 +337,7 @@ let scheduledAutomationNextAt = '';
 const agentTerminalNamesByConversationId = new Map<number, string>();
 const agentTerminalProjectRootsByConversationId = new Map<number, string>();
 const agentProcessCleanupByConversationKey = new Map<string, Promise<void>>();
+const nativeContinuationByConversationKey = new Map<string, Promise<void>>();
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
@@ -987,32 +988,27 @@ async function handleSharedWebviewAction(
         const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
         const rootConversationId = Number(rootConversation?.id || conversationId);
         const terminalProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+        const key = getAgentProcessCleanupKey(terminalProjectRoot, rootConversationId);
+        let continuation = nativeContinuationByConversationKey.get(key);
+        if (!continuation) {
+          continuation = Promise.resolve().then(async () => {
+            await revealAgentStartupTerminal(context, terminalProjectRoot, 'continue', String(conversation?.agentCli || ''));
+            const projectPath = await ensureActionProject(context, request.projectPath || '');
+            if (!projectPath && request.projectPath) return;
+            await waitForAgentProcessCleanup(terminalProjectRoot, rootConversationId);
+            await handleContinueNativeConversation(context, nodeId, conversationId);
+            refreshConversation(nodeId);
+          });
+          nativeContinuationByConversationKey.set(key, continuation);
+          void continuation.finally(() => {
+            if (nativeContinuationByConversationKey.get(key) === continuation) nativeContinuationByConversationKey.delete(key);
+          }).catch(() => {});
+        }
         try {
-          await waitForAgentProcessCleanup(terminalProjectRoot, rootConversationId);
-        } catch {
-          vscode.window.showErrorMessage('上一个 Agent 进程仍未退出，暂时无法续聊。请稍后重试。');
-          return;
+          await continuation;
+        } catch (error) {
+          vscode.window.showErrorMessage(`无法继续对话：${error instanceof Error ? error.message : String(error)}`);
         }
-        const existingTerminal = findReusableAgentTerminal(terminalProjectRoot, rootConversationId);
-        if (existingTerminal) {
-          const registered = await registerInteractiveConversationTurn(
-            terminalProjectRoot,
-            rootConversationId,
-            '继续当前 Agent 对话'
-          );
-          if (registered) {
-            existingTerminal.show(true);
-          } else {
-            vscode.window.showInformationMessage('当前会话暂时无法开始新一轮；本次没有发送内容，请稍后重试。');
-          }
-          refreshConversation(nodeId);
-          return;
-        }
-        await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'continue', String(conversation?.agentCli || ''));
-        const projectPath = await ensureActionProject(context, request.projectPath || '');
-        if (!projectPath && request.projectPath) return;
-        await handleContinueNativeConversation(context, nodeId, conversationId);
-        refreshConversation(nodeId);
       } finally {
         await respond({
           command: 'conversationActionSettled',
@@ -3920,15 +3916,15 @@ function buildSessionCaptureScript(
   return ':';
 }
 
-function resolveNativeSessionIdForConversation(nodeId: string, conversation: AgentConversation | null): string {
-  return resolveNativeSessionIdForConversationFromWorkspace(activeProjectRoot || '', nodeId, conversation);
+function resolveNativeSessionIdForConversation(nodeId: string, conversation: AgentConversation | null, workspaceRoot = activeProjectRoot || ''): string {
+  return resolveNativeSessionIdForConversationFromWorkspace(workspaceRoot, nodeId, conversation);
 }
 
 async function recoverCodexSessionIdentityForConversation(
   nodeId: string,
-  conversation: AgentConversation | null
+  conversation: AgentConversation | null,
+  workspaceRoot = activeProjectRoot || ''
 ): Promise<void> {
-  const workspaceRoot = activeProjectRoot || '';
   if (!workspaceRoot || !conversation || getAgentProvider(String(conversation.agentCli || '')) !== 'codex') return;
   const sessionFilePath = path.join(
     getConversationRunDir(workspaceRoot, nodeId, Number(conversation.id || 0)),
@@ -6052,10 +6048,15 @@ function findAgentStatusForConversation(workspaceRoot: string, conversationId: n
 }
 
 function makeAgentTerminalName(workspaceRoot: string, label: string): string {
-  agentTerminalCounter += 1;
   const projectName = path.basename(workspaceRoot);
   const cleanLabel = String(label || 'run').replace(/[^a-zA-Z0-9_.:-]+/g, '-').slice(0, 40) || 'run';
-  return `${projectName} · ${cleanLabel} · ${agentTerminalCounter} (${agentTerminalBaseName})`;
+  const existingNames = new Set(vscode.window.terminals.map((terminal) => terminal.name));
+  let name: string;
+  do {
+    agentTerminalCounter += 1;
+    name = `${projectName} · ${cleanLabel} · ${agentTerminalCounter} (${agentTerminalBaseName})`;
+  } while (existingNames.has(name));
+  return name;
 }
 
 function findActiveAgentTerminal(conversationId = 0): vscode.Terminal | undefined {
@@ -6517,8 +6518,8 @@ async function handleAgentTerminalClosed(
   if (!workspaceRoot) {
     return false;
   }
-  const runningStatus = findAgentStatusForConversation(workspaceRoot, Number(conversationId));
-  const currentStatus = String(runningStatus?.status || '');
+  let runningStatus = findAgentStatusForConversation(workspaceRoot, Number(conversationId));
+  let currentStatus = String(runningStatus?.status || '');
   const isInteractiveSession = runningStatus?.interactiveSession === true;
   if (!runningStatus || (!isInteractiveSession && currentStatus !== 'Running')) {
     return false;
@@ -6540,6 +6541,8 @@ async function handleAgentTerminalClosed(
   } catch (error) {
     processCleanupError = error instanceof Error ? error.message : String(error);
   }
+  runningStatus = readAgentStatus(statusFilePath) || runningStatus;
+  currentStatus = String(runningStatus.status || '');
   const isContinuationRun = isContinuationRunKind(String(runningStatus.runKind || ''));
   const finishedAt = new Date().toISOString();
   if (runningStatus.outputFilePath) {
@@ -6550,10 +6553,11 @@ async function handleAgentTerminalClosed(
     );
   }
   fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const settledInteractiveSession = isInteractiveSession && ['Waiting', 'Processed'].includes(currentStatus);
+  const settledInteractiveSession = isInteractiveSession && (runningStatus.sessionRestartRequested === true || ['Waiting', 'Processed'].includes(currentStatus));
+  const preservePendingResult = runningStatus.sessionRestartRequested === true && ['In Progress', 'Failed', 'Completed'].includes(currentStatus);
   fs.writeFileSync(statusFilePath, JSON.stringify({
     ...runningStatus,
-    status: processCleanupError ? 'Failed' : settledInteractiveSession ? 'Session Closed' : isInteractiveSession ? 'Failed' : isContinuationRun ? 'In Progress' : 'Failed',
+    status: processCleanupError ? 'Failed' : preservePendingResult ? currentStatus : settledInteractiveSession ? 'Session Closed' : isInteractiveSession ? 'Failed' : isContinuationRun ? 'In Progress' : 'Failed',
     ...(processCleanupError ? {
       failureCode: 'agent_process_cleanup_failed',
       failureReason: processCleanupError,
@@ -7310,17 +7314,74 @@ async function handleContinueConversationTurn(
   });
 }
 
+async function closeConversationProcessesForContinuation(
+  workspaceRoot: string, nodeId: string, conversations: AgentConversation[], rootConversationId: number, sessionId: string
+): Promise<void> {
+  const conversationIds = new Set(conversations.filter((entry) =>
+    Number(resolveContinuationRootConversationFromList(conversations, Number(entry.id))?.id || entry.id) === rootConversationId
+  ).map((entry) => Number(entry.id)));
+  conversationIds.add(rootConversationId);
+  const statuses = getAgentStatusFilePaths(workspaceRoot).map((statusFilePath) => ({
+    statusFilePath, status: readAgentStatus(statusFilePath)
+  })).filter(({ status }) => status && String(status.nodeId || '') === nodeId
+    && (!status.workspaceRoot || path.resolve(status.workspaceRoot) === path.resolve(workspaceRoot))
+    && (conversationIds.has(Number(status.executionLogId))
+      || conversationIds.has(Number(status.rootExecutionLogId))
+      || Number(status.lineageRootExecutionLogId) === rootConversationId
+      || (sessionId && String(status.nativeSessionId || status.previousNativeSessionId || '') === sessionId)));
+  // Older launch scripts invoke this shared runtime when their process exits.
+  ensureTaskCheckpointRuntime(workspaceRoot);
+  for (const { status } of statuses) {
+    if (readTrackedAgentProcess(String(status.agentProcessPidFilePath || '')).state === 'unverified') {
+      throw new Error('无法确认原会话进程身份，未启动新会话。');
+    }
+    conversationIds.add(Number(status.executionLogId));
+    conversationIds.add(Number(status.rootExecutionLogId));
+  }
+  const terminalNames = new Set<string>();
+  for (const { statusFilePath, status } of statuses) {
+    writeAgentStatus(statusFilePath, { ...status, sessionRestartRequested: true });
+    if (status.terminalName) terminalNames.add(String(status.terminalName));
+  }
+  for (const { statusFilePath, status } of statuses) {
+    const pidFile = String(status.agentProcessPidFilePath || '');
+    const tracked = readTrackedAgentProcess(pidFile);
+    if (tracked.state === 'unverified') throw new Error('无法确认原会话进程身份，未启动新会话。');
+    await beginAgentProcessCleanup(workspaceRoot, [...conversationIds], pidFile);
+    const latest = readAgentStatus(statusFilePath) || status;
+    writeAgentStatus(statusFilePath, {
+      ...latest, sessionRestartRequested: true, interactiveSessionClosed: true,
+      status: ['In Progress', 'Failed', 'Completed'].includes(String(latest.status)) ? latest.status : 'Session Closed',
+      sessionClosePreviousStatus: String(status.status || ''),
+      finishedAt: new Date().toISOString()
+    });
+  }
+  for (const [id, name] of agentTerminalNamesByConversationId) {
+    if (conversationIds.has(id) && agentTerminalProjectRootsByConversationId.get(id) === workspaceRoot) {
+      terminalNames.add(name);
+      agentTerminalNamesByConversationId.delete(id);
+      agentTerminalProjectRootsByConversationId.delete(id);
+    }
+  }
+  const reservedTerminals = new Set([...reservedAgentTerminalsByProject.values()].flatMap((entries) => entries.map((entry) => entry.terminal)));
+  for (const terminal of vscode.window.terminals) {
+    if (terminalNames.has(terminal.name) && !reservedTerminals.has(terminal)) terminal.dispose();
+  }
+}
+
 async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
   if (!syncEngine || !activeProjectRoot || !nodeId || !conversationId) {
     return;
   }
+  const workspaceRoot = activeProjectRoot;
+  const projectSyncEngine = syncEngine;
   const resolvedNodeId = resolveConversationNodeIdForContinuation(nodeId, conversationId);
   if (resolvedNodeId) {
     nodeId = resolvedNodeId;
   }
 
   const conversation = resolveContinuationLeafConversation(nodeId, conversationId)
-    || syncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId))
+    || projectSyncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId))
     || null;
   if (!conversation) {
     vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
@@ -7328,15 +7389,9 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   }
   const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
   const rootConversationId = Number(rootConversation.id || conversationId);
-  const existingTerminal = findReusableAgentTerminal(activeProjectRoot, rootConversationId);
-  if (existingTerminal) {
-    existingTerminal.show(true);
-    return;
-  }
-
   const sessionConversation = resolveContinuationSessionConversation(nodeId, conversationId) || conversation;
-  await recoverCodexSessionIdentityForConversation(nodeId, sessionConversation);
-  const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation);
+  await recoverCodexSessionIdentityForConversation(nodeId, sessionConversation, workspaceRoot);
+  const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation, workspaceRoot);
   if (!sessionId) {
     vscode.window.showInformationMessage('No native Agent session ID was recorded for this conversation.');
     return;
@@ -7348,15 +7403,19 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
   const codexResumeContext = getAgentProvider(agentCli) === 'codex'
-    ? getConfirmedCodexResumeContext(activeProjectRoot, nodeId, sessionConversation, sessionId)
+    ? getConfirmedCodexResumeContext(workspaceRoot, nodeId, sessionConversation, sessionId)
     : null;
   if (getAgentProvider(agentCli) === 'codex' && !codexResumeContext) {
     vscode.window.showErrorMessage('No confirmed native Codex transcript was recorded for this conversation.');
     return;
   }
 
+  await closeConversationProcessesForContinuation(
+    workspaceRoot, nodeId, projectSyncEngine.getAgentExecutions(nodeId), rootConversationId, sessionId
+  );
+
   const settings = getPersistedSettings(context);
-  const preGitHash = await createPreSessionGitCommit(activeProjectRoot);
+  const preGitHash = await createPreSessionGitCommit(workspaceRoot);
   const launchSummary = [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
     'Agent continuation started.',
@@ -7365,24 +7424,24 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     'User supplement:\n继续当前 Agent 对话',
     'Continuation mode: direct terminal with tracked sentinel recording.'
   ].filter(Boolean).join('\n\n');
-  const executionLogId = syncEngine.logAgentExecution(
+  const executionLogId = projectSyncEngine.logAgentExecution(
     nodeId,
     agentCli,
     `${agentCli} [preparing tracked continuation terminal]`,
     launchSummary,
     'Running'
   );
-  const runDir = path.join(activeProjectRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
-  const statusFilePath = getAgentStatusFilePath(activeProjectRoot, executionLogId);
+  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
+  const statusFilePath = getAgentStatusFilePath(workspaceRoot, executionLogId);
   fs.mkdirSync(runDir, { recursive: true });
-  const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, activeProjectRoot);
-  const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
-  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
+  const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, workspaceRoot);
+  const displayCommand = buildSdkSentinelCommandLabel(agentCli, workspaceRoot, sessionId);
+  projectSyncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
   const { finalCommand } = buildAgentShellScript(
     agentCli,
     '',
     'SoloMap tracked continuation terminal',
-    activeProjectRoot,
+    workspaceRoot,
     nodeId,
     executionLogId,
     '继续当前 Agent 对话',
@@ -7404,7 +7463,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     }
   );
   await launchAgentConversationTerminal({
-    workspaceRoot: activeProjectRoot,
+    workspaceRoot,
     label: `continue-${nodeId}-${executionLogId}`,
     conversationId: executionLogId,
     nodeId,

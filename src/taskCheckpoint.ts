@@ -241,7 +241,14 @@ if (action === 'complete') {
 }
 
 const previousStatus = String(status.status || '');
-if (previousStatus === 'Waiting' || previousStatus === 'Processed') {
+if (status.sessionRestartRequested === true && ['In Progress', 'Failed', 'Completed'].includes(previousStatus)) {
+  atomicWriteJson(statusFile, {
+    ...status,
+    interactiveSessionClosed: true,
+    sessionExitCode: Number(args.code || 0),
+    finishedAt: now
+  });
+} else if (status.sessionRestartRequested === true || previousStatus === 'Waiting' || previousStatus === 'Processed') {
   atomicWriteJson(statusFile, {
     ...status,
     status: 'Session Closed',
