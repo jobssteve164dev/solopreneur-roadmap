@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.467 - 2026-09-15
+
+### Fixed
+- prevent diagnostic actions squeezing copy (09a1f5f)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.466 - 2026-09-14
 
 ### Fixed
