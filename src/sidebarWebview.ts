@@ -1263,9 +1263,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     .agent-readiness-row {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr);
       gap: 8px;
-      align-items: center;
       padding: 7px;
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 6px;
