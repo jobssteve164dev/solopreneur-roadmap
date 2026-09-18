@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.469 - 2026-09-18
+
+### Fixed
+- restore complete experience review loop (4332c12)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.468 - 2026-09-18
 
 ### Fixed
