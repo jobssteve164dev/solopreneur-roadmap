@@ -4509,6 +4509,7 @@ async function runGlobalPromptReview(
     terminal.show(true);
     const result = await runManualLearningReview({
       runDir, globalRoot, workspaceRoot, projects: [],
+      resultContract: 'global-prompt-v1',
       globalPrompt: currentGlobalPrompt,
       persistedGlobalPrompt: settings.globalPrompt || '',
       getProjects: () => getProjectsReadOnlyFromRegistry({

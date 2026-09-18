@@ -11,9 +11,9 @@ function writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt = 
   const manifest = { schemaVersion: 1, runId: path.basename(runDir), globalRoot, globalPrompt, promptHash: reviewHash(globalPrompt), persistedPromptHash: reviewHash(persistedPrompt), projects, sources: [], memory: [], gaps: [] };
   fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
   const manifestHash = reviewHash(JSON.stringify(manifest));
-  const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], recovery, unresolved };
+  const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: { value: globalPrompt, reason: 'Apply this review revision.', evidence: [] }, memoryChanges: [], lessons: [], processedSources: [], recovery, unresolved };
   fs.writeFileSync(resultFile, JSON.stringify(proposal));
-  const checks = [...recovery.map((_item, index) => ({ target: `recovery:${index}`, safe: true, reason: 'Prior run disposition verified.', evidence: [] })), { target: 'overall', safe: true, reason: 'No unsupported changes.', evidence: [] }];
+  const checks = [{ target: 'globalPrompt', safe: true, reason: 'Full prompt is present.', evidence: [] }, ...recovery.map((_item, index) => ({ target: `recovery:${index}`, safe: true, reason: 'Prior run disposition verified.', evidence: [] })), { target: 'overall', safe: true, reason: 'No unsupported changes.', evidence: [] }];
   fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', provenance: { method: 'subagent', parentRunId: manifest.runId, childRunId: `child-${manifest.runId}` }, checks }));
   return manifest;
 }
@@ -31,6 +31,30 @@ test('review retains legacy reports even when current intake limits are stricter
   const page = await queryGrowthReports(project, path.resolve(__dirname, '..'), { taskId });
   assert.equal(page.turns.length, 4, 'archive remains readable in the growth view');
   assert.equal(JSON.parse(fs.readFileSync(path.join(runDir, 'task-report-1.json'))).report.verification[0], reports[0].verification[0]);
+});
+
+test('incremental review excludes unchanged applied evidence but keeps deferred evidence', async () => {
+  const { collectReviewManifest, reviewHash } = require('../out/learningReview.js');
+  const project = root(); const globalRoot = path.join(project, '.solomap-global');
+  const digests = path.join(project, '.solopreneur/run-digests');
+  fs.mkdirSync(digests, { recursive: true });
+  const appliedFile = path.join(digests, 'applied.json');
+  const deferredFile = path.join(digests, 'deferred.json');
+  fs.writeFileSync(appliedFile, '{"summary":"already reviewed"}');
+  fs.writeFileSync(deferredFile, '{"summary":"needs more evidence"}');
+  const sourceId = file => `source-${reviewHash(`${file}:run_digest`).slice(0, 24)}`;
+  const snapshot = file => { const stat = fs.statSync(file); return { id: sourceId(file), hash: reviewHash(fs.readFileSync(file, 'utf8')), file, kind: 'run_digest', projectPath: project, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino }; };
+  const applied = snapshot(appliedFile); const deferred = snapshot(deferredFile);
+
+  const manifest = await collectReviewManifest({
+    runId: 'incremental', globalRoot, globalPrompt: 'Keep intent.', projects: [project],
+    repositoryForProject: async () => '', incremental: true, includeGithub: false,
+    previousSources: { [applied.id]: applied, [deferred.id]: deferred }, deferredSourceIds: [deferred.id]
+  });
+
+  assert.equal(manifest.sources.some(source => source.file === appliedFile), false, 'an unchanged applied source must not be collected again');
+  assert.equal(manifest.sources.some(source => source.file === deferredFile), true, 'an unresolved source must remain in the next review');
+  assert.equal(manifest.sources.some(source => source.kind === 'legacy_candidate-decisions'), false, 'cursor records are not review evidence');
 });
 
 test('global review indexes every memory and constraint layer with exact paths', async () => {
@@ -98,9 +122,11 @@ test('global review prompt names every path layer and its read or write role', (
     globalPrompt: 'Keep intent.', persistedPromptHash: 'hash', manifestFile: '/runs/manifest.json',
     proposalFile: '/runs/proposal.json', reviewFile: '/runs/review.json'
   });
-  assert.match(agentOwnedPrompt, /memory\/entries.*全部 JSON/s);
-  assert.match(agentOwnedPrompt, /candidate-decisions.*schemaVersion=1 或 2/s);
-  assert.match(agentOwnedPrompt, /candidates、approved、rejected、promotion-suggestions.*schemaVersion=1.*非隐藏项目/s);
+  assert.match(agentOwnedPrompt, /增量采集工具=.*solomap-review\.cjs/);
+  assert.match(agentOwnedPrompt, /已应用且内容未变.*不会再次出现/s);
+  assert.match(agentOwnedPrompt, /内容变化和上次延期.*继续出现/s);
+  assert.match(agentOwnedPrompt, /无论是否存在缺口.*完整全局提示词/s);
+  assert.match(agentOwnedPrompt, /每项新增、合并、修订或删除.*before、after、来源证据和具体理由/s);
   const genericPrompt = buildLearningReviewPrompt('/runs/manifest.json', manifest, '/runs/result.json');
   assert.match(genericPrompt, /\/runs\/review-result\.json/);
 });
@@ -111,7 +137,7 @@ test('manual review reserves its single-flight UI before the Agent launch', asyn
   let starts = 0;
   const operation = runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '',
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     onStart: () => { starts += 1; },
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   });
@@ -126,6 +152,649 @@ test('manual review reserves its single-flight UI before the Agent launch', asyn
   await operation;
 });
 
+test('manual review always applies a prompt revision and advances its continuation state despite evidence gaps', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/apply-with-gaps');
+  let current = 'Keep current instruction.'; let writes = 0;
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current,
+    setGlobalPrompt: async value => { writes += 1; current = value; },
+    launch: async (_promptFile, resultFile) => {
+      writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt: current, unresolved: ['A source is temporarily unavailable.'] });
+    }
+  });
+
+  assert.equal(result.status, 'applied');
+  assert.equal(writes, 1, 'even an unchanged proposal must be applied as this review revision');
+  const application = JSON.parse(fs.readFileSync(path.join(runDir, 'application.json'), 'utf8'));
+  assert.equal(application.status, 'applied');
+  assert.ok(application.items.globalPrompt);
+  const state = JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json'), 'utf8'));
+  assert.equal(state.lastAppliedRunId, 'apply-with-gaps');
+  assert.deepEqual(state.unresolved, ['A source is temporarily unavailable.']);
+});
+
+test('manual review accepts the original single-result contract and applies the generated global prompt', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/original-contract');
+  const source = createReviewSource(globalRoot, 'User confirmed the instruction must be explicit.');
+  let current = 'Old instruction.';
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current,
+    setGlobalPrompt: async value => { current = value; },
+    launch: async (_promptFile, resultFile) => {
+      writeDirectReview({
+        runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: 'New complete instruction.',
+        sources: [source],
+        changes: [{ type: 'revise', before: ['Old instruction.'], after: 'New complete instruction.', evidence: [source.id], reason: 'The confirmed instruction replaces the vague wording with an explicit action.' }],
+        unresolved: ['A missing source was not used.']
+      });
+    }
+  });
+
+  assert.equal(result.status, 'applied');
+  assert.equal(current, 'New complete instruction.');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(runDir, 'application.json'))).status, 'applied');
+});
+
+function writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt, newPrompt, changes = [], sources = [], cursorUpdates = [], projects = [], unresolved = [], deferredSourceIds = [], recovery = [] }) {
+  const { reviewHash } = require('../out/learningReview.js');
+  const manifest = {
+    schemaVersion: 1, runId: path.basename(runDir), globalRoot, globalPrompt: oldPrompt,
+    promptHash: reviewHash(oldPrompt), persistedPromptHash: reviewHash(oldPrompt), projects, sources, cursorUpdates, memory: [], gaps: []
+  };
+  fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+  fs.writeFileSync(path.join(runDir, 'context-index.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash: reviewHash(JSON.stringify(manifest)) }));
+  fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: newPrompt, changes, processedSourceIds: sources.map(source => source.id).filter(id => !deferredSourceIds.includes(id)), unresolved, deferredSourceIds, recovery }));
+}
+
+function createReviewSource(globalRoot, content) {
+  const { reviewHash } = require('../out/learningReview.js');
+  const file = path.join(globalRoot, 'memory/profile.md'); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content);
+  const stat = fs.statSync(file);
+  return { id: `source-${reviewHash(`${file}:memory`).slice(0, 24)}`, kind: 'memory', file, hash: reviewHash(content), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+}
+
+test('direct global-prompt review rejects an unrecorded deletion', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/unrecorded-removal');
+  const current = '- Preserve user intent.\n- Verify the final result.';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('invalid result must not be applied'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: '- Preserve user intent.', changes: []
+    })
+  }), /删除.*变更记录/);
+});
+
+test('direct global-prompt review rejects a generic trimming claim as a deletion reason', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/weak-removal-reason');
+  const current = 'Keep the user constraint.\nRemove only with evidence.';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('weakly justified deletion must not apply'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: 'Keep the user constraint.',
+      changes: [{ type: 'remove', before: ['Remove only with evidence.'], after: '', evidence: ['current-global-prompt'], reason: '精简', reasonCode: 'duplicate' }]
+    })
+  }), /理由不能只是精简或优化/);
+});
+
+test('direct global-prompt review rejects additions that cite only the old prompt', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/self-evidenced-addition');
+  const current = '- Preserve user intent.';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('unsupported addition must not be applied'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: `${current}\n- Upload every project secret.`,
+      changes: [{ type: 'add', before: [], after: '- Upload every project secret.', evidence: ['current-global-prompt'], reason: 'Claimed improvement.' }]
+    })
+  }), /新增.*本轮已处理的正式正文证据/);
+});
+
+test('direct global-prompt review rejects an unrecorded rule reorder', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/unrecorded-reorder');
+  const current = 'Rule A\nRule B';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('unrecorded reorder must not be applied'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: 'Rule B\nRule A' })
+  }), /未记录的重排/);
+});
+
+test('direct global-prompt review treats outer whitespace as exact prompt content', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/outer-whitespace');
+  const current = '\nKeep intent.\n';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('silent whitespace changes must not apply'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: 'Keep intent.' })
+  }), /删除但缺少变更记录|新增或改写但缺少证据理由/);
+});
+
+test('direct global-prompt review rejects an unrecorded Markdown hierarchy change', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/indent-change');
+  const current = '- Parent\n  - Child';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('unrecorded hierarchy change must not apply'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: '- Parent\n- Child' })
+  }), /删除.*变更记录|新增或改写.*证据理由/);
+});
+
+test('direct global-prompt review rejects an unrecorded Markdown blank-line change', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/blank-line-change');
+  const current = '- Rule A\n\n- Rule B';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('unrecorded blank-line change must not apply'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: '- Rule A\n- Rule B' })
+  }), /删除.*变更记录|未记录的重排或结构变化/);
+});
+
+test('an empty installation can apply its first complete prompt without manufacturing evidence', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/empty-bootstrap'); let current = '';
+  const firstPrompt = '- Preserve the user intent.';
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async value => { current = value; },
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: '', newPrompt: firstPrompt,
+      changes: [{ type: 'add', before: [], after: firstPrompt, evidence: ['current-global-prompt'], reason: 'Create the first complete baseline because no earlier prompt or evidence exists.' }]
+    })
+  });
+  assert.equal(result.status, 'applied'); assert.equal(current, firstPrompt);
+});
+
+test('direct global-prompt review rejects a no-op revision used to hide a reorder', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/no-op-reorder');
+  const source = createReviewSource(globalRoot, 'The rule remains supported.');
+  const current = 'Rule A\nRule B\nRule C';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('disguised reorder must not be applied'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: 'Rule B\nRule A\nRule C', sources: [source],
+      changes: [{ type: 'revise', before: ['Rule A'], after: 'Rule A', evidence: [source.id], reason: 'Claimed revision.' }]
+    })
+  }), /不得用相同文本伪造变化/);
+});
+
+test('production review contract rejects a newly generated legacy result', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/legacy-bypass');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: 'Keep intent.', persistedGlobalPrompt: 'Keep intent.',
+    getGlobalPrompt: () => 'Keep intent.', setGlobalPrompt: async () => assert.fail('legacy result must not be applied'),
+    launch: async (_promptFile, resultFile) => writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt: 'Keep intent.' })
+  }), /未按当前契约生成完整全局提示词/);
+});
+
+test('direct global-prompt review applies an evidenced merge and preserves its audit record', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/evidenced-merge');
+  const source = createReviewSource(globalRoot, 'The user goal remains authoritative when constraints overlap.');
+  let current = '- Follow the user goal.\n- Do not replace the user goal with an engineering preference.';
+  const merged = '- Follow the user goal; never replace it with an engineering preference.';
+  const changes = [{
+    type: 'merge',
+    before: ['- Follow the user goal.', '- Do not replace the user goal with an engineering preference.'],
+    after: merged,
+    evidence: [source.id],
+    reason: 'The two constraints express one invariant; the merged sentence keeps both prohibitions without repetition.'
+  }];
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async value => { current = value; },
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: merged, changes, sources: [source] })
+  });
+  assert.equal(result.status, 'applied');
+  assert.equal(current, merged);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runDir, 'proposal.json'))).changes, changes);
+});
+
+test('a successful direct review stores source metadata for the next incremental cursor', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project');
+  const digest = path.join(project, '.solopreneur/run-digests/one.json');
+  fs.mkdirSync(path.dirname(digest), { recursive: true }); fs.writeFileSync(digest, '{"summary":"verified"}');
+  const stat = fs.statSync(digest); const source = {
+    id: `source-${reviewHash(`${digest}:run_digest`).slice(0, 24)}`, kind: 'run_digest', projectPath: project, file: digest,
+    hash: reviewHash(fs.readFileSync(digest, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino
+  };
+  const runDir = path.join(globalRoot, 'maintenance/runs/source-cursor'); const current = 'Keep verified constraints.';
+  const result = await runManualLearningReview({
+    runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: current, sources: [source], projects: [project] })
+  });
+  assert.equal(result.status, 'applied');
+  const cursor = JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json'))).sources[source.id];
+  assert.deepEqual(cursor, { hash: source.hash, file: digest, kind: 'run_digest', projectPath: project, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino, content: '{"summary":"verified"}' });
+});
+
+test('direct global-prompt review rejects a forged cursor update', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const runDir = path.join(globalRoot, 'maintenance/runs/forged-cursor');
+  const file = path.join(project, '.solopreneur/run-digests/one.json'); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '{"summary":"verified"}');
+  const stat = fs.statSync(file); const source = { id: `source-${reviewHash(`${file}:run_digest`).slice(0, 24)}`, kind: 'run_digest', projectPath: project, file, hash: reviewHash(fs.readFileSync(file, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+  fs.mkdirSync(path.join(globalRoot, 'maintenance'), { recursive: true });
+  fs.writeFileSync(path.join(globalRoot, 'maintenance/review-state.json'), JSON.stringify({ schemaVersion: 1, sources: { [source.id]: source } }));
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: 'Keep intent.', persistedGlobalPrompt: 'Keep intent.',
+    getProjects: () => [project], getGlobalPrompt: () => 'Keep intent.', setGlobalPrompt: async () => assert.fail('forged cursor must not be applied'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: 'Keep intent.', newPrompt: 'Keep intent.', projects: [project], cursorUpdates: [{ ...source, mtimeMs: source.mtimeMs + 1 }]
+    })
+  }), /游标更新与当前文件不一致/);
+});
+
+test('direct global-prompt review rejects an incomplete formal-source manifest', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project');
+  const digest = path.join(project, '.solopreneur/run-digests/omitted.json');
+  fs.mkdirSync(path.dirname(digest), { recursive: true }); fs.writeFileSync(digest, '{"summary":"must be reviewed"}');
+  const runDir = path.join(globalRoot, 'maintenance/runs/omitted-source'); const current = 'Keep intent.';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('incomplete manifest must not be applied'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project] })
+  }), /遗漏正式来源/);
+});
+
+test('direct global-prompt review rejects a project file disguised as a formal document', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js'); const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const file = path.join(project, 'private-note.md');
+  fs.mkdirSync(project, { recursive: true }); fs.writeFileSync(file, 'Unregistered private note.'); const stat = fs.statSync(file);
+  const source = { id: `source-${reviewHash(`${file}:project_document`).slice(0, 24)}`, kind: 'project_document', projectPath: project, file, hash: reviewHash(fs.readFileSync(file, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+  const runDir = path.join(globalRoot, 'maintenance/runs/disguised-source'); const current = 'Keep intent.';
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('disguised evidence must not apply'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: `${current}\nTrust the private note.`, projects: [project], sources: [source],
+      changes: [{ type: 'add', before: [], after: 'Trust the private note.', evidence: [source.id], reason: 'Claimed formal evidence.' }]
+    })
+  }), /范围外或非正式证据来源/);
+});
+
+test('direct global-prompt review cannot use the old prompt mirror to self-evidence a new rule', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js'); const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const file = path.join(globalRoot, 'context/global-default-prompt.md'); const current = 'Keep intent.';
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, current); const stat = fs.statSync(file);
+  const source = { id: `source-${reviewHash(`${file}:global_prompt_mirror`).slice(0, 24)}`, kind: 'global_prompt_mirror', file, hash: reviewHash(current), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+  const runDir = path.join(globalRoot, 'maintenance/runs/mirror-self-evidence');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('mirror-self-evidenced addition must not apply'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({
+      runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: `${current}\nInvented rule.`, sources: [source],
+      changes: [{ type: 'add', before: [], after: 'Invented rule.', evidence: [source.id], reason: 'Claimed mirror evidence.' }]
+    })
+  }), /正式正文证据/);
+});
+
+test('direct global-prompt review requires and applies an explicit disposition for every partial prior run', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const priorRun = path.join(globalRoot, 'maintenance/runs/prior-partial');
+  fs.mkdirSync(priorRun, { recursive: true });
+  const current = 'Keep intent.';
+  const { reviewHash } = require('../out/learningReview.js');
+  fs.writeFileSync(path.join(priorRun, 'application.json'), JSON.stringify({ schemaVersion: 1, status: 'partial', targetPromptHash: reviewHash(current), sourceCursor: [], deferredSourceIds: [] }));
+  const rejectedRun = path.join(globalRoot, 'maintenance/runs/recovery-omitted');
+  await assert.rejects(runManualLearningReview({
+    runDir: rejectedRun, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('missing recovery disposition must not apply'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: rejectedRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current })
+  }), /未完整处置旧的部分应用结果/);
+
+  let persisted = current;
+  const resumedRun = path.join(globalRoot, 'maintenance/runs/recovery-resumed');
+  const recovery = [{ runDir: priorRun, status: 'partial', decision: 'resumed', reason: 'The complete prior prompt was carried into this result.' }];
+  const result = await runManualLearningReview({
+    runDir: resumedRun, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => persisted, setGlobalPrompt: async value => { persisted = value; },
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: resumedRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current, recovery })
+  });
+  assert.equal(result.status, 'applied');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(priorRun, 'application.json'))), {
+    schemaVersion: 1, status: 'resumed', targetPromptHash: reviewHash(current), sourceCursor: [], deferredSourceIds: [],
+    recoveredBy: 'recovery-resumed', recoveryReason: 'The complete prior prompt was carried into this result.'
+  });
+});
+
+test('a partial prompt that was never written cannot be superseded', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js'); const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const priorRun = path.join(globalRoot, 'maintenance/runs/unwritten-partial');
+  fs.mkdirSync(priorRun, { recursive: true });
+  const current = 'Current prompt.'; const unwritten = 'Unwritten replacement.';
+  fs.writeFileSync(path.join(priorRun, 'application.json'), JSON.stringify({
+    schemaVersion: 1, status: 'partial', targetPromptHash: reviewHash(unwritten), targetPrompt: unwritten,
+    items: {}, sourceCursor: [], deferredSourceIds: [], deferredSources: []
+  }));
+  const runDir = path.join(globalRoot, 'maintenance/runs/invalid-supersede');
+  const recovery = [{ runDir: priorRun, status: 'partial', decision: 'superseded', reason: 'Claimed replacement.' }];
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('unwritten prompt must not be discarded'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: current, recovery })
+  }), /尚未写入成功的旧完整提示词/);
+});
+
+test('superseding a partial run cannot discard its only deferred-source snapshot', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js'); const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const file = path.join(project, '.solopreneur/run-digests/lost.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '{"summary":"deferred"}'); const stat = fs.statSync(file);
+  const source = { id: `source-${reviewHash(`${file}:run_digest`).slice(0, 24)}`, kind: 'run_digest', projectPath: project, file, hash: reviewHash(fs.readFileSync(file, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino, content: '{"summary":"deferred"}' };
+  const priorRun = path.join(globalRoot, 'maintenance/runs/partial-with-deferred'); fs.mkdirSync(priorRun, { recursive: true });
+  const current = 'Keep intent.';
+  fs.writeFileSync(path.join(priorRun, 'application.json'), JSON.stringify({ schemaVersion: 1, status: 'partial', targetPromptHash: reviewHash(current), sourceCursor: [], deferredSourceIds: [source.id], deferredSources: [source] }));
+  fs.unlinkSync(file);
+  const recovery = [{ runDir: priorRun, status: 'partial', decision: 'superseded', reason: 'A newer complete review replaces the prompt result.' }];
+  const rejectedRun = path.join(globalRoot, 'maintenance/runs/dropped-deferred');
+  await assert.rejects(runManualLearningReview({
+    runDir: rejectedRun, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('lost deferred snapshot must block application'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: rejectedRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project], recovery })
+  }), /延期来源未由本轮承接/);
+
+  const value = { file, previousHash: source.hash, previousKind: source.kind };
+  const tombstone = { id: source.id, kind: 'deleted_source', projectPath: project, hash: reviewHash(JSON.stringify(value)), content: source.content, value };
+  const carriedRun = path.join(globalRoot, 'maintenance/runs/carried-deferred');
+  const result = await runManualLearningReview({
+    runDir: carriedRun, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: carriedRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project], sources: [tombstone], deferredSourceIds: [source.id], recovery })
+  });
+  assert.equal(result.status, 'applied');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(priorRun, 'application.json'))).status, 'superseded');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json'))).deferredSources[0].kind, 'deleted_source');
+});
+
+test('a deferred source keeps a version snapshot and can remain deferred after deletion across later reviews', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const cp = require('node:child_process');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project');
+  const file = path.join(project, '.solopreneur/run-digests/deferred.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '{"summary":"needs follow-up"}');
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ path: project }], hiddenProjects: [] }));
+  const { reviewHash } = require('../out/learningReview.js'); const stat = fs.statSync(file);
+  const source = { id: `source-${reviewHash(`${file}:run_digest`).slice(0, 24)}`, kind: 'run_digest', projectPath: project, file, hash: reviewHash(fs.readFileSync(file, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+  const current = 'Keep intent.'; const runDir = path.join(globalRoot, 'maintenance/runs/defer-source');
+  const result = await runManualLearningReview({
+    runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project], sources: [source], deferredSourceIds: [source.id] })
+  });
+  assert.equal(result.status, 'applied');
+  const state = JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json')));
+  assert.equal(state.sources[source.id], undefined);
+  assert.deepEqual(state.deferredSources, [{ ...source, content: '{"summary":"needs follow-up"}' }]);
+
+  fs.unlinkSync(file);
+  const runDeferredDeletion = async runId => {
+    const nextRun = path.join(globalRoot, 'maintenance/runs', runId);
+    const review = await runManualLearningReview({
+      runDir: nextRun, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+      getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+      launch: async (promptFile, resultFile) => {
+        cp.execFileSync(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-review.cjs'), 'collect', '--run-id', runId, '--run-dir', nextRun, '--global', globalRoot, '--workspace', project, '--prompt-file', promptFile]);
+        const manifest = JSON.parse(fs.readFileSync(path.join(nextRun, 'manifest.json')));
+        const deletion = manifest.sources.find(item => item.id === source.id && item.kind === 'deleted_source');
+        assert.equal(deletion?.value.previousHash, source.hash);
+        fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: current, changes: [], processedSourceIds: [], unresolved: ['Deletion remains unresolved.'], deferredSourceIds: [source.id], recovery: [] }));
+      }
+    });
+    assert.equal(review.status, 'applied');
+    return JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json'))).deferredSources[0];
+  };
+  const firstDeletion = await runDeferredDeletion('deferred-deleted');
+  assert.equal(firstDeletion.kind, 'deleted_source');
+  assert.equal(firstDeletion.content, '{"summary":"needs follow-up"}');
+  const secondDeletion = await runDeferredDeletion('deferred-deleted-again');
+  assert.equal(secondDeletion.kind, 'deleted_source');
+  assert.equal(secondDeletion.content, '{"summary":"needs follow-up"}');
+});
+
+test('a changed deferred source preserves every still-unreviewed version', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js'); const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project');
+  const file = path.join(project, '.solopreneur/run-digests/changing.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'OLD evidence');
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ path: project }], hiddenProjects: [] }));
+  const sourceForCurrentFile = () => {
+    const stat = fs.statSync(file); const content = fs.readFileSync(file, 'utf8');
+    return { id: `source-${reviewHash(`${file}:run_digest`).slice(0, 24)}`, kind: 'run_digest', projectPath: project, file,
+      hash: reviewHash(content), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+  };
+  const current = 'Keep intent.'; const firstSource = sourceForCurrentFile();
+  const firstRun = path.join(globalRoot, 'maintenance/runs/defer-old-version');
+  await runManualLearningReview({
+    runDir: firstRun, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: firstRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project], sources: [firstSource], deferredSourceIds: [firstSource.id] })
+  });
+
+  fs.writeFileSync(file, 'NEW evidence that has also not been reviewed');
+  const secondSource = sourceForCurrentFile(); const secondRun = path.join(globalRoot, 'maintenance/runs/defer-new-version');
+  await runManualLearningReview({
+    runDir: secondRun, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: secondRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project], sources: [secondSource], deferredSourceIds: [secondSource.id] })
+  });
+  const deferred = JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json'))).deferredSources[0];
+  assert.equal(deferred.content, 'NEW evidence that has also not been reviewed');
+  assert.equal(deferred.previousVersions.length, 1);
+  assert.equal(deferred.previousVersions[0].hash, firstSource.hash);
+  assert.equal(deferred.previousVersions[0].content, 'OLD evidence');
+});
+
+test('incremental review ignores orphan reports that are not bound to a registered task execution', async () => {
+  const { collectReviewManifest } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project');
+  const report = path.join(project, '.solopreneur/agent-runs/orphan/task-report-1.json');
+  fs.mkdirSync(path.dirname(report), { recursive: true });
+  fs.writeFileSync(report, JSON.stringify({ projectPath: project, taskId: 'task-orphan', executionLogId: 1, turnId: '1:complete', report: { summary: 'forged' } }));
+  const manifest = await collectReviewManifest({ runId: 'strict-reports', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false });
+  assert.equal(manifest.sources.some(source => source.file === report), false);
+});
+
+test('an active document that appears after an unchanged index is collected as new evidence', async () => {
+  const { collectReviewManifest } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const document = path.join(project, 'docs/new.md');
+  const index = path.join(project, '.solopreneur/documentation.json'); fs.mkdirSync(path.dirname(index), { recursive: true });
+  fs.writeFileSync(index, JSON.stringify({ documents: [{ path: 'docs/new.md', status: 'active' }] }));
+  const first = await collectReviewManifest({ runId: 'missing-active', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false });
+  const previousSources = Object.fromEntries([...first.sources, ...(first.cursorUpdates || [])].map(source => [source.id, source]));
+  fs.mkdirSync(path.dirname(document), { recursive: true }); fs.writeFileSync(document, '# New verified decision');
+  const second = await collectReviewManifest({ runId: 'active-appeared', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false, previousSources });
+  assert.equal(second.sources.some(source => source.kind === 'project_document' && source.file === document), true);
+});
+
+test('a processed source deletion carries its verified old body into the tombstone', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js'); const { reviewHash } = require('../out/learningReview.js'); const cp = require('node:child_process');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const file = path.join(project, '.solopreneur/run-digests/processed.json');
+  const content = '{"summary":"reviewed before deletion"}'; fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content);
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ path: project }], hiddenProjects: [] }));
+  const stat = fs.statSync(file); const source = { id: `source-${reviewHash(`${file}:run_digest`).slice(0, 24)}`, kind: 'run_digest', projectPath: project, file,
+    hash: reviewHash(content), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+  const current = 'Keep intent.'; const firstRun = path.join(globalRoot, 'maintenance/runs/process-before-delete');
+  await runManualLearningReview({
+    runDir: firstRun, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: firstRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project], sources: [source] })
+  });
+  fs.unlinkSync(file);
+  const secondRun = path.join(globalRoot, 'maintenance/runs/processed-deleted'); fs.mkdirSync(secondRun, { recursive: true });
+  const promptFile = path.join(secondRun, 'prompt.txt'); fs.writeFileSync(promptFile, `当前全局默认提示词JSON=${JSON.stringify(current)}\n当前已持久化提示词哈希=${reviewHash(current)}\n`);
+  cp.execFileSync(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-review.cjs'), 'collect', '--run-id', 'processed-deleted', '--run-dir', secondRun, '--global', globalRoot, '--workspace', project, '--prompt-file', promptFile]);
+  const deletion = JSON.parse(fs.readFileSync(path.join(secondRun, 'manifest.json'))).sources.find(item => item.id === source.id);
+  assert.equal(deletion.kind, 'deleted_source');
+  assert.equal(deletion.content, content);
+  assert.equal(reviewHash(deletion.content), deletion.value.previousHash);
+});
+
+test('an unchanged report loses evidence status when its task registration is revoked', async () => {
+  const { collectReviewManifest } = require('../out/learningReview.js'); const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const runDir = path.join(project, '.solopreneur/agent-runs/__solo__/1');
+  const taskRoot = path.join(project, '.solopreneur/agent-runs/learning-tasks'); fs.mkdirSync(taskRoot, { recursive: true }); fs.mkdirSync(runDir, { recursive: true });
+  const taskFile = path.join(taskRoot, 'task-bound.json'); const reportFile = path.join(runDir, 'task-report-1.json');
+  const task = { schemaVersion: 1, taskId: 'task-bound', projectPath: project, executions: [{ id: 1, runDir }] };
+  fs.writeFileSync(taskFile, JSON.stringify(task));
+  fs.writeFileSync(reportFile, JSON.stringify({ projectPath: project, taskId: 'task-bound', executionLogId: 1, turnId: '1:complete', report: { summary: 'valid evidence' } }));
+  const first = await collectReviewManifest({ runId: 'bound-report', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false });
+  const previousSources = Object.fromEntries(first.sources.map(source => [source.id, source]));
+  fs.writeFileSync(taskFile, JSON.stringify({ ...task, executions: [] }));
+  const second = await collectReviewManifest({ runId: 'revoked-report', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false, previousSources, deferredSourceIds: [first.sources.find(source => source.file === reportFile).id] });
+  const revoked = second.sources.find(source => source.file === undefined && source.value?.file === reportFile);
+  assert.equal(second.sources.some(source => source.kind === 'agent_report' && source.file === reportFile), false);
+  assert.equal(revoked?.kind, 'deleted_source');
+  assert.equal(revoked?.value.registrationRevoked, true);
+  fs.mkdirSync(path.join(globalRoot, 'maintenance'), { recursive: true });
+  fs.writeFileSync(path.join(globalRoot, 'maintenance/review-state.json'), JSON.stringify({ schemaVersion: 1, sources: previousSources, deferredSourceIds: [revoked.id], deferredSources: [previousSources[revoked.id]] }));
+  const applyRun = path.join(globalRoot, 'maintenance/runs/apply-revocation'); const current = 'Keep intent.';
+  await runManualLearningReview({
+    runDir: applyRun, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir: applyRun, resultFile, globalRoot, oldPrompt: current, newPrompt: current, projects: [project], sources: second.sources })
+  });
+  const appliedState = JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json')));
+  assert.equal(appliedState.sources[revoked.id], undefined);
+  const third = await collectReviewManifest({ runId: 'after-revocation', globalRoot, globalPrompt: current, projects: [project], incremental: true, includeGithub: false, previousSources: appliedState.sources });
+  assert.equal(third.sources.some(source => source.value?.file === reportFile || source.file === reportFile), false);
+});
+
+test('a legacy unchanged report without registration is revalidated instead of trusted by association', async () => {
+  const { collectReviewManifest, reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const taskRoot = path.join(project, '.solopreneur/agent-runs/learning-tasks');
+  const runDir = path.join(project, '.solopreneur/agent-runs/orphan'); const taskFile = path.join(taskRoot, 'task-real.json'); const reportFile = path.join(runDir, 'task-report-1.json');
+  fs.mkdirSync(taskRoot, { recursive: true }); fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(taskFile, JSON.stringify({ schemaVersion: 1, taskId: 'task-real', projectPath: project, executions: [] }));
+  fs.writeFileSync(reportFile, JSON.stringify({ projectPath: project, taskId: 'task-orphan', executionLogId: 9, turnId: '1:complete', report: { summary: 'old orphan' } }));
+  const snapshot = (file, kind) => { const stat = fs.statSync(file); return { id: `source-${reviewHash(`${file}:${kind}`).slice(0, 24)}`, kind, projectPath: project, file,
+    hash: reviewHash(fs.readFileSync(file, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino }; };
+  const taskSource = snapshot(taskFile, 'task'); const reportSource = snapshot(reportFile, 'agent_report');
+  const manifest = await collectReviewManifest({ runId: 'legacy-report-migration', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false,
+    previousSources: { [taskSource.id]: taskSource, [reportSource.id]: reportSource }, deferredSourceIds: [reportSource.id] });
+  assert.equal(manifest.sources.some(source => source.kind === 'agent_report' && source.file === reportFile), false);
+  assert.equal(manifest.sources.some(source => source.kind === 'deleted_source' && source.value?.registrationRevoked), true);
+});
+
+test('a deleted legacy hash-only cursor becomes a non-semantic gap without blocking the complete prompt', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js'); const { reviewHash } = require('../out/learningReview.js'); const cp = require('node:child_process');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const file = path.join(project, '.solopreneur/run-digests/legacy.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'legacy body unavailable after migration'); const stat = fs.statSync(file);
+  const id = `source-${reviewHash(`${file}:run_digest`).slice(0, 24)}`; const previous = { id, kind: 'run_digest', projectPath: project, file,
+    hash: reviewHash(fs.readFileSync(file, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino };
+  fs.mkdirSync(path.join(globalRoot, 'maintenance'), { recursive: true });
+  fs.writeFileSync(path.join(globalRoot, 'maintenance/review-state.json'), JSON.stringify({ schemaVersion: 1, sources: { [id]: previous }, deferredSourceIds: [], deferredSources: [] }));
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ path: project }], hiddenProjects: [] })); fs.unlinkSync(file);
+  const current = 'Keep intent.'; const runDir = path.join(globalRoot, 'maintenance/runs/legacy-deleted');
+  const result = await runManualLearningReview({
+    runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (promptFile, resultFile) => {
+      cp.execFileSync(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-review.cjs'), 'collect', '--run-id', 'legacy-deleted', '--run-dir', runDir, '--global', globalRoot, '--workspace', project, '--prompt-file', promptFile]);
+      const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'))); const tombstone = manifest.sources.find(source => source.id === id);
+      assert.equal(tombstone.value.contentUnavailable, true);
+      fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: current, changes: [], processedSourceIds: [id], unresolved: ['旧游标没有可恢复正文；仅终结删除状态，不用于提示词变化。'], deferredSourceIds: [], recovery: [] }));
+    }
+  });
+  assert.equal(result.status, 'applied');
+});
+
+test('incremental collection notices a same-size edit whose mtime was restored', async () => {
+  const { collectReviewManifest, reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project'); const file = path.join(project, '.solopreneur/run-digests/same-time.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, '{"value":"one"}');
+  const first = await collectReviewManifest({ runId: 'same-time-one', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false });
+  const source = first.sources.find(item => item.file === file); assert.ok(source);
+  const before = fs.statSync(file); await new Promise(resolve => setTimeout(resolve, 20));
+  fs.writeFileSync(file, '{"value":"two"}'); fs.utimesSync(file, before.atime, before.mtime);
+  const second = await collectReviewManifest({ runId: 'same-time-two', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false, previousSources: { [source.id]: source } });
+  const changed = second.sources.find(item => item.id === source.id);
+  assert.equal(changed?.hash, reviewHash('{"value":"two"}'));
+});
+
+test('incremental collection and closed-set validation do not reread unchanged task or report bodies', async () => {
+  const { collectReviewManifest, reviewHash } = require('../out/learningReview.js'); const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project');
+  const task = path.join(project, '.solopreneur/agent-runs/learning-tasks/task-one.json');
+  const report = path.join(project, '.solopreneur/agent-runs/__solo__/1/task-report-1.json');
+  fs.mkdirSync(path.dirname(task), { recursive: true }); fs.mkdirSync(path.dirname(report), { recursive: true });
+  fs.writeFileSync(task, JSON.stringify({ schemaVersion: 1, taskId: 'task-one', projectPath: project, executions: [{ id: 1, runDir: path.dirname(report) }] }));
+  fs.writeFileSync(report, JSON.stringify({ projectPath: project, taskId: 'task-one', executionLogId: 1, turnId: '1:complete', report: { summary: 'done' } }));
+  const sourceFor = (file, kind) => { const stat = fs.statSync(file); return { id: `source-${reviewHash(`${file}:${kind}`).slice(0, 24)}`, kind, projectPath: project, file, hash: reviewHash(fs.readFileSync(file, 'utf8')), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino }; };
+  const taskSource = sourceFor(task, 'task'); const reportSource = { ...sourceFor(report, 'agent_report'),
+    value: { registration: { taskId: 'task-one', executionLogId: 1, runDir: path.dirname(report), turnId: '1:complete' } } };
+  const previousSources = { [taskSource.id]: taskSource, [reportSource.id]: reportSource };
+  fs.mkdirSync(path.join(globalRoot, 'maintenance'), { recursive: true });
+  fs.writeFileSync(path.join(globalRoot, 'maintenance/review-state.json'), JSON.stringify({ schemaVersion: 1, sources: previousSources, deferredSourceIds: [], deferredSources: [] }));
+  const originalRead = fs.readFileSync;
+  fs.readFileSync = function(file, ...args) {
+    if ([task, report].includes(path.resolve(String(file)))) throw new Error(`unchanged body reread: ${file}`);
+    return originalRead.call(this, file, ...args);
+  };
+  try {
+    const manifest = await collectReviewManifest({ runId: 'no-reread-collect', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false, previousSources });
+    assert.equal(manifest.sources.some(source => [task, report].includes(source.file)), false);
+    const runDir = path.join(globalRoot, 'maintenance/runs/no-reread-validate');
+    const result = await runManualLearningReview({
+      runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: 'Keep intent.', persistedGlobalPrompt: 'Keep intent.',
+      getProjects: () => [project], getGlobalPrompt: () => 'Keep intent.', setGlobalPrompt: async () => {},
+      launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: 'Keep intent.', newPrompt: 'Keep intent.', projects: [project] })
+    });
+    assert.equal(result.status, 'applied');
+  } finally { fs.readFileSync = originalRead; }
+});
+
+test('Agent-owned review collector uses the applied review state as its next-run cursor', () => {
+  const cp = require('node:child_process');
+  const globalRoot = root(); const project = path.join(globalRoot, 'project');
+  const digestDir = path.join(project, '.solopreneur/run-digests');
+  fs.mkdirSync(digestDir, { recursive: true });
+  fs.writeFileSync(path.join(digestDir, 'one.json'), '{"summary":"new lesson"}');
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ path: project }], hiddenProjects: [] }));
+  const tool = path.resolve(__dirname, '../resources/tools/solomap-review.cjs');
+  const collect = runId => {
+    const runDir = path.join(globalRoot, 'maintenance/runs', runId); fs.mkdirSync(runDir, { recursive: true });
+    const prompt = path.join(runDir, 'prompt.txt');
+    fs.writeFileSync(prompt, `当前编辑器中的全局默认提示词="Keep intent."\n当前已持久化提示词哈希=${'a'.repeat(64)}\n`);
+    cp.execFileSync(process.execPath, [tool, 'collect', '--run-id', runId, '--run-dir', runDir, '--global', globalRoot, '--workspace', project, '--prompt-file', prompt]);
+    return JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
+  };
+  const first = collect('cursor-one');
+  const digest = first.sources.find(source => source.kind === 'run_digest');
+  assert.ok(digest);
+  fs.writeFileSync(path.join(globalRoot, 'maintenance/review-state.json'), JSON.stringify({ schemaVersion: 1, sources: { [digest.id]: digest.hash }, deferredSourceIds: [] }));
+  const second = collect('cursor-two');
+  assert.equal(second.sources.some(source => source.id === digest.id), false);
+  const migratedCursor = second.cursorUpdates.find(source => source.id === digest.id);
+  assert.ok(migratedCursor, 'a hash-only cursor is upgraded without returning the unchanged body as evidence');
+  fs.writeFileSync(path.join(globalRoot, 'maintenance/review-state.json'), JSON.stringify({ schemaVersion: 1, sources: { [digest.id]: migratedCursor }, deferredSourceIds: [] }));
+  const third = collect('cursor-three');
+  assert.equal(third.sources.some(source => source.id === digest.id), false);
+  assert.equal(third.cursorUpdates.some(source => source.id === digest.id), false, 'matching metadata skips the unchanged body entirely');
+  fs.unlinkSync(path.join(digestDir, 'one.json'));
+  const fourth = collect('cursor-four');
+  const deletion = fourth.sources.find(source => source.id === digest.id && source.kind === 'deleted_source');
+  assert.equal(deletion?.value.file, path.join(digestDir, 'one.json'), 'a removed source is reviewed once as a tombstone instead of remaining silently consumed');
+});
+
 test('manual review gives the Agent control before any review preparation or evidence collection', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const { reviewHash } = require('../out/learningReview.js');
@@ -136,7 +805,7 @@ test('manual review gives the Agent control before any review preparation or evi
     prepare: () => { pluginActions.push('prepare'); },
     getProjects: () => { pluginActions.push('projects'); return []; },
     api: async () => { pluginActions.push('github'); return []; },
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => {
       assert.deepEqual(pluginActions, [], 'the Agent must start before the plugin performs review work');
       const manifest = { schemaVersion: 1, runId: 'agent-first', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [], sources: [], memory: [], gaps: [] };
@@ -155,7 +824,7 @@ test('manual review rejects an Agent manifest that omits a registered project', 
   const globalRoot = root(); const project = root(); const runDir = path.join(globalRoot, 'maintenance/runs/missing-project');
   await assert.rejects(runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [project],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot, projects: [] }); }
   }), /项目范围/);
 });
@@ -168,7 +837,7 @@ test('manual review ignores legacy candidates that belong to projects outside th
   fs.writeFileSync(path.join(candidates, 'hidden.json'), JSON.stringify({ schemaVersion: 1, projectPath: '/hidden/project' }));
   const result = await runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   });
   assert.equal(result.status, 'applied');
@@ -182,7 +851,7 @@ test('manual review rejects Agent evidence outside registered project and global
   fs.writeFileSync(outside, 'outside');
   await assert.rejects(runManualLearningReview({
     runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => {
       const source = { id: 'outside-source', kind: 'agent_report', projectPath: project, file: outside, hash: reviewHash('outside') };
       const manifest = { schemaVersion: 1, runId: 'outside-source', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
@@ -203,7 +872,7 @@ test('manual review rejects Agent evidence that escapes through a project symlin
   fs.writeFileSync(outside, 'outside'); fs.symlinkSync(outside, linked);
   await assert.rejects(runManualLearningReview({
     runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => {
       const source = { id: 'linked-source', kind: 'agent_report', projectPath: project, file: linked, hash: reviewHash('outside') };
       const manifest = { schemaVersion: 1, runId: 'symlink-source', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
@@ -224,7 +893,7 @@ test('manual review rejects memory content that does not match its Agent manifes
   fs.mkdirSync(path.dirname(memoryFile), { recursive: true }); fs.writeFileSync(memoryFile, original);
   await assert.rejects(runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => {
       const source = { id: 'memory-source', kind: 'memory', file: memoryFile, hash: reviewHash(original) };
       const manifest = { schemaVersion: 1, runId: 'tampered-memory', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [], sources: [source], memory: [{ relativePath: 'operating-rules.md', hash: reviewHash(original), content: '# Fake rules\n' }], gaps: [] };
@@ -238,16 +907,17 @@ test('manual review rejects memory content that does not match its Agent manifes
   assert.equal(fs.readFileSync(memoryFile, 'utf8'), original);
 });
 
-test('manual review rejects an Agent manifest that omits an existing formal source', async () => {
+test('manual review accepts an incremental manifest that omits unchanged formal sources', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/omitted-source');
   const memoryFile = path.join(globalRoot, 'memory/profile.md');
   fs.mkdirSync(path.dirname(memoryFile), { recursive: true }); fs.writeFileSync(memoryFile, '# Profile\n');
-  await assert.rejects(runManualLearningReview({
+  const result = await runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
-  }), /证据清单不完整/);
+  });
+  assert.equal(result.status, 'applied');
 });
 
 test('manual review rejects a memory source whose full content is omitted from manifest.memory', async () => {
@@ -268,7 +938,7 @@ test('manual review rejects a memory source whose full content is omitted from m
       fs.writeFileSync(resultFile, JSON.stringify(proposal));
       fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
     }
-  }), /记忆正文清单不完整/);
+  }), /记忆来源缺少对应正文/);
 });
 
 test('manual review rejects project files outside the formal review source list', async () => {
@@ -288,7 +958,7 @@ test('manual review rejects project files outside the formal review source list'
       fs.writeFileSync(resultFile, JSON.stringify(proposal));
       fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
     }
-  }), /正式材料清单/);
+  }), /正式材料范围/);
 });
 
 test('manual review rejects GitHub evidence whose stable value does not match its hash', async () => {
@@ -310,15 +980,16 @@ test('manual review rejects GitHub evidence whose stable value does not match it
   }), /GitHub.*哈希/);
 });
 
-test('manual review rejects self-consistent GitHub evidence that does not exist remotely', async () => {
+test('post-Agent validation does not repeat remote GitHub collection', async () => {
   const cp = require('node:child_process');
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const { reviewHash } = require('../out/learningReview.js');
   const globalRoot = root(); const project = root(); const runDir = path.join(globalRoot, 'maintenance/runs/forged-github');
   cp.execFileSync('git', ['init'], { cwd: project, stdio: 'ignore' }); cp.execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: project });
-  await assert.rejects(runManualLearningReview({
-    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project], api: async () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+  let apiCalls = 0;
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project], api: async () => { apiCalls += 1; return []; },
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => {
       const value = { repository: 'owner/repo', sha: 'b'.repeat(40), taskIds: [], files: [], checks: [], statuses: [], gaps: [], observedAt: '2026-09-18T00:00:00Z' };
       const { observedAt, ...stable } = value;
@@ -328,9 +999,11 @@ test('manual review rejects self-consistent GitHub evidence that does not exist 
       const manifestHash = reviewHash(JSON.stringify(manifest));
       const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'No lesson.' }], recovery: [], unresolved: [] };
       fs.writeFileSync(resultFile, JSON.stringify(proposal));
-      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', provenance: { method: 'self-review', parentRunId: manifest.runId }, checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
     }
-  }), /GitHub.*真实事实/);
+  });
+  assert.equal(result.status, 'applied');
+  assert.equal(apiCalls, 0);
 });
 
 test('normal event writes and reads do not generate semantic candidates or promotion suggestions', () => {
@@ -375,7 +1048,7 @@ test('manual review applies exact memory patch once and rejects stale or unrevie
   const manifest = { schemaVersion: 1, runId: 'review-1', globalRoot, globalPrompt: 'Keep intent.', promptHash: reviewHash('Keep intent.'), projects: [], sources: [{ id: 'source-1', kind: 'agent_report', hash: 'evidence', value: {} }], memory: [{ relativePath: 'operating-rules.md', hash: reviewHash(fs.readFileSync(target, 'utf8')), content: fs.readFileSync(target, 'utf8') }], gaps: [] };
   const proposal = { schemaVersion: 2, runId: 'review-1', manifestHash: reviewHash(JSON.stringify(manifest)), globalPrompt: null, memoryChanges: [{ path: 'operating-rules.md', baseHash: manifest.memory[0].hash, before: 'Keep user intent.', after: 'Keep user intent. Check actual outcomes.', reason: 'supported', evidence: ['source-1'] }], lessons: [], processedSources: [], unresolved: [] };
   const review = { schemaVersion: 1, runId: 'review-1', manifestHash: proposal.manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', summary: 'checked evidence', checks: [{ target: 'overall', safe: true, reason: 'all reviewed', evidence: ['source-1'] }, { target: 'memory:0', safe: true, reason: 'preserves intent', evidence: ['source-1'] }] };
-  const options = { manifest, proposal, review, runDir, getGlobalPrompt: () => 'Keep intent.', setGlobalPrompt: async () => { throw new Error('must not update unchanged setting'); } };
+  const options = { manifest, proposal, review, runDir, getGlobalPrompt: () => 'Keep intent.', setGlobalPrompt: async () => {} };
   const first = await applyLearningReview(options);
   assert.equal(first.status, 'applied');
   assert.equal(fs.readFileSync(target, 'utf8'), '# Rules\nKeep user intent. Check actual outcomes.\n');
@@ -425,28 +1098,28 @@ test('review rejects any project constraint that lacks a disposition or independ
   ])));
 });
 
-test('manual runner completes generation and subagent verification in one Agent launch', async () => {
+test('manual runner keeps global prompt generation as the one Agent launch outcome', async () => {
   const file = path.resolve(__dirname, '../out/learningReviewRunner.js');
   assert.ok(fs.existsSync(file), 'manual entry runner must exist');
   const { runManualLearningReview } = require(file);
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/global-prompt-review-test');
   let launches = 0;
-  const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => { throw new Error('no changes'); }, launch: async (promptFile, resultFile) => {
+  const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => {}, launch: async (promptFile, resultFile) => {
     launches += 1;
     const generatedPrompt = fs.readFileSync(promptFile, 'utf8');
-    assert.ok(generatedPrompt.includes(path.join(globalRoot, 'memory/profile.md')));
-    assert.ok(generatedPrompt.includes(path.join(globalRoot, 'learning/ledger')));
-    assert.ok(generatedPrompt.includes('影响后续所有插件任务'));
-    assert.match(generatedPrompt, /同一 Agent 会话.*子智能体.*独立只读复核/s);
-    assert.match(generatedPrompt, /maintenance\/runs.*application\.json.*partial.*applying.*recovery/s);
-    assert.match(generatedPrompt, /SHA256\(JSON\.stringify\(JSON\.parse/);
+    assert.ok(generatedPrompt.includes('solomap-review.cjs'));
+    assert.ok(generatedPrompt.includes(path.join(globalRoot, 'maintenance/review-state.json')));
+    assert.match(generatedPrompt, /唯一且必须完成的主成果.*新的、完整的全局默认提示词/s);
+    assert.match(generatedPrompt, /唯一结果文件.*"globalPrompt":"最终完整提示词"/s);
+    assert.match(generatedPrompt, /无论是否存在缺口.*完整全局提示词/s);
+    assert.match(generatedPrompt, /不要再生成.*独立复核包.*lesson 清单.*逐来源处置报告/s);
     writeEmptyAgentReview({ runDir, resultFile, globalRoot });
   } });
   assert.equal(launches, 1);
   assert.equal(result.status, 'applied');
 });
 
-test('manual review rejects a pass artifact without distinct subagent provenance', async () => {
+test('manual review rejects a pass artifact without matching self-review provenance', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/no-subagent-proof');
   await assert.rejects(runManualLearningReview({
@@ -456,7 +1129,7 @@ test('manual review rejects a pass artifact without distinct subagent provenance
       const reviewFile = path.join(runDir, 'review.json'); const review = JSON.parse(fs.readFileSync(reviewFile));
       delete review.provenance; fs.writeFileSync(reviewFile, JSON.stringify(review));
     }
-  }), /子智能体.*执行凭据/);
+  }), /结果自检/);
 });
 
 test('manual review starts a real Agent process before plugin-side project validation', async () => {
@@ -476,7 +1149,7 @@ test('manual review starts a real Agent process before plugin-side project valid
   const result = await runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '',
     getProjects: () => { assert.equal(fs.readFileSync(marker, 'utf8'), 'started'); return []; },
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => new Promise((resolve, reject) => {
       const child = cp.spawn(process.execPath, ['-e', script, runDir, resultFile, globalRoot, marker, reviewModule], { stdio: 'inherit' });
       child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Agent process exited ${code}`)));
@@ -495,7 +1168,7 @@ test('post-Agent validation does not initialize or migrate a project journal', a
   const before = fs.statSync(journal);
   const result = await runManualLearningReview({
     runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => {
       const manifest = { schemaVersion: 1, runId: path.basename(runDir), globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [], memory: [], gaps: [`${project}: No GitHub origin; only local reports are available.`] };
       fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
@@ -520,7 +1193,7 @@ test('manual review requires the Agent to disposition every earlier partial appl
   fs.writeFileSync(path.join(priorRun, 'application.json'), JSON.stringify({ status: 'partial', errors: ['setting unavailable'] }));
   await assert.rejects(runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   }), /恢复处置/);
 });
@@ -534,7 +1207,7 @@ test('manual review records a reviewed superseded partial application as termina
   const recovery = [{ runDir: priorRun, status: 'partial', decision: 'superseded', reason: 'The old artifacts are incomplete and cannot be safely resumed.', items: [] }];
   const result = await runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot, recovery }); }
   });
   assert.equal(result.status, 'applied');
@@ -551,7 +1224,7 @@ test('manual review refuses a second process while the global review lease is he
   let launched = false;
   await assert.rejects(runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { launched = true; writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   }), /另一窗口.*复盘/);
   assert.equal(launched, false);
@@ -564,7 +1237,7 @@ test('manual review recovers a lease left by a process that no longer exists', a
   fs.mkdirSync(path.dirname(lockFile), { recursive: true }); fs.writeFileSync(lockFile, JSON.stringify({ pid: 2147483647, runId: 'crashed-window' }));
   const result = await runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   });
   assert.equal(result.status, 'applied');
@@ -579,7 +1252,7 @@ test('manual review recovers an old truncated lease instead of blocking forever'
   const old = new Date(Date.now() - 10 * 60_000); fs.utimesSync(lockFile, old, old);
   const result = await runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   });
   assert.equal(result.status, 'applied');
@@ -594,7 +1267,7 @@ test('manual review expires an old-format lease even when its PID has been reuse
   const old = new Date(Date.now() - 7 * 60 * 60_000); fs.utimesSync(lockFile, old, old);
   const result = await runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
-    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => {},
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   });
   assert.equal(result.status, 'applied');
@@ -619,7 +1292,7 @@ test('concurrent stale-lease takeover starts exactly one Agent process', async (
 test('interrupted generation is preserved while the next click starts a fresh Agent run', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/review-original');
-  const input = { runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes') };
+  const input = { runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => {} };
   await assert.rejects(runManualLearningReview({ ...input, launch: async () => { throw new Error('interrupted'); } }), /interrupted/);
   const original = fs.readFileSync(path.join(runDir, 'prompt.txt'), 'utf8');
   const launchFiles = [];
@@ -627,7 +1300,7 @@ test('interrupted generation is preserved while the next click starts a fresh Ag
   const result = await runManualLearningReview({ ...input, runDir: nextRunDir, launch: async (prompt, file) => {
     launchFiles.push(file);
     assert.equal(path.dirname(file), nextRunDir);
-    assert.match(fs.readFileSync(prompt, 'utf8'), /明确保留在 unresolved 或 deferred/);
+    assert.match(fs.readFileSync(prompt, 'utf8'), /证据缺口只表示相关判断暂不采用.*无论是否存在缺口.*完整全局提示词/s);
     writeEmptyAgentReview({ runDir: nextRunDir, resultFile: file, globalRoot, unresolved: ['未声称原任务全部验收'] });
   } });
   assert.equal(result.status, 'applied');
@@ -775,11 +1448,13 @@ test('subsequent manual click starts an Agent instead of doing plugin-side parti
 test('review keeps the current editor draft separate from persisted instruction concurrency checks', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/draft');
-  const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: 'Unsaved user instruction', persistedGlobalPrompt: 'Saved instruction', getGlobalPrompt: () => 'Saved instruction', setGlobalPrompt: async () => { throw new Error('no change proposal must preserve draft without saving'); }, launch: async (_prompt, resultFile) => {
+  let persisted = 'Saved instruction';
+  const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: 'Unsaved user instruction', persistedGlobalPrompt: persisted, getGlobalPrompt: () => persisted, setGlobalPrompt: async value => { persisted = value; }, launch: async (_prompt, resultFile) => {
     const manifest = writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt: 'Unsaved user instruction', persistedPrompt: 'Saved instruction' });
     assert.equal(manifest.globalPrompt, 'Unsaved user instruction');
   } });
   assert.equal(result.status, 'applied');
+  assert.equal(persisted, 'Unsaved user instruction');
 });
 
 test('memory patches preserve literal dollar replacement syntax', async () => {

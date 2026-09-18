@@ -175,14 +175,88 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
   return result;
 }
 
-export interface ReviewSource { id: string; kind: string; projectPath?: string; file?: string; hash: string; value?: any }
+export interface ReviewSource { id: string; kind: string; projectPath?: string; file?: string; hash: string; size?: number; mtimeMs?: number; ctimeMs?: number; dev?: number; ino?: number; content?: string; value?: any; previousVersions?: any[] }
 export interface ReviewManifest {
   schemaVersion: 1; runId: string; globalRoot: string; globalPrompt: string; promptHash: string; persistedPromptHash?: string;
   projects: string[]; sources: ReviewSource[]; memory: { relativePath: string; hash: string; content: string }[]; gaps: string[];
+  cursorUpdates?: ReviewSource[];
 }
 
-export async function collectReviewManifest(input: { runId: string; globalRoot: string; globalPrompt: string; projects: string[]; api?: GithubRead; repositoryForProject?: (project: string) => Promise<string> }): Promise<ReviewManifest> {
-  const manifest: ReviewManifest = { schemaVersion: 1, runId: input.runId, globalRoot: input.globalRoot, globalPrompt: input.globalPrompt, promptHash: reviewHash(input.globalPrompt), projects: input.projects, sources: [], memory: [], gaps: [] };
+function sameSourceVersion(source: any, stat: fs.Stats): boolean {
+  return source?.size === stat.size && source?.mtimeMs === stat.mtimeMs && source?.ctimeMs === stat.ctimeMs
+    && source?.dev === stat.dev && source?.ino === stat.ino;
+}
+
+export function registeredReviewSourceFiles(project: string, previousSources: Record<string, any> = {}): { tasks: string[]; reports: string[]; revokedReports: string[]; reportRegistrations: Record<string, any> } {
+  const taskRoot = learningTasksRoot(project); const runsRoot = path.join(project, '.solopreneur', 'agent-runs');
+  const tasks: string[] = []; const reports: string[] = []; const revokedReports: string[] = []; const reportRegistrations: Record<string, any> = {}; const parsedTasks = new Map<string, any>();
+  const safe = (file: string, directory = false) => {
+    try {
+      const relative = path.relative(project, path.resolve(file));
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+      let current = project;
+      for (const part of relative.split(path.sep)) { current = path.join(current, part); if (fs.lstatSync(current).isSymbolicLink()) return false; }
+      return directory ? fs.statSync(current).isDirectory() : fs.statSync(current).isFile();
+    } catch { return false; }
+  };
+  const previous = (file: string, kind: string) => previousSources[`source-${reviewHash(`${file}:${kind}`).slice(0, 24)}`];
+  const readTask = (taskId: string): any => {
+    if (parsedTasks.has(taskId)) return parsedTasks.get(taskId);
+    const file = path.join(taskRoot, `${taskId}.json`); let task: any;
+    try { task = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { task = undefined; }
+    const valid = task?.schemaVersion === 1 && task.projectPath === project && task.taskId === taskId && Array.isArray(task.executions)
+      ? task : undefined;
+    parsedTasks.set(taskId, valid); return valid;
+  };
+  if (fs.existsSync(taskRoot)) for (const entry of fs.readdirSync(taskRoot, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^task-[A-Za-z0-9-]+\.json$/.test(entry.name)) continue;
+    const file = path.join(taskRoot, entry.name); if (!safe(file)) continue;
+    const taskId = entry.name.slice(0, -5); const old = previous(file, 'task');
+    if (old && sameSourceVersion(old, fs.statSync(file))) tasks.push(file);
+    else if (readTask(taskId)) tasks.push(file);
+  }
+  const reportCandidates: string[] = [];
+  if (fs.existsSync(runsRoot)) for (const first of fs.readdirSync(runsRoot, { withFileTypes: true })) {
+    if (!first.isDirectory() || first.isSymbolicLink()) continue;
+    const firstPath = path.join(runsRoot, first.name);
+    for (const second of fs.readdirSync(firstPath, { withFileTypes: true })) {
+      const secondPath = path.join(firstPath, second.name);
+      if (second.isFile() && /^task-report-\d+\.json$/.test(second.name)) reportCandidates.push(secondPath);
+      if (!second.isDirectory() || second.isSymbolicLink()) continue;
+      for (const third of fs.readdirSync(secondPath, { withFileTypes: true })) if (third.isFile() && /^task-report-\d+\.json$/.test(third.name)) reportCandidates.push(path.join(secondPath, third.name));
+    }
+  }
+  for (const file of reportCandidates) {
+    if (!safe(file)) continue;
+    const old = previous(file, 'agent_report');
+    if (old && sameSourceVersion(old, fs.statSync(file))) {
+      const registration = old.value?.registration;
+      if (registration && typeof registration.taskId === 'string') {
+        const taskFile = path.join(taskRoot, `${registration.taskId}.json`); const oldTask = previous(taskFile, 'task');
+        if (safe(taskFile) && oldTask && sameSourceVersion(oldTask, fs.statSync(taskFile))) {
+          reports.push(file); reportRegistrations[file] = registration; continue;
+        }
+      }
+    }
+    let envelope: any; try { envelope = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { if (old) revokedReports.push(file); continue; }
+    const sequence = Number(path.basename(file).match(/\d+/)?.[0]); const task = readTask(envelope?.taskId);
+    const execution = task?.executions?.find((run: any) => run?.id === envelope?.executionLogId && path.resolve(run.runDir) === path.dirname(file)
+      && safe(run.runDir, true));
+    if (execution && envelope.projectPath === project && envelope.turnId === `${sequence}:complete`
+      && envelope.report && typeof envelope.report === 'object' && typeof envelope.report.summary === 'string') {
+      reports.push(file); reportRegistrations[file] = { taskId: envelope.taskId, executionLogId: envelope.executionLogId, runDir: path.dirname(file), turnId: envelope.turnId };
+    } else if (old) revokedReports.push(file);
+  }
+  return { tasks, reports, revokedReports, reportRegistrations };
+}
+
+export async function collectReviewManifest(input: {
+  runId: string; globalRoot: string; globalPrompt: string; projects: string[]; api?: GithubRead;
+  repositoryForProject?: (project: string) => Promise<string>; incremental?: boolean; includeGithub?: boolean;
+  previousSources?: Record<string, string | { hash?: string; file?: string; kind?: string; projectPath?: string; size?: number; mtimeMs?: number; ctimeMs?: number; dev?: number; ino?: number; content?: string }>;
+  deferredSourceIds?: string[];
+}): Promise<ReviewManifest> {
+  const manifest: ReviewManifest = { schemaVersion: 1, runId: input.runId, globalRoot: input.globalRoot, globalPrompt: input.globalPrompt, promptHash: reviewHash(input.globalPrompt), projects: input.projects, sources: [], memory: [], gaps: [], ...(input.incremental ? { cursorUpdates: [] } : {}) };
   const safeFile = (root: string, file: string): boolean => {
     try {
       const relative = path.relative(path.resolve(root), path.resolve(file));
@@ -195,12 +269,24 @@ export async function collectReviewManifest(input: { runId: string; globalRoot: 
       return fs.statSync(current).isFile();
     } catch { return false; }
   };
-  const addFile = (file: string, kind: string, projectPath?: string) => {
-    if (manifest.sources.some(source => source.file === file && source.kind === kind)) return;
+  const deferred = new Set(input.deferredSourceIds || []);
+  const addFile = (file: string, kind: string, projectPath?: string): string | undefined => {
+    if (manifest.sources.some(source => source.file === file && source.kind === kind)) return undefined;
+    const id = `source-${reviewHash(`${file}:${kind}`).slice(0, 24)}`;
+    const stat = fs.statSync(file);
+    const previous = input.previousSources?.[id];
+    if (input.incremental && !deferred.has(id) && previous && typeof previous === 'object'
+      && previous.file === file && previous.kind === kind && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs
+      && previous.ctimeMs === stat.ctimeMs && previous.dev === stat.dev && previous.ino === stat.ino) return undefined;
     const content = fs.readFileSync(file, 'utf8');
-    const originalId = `source-${reviewHash(file).slice(0, 24)}`;
-    const id = manifest.sources.some(source => source.id === originalId) ? `source-${reviewHash(`${file}:${kind}`).slice(0, 24)}` : originalId;
-    manifest.sources.push({ id, kind, projectPath, file, hash: reviewHash(content) });
+    const hash = reviewHash(content);
+    const previousHash = typeof previous === 'string' ? previous : previous?.hash;
+    if (input.incremental && !deferred.has(id) && previousHash === hash) {
+      manifest.cursorUpdates!.push({ id, kind, projectPath, file, hash, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino });
+      return undefined;
+    }
+    manifest.sources.push({ id, kind, projectPath, file, hash, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino, content });
+    return content;
   };
   const addDirectoryFiles = (root: string, directory: string, kind: string, projectPath?: string, pattern = /\.json$/) => {
     if (!fs.existsSync(directory)) return;
@@ -220,22 +306,46 @@ export async function collectReviewManifest(input: { runId: string; globalRoot: 
     if (safeFile(project, legacyProjectMemory)) addFile(legacyProjectMemory, 'project_memory_legacy', project);
     const documentationFile = path.join(project, '.solopreneur', 'documentation.json');
     if (safeFile(project, documentationFile)) {
-      addFile(documentationFile, 'project_document_index', project);
-      const documentation = readLearningJson(documentationFile);
-      for (const item of Array.isArray(documentation?.documents) ? documentation.documents : []) {
-        if (item?.status !== 'active' || typeof item.path !== 'string') continue;
-        const file = path.resolve(project, item.path);
-        if (safeFile(project, file)) addFile(file, 'project_document', project);
+      const documentationContent = addFile(documentationFile, 'project_document_index', project);
+      const indexId = `source-${reviewHash(`${documentationFile}:project_document_index`).slice(0, 24)}`;
+      const oldIndex: any = input.previousSources?.[indexId];
+      let activeDocumentPaths: string[] = Array.isArray(oldIndex?.value?.activeDocumentPaths) ? oldIndex.value.activeDocumentPaths : [];
+      if (documentationContent !== undefined || !activeDocumentPaths.length) {
+        let documentation: any = {}; try { documentation = JSON.parse(documentationContent ?? fs.readFileSync(documentationFile, 'utf8')); } catch { documentation = {}; }
+        activeDocumentPaths = (Array.isArray(documentation?.documents) ? documentation.documents : [])
+          .filter((item: any) => item?.status === 'active' && typeof item.path === 'string').map((item: any) => path.resolve(project, item.path));
       }
+      const indexSnapshot = [...manifest.sources, ...(manifest.cursorUpdates || [])].find(source => source.id === indexId);
+      if (indexSnapshot) indexSnapshot.value = { activeDocumentPaths };
+      for (const file of activeDocumentPaths) if (safeFile(project, file)) addFile(file, 'project_document', project);
     }
     addDirectoryFiles(project, path.join(project, '.solopreneur', 'run-digests'), 'run_digest', project);
     const taskRoot = learningTasksRoot(project);
-    const { tasks, reports, observations } = await readRegisteredProjectSources(project, path.resolve(__dirname, '..'));
-    for (const task of tasks) {
-      addFile(path.join(taskRoot, `${task.taskId}.json`), 'task', project);
-      for (const observation of observations.filter(item => item.taskId === task.taskId && item.envelope)) addFile(observation.file, 'agent_report', project);
+    let tasks: any[] = []; let reports: any[] = [];
+    if (input.includeGithub === false) {
+      const registered = registeredReviewSourceFiles(project, input.previousSources as Record<string, any>);
+      for (const file of registered.tasks) addFile(file, 'task', project);
+      for (const file of registered.reports) {
+        addFile(file, 'agent_report', project);
+        const id = `source-${reviewHash(`${file}:agent_report`).slice(0, 24)}`;
+        const snapshot = [...manifest.sources, ...(manifest.cursorUpdates || [])].find(source => source.id === id);
+        const registration = registered.reportRegistrations[file] || (input.previousSources?.[id] as any)?.value?.registration;
+        if (snapshot && registration) snapshot.value = { registration };
+      }
+      for (const file of registered.revokedReports) {
+        const id = `source-${reviewHash(`${file}:agent_report`).slice(0, 24)}`; const previous: any = input.previousSources?.[id];
+        const value = { file, previousHash: previous?.hash, previousKind: 'agent_report', registrationRevoked: true, ...(typeof previous?.content === 'string' ? {} : { contentUnavailable: true }) };
+        manifest.sources.push({ id, kind: 'deleted_source', projectPath: project, hash: reviewHash(JSON.stringify(value)), content: previous?.content, value });
+      }
+    } else {
+      const registered = await readRegisteredProjectSources(project, path.resolve(__dirname, '..'));
+      tasks = registered.tasks; reports = registered.reports;
+      for (const task of tasks) {
+        addFile(path.join(taskRoot, `${task.taskId}.json`), 'task', project);
+        for (const observation of registered.observations.filter(item => item.taskId === task.taskId && item.envelope)) addFile(observation.file, 'agent_report', project);
+      }
     }
-    try {
+    if (input.includeGithub !== false) try {
       const repository = await (input.repositoryForProject || projectGithubRepository)(project);
       const evidence = await collectGithubEvidence({ projectPath: project, repository, tasks, reports, api: input.api });
       manifest.gaps.push(...evidence.gaps.map(gap => `${project}: ${gap}`));
@@ -252,9 +362,8 @@ export async function collectReviewManifest(input: { runId: string; globalRoot: 
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) walkMemory(file);
       else if (entry.name.endsWith('.md') && !entry.name.startsWith('_')) {
-        const content = fs.readFileSync(file, 'utf8');
-        manifest.memory.push({ relativePath: path.relative(path.join(input.globalRoot, 'memory'), file).replace(/\\/g, '/'), hash: reviewHash(content), content });
-        addFile(file, 'memory');
+        const content = addFile(file, 'memory');
+        if (content !== undefined) manifest.memory.push({ relativePath: path.relative(path.join(input.globalRoot, 'memory'), file).replace(/\\/g, '/'), hash: reviewHash(content), content });
       }
     }
   };
@@ -268,6 +377,9 @@ export async function collectReviewManifest(input: { runId: string; globalRoot: 
   for (const dir of ['candidates', 'approved', 'rejected', 'promotion-suggestions', 'candidate-decisions']) {
     const root = path.join(input.globalRoot, 'learning', dir);
     if (!fs.existsSync(root)) continue;
+    if (input.incremental) {
+      continue;
+    }
     for (const name of fs.readdirSync(root).filter(name => name.endsWith('.json'))) {
       const file = path.join(root, name); const value = readLearningJson(file);
       if (dir === 'candidate-decisions' && [1, 2].includes(value?.schemaVersion)) addFile(file, `legacy_${dir}`);
@@ -275,9 +387,14 @@ export async function collectReviewManifest(input: { runId: string; globalRoot: 
     }
   }
   manifest.sources = manifest.sources.filter(source => {
-    if (['memory', 'memory_entry', 'task', 'global_prompt_mirror', 'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document', 'run_digest', 'learning_ledger', 'learning_event_source'].includes(source.kind) || source.kind.startsWith('legacy_')) return true;
+    if (input.incremental) return source.kind !== 'legacy_candidate-decisions';
+    if (!input.incremental && (['memory', 'memory_entry', 'task', 'global_prompt_mirror', 'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document', 'run_digest', 'learning_ledger', 'learning_event_source'].includes(source.kind) || source.kind.startsWith('legacy_'))) return true;
     const decision = readLearningJson(path.join(input.globalRoot, 'learning', 'candidate-decisions', `semantic-${reviewHash(`${source.id}:${source.hash}`)}.json`));
     return !(decision?.schemaVersion === 2 && decision.id === source.id && decision.hash === source.hash && ['created', 'skipped'].includes(decision.decision));
   });
+  if (input.incremental) {
+    const includedMemory = new Set(manifest.sources.filter(source => source.kind === 'memory' && source.file).map(source => path.resolve(source.file!)));
+    manifest.memory = manifest.memory.filter(item => includedMemory.has(path.resolve(input.globalRoot, 'memory', ...item.relativePath.split('/'))));
+  }
   return manifest;
 }

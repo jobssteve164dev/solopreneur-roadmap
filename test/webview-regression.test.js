@@ -13126,20 +13126,24 @@ test('Flow role output validation error triggers self-correction loop', async ()
   assert.match(startRoleRunPayload.prompt, /自检修正/);
 });
 
-test('settings review executes generated CLI scripts and preserves an unchanged editor draft', async () => {
+test('settings review executes one Agent and persists its generated global prompt', async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-settings-'));
   const globalRoot = path.join(workspace, '.solomap-global');
+  const reviewEvidence = path.join(globalRoot, 'memory/profile.md');
+  fs.mkdirSync(path.dirname(reviewEvidence), { recursive: true });
+  fs.writeFileSync(reviewEvidence, 'The reviewed instruction was explicitly confirmed.');
   const fakeAgent = path.join(workspace, 'review-agent.cjs');
   fs.writeFileSync(fakeAgent, `const fs=require('fs'),path=require('path'),crypto=require('crypto');
 const prompt=process.argv[2], dir=path.dirname(prompt), text=fs.readFileSync(prompt,'utf8');
-const line=name=>text.match(new RegExp('^'+name+'=(.*)$','m'))[1], hashText=x=>crypto.createHash('sha256').update(x).digest('hex'), hash=x=>hashText(JSON.stringify(x));
-const globalRoot=line('全局数据根目录'),globalPrompt=JSON.parse(line('当前编辑器中的全局默认提示词')),persistedPromptHash=line('当前已持久化提示词哈希');
-const m={schemaVersion:1,runId:path.basename(dir),globalRoot,globalPrompt,promptHash:hashText(globalPrompt),persistedPromptHash,projects:[],sources:[],memory:[],gaps:[]};
-fs.writeFileSync(path.join(dir,'manifest.json'),JSON.stringify(m));
-const proposal={schemaVersion:2,runId:m.runId,manifestHash:hash(m),globalPrompt:null,memoryChanges:[],lessons:[],processedSources:[],recovery:[],unresolved:[]};
-const review={schemaVersion:1,runId:m.runId,manifestHash:hash(m),proposalHash:hash(proposal),verdict:'pass',summary:'No new evidence',provenance:{method:'subagent',parentRunId:m.runId,childRunId:'child-settings-review'},checks:[{target:'overall',safe:true,reason:'No changes warranted',evidence:[]}]};
-fs.writeFileSync(path.join(dir,'proposal.json'),JSON.stringify(proposal));
-fs.writeFileSync(path.join(dir,'review.json'),JSON.stringify(review));`);
+const line=name=>text.match(new RegExp('^'+name+'=(.*)$','m'))[1];
+const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
+const globalRoot=line('全局数据根目录'),globalPrompt=JSON.parse(line('当前全局默认提示词JSON')),persistedPromptHash=line('当前已持久化提示词哈希');
+const evidence=path.join(globalRoot,'memory/profile.md'),stat=fs.statSync(evidence),source={id:'source-'+hash(evidence+':memory').slice(0,24),kind:'memory',file:evidence,hash:hash(fs.readFileSync(evidence,'utf8')),size:stat.size,mtimeMs:stat.mtimeMs};
+const manifest={schemaVersion:1,runId:path.basename(dir),globalRoot,globalPrompt,promptHash:hash(globalPrompt),persistedPromptHash,projects:[],sources:[source],memory:[],gaps:[]};
+fs.writeFileSync(path.join(dir,'manifest.json'),JSON.stringify(manifest));
+fs.writeFileSync(path.join(dir,'context-index.json'),JSON.stringify({schemaVersion:1,runId:manifest.runId,manifestHash:hash(JSON.stringify(manifest))}));
+const reviewed=globalPrompt+'\\nReviewed instruction.';
+fs.writeFileSync(path.join(dir,'proposal.json'),JSON.stringify({globalPrompt:reviewed,changes:[{type:'add',before:[],after:'Reviewed instruction.',evidence:[source.id],reason:'The confirmed durable instruction is required by the current review.'}],processedSourceIds:[source.id],unresolved:[],deferredSourceIds:[],recovery:[]}));`);
   const extensionModule = loadCompiledModule('out/extension.js', [
     'let reviewTerminalCount = 0;',
     'let reviewAgentCommandCount = 0;',
@@ -13178,8 +13182,8 @@ fs.writeFileSync(path.join(dir,'review.json'),JSON.stringify(review));`);
   assert.ok(extensionModule.__reviewStartupOrder().some(item => /scope:.*\.solomap-global\/maintenance:auto$/.test(item)), 'the review Agent must use the normal task workspace and the user-selected permission mode');
   const final = messages.find(message => message.command === 'globalPromptReviewCompleted');
   assert.equal(final?.success, true, final?.message);
-  assert.equal(final.globalPrompt, 'Current unsaved instruction.');
-  assert.equal(saved.globalPrompt, 'Saved instruction.');
+  assert.equal(final.globalPrompt, 'Current unsaved instruction.\nReviewed instruction.');
+  assert.equal(saved.globalPrompt, 'Current unsaved instruction.\nReviewed instruction.');
   const runs = path.join(globalRoot, 'maintenance/runs');
   const dir = path.join(runs, fs.readdirSync(runs)[0]);
   assert.equal(fs.existsSync(path.join(globalRoot, 'projects.json')), false, 'review validation must not initialize the project registry');

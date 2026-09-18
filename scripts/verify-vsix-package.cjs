@@ -12,6 +12,7 @@ const REQUIRED_FILES = [
   'extension/resources/logo_with_text.svg',
   'extension/resources/tools/solomap-experience.cjs',
   'extension/resources/tools/solomap-memory.cjs',
+  'extension/resources/tools/solomap-review.cjs',
   'extension/node_modules/@vscode/codicons/dist/codicon.css',
   'extension/node_modules/c8/bin/c8.js',
   'extension/node_modules/dependency-cruiser/bin/dependency-cruise.mjs',

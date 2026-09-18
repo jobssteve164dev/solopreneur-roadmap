@@ -1,8 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { collectGithubEvidence, GithubRead, projectGithubRepository, ReviewManifest, reviewHash } from './learningReview.js';
-import { applyLearningReview, buildAgentExecutedLearningReviewPrompt, validateLearningReview } from './learningReviewApply.js';
+import { collectGithubEvidence, GithubRead, projectGithubRepository, registeredReviewSourceFiles, ReviewManifest, reviewHash } from './learningReview.js';
+import { applyLearningReview, buildAgentExecutedLearningReviewPrompt, validateDirectGlobalPromptReview, validateLearningReview } from './learningReviewApply.js';
 import { readRegisteredTaskSources } from './growthReports.js';
 import { learningTasksRoot, readLearningJson, writeLearningJson } from './taskReport.js';
 
@@ -94,6 +94,28 @@ function isSafeSourceFile(root: string, file: string): boolean {
   } catch { return false; }
 }
 
+function isDeclaredReviewSource(globalRoot: string, source: any): boolean {
+  if (!source?.file || typeof source.kind !== 'string') return false;
+  const file = path.resolve(source.file);
+  const within = (root: string, ...parts: string[]) => isWithin(path.join(root, ...parts), file);
+  if (source.kind === 'global_prompt_mirror') return file === path.join(globalRoot, 'context', 'global-default-prompt.md');
+  if (source.kind === 'memory') return within(globalRoot, 'memory') && file.endsWith('.md');
+  if (source.kind === 'memory_entry') return within(globalRoot, 'memory', 'entries') && file.endsWith('.json');
+  if (source.kind === 'learning_ledger') return [path.join(globalRoot, 'learning', 'ledger', 'index.json'), path.join(globalRoot, 'learning', 'ledger', 'events.jsonl')].includes(file);
+  if (source.kind === 'learning_event_source') return within(globalRoot, 'learning', 'ledger', 'sources') && file.endsWith('.json');
+  const legacy = source.kind.match(/^legacy_(candidates|approved|rejected|promotion-suggestions)$/)?.[1];
+  if (legacy) return within(globalRoot, 'learning', legacy) && file.endsWith('.json');
+  if (!source.projectPath) return false;
+  const project = path.resolve(source.projectPath);
+  if (source.kind === 'project_constraint') return [path.join(project, 'agent.md'), path.join(project, 'AGENTS.md')].includes(file);
+  if (source.kind === 'project_memory_legacy') return file === path.join(project, 'PROJECT_MEMORY.md');
+  if (source.kind === 'project_document_index') return file === path.join(project, '.solopreneur', 'documentation.json');
+  if (source.kind === 'project_document') return isWithin(project, file);
+  if (source.kind === 'run_digest') return within(project, '.solopreneur', 'run-digests') && file.endsWith('.json');
+  if (source.kind === 'task') return within(project, '.solopreneur', 'agent-runs', 'learning-tasks') && file.endsWith('.json');
+  return source.kind === 'agent_report' && within(project, '.solopreneur', 'agent-runs') && file.endsWith('.json');
+}
+
 function pendingReviewApplications(globalRoot: string, currentRunDir: string): Array<{ runDir: string; status: string; application: any }> {
   const runsRoot = path.join(globalRoot, 'maintenance', 'runs');
   if (!fs.existsSync(runsRoot)) return [];
@@ -112,6 +134,11 @@ function canonical(value: any): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
   return JSON.stringify(value);
+}
+
+function sourceMetadataMatches(source: any, stat: fs.Stats): boolean {
+  return source?.size === stat.size && source?.mtimeMs === stat.mtimeMs && source?.ctimeMs === stat.ctimeMs
+    && source?.dev === stat.dev && source?.ino === stat.ino;
 }
 
 function comparableGithubEvidence(value: any): any {
@@ -167,12 +194,6 @@ async function verifyGithubSources(manifest: ReviewManifest, api?: GithubRead): 
     const verified = actual.get(key);
     if (!verified || !verifyGithubValue(source.value, verified)) throw new Error('复盘 Agent 生成的 GitHub 来源与退出后核验的真实事实不一致，材料已保留。');
   }
-  for (const [key, value] of actual) {
-    if (!declared.some(source => `${source.projectPath}:${source.value?.repository}:${source.value?.sha}` === key
-      && verifyGithubValue(source.value, value))) {
-      throw new Error('复盘 Agent 生成的 GitHub 证据清单不完整，材料已保留。');
-    }
-  }
 }
 
 function readVerifiedPendingIntent(pending: { runDir: string; application: any }): { keys: string[]; proposal: any; manifest: ReviewManifest } {
@@ -215,7 +236,7 @@ function pendingRecoveryItems(pending: { runDir: string; application: any }, pro
 
 interface RequiredReviewSource { kinds: Set<string>; projectPath?: string }
 
-async function requiredLocalReviewSources(globalRoot: string, projects: string[]): Promise<Map<string, RequiredReviewSource>> {
+async function requiredLocalReviewSources(globalRoot: string, projects: string[], previousSources: Record<string, any> = {}): Promise<Map<string, RequiredReviewSource>> {
   const required = new Map<string, RequiredReviewSource>();
   const add = (file: string, kind: string, sourceRoot: string, projectPath?: string) => {
     const resolved = path.resolve(file);
@@ -242,36 +263,33 @@ async function requiredLocalReviewSources(globalRoot: string, projects: string[]
   add(path.join(globalRoot, 'learning', 'ledger', 'index.json'), 'learning_ledger', globalRoot);
   add(path.join(globalRoot, 'learning', 'ledger', 'events.jsonl'), 'learning_ledger', globalRoot);
   addJsonDirectory(path.join(globalRoot, 'learning', 'ledger', 'sources'), 'learning_event_source', globalRoot);
-  for (const directory of ['candidates', 'approved', 'rejected', 'promotion-suggestions', 'candidate-decisions']) {
-    const directoryPath = path.join(globalRoot, 'learning', directory);
-    if (!fs.existsSync(directoryPath)) continue;
-    for (const entry of fs.readdirSync(directoryPath, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-      const file = path.join(directoryPath, entry.name); const value = readLearningJson(file);
-      if (directory === 'candidate-decisions' && [1, 2].includes(value?.schemaVersion)) add(file, `legacy_${directory}`, globalRoot);
-      else if (value?.schemaVersion === 1 && projects.includes(value?.projectPath)) add(file, `legacy_${directory}`, globalRoot, value.projectPath);
-    }
-  }
   for (const project of projects) {
     add(path.join(project, 'agent.md'), 'project_constraint', project, project); add(path.join(project, 'AGENTS.md'), 'project_constraint', project, project);
     add(path.join(project, 'PROJECT_MEMORY.md'), 'project_memory_legacy', project, project);
     const documentationFile = path.join(project, '.solopreneur', 'documentation.json');
     add(documentationFile, 'project_document_index', project, project);
-    const documentation = readLearningJson(documentationFile);
-    for (const item of Array.isArray(documentation?.documents) ? documentation.documents : []) if (item?.status === 'active' && typeof item.path === 'string') add(path.resolve(project, item.path), 'project_document', project, project);
-    addJsonDirectory(path.join(project, '.solopreneur', 'run-digests'), 'run_digest', project, project);
-    const taskRoot = learningTasksRoot(project);
-    const { tasks, observations } = readRegisteredTaskSources(project);
-    for (const task of tasks) {
-      add(path.join(taskRoot, `${task.taskId}.json`), 'task', project, project);
-      for (const observation of observations.filter(item => item.taskId === task.taskId && item.envelope)) add(observation.file, 'agent_report', project, project);
+    const previousIndex = Object.values(previousSources).find((source: any) => source?.file === documentationFile && source?.kind === 'project_document_index');
+    if (previousIndex && fs.existsSync(documentationFile) && sourceMetadataMatches(previousIndex, fs.statSync(documentationFile))) {
+      const declared = Array.isArray((previousIndex as any)?.value?.activeDocumentPaths)
+        ? (previousIndex as any).value.activeDocumentPaths
+        : (Array.isArray(readLearningJson(documentationFile)?.documents) ? readLearningJson(documentationFile).documents : [])
+            .filter((item: any) => item?.status === 'active' && typeof item.path === 'string').map((item: any) => path.resolve(project, item.path));
+      for (const file of declared) add(file, 'project_document', project, project);
+    } else {
+      const documentation = readLearningJson(documentationFile);
+      for (const item of Array.isArray(documentation?.documents) ? documentation.documents : []) if (item?.status === 'active' && typeof item.path === 'string') add(path.resolve(project, item.path), 'project_document', project, project);
     }
+    addJsonDirectory(path.join(project, '.solopreneur', 'run-digests'), 'run_digest', project, project);
+    const registered = registeredReviewSourceFiles(project, previousSources);
+    for (const file of registered.tasks) add(file, 'task', project, project);
+    for (const file of registered.reports) add(file, 'agent_report', project, project);
   }
   return required;
 }
 
 export function runManualLearningReview(input: {
   runDir: string; globalRoot: string; workspaceRoot?: string; projects: string[]; globalPrompt: string; persistedGlobalPrompt?: string;
+  resultContract?: 'global-prompt-v1' | 'legacy-review-v2';
   getGlobalPrompt: () => string; setGlobalPrompt: (value: string, expectedHash: string) => Promise<void>;
   onStart?: () => void; getProjects?: () => string[];
   launch: (promptFile: string, resultFile: string) => Promise<void>; api?: GithubRead;
@@ -297,6 +315,205 @@ export function runManualLearningReview(input: {
       manifestFile, proposalFile, reviewFile: checkFile
     }), 'utf8');
     await input.launch(promptFile, proposalFile);
+    const directResult = readLearningJson(proposalFile);
+    if (typeof directResult?.globalPrompt === 'string') {
+      const manifest = readLearningJson(manifestFile) as ReviewManifest | undefined;
+      if (!manifest || manifest.schemaVersion !== 1 || manifest.runId !== runId || manifest.globalRoot !== input.globalRoot
+        || manifest.globalPrompt !== input.globalPrompt || manifest.promptHash !== reviewHash(input.globalPrompt)
+        || manifest.persistedPromptHash !== reviewHash(input.persistedGlobalPrompt ?? input.globalPrompt)
+        || !Array.isArray(manifest.projects) || !Array.isArray(manifest.sources) || !Array.isArray(manifest.memory) || !Array.isArray(manifest.gaps)) {
+        throw new Error('复盘 Agent 未生成与本次请求匹配的增量证据清单。');
+      }
+      const contextIndex = readLearningJson(path.join(input.runDir, 'context-index.json'));
+      if (contextIndex?.schemaVersion !== 1 || contextIndex.runId !== runId || contextIndex.manifestHash !== reviewHash(JSON.stringify(manifest))) throw new Error('复盘 Agent 未保留与增量采集结果匹配的索引凭据。');
+      const allowedProjects = input.getProjects ? input.getProjects() : input.projects;
+      if (JSON.stringify([...manifest.projects].sort()) !== JSON.stringify([...allowedProjects].sort())) throw new Error('复盘 Agent 生成的项目范围与当前登记项目不一致。');
+      const directKinds = new Set([
+        'global_prompt_mirror', 'memory', 'memory_entry', 'learning_ledger', 'learning_event_source',
+        'legacy_candidates', 'legacy_approved', 'legacy_rejected', 'legacy_promotion-suggestions',
+        'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document',
+        'run_digest', 'task', 'agent_report'
+      ]);
+      const priorState = readLearningJson(path.join(input.globalRoot, 'maintenance', 'review-state.json')) || {};
+      const pendingApplications = pendingReviewApplications(input.globalRoot, input.runDir);
+      const priorDeferredSources = Array.isArray(priorState.deferredSources)
+        ? Object.fromEntries(priorState.deferredSources.filter((source: any) => source && typeof source.id === 'string').map((source: any) => [source.id, source]))
+        : {};
+      const pendingSnapshots = pendingApplications.flatMap(pending => [
+        ...(Array.isArray(pending.application?.sourceCursor) ? pending.application.sourceCursor : []),
+        ...(Array.isArray(pending.application?.deferredSources) ? pending.application.deferredSources : [])
+      ]).filter((source: any) => source && typeof source.id === 'string');
+      const priorSources = { ...(priorState.sources || {}), ...Object.fromEntries(pendingSnapshots.map((source: any) => [source.id, source])), ...priorDeferredSources };
+      const requiredSources = await requiredLocalReviewSources(input.globalRoot, manifest.projects, priorSources);
+      const directSourceIds = new Set<string>();
+      for (const source of manifest.sources) {
+        if (typeof source?.id !== 'string' || !source.id || directSourceIds.has(source.id) || !/^[a-f0-9]{64}$/.test(source.hash || '')) throw new Error('复盘 Agent 生成了无效来源标识或哈希。');
+        directSourceIds.add(source.id);
+        if (source.projectPath && !manifest.projects.includes(source.projectPath)) throw new Error('复盘 Agent 生成的来源项目未登记。');
+        if (source.file) {
+          const sourceRoot = isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
+          const expected = requiredSources.get(path.resolve(source.file));
+          if (!path.isAbsolute(source.file) || !sourceRoot || !isSafeSourceFile(sourceRoot, source.file)
+            || !directKinds.has(source.kind) || !isDeclaredReviewSource(input.globalRoot, source)
+            || !expected || !expected.kinds.has(source.kind) || expected.projectPath !== source.projectPath
+            || source.id !== `source-${reviewHash(`${source.file}:${source.kind}`).slice(0, 24)}`) throw new Error('复盘 Agent 引用了范围外或非正式证据来源。');
+          const verifiedContent = fs.readFileSync(source.file, 'utf8');
+          if (reviewHash(verifiedContent) !== source.hash || (source.content !== undefined && source.content !== verifiedContent)) throw new Error('复盘 Agent 引用的证据版本已变化。');
+          source.content = verifiedContent;
+        } else if (source.kind === 'deleted_source') {
+          const previous = priorSources[source.id];
+          const value = source.value;
+          const repeatedTombstone = previous && typeof previous === 'object' && previous.kind === 'deleted_source'
+            && previous.hash === source.hash && canonical(previous.value) === canonical(value)
+            && ((typeof previous.content === 'string' && typeof source.content === 'string' && previous.content === source.content
+              && reviewHash(source.content) === value?.previousHash) || (value?.contentUnavailable === true && previous.content === undefined && source.content === undefined))
+            && typeof value?.file === 'string' && (!fs.existsSync(value.file) || value?.registrationRevoked === true);
+          const newTombstone = previous && typeof previous === 'object' && previous.kind !== 'deleted_source' && typeof previous.file === 'string'
+            && value && value.file === previous.file && value.previousHash === previous.hash && value.previousKind === previous.kind
+            && typeof previous.content === 'string' && typeof source.content === 'string' && source.content === previous.content && reviewHash(source.content) === previous.hash
+            && (!fs.existsSync(previous.file) || (value.registrationRevoked === true && previous.kind === 'agent_report')) && reviewHash(JSON.stringify(value)) === source.hash;
+          const legacyTombstone = previous && typeof previous === 'object' && previous.kind !== 'deleted_source' && previous.content === undefined && source.content === undefined
+            && value?.contentUnavailable === true && value.file === previous.file && value.previousHash === previous.hash && value.previousKind === previous.kind
+            && (!fs.existsSync(previous.file) || (value.registrationRevoked === true && previous.kind === 'agent_report')) && reviewHash(JSON.stringify(value)) === source.hash;
+          if (!repeatedTombstone && !newTombstone && !legacyTombstone) throw new Error('复盘 Agent 生成的删除来源证据无效。');
+        } else if (source.kind === 'github') {
+          const repository = source.value?.repository; const sha = source.value?.sha;
+          const { observedAt, ...stableValue } = source.value || {};
+          if (!source.projectPath || !manifest.projects.includes(source.projectPath)
+            || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || '') || !/^[a-f0-9]{40}$/.test(sha || '')
+            || source.id !== `github-${reviewHash(`${repository}:${sha}`).slice(0, 24)}`
+            || source.hash !== reviewHash(JSON.stringify(stableValue))) throw new Error('复盘 Agent 生成的精确提交证据格式无效。');
+        } else throw new Error('复盘 Agent 引用了无法定位的证据来源。');
+      }
+      if (manifest.sources.some(source => source.kind === 'github')) await verifyGithubSources(manifest, input.api);
+      const cursorUpdates = Array.isArray(manifest.cursorUpdates) ? manifest.cursorUpdates : [];
+      const cursorUpdateIds = new Set<string>();
+      for (const source of cursorUpdates) {
+        const previous = priorState.sources?.[source?.id];
+        const previousHash = typeof previous === 'string' ? previous : previous?.hash;
+        if (typeof source?.id !== 'string' || !source.id || cursorUpdateIds.has(source.id) || directSourceIds.has(source.id)
+          || !source.file || !/^[a-f0-9]{64}$/.test(source.hash || '') || previousHash !== source.hash) throw new Error('复盘 Agent 生成了无效的游标更新。');
+        cursorUpdateIds.add(source.id);
+        if (previous && typeof previous === 'object' && (previous.file !== source.file || previous.kind !== source.kind || previous.projectPath !== source.projectPath)) throw new Error('复盘 Agent 生成的游标更新与既有来源身份不一致。');
+        const sourceRoot = isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
+        if (!sourceRoot || !directKinds.has(source.kind) || !isSafeSourceFile(sourceRoot, source.file) || !isDeclaredReviewSource(input.globalRoot, source)) throw new Error('复盘 Agent 生成的游标更新超出正式来源范围。');
+        const stat = fs.statSync(source.file);
+        if (source.id !== `source-${reviewHash(`${source.file}:${source.kind}`).slice(0, 24)}`
+          || reviewHash(fs.readFileSync(source.file, 'utf8')) !== source.hash || !sourceMetadataMatches(source, stat)) throw new Error('复盘 Agent 生成的游标更新与当前文件不一致。');
+      }
+      for (const [file, requirement] of requiredSources) {
+        const kinds = [...requirement.kinds].filter(kind => kind !== 'legacy_candidate-decisions');
+        if (!kinds.length) continue;
+        const coveredByRun = [...manifest.sources, ...cursorUpdates].some(source => source.file === file && kinds.includes(source.kind));
+        if (coveredByRun) continue;
+        const stat = fs.statSync(file);
+        const coveredByCursor = Object.values(priorState.sources || {}).some((source: any) => source && typeof source === 'object'
+          && source.file === file && kinds.includes(source.kind) && sourceMetadataMatches(source, stat));
+        if (!coveredByCursor) throw new Error(`复盘 Agent 的增量清单遗漏正式来源：${file}`);
+      }
+      validateDirectGlobalPromptReview(manifest, directResult);
+      if (!Array.isArray(directResult.recovery) || directResult.recovery.length !== pendingApplications.length) throw new Error('复盘 Agent 未完整处置旧的部分应用结果。');
+      const recoveryRuns = new Set<string>();
+      for (const disposition of directResult.recovery) {
+        if (!disposition || typeof disposition.runDir !== 'string' || recoveryRuns.has(disposition.runDir)
+          || !['resumed', 'superseded'].includes(disposition.decision) || typeof disposition.reason !== 'string' || !disposition.reason.trim()) {
+          throw new Error('复盘 Agent 生成了无效的旧结果恢复处置。');
+        }
+        recoveryRuns.add(disposition.runDir);
+        const pending = pendingApplications.find(item => item.runDir === disposition.runDir && item.status === disposition.status);
+        if (!pending) throw new Error('复盘 Agent 的旧结果恢复处置与当前状态不一致。');
+        if (disposition.decision === 'resumed' && pending.application?.targetPromptHash !== reviewHash(directResult.globalPrompt)) throw new Error('复盘 Agent 声明承接旧结果，但最终提示词与旧目标版本不一致。');
+        if (disposition.decision === 'superseded' && pending.application?.targetPromptHash !== manifest.promptHash
+          && pending.application?.items?.globalPrompt !== pending.application?.targetPromptHash) throw new Error('尚未写入成功的旧完整提示词不能直接标记为已替代。');
+      }
+      const currentSourceIds = new Set([...manifest.sources, ...cursorUpdates].map(source => source.id));
+      const recoveredSourceCursor: any[] = [];
+      for (const pending of pendingApplications) {
+        for (const source of Array.isArray(pending.application?.deferredSources) ? pending.application.deferredSources : []) {
+          if (source && typeof source.id === 'string' && source.kind && !currentSourceIds.has(source.id)) throw new Error(`旧部分应用中的延期来源未由本轮承接：${source.id}`);
+        }
+        for (const source of Array.isArray(pending.application?.sourceCursor) ? pending.application.sourceCursor : []) {
+          if (!source || typeof source.id !== 'string' || currentSourceIds.has(source.id) || priorState.sources?.[source.id]) continue;
+          if (typeof source.file !== 'string' || !fs.existsSync(source.file) || !sourceMetadataMatches(source, fs.statSync(source.file))) {
+            throw new Error(`旧部分应用中的已处理游标未由本轮承接：${source.id}`);
+          }
+          recoveredSourceCursor.push(source);
+        }
+      }
+      const globalPrompt = directResult.globalPrompt;
+      const processed = new Set<string>(directResult.processedSourceIds);
+      const deferred = new Set<string>(directResult.deferredSourceIds || []);
+      const deferredSources = manifest.sources.filter(source => deferred.has(source.id)).map(source => {
+        const content = source.file ? fs.readFileSync(source.file, 'utf8') : source.content;
+        if (source.file && reviewHash(content || '') !== source.hash) throw new Error(`延期来源在快照保存前已变化：${source.id}`);
+        const previous = priorSources[source.id];
+        const previousVersions = previous && typeof previous === 'object' && previous.hash !== source.hash
+          ? [
+              ...(Array.isArray(previous.previousVersions) ? previous.previousVersions : []),
+              {
+                id: previous.id || source.id, hash: previous.hash, file: previous.file, kind: previous.kind,
+                projectPath: previous.projectPath, size: previous.size, mtimeMs: previous.mtimeMs,
+                ctimeMs: previous.ctimeMs, dev: previous.dev, ino: previous.ino,
+                content: previous.content, value: previous.value
+              }
+            ]
+          : Array.isArray(previous?.previousVersions) ? previous.previousVersions : undefined;
+        return {
+          id: source.id, hash: source.hash, file: source.file, kind: source.kind, projectPath: source.projectPath,
+          size: source.size, mtimeMs: source.mtimeMs, ctimeMs: source.ctimeMs, dev: source.dev, ino: source.ino, content, value: source.value,
+          ...(previousVersions?.length ? { previousVersions } : {})
+        };
+      });
+      const expectedHash = reviewHash(input.persistedGlobalPrompt ?? input.globalPrompt);
+      if (reviewHash(input.getGlobalPrompt()) !== expectedHash) throw new Error('默认指令已被修改，请重新复盘以保留最新内容。');
+      const applicationFile = path.join(input.runDir, 'application.json');
+      const proposalHash = reviewHash(JSON.stringify(directResult));
+      const journal: any = {
+        schemaVersion: 1, proposalHash, targetPromptHash: reviewHash(globalPrompt), targetPrompt: globalPrompt, status: 'applying', items: {}, errors: [],
+        sourceCursor: [...recoveredSourceCursor, ...manifest.sources.filter(source => processed.has(source.id)), ...cursorUpdates].map(source => ({
+          id: source.id, hash: source.hash, file: source.file, kind: source.kind, projectPath: source.projectPath, size: source.size, mtimeMs: source.mtimeMs,
+          ctimeMs: source.ctimeMs, dev: source.dev, ino: source.ino, content: source.content ?? priorSources[source.id]?.content, value: source.value ?? priorSources[source.id]?.value
+        })),
+        deferredSourceIds: [...deferred], deferredSources, recovery: directResult.recovery
+      };
+      writeLearningJson(applicationFile, journal);
+      try {
+        await input.setGlobalPrompt(globalPrompt, expectedHash);
+        if (input.getGlobalPrompt() !== globalPrompt) throw new Error('全局默认提示词写入后回读不一致。');
+        journal.items.globalPrompt = reviewHash(globalPrompt);
+        const sources: Record<string, any> = { ...(priorState.sources || {}) };
+        for (const id of deferred) delete sources[id];
+        for (const source of [...recoveredSourceCursor, ...manifest.sources.filter(source => processed.has(source.id)), ...cursorUpdates]) {
+          if (typeof source?.id === 'string' && /^[a-f0-9]{64}$/.test(source?.hash || '') && !deferred.has(source.id)) {
+            if (source.kind === 'deleted_source') { delete sources[source.id]; continue; }
+            sources[source.id] = source.file
+              ? { hash: source.hash, file: source.file, kind: source.kind, projectPath: source.projectPath, size: source.size, mtimeMs: source.mtimeMs, ctimeMs: source.ctimeMs, dev: source.dev, ino: source.ino, content: source.content ?? priorSources[source.id]?.content, value: source.value ?? priorSources[source.id]?.value }
+              : { hash: source.hash, kind: source.kind, projectPath: source.projectPath };
+          }
+        }
+        writeLearningJson(path.join(input.globalRoot, 'maintenance', 'review-state.json'), {
+          schemaVersion: 1,
+          lastAppliedRunId: runId,
+          appliedAt: new Date().toISOString(),
+          promptHash: reviewHash(globalPrompt),
+          sources,
+          deferredSourceIds: [...deferred],
+          deferredSources,
+          unresolved: Array.isArray(directResult.unresolved) ? directResult.unresolved : []
+        });
+        for (const disposition of directResult.recovery) {
+          const oldApplicationFile = path.join(disposition.runDir, 'application.json');
+          const oldApplication = readLearningJson(oldApplicationFile);
+          writeLearningJson(oldApplicationFile, { ...oldApplication, status: disposition.decision, recoveredBy: runId, recoveryReason: disposition.reason });
+        }
+        journal.status = 'applied';
+      } catch (error: any) {
+        journal.status = 'partial'; journal.errors = [String(error?.message || error)];
+      }
+      writeLearningJson(applicationFile, journal);
+      return { status: journal.status as 'applied' | 'partial', errors: journal.errors };
+    }
+    if (input.resultContract === 'global-prompt-v1') throw new Error('复盘 Agent 未按当前契约生成完整全局提示词。');
     const manifest = readLearningJson(manifestFile) as ReviewManifest | undefined;
     if (!manifest || manifest.schemaVersion !== 1 || manifest.runId !== runId || manifest.globalRoot !== input.globalRoot
       || manifest.globalPrompt !== input.globalPrompt || manifest.promptHash !== reviewHash(input.globalPrompt)
@@ -306,7 +523,12 @@ export function runManualLearningReview(input: {
     }
     const allowedProjects = input.getProjects ? input.getProjects() : input.projects;
     if (JSON.stringify([...manifest.projects].sort()) !== JSON.stringify([...allowedProjects].sort())) throw new Error('复盘 Agent 生成的项目范围与当前登记项目不一致，材料已保留。');
-    const requiredSources = await requiredLocalReviewSources(input.globalRoot, manifest.projects);
+    const allowedFileKinds = new Set([
+      'global_prompt_mirror', 'memory', 'memory_entry', 'learning_ledger', 'learning_event_source',
+      'legacy_candidates', 'legacy_approved', 'legacy_rejected', 'legacy_promotion-suggestions',
+      'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document',
+      'run_digest', 'task', 'agent_report'
+    ]);
     const sourceIds = new Set<string>();
     for (const source of manifest.sources) {
       if (typeof source.id !== 'string' || !source.id || sourceIds.has(source.id) || !/^[a-f0-9]{64}$/.test(source.hash)) throw new Error('复盘 Agent 生成了无效来源标识或哈希，材料已保留。');
@@ -316,8 +538,7 @@ export function runManualLearningReview(input: {
         const sourceRoot = isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
         if (!path.isAbsolute(source.file) || !sourceRoot) throw new Error('复盘 Agent 生成的来源范围超出登记项目和全局数据目录，材料已保留。');
         if (!isSafeSourceFile(sourceRoot, source.file)) throw new Error('复盘 Agent 生成的来源文件不存在或经过符号链接，材料已保留。');
-        const expected = requiredSources.get(path.resolve(source.file));
-        if (!expected || !expected.kinds.has(source.kind) || expected.projectPath !== source.projectPath) throw new Error('复盘 Agent 生成的文件来源不在正式材料清单中，材料已保留。');
+        if (!allowedFileKinds.has(source.kind) || !isDeclaredReviewSource(input.globalRoot, source)) throw new Error('复盘 Agent 生成的文件来源不在正式材料范围内，材料已保留。');
         if (reviewHash(fs.readFileSync(source.file, 'utf8')) !== source.hash) throw new Error('复盘 Agent 生成的文件来源哈希不匹配，材料已保留。');
       } else if (source.kind === 'github') {
         const value = source.value;
@@ -331,13 +552,6 @@ export function runManualLearningReview(input: {
         throw new Error('复盘 Agent 生成了没有可复核文件的来源，材料已保留。');
       }
     }
-    for (const [file, expected] of requiredSources) {
-      if (!manifest.sources.some(source => source.file === file && expected.kinds.has(source.kind)
-        && source.projectPath === expected.projectPath && source.hash === reviewHash(fs.readFileSync(file, 'utf8')))) {
-        throw new Error(`复盘 Agent 生成的证据清单不完整，缺少正式材料：${file}`);
-      }
-    }
-    await verifyGithubSources(manifest, input.api);
     const memoryRoot = path.join(input.globalRoot, 'memory');
     const memoryPaths = new Set<string>();
     for (const item of manifest.memory) {
@@ -353,11 +567,10 @@ export function runManualLearningReview(input: {
         throw new Error('复盘 Agent 生成的记忆清单与当前文件不匹配，材料已保留。');
       }
     }
-    for (const [file, expected] of requiredSources) {
-      if (!expected.kinds.has('memory')) continue;
-      const relativePath = path.relative(memoryRoot, file).replace(/\\/g, '/');
-      if (!manifest.memory.some(item => item.relativePath === relativePath && item.hash === reviewHash(fs.readFileSync(file, 'utf8')) && item.content === fs.readFileSync(file, 'utf8'))) {
-        throw new Error(`复盘 Agent 生成的记忆正文清单不完整：${file}`);
+    for (const source of manifest.sources.filter(item => item.kind === 'memory')) {
+      const relativePath = path.relative(memoryRoot, source.file!).replace(/\\/g, '/');
+      if (!manifest.memory.some(item => item.relativePath === relativePath && item.hash === source.hash)) {
+        throw new Error(`复盘 Agent 引用的记忆来源缺少对应正文：${source.file}`);
       }
     }
     const proposal = readLearningJson(proposalFile);
@@ -385,9 +598,12 @@ export function runManualLearningReview(input: {
     const review = readLearningJson(checkFile);
     if (!review) throw new Error('复盘子智能体未生成完整复核结果，材料已保留。');
     if (review.verdict !== 'pass') throw new Error('复盘子智能体尚未通过最终提案，材料已保留。');
-    if (review.provenance?.method !== 'subagent' || review.provenance.parentRunId !== runId
-      || typeof review.provenance.childRunId !== 'string' || !review.provenance.childRunId.trim() || review.provenance.childRunId === runId) {
-      throw new Error('复盘子智能体缺少可区分的执行凭据，材料已保留。');
+    const provenance = review.provenance;
+    const validSelfReview = provenance?.method === 'self-review' && provenance.parentRunId === runId;
+    const validSubagentReview = provenance?.method === 'subagent' && provenance.parentRunId === runId
+      && typeof provenance.childRunId === 'string' && provenance.childRunId.trim() && provenance.childRunId !== runId;
+    if (!validSelfReview && !validSubagentReview) {
+      throw new Error('复盘 Agent 缺少与本次提案匹配的结果自检，材料已保留。');
     }
     proposal.recovery.forEach((_item: any, index: number) => {
       if (!review.checks?.some((check: any) => check.target === `recovery:${index}` && check.safe === true && typeof check.reason === 'string' && check.reason.trim())) throw new Error(`复盘子智能体未复核 recovery:${index}，材料已保留。`);
