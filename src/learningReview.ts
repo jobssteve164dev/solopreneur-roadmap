@@ -28,14 +28,14 @@ function taskTrailers(message: string, known: Set<string>): string[] {
 }
 
 type EvidenceInput = {
-  projectPath: string; repository: string; tasks: any[]; reports: any[]; api?: GithubRead;
+  projectPath: string; repository: string; tasks: any[]; reports: any[]; api?: GithubRead; persist?: boolean;
 };
 type GithubEvidence = { repository: string; commits: any[]; gaps: string[] };
 const factRequests = new Map<string, Promise<GithubEvidence>>();
 
 export function collectGithubEvidence(input: EvidenceInput): Promise<GithubEvidence> {
   const scope = reviewHash(input.tasks.map(task => task.taskId).sort().join('\n'));
-  const key = `${input.projectPath}:${input.repository}:${scope}`;
+  const key = `${input.projectPath}:${input.repository}:${scope}:${input.persist === false ? 'read-only' : 'persist'}`;
   const pending = factRequests.get(key); if (pending) return pending;
   const operation = collectGithubFacts(input, scope).finally(() => factRequests.delete(key));
   factRequests.set(key, operation); return operation;
@@ -43,6 +43,7 @@ export function collectGithubEvidence(input: EvidenceInput): Promise<GithubEvide
 
 async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<GithubEvidence> {
   const { repository, tasks, reports } = input;
+  const persist = input.persist !== false;
   const result: { repository: string; commits: any[]; gaps: string[] } = { repository, commits: [], gaps: [] };
   if (!repository) { result.gaps.push('No GitHub origin; only local reports are available.'); return result; }
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid GitHub repository');
@@ -51,8 +52,8 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
   const root = path.join(input.projectPath, '.solopreneur', 'agent-runs', 'learning-evidence');
   const cursorFile = path.join(root, `${reviewHash(repository)}-${scope}.json`);
   const factsFile = path.join(root, `${reviewHash(repository)}.facts.json`);
-  const previous = readLearningJson(factsFile);
-  const cursor = readLearningJson(cursorFile) || { discovered: {}, coveredHead: '', page: 1, scanHead: '' };
+  const previous = persist ? readLearningJson(factsFile) : undefined;
+  const cursor = (persist ? readLearningJson(cursorFile) : undefined) || { discovered: {}, coveredHead: '', page: 1, scanHead: '' };
   const discovered: Record<string, string[]> = cursor.discovered || {};
   const since = tasks.map(task => task.startedAt).filter(Boolean).sort()[0];
   if (known.size && since) {
@@ -73,14 +74,14 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
         }
         if (boundaryFound || commits.length < 100) {
           if (cursor.coveredHead && !boundaryFound) result.gaps.push('Previous commit boundary was not found; history may have changed.');
-          writeLearningJson(cursorFile, { discovered, coveredHead: !cursor.coveredHead || boundaryFound ? scanHead : cursor.coveredHead, scanHead: '', page: 1 });
+          if (persist) writeLearningJson(cursorFile, { discovered, coveredHead: !cursor.coveredHead || boundaryFound ? scanHead : cursor.coveredHead, scanHead: '', page: 1 });
           break;
         }
         page += 1;
-        writeLearningJson(cursorFile, { discovered, coveredHead: cursor.coveredHead, scanHead, page });
+        if (persist) writeLearningJson(cursorFile, { discovered, coveredHead: cursor.coveredHead, scanHead, page });
       }
     } catch (error: any) {
-      writeLearningJson(cursorFile, { discovered, coveredHead: cursor.coveredHead, scanHead, page });
+      if (persist) writeLearningJson(cursorFile, { discovered, coveredHead: cursor.coveredHead, scanHead, page });
       result.gaps.push(String(error.message));
     }
   }
@@ -147,6 +148,7 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
     result.commits.push(evidence);
   }
   // Read again at publication: another task scope may have completed while this request awaited GitHub.
+  if (!persist) return result;
   const latest = readLearningJson(factsFile);
   const merged = new Map<string, any>((latest?.commits || []).map((commit: any) => [commit.sha, commit]));
   for (const commit of result.commits) {

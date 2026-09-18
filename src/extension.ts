@@ -168,6 +168,7 @@ import {
 import {
   getHiddenProjects as getHiddenProjectsFromRegistry,
   getProjects as getProjectsFromRegistry,
+  getProjectsReadOnly as getProjectsReadOnlyFromRegistry,
   getSelectedProjectPath as getSelectedProjectPathFromRegistry,
   normalizeGlobalDataPathForExtension as normalizeGlobalDataPathForRegistry,
   normalizeProjectsForStorage as normalizeProjectsForRegistryStorage,
@@ -1480,6 +1481,19 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   persistedSettingsCacheSource = savedSource;
   persistedSettingsCacheWorkspaceRoot = settingsWorkspaceRoot;
   return persistedSettingsCache;
+}
+
+type ReviewLaunchSettings = Pick<SolopreneurSettings, 'cliPath' | 'globalPrompt' | 'globalDataPath' | 'taskPermissionMode'>;
+
+function getReviewLaunchSettings(context: vscode.ExtensionContext): ReviewLaunchSettings {
+  const saved = pendingPersistedSettings || context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  const config = vscode.workspace.getConfiguration('solopreneur');
+  return {
+    cliPath: saved.cliPath || config.get('cliPath') || 'agy',
+    globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
+    globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
+    taskPermissionMode: 'auto'
+  };
 }
 
 function invalidatePersistedSettingsCache(): void {
@@ -4479,34 +4493,38 @@ async function runGlobalPromptReview(
   context: vscode.ExtensionContext,
   currentGlobalPrompt: string
 ): Promise<GlobalPromptReviewCompletion> {
-  const runId = `global-prompt-review-${Date.now()}`;
+  const runId = `global-prompt-review-${Date.now()}-${crypto.randomUUID()}`;
   try {
-    const terminal = createAgentTerminal(context.extensionPath, `prompt-review-${runId.slice(-6)}`);
-    terminal.show(true);
-    const terminalReady = sendTextWhenTerminalReady(terminal, `printf '%s\\n' ${shellQuote('SoloMap 正在准备经验复盘…')}`);
-    const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-    const settings = getPersistedSettings(context);
+    const workspaceRoot = activeProjectRoot || getWorkspaceRoot() || process.cwd();
+    const settings = getReviewLaunchSettings(context);
     const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
     const maintenanceRoot = path.join(globalRoot, 'maintenance');
     const runsRoot = path.join(maintenanceRoot, 'runs');
     const runDir = path.join(runsRoot, runId);
-    let agentCli = '';
+    const agentCli = resolveAgentCli((settings.cliPath || 'agy').trim(), settings.cliPath);
+    if (!commandExists(agentCli)) throw new Error('找不到当前 Agent CLI，请检查 Agent 设置。');
+    const automation = ensureAgentTaskAutomation(agentCli);
+    if (!automation.ok) throw new Error(automation.message);
+    const terminal = createAgentTerminal(context.extensionPath, `prompt-review-${runId.slice(-6)}`);
+    terminal.show(true);
     const result = await runManualLearningReview({
-      runDir, globalRoot, projects: [],
+      runDir, globalRoot, workspaceRoot, projects: [],
       globalPrompt: currentGlobalPrompt,
       persistedGlobalPrompt: settings.globalPrompt || '',
-      prepare: () => {
-        ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
-        agentCli = resolveAgentCli((settings.cliPath || 'agy').trim(), settings.cliPath);
-        if (!commandExists(agentCli)) throw new Error('找不到当前 Agent CLI，请检查 Agent 设置。');
-        const automation = ensureAgentTaskAutomation(agentCli);
-        if (!automation.ok) throw new Error(automation.message);
-        ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
-      },
-      getProjects: () => getProjects(context).map(project => project.path),
-      getGlobalPrompt: () => getPersistedSettings(context).globalPrompt || '',
+      getProjects: () => getProjectsReadOnlyFromRegistry({
+        globalDataPath: (() => {
+          const latest = getReviewLaunchSettings(context);
+          if (latest.globalDataPath !== settings.globalDataPath) throw new Error('记忆位置已被修改，请重新发起经验复盘。');
+          return latest.globalDataPath;
+        })(),
+        projectRegistryFileName,
+        legacyProjects: [],
+        legacyHiddenProjects: [],
+        workspaceRoot
+      }).map(project => project.path),
+      getGlobalPrompt: () => getReviewLaunchSettings(context).globalPrompt || '',
       setGlobalPrompt: async (value, expectedHash) => {
-        const latest = getPersistedSettings(context);
+        const latest = getReviewLaunchSettings(context);
         if (latest.globalDataPath !== settings.globalDataPath || reviewHash(latest.globalPrompt || '') !== expectedHash) throw new Error('默认指令或记忆位置已被修改，请重新复盘以保留最新内容。');
         await updatePersistedSettings(context, { globalPrompt: value });
         writeSoloGlobalPromptIndex(workspaceRoot, settings.globalDataPath, getPersistedSettings(context).globalPrompt || '');
@@ -4519,7 +4537,6 @@ async function runGlobalPromptReview(
         fs.writeFileSync(scriptFile, buildLearningReviewRunScript(command, maintenanceRoot, outputFile, doneFile, shellQuote), { encoding: 'utf8', mode: 0o755 });
         if (terminal.exitStatus) throw new Error('复盘终端已关闭，请重新发起复盘。');
         const activeTerminal = terminal;
-        if (!await terminalReady) throw new Error('复盘终端尚未就绪，请重试。');
         if (!await sendTextWhenTerminalReady(activeTerminal, `bash ${shellQuote(scriptFile)}`)) throw new Error('复盘命令未能发送到终端，请重试。');
         await new Promise<void>((resolve, reject) => {
           const poller = setInterval(() => {

@@ -6,6 +6,18 @@ const test = require('node:test');
 const ledger = require('../out/learningLedger.js');
 const root = () => fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-learning-review-'));
 
+function writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt = '', persistedPrompt = globalPrompt, projects = [], unresolved = [], recovery = [] }) {
+  const { reviewHash } = require('../out/learningReview.js');
+  const manifest = { schemaVersion: 1, runId: path.basename(runDir), globalRoot, globalPrompt, promptHash: reviewHash(globalPrompt), persistedPromptHash: reviewHash(persistedPrompt), projects, sources: [], memory: [], gaps: [] };
+  fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+  const manifestHash = reviewHash(JSON.stringify(manifest));
+  const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], recovery, unresolved };
+  fs.writeFileSync(resultFile, JSON.stringify(proposal));
+  const checks = [...recovery.map((_item, index) => ({ target: `recovery:${index}`, safe: true, reason: 'Prior run disposition verified.', evidence: [] })), { target: 'overall', safe: true, reason: 'No unsupported changes.', evidence: [] }];
+  fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', provenance: { method: 'subagent', parentRunId: manifest.runId, childRunId: `child-${manifest.runId}` }, checks }));
+  return manifest;
+}
+
 test('review retains legacy reports even when current intake limits are stricter', async () => {
   const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
   const { collectReviewManifest } = require('../out/learningReview.js');
@@ -60,7 +72,7 @@ test('global review indexes every memory and constraint layer with exact paths',
 });
 
 test('global review prompt names every path layer and its read or write role', () => {
-  const { buildLearningReviewPrompt } = require('../out/learningReviewApply.js');
+  const { buildAgentExecutedLearningReviewPrompt, buildLearningReviewPrompt } = require('../out/learningReviewApply.js');
   const project = '/workspace/product'; const globalRoot = '/data/.solomap-global';
   const manifest = { schemaVersion: 1, runId: 'review-paths', globalRoot, globalPrompt: 'Keep intent.', promptHash: 'hash', projects: [project], memory: [], gaps: [], sources: [
     { kind: 'global_prompt_mirror', file: '/data/.solomap-global/context/global-default-prompt.md' }
@@ -81,28 +93,29 @@ test('global review prompt names every path layer and its read or write role', (
   ]) assert.ok(prompt.includes(expected), expected);
   assert.match(prompt, /逐个审查.*project_constraint.*跨项目成立.*上提/s);
   assert.match(prompt, /只读.*不能修改项目文件.*不等于跳过上提判断/s);
+  const agentOwnedPrompt = buildAgentExecutedLearningReviewPrompt({
+    runId: 'review-paths', runDir: '/runs', workspaceRoot: project, globalRoot,
+    globalPrompt: 'Keep intent.', persistedPromptHash: 'hash', manifestFile: '/runs/manifest.json',
+    proposalFile: '/runs/proposal.json', reviewFile: '/runs/review.json'
+  });
+  assert.match(agentOwnedPrompt, /memory\/entries.*全部 JSON/s);
+  assert.match(agentOwnedPrompt, /candidate-decisions.*schemaVersion=1 或 2/s);
+  assert.match(agentOwnedPrompt, /candidates、approved、rejected、promotion-suggestions.*schemaVersion=1.*非隐藏项目/s);
   const genericPrompt = buildLearningReviewPrompt('/runs/manifest.json', manifest, '/runs/result.json');
   assert.match(genericPrompt, /\/runs\/review-result\.json/);
 });
 
-test('manual review reserves its single-flight UI before asynchronous preparation', async () => {
+test('manual review reserves its single-flight UI before the Agent launch', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
-  const { reviewHash } = require('../out/learningReview.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/immediate');
   let starts = 0;
   const operation = runManualLearningReview({
     runDir, globalRoot, projects: [], globalPrompt: '',
     getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
     onStart: () => { starts += 1; },
-    launch: async (_promptFile, resultFile) => {
-      const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
-      const manifestHash = reviewHash(JSON.stringify(manifest));
-      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
-      fs.writeFileSync(resultFile, JSON.stringify(proposal));
-      fs.writeFileSync(path.join(runDir, 'review-1.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
-    }
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   });
-  assert.equal(starts, 1, 'the user-visible review start must happen before manifest collection yields');
+  assert.equal(starts, 1, 'the user-visible review start must be reserved synchronously');
   const duplicate = runManualLearningReview({
     runDir: path.join(globalRoot, 'maintenance/runs/duplicate'), globalRoot, projects: [], globalPrompt: '',
     getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('duplicate must share the first operation'),
@@ -111,6 +124,213 @@ test('manual review reserves its single-flight UI before asynchronous preparatio
   });
   assert.equal(duplicate, operation);
   await operation;
+});
+
+test('manual review gives the Agent control before any review preparation or evidence collection', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/agent-first');
+  const pluginActions = [];
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '',
+    prepare: () => { pluginActions.push('prepare'); },
+    getProjects: () => { pluginActions.push('projects'); return []; },
+    api: async () => { pluginActions.push('github'); return []; },
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      assert.deepEqual(pluginActions, [], 'the Agent must start before the plugin performs review work');
+      const manifest = { schemaVersion: 1, runId: 'agent-first', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [], sources: [], memory: [], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], recovery: [], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', provenance: { method: 'subagent', parentRunId: manifest.runId, childRunId: 'child-agent-first' }, checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  });
+  assert.equal(result.status, 'applied');
+});
+
+test('manual review rejects an Agent manifest that omits a registered project', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const project = root(); const runDir = path.join(globalRoot, 'maintenance/runs/missing-project');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [project],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot, projects: [] }); }
+  }), /项目范围/);
+});
+
+test('manual review ignores legacy candidates that belong to projects outside the Agent-visible scope', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/hidden-candidate');
+  const candidates = path.join(globalRoot, 'learning/candidates');
+  fs.mkdirSync(candidates, { recursive: true });
+  fs.writeFileSync(path.join(candidates, 'hidden.json'), JSON.stringify({ schemaVersion: 1, projectPath: '/hidden/project' }));
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
+  });
+  assert.equal(result.status, 'applied');
+});
+
+test('manual review rejects Agent evidence outside registered project and global roots', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = root(); const outside = path.join(root(), 'outside.md');
+  const runDir = path.join(globalRoot, 'maintenance/runs/outside-source');
+  fs.writeFileSync(outside, 'outside');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const source = { id: 'outside-source', kind: 'agent_report', projectPath: project, file: outside, hash: reviewHash('outside') };
+      const manifest = { schemaVersion: 1, runId: 'outside-source', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'No reusable lesson.' }], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  }), /来源范围/);
+});
+
+test('manual review rejects Agent evidence that escapes through a project symlink', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = root(); const outside = path.join(root(), 'outside.md');
+  const linked = path.join(project, 'linked.md'); const runDir = path.join(globalRoot, 'maintenance/runs/symlink-source');
+  fs.writeFileSync(outside, 'outside'); fs.symlinkSync(outside, linked);
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const source = { id: 'linked-source', kind: 'agent_report', projectPath: project, file: linked, hash: reviewHash('outside') };
+      const manifest = { schemaVersion: 1, runId: 'symlink-source', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'No reusable lesson.' }], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  }), /符号链接/);
+});
+
+test('manual review rejects memory content that does not match its Agent manifest hash', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/tampered-memory');
+  const memoryFile = path.join(globalRoot, 'memory/operating-rules.md'); const original = '# Real rules\n';
+  fs.mkdirSync(path.dirname(memoryFile), { recursive: true }); fs.writeFileSync(memoryFile, original);
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const source = { id: 'memory-source', kind: 'memory', file: memoryFile, hash: reviewHash(original) };
+      const manifest = { schemaVersion: 1, runId: 'tampered-memory', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [], sources: [source], memory: [{ relativePath: 'operating-rules.md', hash: reviewHash(original), content: '# Fake rules\n' }], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [{ path: 'operating-rules.md', baseHash: reviewHash(original), before: '# Fake rules\n', after: '# Fake rules\nChanged\n', reason: 'Test mismatch.', evidence: [source.id] }], lessons: [], processedSources: [], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'memory:0', safe: true, reason: 'Checked.', evidence: [source.id] }, { target: 'overall', safe: true, reason: 'Checked.', evidence: [source.id] }] }));
+    }
+  }), /记忆清单/);
+  assert.equal(fs.readFileSync(memoryFile, 'utf8'), original);
+});
+
+test('manual review rejects an Agent manifest that omits an existing formal source', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/omitted-source');
+  const memoryFile = path.join(globalRoot, 'memory/profile.md');
+  fs.mkdirSync(path.dirname(memoryFile), { recursive: true }); fs.writeFileSync(memoryFile, '# Profile\n');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
+  }), /证据清单不完整/);
+});
+
+test('manual review rejects a memory source whose full content is omitted from manifest.memory', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/omitted-memory-content');
+  const memoryFile = path.join(globalRoot, 'memory/profile.md'); const content = '# Profile\n';
+  fs.mkdirSync(path.dirname(memoryFile), { recursive: true }); fs.writeFileSync(memoryFile, content);
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const source = { id: 'memory-profile', kind: 'memory', file: memoryFile, hash: reviewHash(content) };
+      const manifest = { schemaVersion: 1, runId: 'omitted-memory-content', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [], sources: [source], memory: [], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], recovery: [], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  }), /记忆正文清单不完整/);
+});
+
+test('manual review rejects project files outside the formal review source list', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = root(); const runDir = path.join(globalRoot, 'maintenance/runs/private-source');
+  const privateFile = path.join(project, '.env'); fs.writeFileSync(privateFile, 'TOKEN=secret\n');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const source = { id: 'private-source', kind: 'agent_report', projectPath: project, file: privateFile, hash: reviewHash('TOKEN=secret\n') };
+      const manifest = { schemaVersion: 1, runId: 'private-source', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'Not a formal review source.' }], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  }), /正式材料清单/);
+});
+
+test('manual review rejects GitHub evidence whose stable value does not match its hash', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = root(); const runDir = path.join(globalRoot, 'maintenance/runs/github-source');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const source = { id: 'github-source', kind: 'github', projectPath: project, hash: reviewHash('forged'), value: { repository: 'owner/repo', sha: 'a'.repeat(40), files: [], checks: [], statuses: [], gaps: [], observedAt: '2026-09-18T00:00:00Z' } };
+      const manifest = { schemaVersion: 1, runId: 'github-source', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'No reusable lesson.' }], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  }), /GitHub.*哈希/);
+});
+
+test('manual review rejects self-consistent GitHub evidence that does not exist remotely', async () => {
+  const cp = require('node:child_process');
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = root(); const runDir = path.join(globalRoot, 'maintenance/runs/forged-github');
+  cp.execFileSync('git', ['init'], { cwd: project, stdio: 'ignore' }); cp.execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: project });
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project], api: async () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const value = { repository: 'owner/repo', sha: 'b'.repeat(40), taskIds: [], files: [], checks: [], statuses: [], gaps: [], observedAt: '2026-09-18T00:00:00Z' };
+      const { observedAt, ...stable } = value;
+      const source = { id: 'forged-github', kind: 'github', projectPath: project, hash: reviewHash(JSON.stringify(stable)), value };
+      const manifest = { schemaVersion: 1, runId: 'forged-github', globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [source], memory: [], gaps: [] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'No lesson.' }], recovery: [], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  }), /GitHub.*真实事实/);
 });
 
 test('normal event writes and reads do not generate semantic candidates or promotion suggestions', () => {
@@ -209,7 +429,6 @@ test('manual runner completes generation and subagent verification in one Agent 
   const file = path.resolve(__dirname, '../out/learningReviewRunner.js');
   assert.ok(fs.existsSync(file), 'manual entry runner must exist');
   const { runManualLearningReview } = require(file);
-  const { reviewHash } = require('../out/learningReview.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/global-prompt-review-test');
   let launches = 0;
   const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => { throw new Error('no changes'); }, launch: async (promptFile, resultFile) => {
@@ -219,39 +438,202 @@ test('manual runner completes generation and subagent verification in one Agent 
     assert.ok(generatedPrompt.includes(path.join(globalRoot, 'learning/ledger')));
     assert.ok(generatedPrompt.includes('影响后续所有插件任务'));
     assert.match(generatedPrompt, /同一 Agent 会话.*子智能体.*独立只读复核/s);
+    assert.match(generatedPrompt, /maintenance\/runs.*application\.json.*partial.*applying.*recovery/s);
     assert.match(generatedPrompt, /SHA256\(JSON\.stringify\(JSON\.parse/);
-    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
-    const manifestHash = reviewHash(JSON.stringify(manifest));
-    const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
-    fs.writeFileSync(resultFile, `${JSON.stringify(proposal, null, 2)}\n`);
-    fs.writeFileSync(path.join(runDir, 'review-1.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No new evidence warrants changes.', evidence: [] }], summary: 'No changes' }));
+    writeEmptyAgentReview({ runDir, resultFile, globalRoot });
   } });
   assert.equal(launches, 1);
   assert.equal(result.status, 'applied');
 });
 
-test('interrupted generation resumes the same review without overwriting previous attempts', async () => {
+test('manual review rejects a pass artifact without distinct subagent provenance', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/no-subagent-proof');
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      writeEmptyAgentReview({ runDir, resultFile, globalRoot });
+      const reviewFile = path.join(runDir, 'review.json'); const review = JSON.parse(fs.readFileSync(reviewFile));
+      delete review.provenance; fs.writeFileSync(reviewFile, JSON.stringify(review));
+    }
+  }), /子智能体.*执行凭据/);
+});
+
+test('manual review starts a real Agent process before plugin-side project validation', async () => {
+  const cp = require('node:child_process');
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/real-process');
+  const marker = path.join(globalRoot, 'agent-started'); const reviewModule = path.resolve(__dirname, '../out/learningReview.js');
+  const script = [
+    "const fs=require('node:fs'),path=require('node:path');",
+    "const [runDir,resultFile,globalRoot,marker,reviewModule]=process.argv.slice(1);",
+    "const {reviewHash}=require(reviewModule);fs.writeFileSync(marker,'started');",
+    "const manifest={schemaVersion:1,runId:path.basename(runDir),globalRoot,globalPrompt:'',promptHash:reviewHash(''),persistedPromptHash:reviewHash(''),projects:[],sources:[],memory:[],gaps:[]};",
+    "fs.writeFileSync(path.join(runDir,'manifest.json'),JSON.stringify(manifest));const manifestHash=reviewHash(JSON.stringify(manifest));",
+    "const proposal={schemaVersion:2,runId:manifest.runId,manifestHash,globalPrompt:null,memoryChanges:[],lessons:[],processedSources:[],recovery:[],unresolved:[]};",
+    "fs.writeFileSync(resultFile,JSON.stringify(proposal));fs.writeFileSync(path.join(runDir,'review.json'),JSON.stringify({schemaVersion:1,runId:manifest.runId,manifestHash,proposalHash:reviewHash(JSON.stringify(proposal)),verdict:'pass',provenance:{method:'subagent',parentRunId:manifest.runId,childRunId:'child-real-process'},checks:[{target:'overall',safe:true,reason:'No changes.',evidence:[]}]}));"
+  ].join('');
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '',
+    getProjects: () => { assert.equal(fs.readFileSync(marker, 'utf8'), 'started'); return []; },
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => new Promise((resolve, reject) => {
+      const child = cp.spawn(process.execPath, ['-e', script, runDir, resultFile, globalRoot, marker, reviewModule], { stdio: 'inherit' });
+      child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Agent process exited ${code}`)));
+    })
+  });
+  assert.equal(result.status, 'applied');
+});
+
+test('post-Agent validation does not initialize or migrate a project journal', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const { reviewHash } = require('../out/learningReview.js');
+  const globalRoot = root(); const project = root(); const runDir = path.join(globalRoot, 'maintenance/runs/read-only-project');
+  const journal = path.join(project, '.solopreneur/project_journal.db');
+  fs.mkdirSync(path.dirname(journal), { recursive: true });
+  fs.writeFileSync(journal, 'not-a-sqlite-database');
+  const before = fs.statSync(journal);
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [project], globalPrompt: '', getProjects: () => [project],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => {
+      const manifest = { schemaVersion: 1, runId: path.basename(runDir), globalRoot, globalPrompt: '', promptHash: reviewHash(''), persistedPromptHash: reviewHash(''), projects: [project], sources: [], memory: [], gaps: [`${project}: No GitHub origin; only local reports are available.`] };
+      fs.writeFileSync(path.join(runDir, 'manifest.json'), JSON.stringify(manifest));
+      const manifestHash = reviewHash(JSON.stringify(manifest));
+      const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], recovery: [], unresolved: [] };
+      fs.writeFileSync(resultFile, JSON.stringify(proposal));
+      fs.writeFileSync(path.join(runDir, 'review.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', provenance: { method: 'subagent', parentRunId: manifest.runId, childRunId: 'child-read-only-project' }, checks: [{ target: 'overall', safe: true, reason: 'No changes.', evidence: [] }] }));
+    }
+  });
+  const after = fs.statSync(journal);
+  assert.equal(result.status, 'applied');
+  assert.equal(fs.readFileSync(journal, 'utf8'), 'not-a-sqlite-database');
+  assert.equal(after.size, before.size);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+});
+
+test('manual review requires the Agent to disposition every earlier partial application', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const priorRun = path.join(globalRoot, 'maintenance/runs/prior-partial');
+  const runDir = path.join(globalRoot, 'maintenance/runs/recovery-required');
+  fs.mkdirSync(priorRun, { recursive: true });
+  fs.writeFileSync(path.join(priorRun, 'application.json'), JSON.stringify({ status: 'partial', errors: ['setting unavailable'] }));
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
+  }), /恢复处置/);
+});
+
+test('manual review records a reviewed superseded partial application as terminal after success', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const priorRun = path.join(globalRoot, 'maintenance/runs/prior-superseded');
+  const runDir = path.join(globalRoot, 'maintenance/runs/recovery-terminal');
+  fs.mkdirSync(priorRun, { recursive: true });
+  fs.writeFileSync(path.join(priorRun, 'application.json'), JSON.stringify({ status: 'partial', proposalHash: 'unrecoverable', items: {}, pending: {}, errors: ['old failure'] }));
+  const recovery = [{ runDir: priorRun, status: 'partial', decision: 'superseded', reason: 'The old artifacts are incomplete and cannot be safely resumed.', items: [] }];
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot, recovery }); }
+  });
+  assert.equal(result.status, 'applied');
+  const prior = JSON.parse(fs.readFileSync(path.join(priorRun, 'application.json')));
+  assert.equal(prior.status, 'superseded');
+  assert.equal(prior.recoveredBy, path.basename(runDir));
+});
+
+test('manual review refuses a second process while the global review lease is held', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/lease-conflict');
+  const lockFile = path.join(globalRoot, 'maintenance/review.lock');
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true }); fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, runId: 'other-window' }));
+  let launched = false;
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { launched = true; writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
+  }), /另一窗口.*复盘/);
+  assert.equal(launched, false);
+});
+
+test('manual review recovers a lease left by a process that no longer exists', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/stale-lease');
+  const lockFile = path.join(globalRoot, 'maintenance/review.lock');
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true }); fs.writeFileSync(lockFile, JSON.stringify({ pid: 2147483647, runId: 'crashed-window' }));
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
+  });
+  assert.equal(result.status, 'applied');
+  assert.equal(fs.existsSync(lockFile), false);
+});
+
+test('manual review recovers an old truncated lease instead of blocking forever', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/truncated-lease');
+  const lockFile = path.join(globalRoot, 'maintenance/review.lock');
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true }); fs.writeFileSync(lockFile, '{');
+  const old = new Date(Date.now() - 10 * 60_000); fs.utimesSync(lockFile, old, old);
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
+  });
+  assert.equal(result.status, 'applied');
+  assert.equal(fs.existsSync(lockFile), false);
+});
+
+test('manual review expires an old-format lease even when its PID has been reused', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/reused-pid-lease');
+  const lockFile = path.join(globalRoot, 'maintenance/review.lock');
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true }); fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, runId: 'old-format' }));
+  const old = new Date(Date.now() - 7 * 60 * 60_000); fs.utimesSync(lockFile, old, old);
+  const result = await runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: '', getProjects: () => [],
+    getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
+  });
+  assert.equal(result.status, 'applied');
+  assert.equal(fs.existsSync(lockFile), false);
+});
+
+test('concurrent stale-lease takeover starts exactly one Agent process', async () => {
+  const cp = require('node:child_process'); const globalRoot = root();
+  const lockFile = path.join(globalRoot, 'maintenance/review.lock'); fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: 2147483647, runId: 'crashed' }));
+  const runner = path.resolve(__dirname, '../out/learningReviewRunner.js'); const reviewModule = path.resolve(__dirname, '../out/learningReview.js');
+  const script = [
+    "const fs=require('node:fs'),path=require('node:path');const [runner,reviewModule,globalRoot,name]=process.argv.slice(1);",
+    "const {runManualLearningReview}=require(runner),{reviewHash}=require(reviewModule);const runDir=path.join(globalRoot,'maintenance/runs',name);",
+    "runManualLearningReview({runDir,globalRoot,projects:[],globalPrompt:'',getGlobalPrompt:()=>'',setGlobalPrompt:async()=>{},launch:async(_p,resultFile)=>{await new Promise(r=>setTimeout(r,250));const runId=path.basename(runDir),manifest={schemaVersion:1,runId,globalRoot,globalPrompt:'',promptHash:reviewHash(''),persistedPromptHash:reviewHash(''),projects:[],sources:[],memory:[],gaps:[]};fs.writeFileSync(path.join(runDir,'manifest.json'),JSON.stringify(manifest));const manifestHash=reviewHash(JSON.stringify(manifest)),proposal={schemaVersion:2,runId,manifestHash,globalPrompt:null,memoryChanges:[],lessons:[],processedSources:[],recovery:[],unresolved:[]};fs.writeFileSync(resultFile,JSON.stringify(proposal));fs.writeFileSync(path.join(runDir,'review.json'),JSON.stringify({schemaVersion:1,runId,manifestHash,proposalHash:reviewHash(JSON.stringify(proposal)),verdict:'pass',provenance:{method:'subagent',parentRunId:runId,childRunId:'child-'+name},checks:[{target:'overall',safe:true,reason:'checked'}]}));}}).then(()=>process.stdout.write('ok')).catch(e=>process.stdout.write(/另一窗口/.test(e.message)?'blocked':'error:'+e.message));"
+  ].join('');
+  const run = name => new Promise((resolve, reject) => cp.execFile(process.execPath, ['-e', script, runner, reviewModule, globalRoot, name], { encoding: 'utf8' }, (error, stdout, stderr) => error ? reject(error) : resolve(stdout.trim())));
+  const outcomes = await Promise.all([run('race-a'), run('race-b')]);
+  assert.deepEqual(outcomes.sort(), ['blocked', 'ok']);
+});
+
+test('interrupted generation is preserved while the next click starts a fresh Agent run', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/review-original');
   const input = { runDir, globalRoot, projects: [], globalPrompt: '', getGlobalPrompt: () => '', setGlobalPrompt: async () => assert.fail('no changes') };
   await assert.rejects(runManualLearningReview({ ...input, launch: async () => { throw new Error('interrupted'); } }), /interrupted/);
-  const original = fs.readFileSync(path.join(runDir, 'prompt-1.txt'), 'utf8');
+  const original = fs.readFileSync(path.join(runDir, 'prompt.txt'), 'utf8');
   const launchFiles = [];
-  const result = await runManualLearningReview({ ...input, runDir: path.join(globalRoot, 'maintenance/runs/review-new-request'), launch: async (prompt, file) => {
+  const nextRunDir = path.join(globalRoot, 'maintenance/runs/review-new-request');
+  const result = await runManualLearningReview({ ...input, runDir: nextRunDir, launch: async (prompt, file) => {
     launchFiles.push(file);
-    assert.equal(path.dirname(file), runDir);
-    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
-    const manifestHash = reviewHash(JSON.stringify(manifest));
+    assert.equal(path.dirname(file), nextRunDir);
     assert.match(fs.readFileSync(prompt, 'utf8'), /明确保留在 unresolved 或 deferred/);
-    const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: ['未声称原任务全部验收'] };
-    fs.writeFileSync(file, JSON.stringify(proposal));
-    fs.writeFileSync(path.join(runDir, 'review-2.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks: [{ target: 'overall', safe: true, reason: 'No unsupported changes or conclusions.', evidence: [] }] }));
+    writeEmptyAgentReview({ runDir: nextRunDir, resultFile: file, globalRoot, unresolved: ['未声称原任务全部验收'] });
   } });
   assert.equal(result.status, 'applied');
   assert.equal(launchFiles.length, 1);
-  assert.equal(fs.readFileSync(path.join(runDir, 'prompt-1.txt'), 'utf8'), original);
-  assert.equal(fs.existsSync(path.join(globalRoot, 'maintenance/runs/review-new-request')), false);
+  assert.equal(fs.readFileSync(path.join(runDir, 'prompt.txt'), 'utf8'), original);
+  assert.equal(fs.existsSync(path.join(nextRunDir, 'prompt.txt')), true);
 });
 
 test('completed digest text does not count as a successful experience use', () => {
@@ -281,6 +663,22 @@ test('GitHub pagination failure preserves progress and a later manual call resum
   await collectGithubEvidence({ projectPath: project, repository: 'owner/repo', tasks, reports: [], api: async endpoint => { secondCalls.push(endpoint); return []; } });
   assert.match(secondCalls[0], /page=2/);
   assert.match(secondCalls[0], new RegExp('sha=' + sha));
+});
+
+test('read-only GitHub verification leaves no shared evidence cache files', async () => {
+  const { collectGithubEvidence } = require('../out/learningReview.js');
+  const project = root(); const tasks = [{ taskId: 'task-read-only', startedAt: '2026-09-08' }];
+  const sha = 'd'.repeat(40);
+  const api = async endpoint => {
+    if (endpoint.includes('/commits?')) return [{ sha, commit: { message: 'fix\n\nSoloMap-Task: task-read-only' } }];
+    if (endpoint.includes(`/commits/${sha}?`)) return { sha, commit: { message: 'fix\n\nSoloMap-Task: task-read-only' }, files: [{ filename: 'a.js', patch: '+ok', changes: 1 }] };
+    if (endpoint.includes('/check-runs?')) return { check_runs: [] };
+    if (endpoint.includes('/status?')) return { sha, statuses: [] };
+    throw new Error(endpoint);
+  };
+  const result = await collectGithubEvidence({ projectPath: project, repository: 'owner/repo', tasks, reports: [], api, persist: false });
+  assert.equal(result.commits.length, 1);
+  assert.equal(fs.existsSync(path.join(project, '.solopreneur/agent-runs/learning-evidence')), false);
 });
 
 test('report registration preserves explicit task lineage across CLI runs and separates new Solo tasks', () => {
@@ -360,7 +758,7 @@ test('promoted semantic lesson is retrievable with identity and evidence, reject
   assert.equal(ledger.buildLearningRetrievalContext(f.project, f.globalRoot, { projectPath: f.project, contextText: 'login' }), '');
 });
 
-test('subsequent manual click resumes a partial application before starting another Agent', async () => {
+test('subsequent manual click starts an Agent instead of doing plugin-side partial recovery', async () => {
   const { applyLearningReview } = require('../out/learningReviewApply.js');
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
   const f = applicationFixture(); const review = f.makeReview();
@@ -369,23 +767,17 @@ test('subsequent manual click resumes a partial application before starting anot
   fs.writeFileSync(path.join(f.runDir, 'result.json'), JSON.stringify({ proposalFile: path.join(f.runDir, 'proposal-1.json'), checkFile: path.join(f.runDir, 'review-1.json') }));
   await applyLearningReview({ ...f, review, getGlobalPrompt: () => 'Keep intent.', setGlobalPrompt: async () => { throw new Error('temporary failure'); } });
   let prompt = 'Keep intent.'; let launches = 0;
-  const result = await runManualLearningReview({ runDir: path.join(path.dirname(f.runDir), 'next-review'), globalRoot: f.globalRoot, projects: [f.project], globalPrompt: prompt, getGlobalPrompt: () => prompt, setGlobalPrompt: async value => { prompt = value; }, launch: async () => { launches += 1; throw new Error('should resume saved proposal'); } });
-  assert.equal(result.status, 'applied');
-  assert.equal(launches, 0);
-  assert.equal(prompt, 'Keep intent. Verify outcomes.');
+  await assert.rejects(runManualLearningReview({ runDir: path.join(path.dirname(f.runDir), 'next-review'), globalRoot: f.globalRoot, projects: [f.project], globalPrompt: prompt, getGlobalPrompt: () => prompt, setGlobalPrompt: async value => { prompt = value; }, launch: async () => { launches += 1; throw new Error('Agent owns recovery'); } }), /Agent owns recovery/);
+  assert.equal(launches, 1);
+  assert.equal(prompt, 'Keep intent.');
 });
 
 test('review keeps the current editor draft separate from persisted instruction concurrency checks', async () => {
   const { runManualLearningReview } = require('../out/learningReviewRunner.js');
-  const { reviewHash } = require('../out/learningReview.js');
   const globalRoot = root(); const runDir = path.join(globalRoot, 'maintenance/runs/draft');
   const result = await runManualLearningReview({ runDir, globalRoot, projects: [], globalPrompt: 'Unsaved user instruction', persistedGlobalPrompt: 'Saved instruction', getGlobalPrompt: () => 'Saved instruction', setGlobalPrompt: async () => { throw new Error('no change proposal must preserve draft without saving'); }, launch: async (_prompt, resultFile) => {
-    const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
+    const manifest = writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt: 'Unsaved user instruction', persistedPrompt: 'Saved instruction' });
     assert.equal(manifest.globalPrompt, 'Unsaved user instruction');
-    const manifestHash = reviewHash(JSON.stringify(manifest));
-    const proposal = { schemaVersion: 2, runId: manifest.runId, manifestHash, globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
-    fs.writeFileSync(resultFile, JSON.stringify(proposal));
-    fs.writeFileSync(path.join(runDir, 'review-1.json'), JSON.stringify({ schemaVersion: 1, runId: manifest.runId, manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', summary: 'No changes', checks: [{ target: 'overall', safe: true, reason: 'Retains draft', evidence: [] }] }));
   } });
   assert.equal(result.status, 'applied');
 });

@@ -152,6 +152,39 @@ export function getProjects(input: {
   return sortProjectsForDisplay(normalizedProjects);
 }
 
+export function getProjectsReadOnly(input: {
+  globalDataPath: string;
+  projectRegistryFileName: string;
+  legacyProjects: SolopreneurProject[];
+  legacyHiddenProjects: string[];
+  workspaceRoot?: string;
+}): SolopreneurProject[] {
+  const readableProjectDirectory = (projectPath: string): boolean => {
+    if (!path.isAbsolute(projectPath)) return false;
+    try {
+      fs.accessSync(projectPath, fs.constants.R_OK);
+      return fs.statSync(projectPath).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const registry = readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
+  const savedProjects = registry ? registry.projects : input.legacyProjects;
+  const hiddenProjects = new Set(registry ? registry.hiddenProjects : input.legacyHiddenProjects);
+  const workspaceRoot = String(input.workspaceRoot || '').trim();
+  const projects = normalizeProjectsForStorage(savedProjects)
+    .filter(project => !hiddenProjects.has(project.path) && readableProjectDirectory(project.path));
+
+  if (workspaceRoot && readableProjectDirectory(workspaceRoot) && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
+    projects.unshift({
+      name: projectName(workspaceRoot),
+      path: workspaceRoot
+    });
+  }
+
+  return sortProjectsForDisplay(normalizeProjectsForStorage(projects));
+}
+
 export function getSelectedProjectPath(projects: SolopreneurProject[], savedSelected: string): string {
   if (savedSelected && projects.some((project) => project.path === savedSelected)) {
     return savedSelected;

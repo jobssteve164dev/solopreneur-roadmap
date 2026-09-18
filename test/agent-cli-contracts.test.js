@@ -85,6 +85,17 @@ for (const contract of cliContracts) {
   });
 }
 
+test('review launches use the same automatic Agent permission contract as normal task runs', () => {
+  const runDir = '/global/maintenance/runs/review';
+  const prompt = `${runDir}/prompt.txt`;
+  for (const contract of cliContracts) {
+    const review = agentCli.buildAgentCommandForPromptFile(contract.executable, prompt, runDir, 'always');
+    const normal = agentCli.buildAgentCommandForPromptFile(contract.executable, prompt, runDir, 'always');
+    assert.equal(review, normal);
+    assert.ok(review.includes(contract.permissionArgs), `${contract.family} must preserve the normal automatic task permission setting`);
+  }
+});
+
 test('Cursor installer verifies the official user-local binary before PATH is refreshed', () => {
   const fixtureHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cursor-install-'));
   const installedCli = path.join(fixtureHome, '.local', 'bin', 'cursor-agent');
