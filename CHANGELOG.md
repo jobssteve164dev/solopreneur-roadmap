@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.468 - 2026-09-18
+
+### Fixed
+- restore agent-owned experience reviews (7481511)
+
+### Docs
+- correct experience review execution boundary (1a39a1d)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.467 - 2026-09-15
 
 ### Fixed
