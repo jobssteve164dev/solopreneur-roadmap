@@ -83,7 +83,8 @@ test('global review indexes every memory and constraint layer with exact paths',
   fs.writeFileSync(path.join(project, 'agent-root.md'), '');
   const manifest = await collectReviewManifest({ runId: 'layers', globalRoot, globalPrompt: 'Global setting', projects: [project], repositoryForProject: async () => '' });
   const byKind = kind => manifest.sources.filter(source => source.kind === kind).map(source => source.file);
-  for (const name of ['agent.md', 'AGENTS.md']) assert.ok(byKind('project_constraint').includes(path.join(project, name)), name);
+  assert.ok(byKind('global_constraint').includes(path.join(project, 'agent.md')), 'the shared-root agent file has a distinct global evidence role');
+  assert.ok(byKind('project_constraint').includes(path.join(project, 'AGENTS.md')), 'AGENTS.md');
   assert.ok(byKind('project_memory_legacy').includes(path.join(project, 'PROJECT_MEMORY.md')));
   assert.ok(byKind('project_document_index').includes(path.join(project, '.solopreneur/documentation.json')));
   assert.ok(byKind('project_document').includes(path.join(project, 'docs/boundary.md')));
@@ -613,6 +614,86 @@ test('incremental review ignores orphan reports that are not bound to a register
   assert.equal(manifest.sources.some(source => source.file === report), false);
 });
 
+test('the shared project-root agent file enters review evidence even when the root is not a registered project', async () => {
+  const { collectReviewManifest } = require('../out/learningReview.js');
+  const sharedRoot = root(); const globalRoot = path.join(sharedRoot, '.solomap-global'); const project = path.join(sharedRoot, 'product');
+  fs.mkdirSync(project, { recursive: true });
+  const sharedAgent = path.join(sharedRoot, 'agent.md');
+  fs.writeFileSync(sharedAgent, '# Cross-project execution constraints');
+
+  const manifest = await collectReviewManifest({
+    runId: 'shared-root-agent', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false
+  });
+
+  const source = manifest.sources.find(item => item.file === sharedAgent);
+  assert.equal(source?.kind, 'global_constraint');
+  assert.equal(source?.content, '# Cross-project execution constraints');
+});
+
+test('a changed shared project-root agent file re-enters incremental review as a new version', async () => {
+  const { collectReviewManifest } = require('../out/learningReview.js');
+  const sharedRoot = root(); const globalRoot = path.join(sharedRoot, '.solomap-global'); const project = path.join(sharedRoot, 'product');
+  fs.mkdirSync(project, { recursive: true });
+  const sharedAgent = path.join(sharedRoot, 'agent.md');
+  fs.writeFileSync(sharedAgent, 'first version');
+  const first = await collectReviewManifest({ runId: 'shared-root-first', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false });
+  const original = first.sources.find(item => item.file === sharedAgent);
+  assert.ok(original);
+  const previousSources = { [original.id]: original };
+
+  const unchanged = await collectReviewManifest({ runId: 'shared-root-unchanged', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false, previousSources });
+  assert.equal(unchanged.sources.some(item => item.id === original.id), false);
+
+  fs.writeFileSync(sharedAgent, 'second changed version');
+  const changed = await collectReviewManifest({ runId: 'shared-root-changed', globalRoot, globalPrompt: 'Keep intent.', projects: [project], incremental: true, includeGithub: false, previousSources });
+  const refreshed = changed.sources.find(item => item.id === original.id);
+  assert.equal(refreshed?.kind, 'global_constraint');
+  assert.equal(refreshed?.content, 'second changed version');
+});
+
+test('manual review accepts and advances the shared project-root constraint collected by the Agent', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const cp = require('node:child_process');
+  const sharedRoot = root(); const globalRoot = path.join(sharedRoot, '.solomap-global'); const project = path.join(sharedRoot, 'product');
+  fs.mkdirSync(project, { recursive: true }); fs.mkdirSync(globalRoot, { recursive: true });
+  const sharedAgent = path.join(sharedRoot, 'agent.md');
+  fs.writeFileSync(sharedAgent, '# Shared constraint');
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ path: project }], hiddenProjects: [sharedRoot] }));
+  const runDir = path.join(globalRoot, 'maintenance/runs/shared-root-accepted'); const current = 'Keep intent.';
+
+  const result = await runManualLearningReview({
+    runDir, globalRoot, workspaceRoot: project, projects: [project], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [project], getGlobalPrompt: () => current, setGlobalPrompt: async () => {},
+    launch: async (promptFile, resultFile) => {
+      cp.execFileSync(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-review.cjs'), 'collect', '--run-id', 'shared-root-accepted', '--run-dir', runDir, '--global', globalRoot, '--workspace', project, '--prompt-file', promptFile]);
+      const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json')));
+      const source = manifest.sources.find(item => item.file === sharedAgent);
+      assert.equal(source?.kind, 'global_constraint');
+      fs.writeFileSync(resultFile, JSON.stringify({ globalPrompt: current, changes: [], processedSourceIds: manifest.sources.map(item => item.id), unresolved: [], deferredSourceIds: [], recovery: [] }));
+    }
+  });
+
+  assert.equal(result.status, 'applied');
+  const state = JSON.parse(fs.readFileSync(path.join(globalRoot, 'maintenance/review-state.json')));
+  assert.equal(state.sources[`source-${require('../out/learningReview.js').reviewHash(`${sharedAgent}:global_constraint`).slice(0, 24)}`].content, '# Shared constraint');
+});
+
+test('direct review rejects a sibling file disguised as the shared global constraint', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const sharedRoot = root(); const globalRoot = path.join(sharedRoot, '.solomap-global'); const sibling = path.join(sharedRoot, 'other.md');
+  fs.mkdirSync(globalRoot, { recursive: true }); fs.writeFileSync(sibling, 'not the shared agent constraint');
+  const stat = fs.statSync(sibling); const content = fs.readFileSync(sibling, 'utf8');
+  const source = { id: `source-${reviewHash(`${sibling}:global_constraint`).slice(0, 24)}`, kind: 'global_constraint', file: sibling, hash: reviewHash(content), size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino, content };
+  const runDir = path.join(globalRoot, 'maintenance/runs/forged-global-constraint'); const current = 'Keep intent.';
+
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], resultContract: 'global-prompt-v1', globalPrompt: current, persistedGlobalPrompt: current,
+    getProjects: () => [], getGlobalPrompt: () => current, setGlobalPrompt: async () => assert.fail('a forged global constraint must not be applied'),
+    launch: async (_promptFile, resultFile) => writeDirectReview({ runDir, resultFile, globalRoot, oldPrompt: current, newPrompt: current, sources: [source] })
+  }), /范围外或非正式证据来源/);
+});
+
 test('an active document that appears after an unchanged index is collected as new evidence', async () => {
   const { collectReviewManifest } = require('../out/learningReview.js');
   const globalRoot = root(); const project = path.join(globalRoot, 'project'); const document = path.join(project, 'docs/new.md');
@@ -841,6 +922,18 @@ test('manual review ignores legacy candidates that belong to projects outside th
     launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot }); }
   });
   assert.equal(result.status, 'applied');
+});
+
+test('legacy review rejects a manifest that omits the existing shared global constraint', async () => {
+  const { runManualLearningReview } = require('../out/learningReviewRunner.js');
+  const sharedRoot = root(); const globalRoot = path.join(sharedRoot, '.solomap-global'); const runDir = path.join(globalRoot, 'maintenance/runs/legacy-missing-global-constraint');
+  fs.mkdirSync(globalRoot, { recursive: true }); fs.writeFileSync(path.join(sharedRoot, 'agent.md'), '# Required shared constraint');
+
+  await assert.rejects(runManualLearningReview({
+    runDir, globalRoot, projects: [], globalPrompt: 'Keep intent.', getProjects: () => [],
+    getGlobalPrompt: () => 'Keep intent.', setGlobalPrompt: async () => assert.fail('an incomplete legacy manifest must not apply'),
+    launch: async (_promptFile, resultFile) => { writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt: 'Keep intent.' }); }
+  }), /global constraint.*omitted/i);
 });
 
 test('manual review rejects Agent evidence outside registered project and global roots', async () => {
@@ -1094,6 +1187,29 @@ test('review rejects any project constraint that lacks a disposition or independ
     { target: 'memory:0', safe: true, reason: 'checked' },
     { target: 'lesson:0', safe: true, reason: 'checked' },
     { target: `source:${source.id}`, safe: true, reason: 'checked', evidence: [source.id] },
+    { target: 'overall', safe: true, reason: 'checked' }
+  ])));
+});
+
+test('legacy review cannot skip the shared global constraint disposition or independent check', () => {
+  const { validateLearningReview } = require('../out/learningReviewApply.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const source = { id: 'global-rule-1', kind: 'global_constraint', file: '/workspace/agent.md', hash: 'global-constraint-hash' };
+  const manifest = { schemaVersion: 1, runId: 'global-constraint-review', globalRoot: '/workspace/.solomap-global', globalPrompt: 'Keep intent.', promptHash: reviewHash('Keep intent.'), projects: [], sources: [source], memory: [], gaps: [] };
+  const baseProposal = { schemaVersion: 2, runId: manifest.runId, manifestHash: reviewHash(JSON.stringify(manifest)), globalPrompt: null, memoryChanges: [], lessons: [], processedSources: [], unresolved: [] };
+  const makeReview = (proposal, checks) => ({ schemaVersion: 1, runId: manifest.runId, manifestHash: proposal.manifestHash, proposalHash: reviewHash(JSON.stringify(proposal)), verdict: 'pass', checks });
+
+  assert.throws(() => validateLearningReview(manifest, baseProposal, makeReview(baseProposal, [{ target: 'overall', safe: true, reason: 'checked' }])), /global constraint/i);
+  const proposal = { ...baseProposal, processedSources: [{ id: source.id, hash: source.hash, decision: 'skipped', reason: 'Already covered globally.' }] };
+  assert.throws(() => validateLearningReview(manifest, proposal, makeReview(proposal, [{ target: 'overall', safe: true, reason: 'checked' }])), /source:global-rule-1/);
+  assert.doesNotThrow(() => validateLearningReview(manifest, proposal, makeReview(proposal, [
+    { target: `source:${source.id}`, safe: true, reason: 'Confirmed the shared constraint is already covered.', evidence: [source.id] },
+    { target: 'overall', safe: true, reason: 'checked' }
+  ])));
+  const promotedPrompt = { ...baseProposal, globalPrompt: { value: 'Keep intent.\nHonor shared constraints.', reason: 'Promote the shared cross-project rule.', evidence: [source.id], constraints: [] }, processedSources: [{ id: source.id, hash: source.hash, decision: 'created', reason: 'Promoted to the global prompt.' }] };
+  assert.doesNotThrow(() => validateLearningReview(manifest, promotedPrompt, makeReview(promotedPrompt, [
+    { target: 'globalPrompt', safe: true, reason: 'The shared rule is cross-project.', evidence: [source.id] },
+    { target: `source:${source.id}`, safe: true, reason: 'Verified the shared constraint source.', evidence: [source.id] },
     { target: 'overall', safe: true, reason: 'checked' }
   ])));
 });

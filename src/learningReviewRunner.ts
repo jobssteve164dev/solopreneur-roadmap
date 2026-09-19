@@ -99,6 +99,7 @@ function isDeclaredReviewSource(globalRoot: string, source: any): boolean {
   const file = path.resolve(source.file);
   const within = (root: string, ...parts: string[]) => isWithin(path.join(root, ...parts), file);
   if (source.kind === 'global_prompt_mirror') return file === path.join(globalRoot, 'context', 'global-default-prompt.md');
+  if (source.kind === 'global_constraint') return file === path.join(path.dirname(globalRoot), 'agent.md');
   if (source.kind === 'memory') return within(globalRoot, 'memory') && file.endsWith('.md');
   if (source.kind === 'memory_entry') return within(globalRoot, 'memory', 'entries') && file.endsWith('.json');
   if (source.kind === 'learning_ledger') return [path.join(globalRoot, 'learning', 'ledger', 'index.json'), path.join(globalRoot, 'learning', 'ledger', 'events.jsonl')].includes(file);
@@ -258,13 +259,15 @@ async function requiredLocalReviewSources(globalRoot: string, projects: string[]
     }
   };
   add(path.join(globalRoot, 'context', 'global-default-prompt.md'), 'global_prompt_mirror', globalRoot);
+  add(path.join(path.dirname(globalRoot), 'agent.md'), 'global_constraint', path.dirname(globalRoot));
   walkMemory(path.join(globalRoot, 'memory'));
   addJsonDirectory(path.join(globalRoot, 'memory', 'entries'), 'memory_entry', globalRoot);
   add(path.join(globalRoot, 'learning', 'ledger', 'index.json'), 'learning_ledger', globalRoot);
   add(path.join(globalRoot, 'learning', 'ledger', 'events.jsonl'), 'learning_ledger', globalRoot);
   addJsonDirectory(path.join(globalRoot, 'learning', 'ledger', 'sources'), 'learning_event_source', globalRoot);
   for (const project of projects) {
-    add(path.join(project, 'agent.md'), 'project_constraint', project, project); add(path.join(project, 'AGENTS.md'), 'project_constraint', project, project);
+    if (path.join(project, 'agent.md') !== path.join(path.dirname(globalRoot), 'agent.md')) add(path.join(project, 'agent.md'), 'project_constraint', project, project);
+    add(path.join(project, 'AGENTS.md'), 'project_constraint', project, project);
     add(path.join(project, 'PROJECT_MEMORY.md'), 'project_memory_legacy', project, project);
     const documentationFile = path.join(project, '.solopreneur', 'documentation.json');
     add(documentationFile, 'project_document_index', project, project);
@@ -329,7 +332,7 @@ export function runManualLearningReview(input: {
       const allowedProjects = input.getProjects ? input.getProjects() : input.projects;
       if (JSON.stringify([...manifest.projects].sort()) !== JSON.stringify([...allowedProjects].sort())) throw new Error('复盘 Agent 生成的项目范围与当前登记项目不一致。');
       const directKinds = new Set([
-        'global_prompt_mirror', 'memory', 'memory_entry', 'learning_ledger', 'learning_event_source',
+        'global_prompt_mirror', 'global_constraint', 'memory', 'memory_entry', 'learning_ledger', 'learning_event_source',
         'legacy_candidates', 'legacy_approved', 'legacy_rejected', 'legacy_promotion-suggestions',
         'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document',
         'run_digest', 'task', 'agent_report'
@@ -351,7 +354,8 @@ export function runManualLearningReview(input: {
         directSourceIds.add(source.id);
         if (source.projectPath && !manifest.projects.includes(source.projectPath)) throw new Error('复盘 Agent 生成的来源项目未登记。');
         if (source.file) {
-          const sourceRoot = isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
+          const sourceRoot = source.kind === 'global_constraint' ? path.dirname(input.globalRoot)
+            : isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
           const expected = requiredSources.get(path.resolve(source.file));
           if (!path.isAbsolute(source.file) || !sourceRoot || !isSafeSourceFile(sourceRoot, source.file)
             || !directKinds.has(source.kind) || !isDeclaredReviewSource(input.globalRoot, source)
@@ -395,7 +399,8 @@ export function runManualLearningReview(input: {
           || !source.file || !/^[a-f0-9]{64}$/.test(source.hash || '') || previousHash !== source.hash) throw new Error('复盘 Agent 生成了无效的游标更新。');
         cursorUpdateIds.add(source.id);
         if (previous && typeof previous === 'object' && (previous.file !== source.file || previous.kind !== source.kind || previous.projectPath !== source.projectPath)) throw new Error('复盘 Agent 生成的游标更新与既有来源身份不一致。');
-        const sourceRoot = isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
+        const sourceRoot = source.kind === 'global_constraint' ? path.dirname(input.globalRoot)
+          : isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
         if (!sourceRoot || !directKinds.has(source.kind) || !isSafeSourceFile(sourceRoot, source.file) || !isDeclaredReviewSource(input.globalRoot, source)) throw new Error('复盘 Agent 生成的游标更新超出正式来源范围。');
         const stat = fs.statSync(source.file);
         if (source.id !== `source-${reviewHash(`${source.file}:${source.kind}`).slice(0, 24)}`
@@ -523,8 +528,14 @@ export function runManualLearningReview(input: {
     }
     const allowedProjects = input.getProjects ? input.getProjects() : input.projects;
     if (JSON.stringify([...manifest.projects].sort()) !== JSON.stringify([...allowedProjects].sort())) throw new Error('复盘 Agent 生成的项目范围与当前登记项目不一致，材料已保留。');
+    const sharedProjectRoot = path.dirname(input.globalRoot);
+    const globalConstraintFile = path.join(sharedProjectRoot, 'agent.md');
+    if (isSafeSourceFile(sharedProjectRoot, globalConstraintFile)
+      && !manifest.sources.some(source => source.kind === 'global_constraint' && path.resolve(source.file || '') === globalConstraintFile)) {
+      throw new Error('Shared global constraint omitted from review manifest.');
+    }
     const allowedFileKinds = new Set([
-      'global_prompt_mirror', 'memory', 'memory_entry', 'learning_ledger', 'learning_event_source',
+      'global_prompt_mirror', 'global_constraint', 'memory', 'memory_entry', 'learning_ledger', 'learning_event_source',
       'legacy_candidates', 'legacy_approved', 'legacy_rejected', 'legacy_promotion-suggestions',
       'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document',
       'run_digest', 'task', 'agent_report'
@@ -535,7 +546,8 @@ export function runManualLearningReview(input: {
       sourceIds.add(source.id);
       if (source.projectPath && !manifest.projects.includes(source.projectPath)) throw new Error('复盘 Agent 生成的来源项目未登记，材料已保留。');
       if (source.file) {
-        const sourceRoot = isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
+        const sourceRoot = source.kind === 'global_constraint' ? path.dirname(input.globalRoot)
+          : isWithin(input.globalRoot, source.file) ? input.globalRoot : source.projectPath && isWithin(source.projectPath, source.file) ? source.projectPath : '';
         if (!path.isAbsolute(source.file) || !sourceRoot) throw new Error('复盘 Agent 生成的来源范围超出登记项目和全局数据目录，材料已保留。');
         if (!isSafeSourceFile(sourceRoot, source.file)) throw new Error('复盘 Agent 生成的来源文件不存在或经过符号链接，材料已保留。');
         if (!allowedFileKinds.has(source.kind) || !isDeclaredReviewSource(input.globalRoot, source)) throw new Error('复盘 Agent 生成的文件来源不在正式材料范围内，材料已保留。');

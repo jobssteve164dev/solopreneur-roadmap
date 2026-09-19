@@ -297,10 +297,13 @@ export async function collectReviewManifest(input: {
   };
   const promptMirror = path.join(input.globalRoot, 'context', 'global-default-prompt.md');
   if (safeFile(input.globalRoot, promptMirror)) addFile(promptMirror, 'global_prompt_mirror');
+  const sharedProjectRoot = path.dirname(input.globalRoot);
+  const globalConstraintFile = path.join(sharedProjectRoot, 'agent.md');
+  if (safeFile(sharedProjectRoot, globalConstraintFile)) addFile(globalConstraintFile, 'global_constraint');
   for (const project of input.projects) {
     for (const name of ['agent.md', 'AGENTS.md']) {
       const file = path.join(project, name);
-      if (safeFile(project, file)) addFile(file, 'project_constraint', project);
+      if (file !== globalConstraintFile && safeFile(project, file)) addFile(file, 'project_constraint', project);
     }
     const legacyProjectMemory = path.join(project, 'PROJECT_MEMORY.md');
     if (safeFile(project, legacyProjectMemory)) addFile(legacyProjectMemory, 'project_memory_legacy', project);
@@ -388,7 +391,7 @@ export async function collectReviewManifest(input: {
   }
   manifest.sources = manifest.sources.filter(source => {
     if (input.incremental) return source.kind !== 'legacy_candidate-decisions';
-    if (!input.incremental && (['memory', 'memory_entry', 'task', 'global_prompt_mirror', 'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document', 'run_digest', 'learning_ledger', 'learning_event_source'].includes(source.kind) || source.kind.startsWith('legacy_'))) return true;
+    if (!input.incremental && (['memory', 'memory_entry', 'task', 'global_prompt_mirror', 'global_constraint', 'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document', 'run_digest', 'learning_ledger', 'learning_event_source'].includes(source.kind) || source.kind.startsWith('legacy_'))) return true;
     const decision = readLearningJson(path.join(input.globalRoot, 'learning', 'candidate-decisions', `semantic-${reviewHash(`${source.id}:${source.hash}`)}.json`));
     return !(decision?.schemaVersion === 2 && decision.id === source.id && decision.hash === source.hash && ['created', 'skipped'].includes(decision.decision));
   });
