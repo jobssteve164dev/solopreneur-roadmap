@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.471 - 2026-09-21
+
+### Fixed
+- keep continuations under their root conversation (1f98a92)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.470 - 2026-09-19
 
 ### Fixed
