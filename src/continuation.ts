@@ -312,6 +312,12 @@ export function extractContinuationParentConversationId(output: string): number 
     : 0;
 }
 
+export function extractConversationParentConversationId(conversation: AgentConversation): number {
+  const conversationId = Number(conversation.id || 0);
+  const explicitParentId = extractContinuationParentConversationId(conversation.output || '');
+  return explicitParentId && explicitParentId !== conversationId ? explicitParentId : 0;
+}
+
 const codexTranscriptFilesCache = new Map<string, { expiresAt: number; files: string[] }>();
 
 export function findCodexTranscriptFile(codexHome: string, sessionId: string): string {
@@ -563,7 +569,7 @@ export function resolveContinuationLeafConversationFromList(
   }
   const byParent = new Map<number, AgentConversation[]>();
   for (const conversation of conversations) {
-    const parentId = extractContinuationParentConversationId(conversation.output || '');
+    const parentId = extractConversationParentConversationId(conversation);
     if (!parentId) continue;
     const siblings = byParent.get(parentId) || [];
     siblings.push(conversation);
@@ -606,7 +612,7 @@ export function resolveContinuationSessionConversationFromList(
       }
       seen.add(currentId);
       candidates.push(current);
-      const parentId = extractContinuationParentConversationId(current.output || '');
+      const parentId = extractConversationParentConversationId(current);
       current = parentId ? byId.get(Number(parentId)) || null : null;
     }
   };
@@ -648,7 +654,7 @@ export function resolveContinuationRootConversationFromList(conversations: Agent
       return current;
     }
     seen.add(currentId);
-    const parentId = extractContinuationParentConversationId(current.output || '');
+    const parentId = extractConversationParentConversationId(current);
     declaredParent = declaredParent || Boolean(parentId);
     const parent = parentId ? byId.get(Number(parentId)) : null;
     if (!parent) {

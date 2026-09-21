@@ -19,6 +19,7 @@ import {
   inferProjectRootForConversationStore,
   normalizeAgentConversationLifecycle
 } from '../conversationLifecycle';
+import { extractConversationParentConversationId } from '../continuation';
 
 let sharedSqlJsRuntime: Promise<initSqlJs.SqlJsStatic> | null = null;
 
@@ -491,6 +492,33 @@ export class SqliteStore {
       const output = String(log.output || '');
       return !/Agent conversation started|Launched command in integrated terminal/.test(output);
     });
+  }
+
+  private includeConversationLineage(logs: AgentConversation[]): AgentConversation[] {
+    const expanded = [...logs];
+    const includedIds = new Set(expanded.map((conversation) => Number(conversation.id || 0)));
+    while (true) {
+      const expectedNodeByParentId = new Map<number, Set<string>>();
+      for (const conversation of expanded) {
+        const parentId = extractConversationParentConversationId(conversation);
+        if (!parentId || includedIds.has(parentId)) continue;
+        const nodeIds = expectedNodeByParentId.get(parentId) || new Set<string>();
+        nodeIds.add(String(conversation.nodeId || ''));
+        expectedNodeByParentId.set(parentId, nodeIds);
+      }
+      if (expectedNodeByParentId.size === 0) {
+        break;
+      }
+      const parents = this.getExecutionLogsByIds([...expectedNodeByParentId.keys()]).filter((parent) => (
+        expectedNodeByParentId.get(Number(parent.id || 0))?.has(String(parent.nodeId || ''))
+      ));
+      if (parents.length === 0) {
+        break;
+      }
+      parents.forEach((parent) => includedIds.add(Number(parent.id || 0)));
+      expanded.push(...parents);
+    }
+    return expanded.sort((left, right) => Number(right.id || 0) - Number(left.id || 0));
   }
 
   /**
@@ -1264,9 +1292,38 @@ export class SqliteStore {
     const hasMore = logs.length > safeLimit;
     const page = logs.slice(0, safeLimit);
     return {
-      logs: this.filterSupersededRunningLogs(page.map((log) => this.normalizeConversationStatus(log))),
+      logs: this.includeConversationLineage(
+        this.filterSupersededRunningLogs(page.map((log) => this.normalizeConversationStatus(log)))
+      ),
       hasMore
     };
+  }
+
+  private getExecutionLogsByIds(ids: number[]): AgentConversation[] {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    const normalizedIds = [...new Set(ids.map((id) => Number(id || 0)).filter((id) => id > 0))];
+    if (normalizedIds.length === 0) {
+      return [];
+    }
+    const placeholders = normalizedIds.map(() => '?').join(', ');
+    const stmt = this.db.prepare(`
+      SELECT id, nodeId, timestamp, agentCli, command, output, status
+      FROM execution_logs
+      WHERE id IN (${placeholders})
+      ORDER BY id DESC
+    `);
+    const logs: AgentConversation[] = [];
+    try {
+      stmt.bind(normalizedIds);
+      while (stmt.step()) {
+        logs.push(this.normalizeConversationStatus(stmt.getAsObject() as unknown as AgentConversation));
+      }
+    } finally {
+      stmt.free();
+    }
+    return logs;
   }
 
   /**
@@ -1319,7 +1376,9 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)));
+    return this.includeConversationLineage(
+      this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)))
+    );
   }
 
   /**

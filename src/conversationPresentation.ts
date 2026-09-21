@@ -1,7 +1,7 @@
 import { AgentConversation } from './db/types';
 import {
   ContinuableAgentConversation,
-  extractContinuationParentConversationId,
+  extractConversationParentConversationId,
   hydrateConversationContinuations,
   recoverInterruptedNativeSessionId
 } from './continuation';
@@ -181,7 +181,7 @@ export function buildConversationPresentations(
     return {
       ...conversation,
       ...(resumableNativeSessionId ? { resumableNativeSessionId } : {}),
-      continuationParentConversationId: extractContinuationParentConversationId(output),
+      continuationParentConversationId: extractConversationParentConversationId(conversation),
       reviewParentConversationId: extractReviewParentConversationId(output),
       summary: extractSummary(output),
       conclusion: extractConclusion(output),

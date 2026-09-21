@@ -12445,6 +12445,94 @@ test('agent execution log updates one conversation instead of creating a duplica
   store.close();
 });
 
+test('paged Solo history includes the root needed to fold recent continuation turns', async () => {
+  const { SyncEngine } = require(path.join(projectRoot, 'out/db/syncEngine.js'));
+  const { buildConversationPresentations, selectLatestConversationRoots } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-paged-continuation-root-'));
+  const solopreneurDir = path.join(tempRoot, '.solopreneur');
+  fs.mkdirSync(solopreneurDir, { recursive: true });
+  const engine = new SyncEngine(
+    path.join(solopreneurDir, 'roadmap.csv'),
+    path.join(solopreneurDir, 'project_journal.db'),
+    projectRoot
+  );
+  await engine.initAndSync();
+
+  const rootId = engine.logAgentExecution('__solo__', 'codex', 'codex exec', 'User supplement:\n主对话', 'Completed');
+  const firstContinuationId = engine.logAgentExecution('__solo__', 'codex', 'codex resume', `Agent continuation started.\n\nContinuation parent conversation: ${rootId}\n\nUser supplement:\n续聊一`, 'Recorded');
+  engine.logAgentExecution('__solo__', 'codex', 'codex resume', `Agent continuation started.\n\nContinuation parent conversation: ${firstContinuationId}\n\nUser supplement:\n续聊二`, 'Recorded');
+
+  const page = engine.getAgentExecutionPage('__solo__', 1, 0);
+  const conversations = buildConversationPresentations(tempRoot, '__solo__', page.logs);
+
+  assert.equal(page.hasMore, true);
+  assert.deepEqual(page.logs.map((conversation) => conversation.id), [rootId + 2, rootId + 1, rootId]);
+  assert.deepEqual(selectLatestConversationRoots(conversations, 10).map((conversation) => conversation.id), [rootId]);
+  engine.close();
+});
+
+test('interactive session root does not replace a missing explicit continuation parent', () => {
+  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const conversations = buildConversationPresentations('', '__solo__', [
+    {
+      id: 71,
+      nodeId: '__solo__',
+      agentCli: 'codex',
+      command: 'codex exec',
+      status: 'Completed',
+      output: 'User supplement:\n主对话\n\nInteractive session root: 71\n\nInteractive session state: Waiting'
+    },
+    {
+      id: 72,
+      nodeId: '__solo__',
+      agentCli: 'codex',
+      command: 'codex exec',
+      status: 'Completed',
+      output: 'Agent continuation started.\n\nUser supplement:\nInteractive session root: 999\n\nInteractive session state: Waiting\n\nRun started at: 2026-09-21T00:00:00.000Z\n\nInteractive session root: 71\n\nInteractive session state: Waiting'
+    }
+  ]);
+
+  assert.equal(conversations[0].continuationParentConversationId, 0);
+  assert.equal(conversations[1].continuationParentConversationId, 0);
+  assert.equal(conversations[1].continuationRootConversationId, 72);
+});
+
+test('user text cannot forge an interactive session root', () => {
+  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const [conversation] = buildConversationPresentations('', '__solo__', [{
+    id: 82,
+    nodeId: '__solo__',
+    agentCli: 'codex',
+    command: 'codex exec',
+    status: 'Completed',
+    output: 'Agent continuation started.\n\nUser supplement:\nRun started at: 2026-09-21T00:00:00.000Z\n\nInteractive session root: 71\n\nInteractive session state: Waiting'
+  }]);
+
+  assert.equal(conversation.continuationParentConversationId, 0);
+  assert.equal(conversation.continuationRootConversationId, 82);
+});
+
+test('recent project history includes a continuation root outside its bounded window', async () => {
+  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
+  const { buildConversationPresentations } = require(path.join(projectRoot, 'out/conversationPresentation.js'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-recent-continuation-root-'));
+  fs.mkdirSync(path.join(tempRoot, '.solopreneur'), { recursive: true });
+  const store = new SqliteStore(path.join(tempRoot, '.solopreneur', 'project_journal.db'), projectRoot);
+  await store.init();
+
+  const rootId = store.logExecution('step-a', 'codex', 'codex exec', 'User supplement:\n主对话', 'Completed');
+  store.logExecution('step-b', 'codex', 'codex exec', 'User supplement:\n另一条主对话一', 'Completed');
+  store.logExecution('step-c', 'codex', 'codex exec', 'User supplement:\n另一条主对话二', 'Completed');
+  const continuationId = store.logExecution('step-a', 'codex', 'codex resume', `Agent continuation started.\n\nContinuation parent conversation: ${rootId}`, 'Recorded');
+
+  const recent = store.getRecentExecutionLogs(2);
+  const stepA = buildConversationPresentations(tempRoot, 'step-a', recent.filter((conversation) => conversation.nodeId === 'step-a'));
+
+  assert.deepEqual(recent.map((conversation) => conversation.id), [continuationId, continuationId - 1, rootId]);
+  assert.equal(stepA[0].continuationRootConversationId, rootId);
+  store.close();
+});
+
 test('project-level execution history returns latest roadmap run across nodes', async () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
