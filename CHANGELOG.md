@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.472 - 2026-09-22
+
+### Added
+- pilot autonomous Today planning runtime (48ef881)
+
+### Docs
+- define autonomous runtime and RSI blueprint (9385cf6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.471 - 2026-09-21
 
 ### Fixed
