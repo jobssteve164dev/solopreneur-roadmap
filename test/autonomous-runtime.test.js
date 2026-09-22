@@ -220,6 +220,40 @@ test('shadow decision projects into the existing Today arrangement contract', ()
   }
 });
 
+test('Today arrangement projection keeps at most three additional project suggestions', () => {
+  const recommendations = Array.from({ length: 8 }, (_, index) => ({
+    id: `candidate-${index + 1}`,
+    projectPath: `/workspace/project-${index + 1}`,
+    projectName: `Project ${index + 1}`,
+    nodeId: `step-${index + 1}`,
+    title: `推进 Project ${index + 1}`,
+    reason: `Reason ${index + 1}`,
+    action: 'advance_step'
+  }));
+  const review = runtime.projectShadowDecisionForToday({
+    schemaVersion: 1,
+    decisionId: 'decision-many-projects',
+    generatedAt: '2026-09-22T08:00:00.000Z',
+    status: 'completed',
+    projectCount: recommendations.length,
+    readOnly: true,
+    baselineProjectPath: recommendations[0].projectPath,
+    recommendedProjectPath: recommendations[0].projectPath,
+    summary: 'Today arrangement',
+    recommendations
+  });
+
+  assert.equal(review.todos.length, 6);
+  assert.deepEqual(
+    review.todos.map(item => item.projectPath),
+    recommendations.slice(0, 6).map(item => item.projectPath)
+  );
+  assert.deepEqual(review.todos.map(item => item.suggestionGroup), [
+    'today', 'today', 'today', 'other', 'other', 'other'
+  ]);
+  assert.equal(review.todos.filter(item => item.suggestionGroup === 'other').length, 3);
+});
+
 test('extension host starts one detached runtime and reuses its live instance', () => {
   const fixture = createFixture();
   try {

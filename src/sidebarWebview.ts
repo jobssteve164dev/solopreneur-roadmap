@@ -9585,7 +9585,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const todos = Array.isArray(review.todos) ? review.todos : [];
         const confirmations = Array.isArray(review.needsConfirmation) ? review.needsConfirmation : [];
 
-        const otherTodos = todos.filter(t => !shownProjectPaths.has(t.projectPath));
+        const otherTodos = todos
+          .filter(t => t.suggestionGroup === 'other' || (!t.suggestionGroup && !shownProjectPaths.has(t.projectPath)))
+          .slice(0, 3);
         const otherConfirms = confirmations.filter(c => !shownProjectPaths.has(c.projectPath));
 
         if (!otherTodos.length && !otherConfirms.length && !review.summary) return '';

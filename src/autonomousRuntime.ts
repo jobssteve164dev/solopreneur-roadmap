@@ -440,13 +440,14 @@ export function projectShadowDecisionForToday(decision: ShadowDecision): any {
     source: 'runtime_shadow',
     status: 'completed',
     summary: decision.summary,
-    todos: decision.recommendations.map((item) => ({
+    todos: decision.recommendations.slice(0, 6).map((item, index) => ({
       id: item.id,
       title: item.title,
       reason: item.reason,
       projectPath: item.projectPath,
       nodeId: item.nodeId,
-      action: item.action
+      action: item.action,
+      suggestionGroup: index < 3 ? 'today' : 'other'
     })),
     needsConfirmation: [],
     inputSnapshot: {

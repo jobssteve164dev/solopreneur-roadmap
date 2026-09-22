@@ -1743,6 +1743,30 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   );
 
   dispatchMessage({
+    command: 'dailyReviewLoaded',
+    review: {
+      source: 'runtime_shadow',
+      status: 'completed',
+      decisionId: 'decision-many-projects',
+      recommendedProjectPath: '/workspace/beta',
+      todos: [
+        { projectPath: '/workspace/beta', title: '推进 Beta', reason: '先推进 Beta。' },
+        { projectPath: '/workspace/alpha', title: '推进 Alpha', reason: '再推进 Alpha。' },
+        ...Array.from({ length: 5 }, (_, index) => ({
+          projectPath: `/workspace/other-${index + 1}`,
+          title: `其他项目 ${index + 1}`,
+          reason: `建议 ${index + 1}`
+        }))
+      ],
+      needsConfirmation: []
+    }
+  });
+  assert.equal(
+    [...elements['global-focus-panel'].innerHTML.matchAll(/其他项目 \d/g)].length,
+    3
+  );
+
+  dispatchMessage({
     command: 'projectsLoaded',
     projects: {
       projects: [{ name: 'Alpha', path: '/workspace/alpha' }, { name: 'Beta', path: '/workspace/beta' }],

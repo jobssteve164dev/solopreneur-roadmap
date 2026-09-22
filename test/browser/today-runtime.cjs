@@ -52,6 +52,22 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     }, '*'));
     const names = await page.locator('.global-focus-name').allTextContents();
     assert.deepEqual(names.slice(0, 2), ['Beta', 'Alpha']);
+    await page.evaluate(() => window.postMessage({
+      command: 'dailyReviewLoaded',
+      review: {
+        source: 'runtime_shadow', status: 'completed', decisionId: 'decision-browser-many',
+        recommendedProjectPath: '/workspace/beta', summary: '今天先推进 Beta', needsConfirmation: [],
+        todos: [
+          { projectPath: '/workspace/beta', title: '推进 Beta', reason: '先收口已有进展。' },
+          ...Array.from({ length: 5 }, (_, index) => ({
+            projectPath: `/workspace/other-${index + 1}`,
+            title: `其他项目 ${index + 1}`,
+            reason: `建议 ${index + 1}`
+          }))
+        ]
+      }
+    }, '*'));
+    assert.equal(await page.locator('.daily-review-panel [data-daily-review-index]').count(), 3);
     await page.locator('[data-global-focus-project="/workspace/beta"]').click();
     assert.ok(messages.some(message => message.command === 'recordTodayShadowFeedback' && message.outcome === 'accepted'));
     await page.locator('#btn-toggle-settings').click();
