@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { buildProjectPortfolioSummaries, ProjectPortfolioSummary } from './projectPortfolio';
+import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { getProjectsReadOnly, normalizeGlobalDataPathForExtension, SolopreneurProject } from './projectRegistry';
 
 const SHADOW_ALGORITHM_VERSION = 'today-shadow-v1';
@@ -35,6 +36,7 @@ export interface ShadowDecision {
   summary: string;
   recommendations: ShadowRecommendation[];
   engineId?: string;
+  engineConfigRevision?: string;
   engineStatus?: 'completed' | 'failed' | 'unavailable';
 }
 
@@ -73,6 +75,8 @@ interface ShadowCycleOptions {
   globalDataPath: string;
   projectRegistryFileName?: string;
   now?: Date;
+  beforeCommit?: () => boolean;
+  engineConfigRevision?: string;
 }
 
 export interface RuntimeState {
@@ -384,8 +388,12 @@ export async function runCognitiveShadowDecisionCycle(
     summary: `今天先推进 ${selected.projectName}：${selected.title}`,
     recommendations,
     engineId: options.engine.id,
+    ...(options.engineConfigRevision ? { engineConfigRevision: options.engineConfigRevision } : {}),
     engineStatus: 'completed'
   };
+  if (options.beforeCommit && !options.beforeCommit()) {
+    throw new Error('Cognitive decision lease is no longer current.');
+  }
   appendDecisionEvent(options.globalDataPath, decision);
   writeJsonAtomic(shadowSnapshotPath(options.globalDataPath), decision);
   return decision;
@@ -399,6 +407,11 @@ export function readCurrentShadowDecision(globalDataPath: string, projects: Solo
     if (parsed.schemaVersion !== 1 || parsed.source !== 'runtime_shadow' || parsed.status !== 'completed') return null;
     if (parsed.generatedAt.slice(0, 10) !== new Date().toISOString().slice(0, 10)) return null;
     if (parsed.sourceRevision !== buildProjectSourceRevision(projects)) return null;
+    if (
+      parsed.engineStatus === 'completed'
+      && parsed.engineConfigRevision
+      && parsed.engineConfigRevision !== cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath))
+    ) return null;
     return parsed;
   } catch {
     return null;

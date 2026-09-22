@@ -8,6 +8,7 @@ const test = require('node:test');
 const runtime = require('../out/autonomousRuntime.js');
 const runtimeHost = require('../out/autonomousRuntimeHost.js');
 const cognitiveEngine = require('../out/copilotShadowEngine.js');
+const cognitiveConfig = require('../out/cognitiveRuntimeConfig.js');
 
 function createProject(root, name, rows) {
   const projectPath = path.join(root, name);
@@ -47,7 +48,8 @@ function removeFixture(fixture) {
   const feedbackPath = path.join(runtimeRoot, 'shadow-feedback.jsonl');
   const snapshotPath = path.join(runtimeRoot, 'today-shadow.json');
   const statePath = path.join(runtimeRoot, 'state.json');
-  for (const filePath of [eventsPath, feedbackPath, snapshotPath, statePath]) {
+  const cognitiveConfigPath = path.join(runtimeRoot, 'cognitive-config.json');
+  for (const filePath of [eventsPath, feedbackPath, snapshotPath, statePath, cognitiveConfigPath]) {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
   if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
@@ -231,7 +233,6 @@ test('extension host starts one detached runtime and reuses its live instance', 
       globalDataPath: fixture.globalRoot,
       execPath: '/usr/bin/node',
       runtimeId: 'host-runtime',
-      cognitiveEngine: 'copilot',
       spawnProcess,
       isProcessAlive: () => false,
       now: new Date('2026-09-22T08:00:00.000Z')
@@ -253,8 +254,7 @@ test('extension host starts one detached runtime and reuses its live instance', 
     assert.deepEqual(launches[0].args, [
       '/opt/solomap/out/autonomousRuntimeProcess.js',
       '--global-data-path', fixture.globalRoot,
-      '--runtime-id', 'host-runtime',
-      '--cognitive-engine', 'copilot'
+      '--runtime-id', 'host-runtime'
     ]);
     assert.equal(launches[0].options.detached, true);
     assert.equal(launches[0].options.stdio, 'ignore');
@@ -320,6 +320,56 @@ test('cognitive shadow engine can reorder opaque candidates without receiving lo
     assert.equal(decision.recommendations[0].reason, 'Alpha 是今天最适合形成完整闭环的项目。');
     assert.equal(decision.engineId, 'test-engine');
     assert.equal(decision.engineStatus, 'completed');
+  } finally {
+    removeFixture(fixture);
+  }
+});
+
+test('a cognitive snapshot loses display authority after the intelligence engine config changes', async () => {
+  const fixture = createFixture();
+  try {
+    const initial = cognitiveConfig.writeCognitiveRuntimeConfig(fixture.globalRoot, {
+      mode: 'agent_cli', agentCli: 'codex', model: 'auto'
+    });
+    await runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      projectRegistryFileName: 'projects.json',
+      now: new Date(),
+      engineConfigRevision: initial.revision,
+      engine: {
+        id: `test-engine:${initial.revision}`,
+        async plan(input) {
+          return { candidateId: input.candidates[0].id, reason: '旧配置生成的结果。' };
+        }
+      }
+    });
+    assert.ok(runtime.readCurrentRegisteredShadowDecision(fixture.globalRoot));
+    cognitiveConfig.writeCognitiveRuntimeConfig(fixture.globalRoot, {
+      mode: 'agent_cli', agentCli: 'claude', model: 'auto'
+    });
+    assert.equal(runtime.readCurrentRegisteredShadowDecision(fixture.globalRoot), null);
+  } finally {
+    removeFixture(fixture);
+  }
+});
+
+test('cognitive shadow result cannot publish after Runtime loses its lease', async () => {
+  const fixture = createFixture();
+  try {
+    await assert.rejects(runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      projectRegistryFileName: 'projects.json',
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      beforeCommit: () => false,
+      engine: {
+        id: 'test-engine',
+        async plan(input) {
+          return { candidateId: input.candidates[0].id, reason: '不应发布的旧结果。' };
+        }
+      }
+    }), /lease/i);
+    const snapshot = JSON.parse(fs.readFileSync(path.join(fixture.globalRoot, 'runtime', 'today-shadow.json'), 'utf8'));
+    assert.equal(snapshot.engineStatus, undefined);
   } finally {
     removeFixture(fixture);
   }

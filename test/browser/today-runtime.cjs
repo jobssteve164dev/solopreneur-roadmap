@@ -54,8 +54,18 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     assert.deepEqual(names.slice(0, 2), ['Beta', 'Alpha']);
     await page.locator('[data-global-focus-project="/workspace/beta"]').click();
     assert.ok(messages.some(message => message.command === 'recordTodayShadowFeedback' && message.outcome === 'accepted'));
+    await page.locator('#btn-toggle-settings').click();
+    await page.locator('#setting-cognitive-engine-agent [data-solo-trigger]').click();
+    await page.locator('#setting-cognitive-engine-agent [data-solo-option-value="codex"]').click();
+    assert.equal(await page.locator('#setting-cognitive-engine-agent').getAttribute('data-value'), 'codex');
+    assert.match(await page.locator('#help-cognitive-engine-agent').textContent(), /不会打开终端窗口/);
+    if (process.env.SOLOMAP_BROWSER_SCREENSHOT) {
+      await page.screenshot({ path: process.env.SOLOMAP_BROWSER_SCREENSHOT, fullPage: true });
+    }
+    await page.locator('#btn-save-settings').click();
+    assert.ok(messages.some(message => message.command === 'settings.update' && message.cognitiveEngineAgent === 'codex'));
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ names: names.slice(0, 2), feedback: 'accepted', pageErrors: errors.length }));
+    console.log(JSON.stringify({ names: names.slice(0, 2), feedback: 'accepted', cognitiveEngineAgent: 'codex', pageErrors: errors.length }));
   } finally {
     await browser.close();
   }

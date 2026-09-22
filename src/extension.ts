@@ -184,6 +184,7 @@ import {
 } from './localUsageStats';
 import { recordLocalDiagnosticError } from './localDiagnostics';
 import { ensureAutonomousRuntime } from './autonomousRuntimeHost';
+import { writeCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import {
   buildCollaborationInviteCode,
   createCollaborationLobbySession,
@@ -358,11 +359,11 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   }
   try {
-    const configuredCli = String(getPersistedSettings(context).cliPath || '').replace(/\\/g, '/').split('/').pop()?.toLowerCase();
+    const runtimeSettings = getPersistedSettings(context);
+    syncCognitiveRuntimeConfig(runtimeSettings);
     ensureAutonomousRuntime({
       extensionPath: context.extensionPath,
-      globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
-      cognitiveEngine: configuredCli === 'copilot' || configuredCli === 'copilot.exe' ? 'copilot' : undefined
+      globalDataPath: normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath)
     });
   } catch (error) {
     recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
@@ -1209,6 +1210,7 @@ async function handleSharedWebviewAction(
       await updatePersistedSettings(context, {
         cliPath: request.cliPath,
         agentModelPreferences: request.agentModelPreferences,
+        cognitiveEngineAgent: request.cognitiveEngineAgent,
         openCodeProvider: request.openCodeProvider,
         language: request.language,
         globalPrompt: request.globalPrompt,
@@ -1465,6 +1467,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   const baseSettings = {
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
     agentModelPreferences: normalizeAgentModelPreferences(saved.agentModelPreferences),
+    cognitiveEngineAgent: String(saved.cognitiveEngineAgent || 'local_only'),
     openCodeProvider: normalizeOpenCodeProvider(saved.openCodeProvider)
       || getOpenCodeProviderFromModel(normalizeAgentModelPreferences(saved.agentModelPreferences).opencode),
     language: saved.language || config.get('language') || 'zh',
@@ -2036,6 +2039,9 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   const nextSettings: SolopreneurSettings = {
     cliPath: hasSetting('cliPath') ? (String(settings.cliPath || '').trim() || 'agy') : (currentSettings.cliPath || 'agy'),
     agentModelPreferences: mergeAgentModelPreferences(currentSettings.agentModelPreferences, hasSetting('agentModelPreferences') ? settings.agentModelPreferences : undefined),
+    cognitiveEngineAgent: hasSetting('cognitiveEngineAgent')
+      ? String(settings.cognitiveEngineAgent || 'local_only').trim()
+      : String(currentSettings.cognitiveEngineAgent || 'local_only').trim(),
     openCodeProvider: hasSetting('openCodeProvider')
       ? normalizeOpenCodeProvider(settings.openCodeProvider)
       : normalizeOpenCodeProvider(currentSettings.openCodeProvider),
@@ -2102,6 +2108,26 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
       scheduleTimedAutomationTask(context);
     }
   }
+  syncCognitiveRuntimeConfig(nextSettings);
+  const previousRuntimeRoot = normalizeGlobalDataPathForExtension(currentSettings.globalDataPath);
+  const nextRuntimeRoot = normalizeGlobalDataPathForExtension(nextSettings.globalDataPath);
+  if (previousRuntimeRoot !== nextRuntimeRoot) {
+    writeCognitiveRuntimeConfig(previousRuntimeRoot, { mode: 'local_only', agentCli: '', model: 'auto' });
+    ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: nextRuntimeRoot });
+  }
+}
+
+function syncCognitiveRuntimeConfig(settings: SolopreneurSettings): void {
+  const globalDataPath = normalizeGlobalDataPathForExtension(settings.globalDataPath);
+  const selection = String(settings.cognitiveEngineAgent || 'local_only').trim();
+  if (selection === 'local_only') {
+    writeCognitiveRuntimeConfig(globalDataPath, { mode: 'local_only', agentCli: '', model: 'auto' });
+    return;
+  }
+  const agentCli = selection === 'follow_main' ? String(settings.cliPath || 'agy') : selection;
+  const family = getAgentCliFamily(agentCli);
+  const model = String(settings.agentModelPreferences?.[family] || 'auto');
+  writeCognitiveRuntimeConfig(globalDataPath, { mode: 'agent_cli', agentCli, model });
 }
 
 function projectName(projectPath: string): string {

@@ -443,6 +443,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './dailyReview') {
           return loadCompiledModule('out/dailyReview.js', '');
         }
+        if (id === './cognitiveRuntimeConfig') {
+          return { writeCognitiveRuntimeConfig() {} };
+        }
         if (id === './globalEngineeringStore') {
           return require(path.join(projectRoot, 'out/globalEngineeringStore.js'));
         }
@@ -593,6 +596,12 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
     { value: 'custom', label: 'Custom...' }
   ]);
   wireSoloSelect(elements['setting-agent-model-select'], []);
+  wireSoloSelect(elements['setting-cognitive-engine-agent'], [
+    { value: 'follow_main', label: '跟随主 Agent' },
+    { value: 'local_only', label: '仅使用本地规则' },
+    { value: 'codex', label: 'Codex' },
+    { value: 'copilot', label: 'GitHub Copilot' }
+  ]);
   wireSoloSelect(elements['setting-opencode-provider'], []);
   wireSoloSelect(elements['project-select'], []);
   wireSoloSelect(elements['project-type-select'], [
@@ -1044,6 +1053,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(html, /id="btn-account-logout"/);
   assert.doesNotMatch(html, /id="btn-paste-pro-code"/);
   assert.match(html, /id="automation-trigger-select"/);
+  assert.match(html, /id="setting-cognitive-engine-agent"/);
+  assert.match(html, /id="help-cognitive-engine-agent"/);
   assert.match(html, /id="automation-action-select"/);
   assert.match(html, /id="automation-time-input"/);
   assert.match(html, /id="btn-open-scheduled-tasks"/);
@@ -1128,6 +1139,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'setting-language',
     'setting-cli-select',
     'setting-agent-model-select',
+    'setting-cognitive-engine-agent',
     'setting-clipath-custom',
     'setting-opencode-panel',
     'setting-opencode-provider',
@@ -1418,6 +1430,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     stopPropagation() {}
   });
   elements['setting-global-data-path'].value = '/workspace/.solomap-global';
+  elements['setting-cognitive-engine-agent'].listeners.click({
+    target: elements['setting-cognitive-engine-agent'].__options.find(option => option.getAttribute('data-solo-option-value') === 'codex'),
+    stopPropagation() {}
+  });
   elements['settings-panel'].listeners.input();
   dispatchMessage({
     command: 'settingsLoaded',
@@ -1436,6 +1452,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.ok(postedMessages.some((message) => message.command === 'settings.get'));
   assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
   const savedSettingsRequest = postedMessages.find(message => message.command === 'settings.update');
+  assert.equal(savedSettingsRequest.cognitiveEngineAgent, 'codex');
   dispatchMessage({ command: 'settingsSaved', requestId: savedSettingsRequest.requestId, settings: savedSettingsRequest });
   postedMessages.length = 0;
   elements['btn-open-pro-authorization'].listeners.click();
@@ -12829,6 +12846,16 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).panelTitle, 'solomap Project Growth Graph');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshNoProject, 'Choose a project folder before refreshing project growth data.');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), 'Project growth data refreshed: 4 files, 3 modules.');
+});
+
+test('cognitive Runtime config uses the same normalized data root as the detached Runtime', () => {
+  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const start = extension.indexOf('function syncCognitiveRuntimeConfig');
+  const end = extension.indexOf('\nfunction projectName', start);
+  const body = extension.slice(start, end);
+  assert.match(body, /const globalDataPath = normalizeGlobalDataPathForExtension\(settings\.globalDataPath\)/);
+  assert.match(body, /writeCognitiveRuntimeConfig\(globalDataPath,/);
+  assert.doesNotMatch(body, /writeCognitiveRuntimeConfig\(settings\.globalDataPath,/);
 });
 
 test('manual experience review is routed from the existing settings action', async () => {

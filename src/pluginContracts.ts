@@ -18,6 +18,7 @@ export interface SolomapEnhancementStatus {
 export interface SolopreneurSettings {
   cliPath: string;
   agentModelPreferences?: Record<string, string>;
+  cognitiveEngineAgent?: string;
   openCodeProvider?: string;
   openCodeApiKeyConfigured?: boolean;
   language: string;

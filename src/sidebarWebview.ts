@@ -4251,6 +4251,28 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
 
     <div class="settings-field">
+      <label class="settings-lbl-title" id="label-cognitive-engine-agent">智能内核</label>
+      <div class="solo-select settings-select" id="setting-cognitive-engine-agent" data-solo-select data-value="local_only">
+        <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
+          <span class="solo-select-trigger-label" data-solo-label>仅使用本地规则</span>
+          <span class="codicon codicon-chevron-down solo-select-caret"></span>
+        </button>
+        <div class="solo-select-menu" data-solo-menu role="listbox">
+          <button type="button" class="solo-select-option" data-solo-option-value="follow_main" aria-selected="false" id="option-cognitive-follow-main">跟随主 Agent</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="local_only" aria-selected="true" id="option-cognitive-local-only">仅使用本地规则</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="agy" aria-selected="false">Antigravity</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="codex" aria-selected="false">Codex</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="cursor" aria-selected="false">Cursor</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="copilot" aria-selected="false">GitHub Copilot</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="claude" aria-selected="false">Claude</button>
+        </div>
+      </div>
+      <div id="help-cognitive-engine-agent" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px; line-height: 1.45;">
+        在后台更新今日安排，不会打开终端窗口；不可用时自动使用本地规则。
+      </div>
+    </div>
+
+    <div class="settings-field">
       <label class="settings-lbl-title" id="label-reviewer-cli-path">Review Agent</label>
       <div class="settings-cli-select-wrap">
         <div class="solo-select settings-select" id="setting-reviewer-cli-select" data-solo-select data-value="">
@@ -4556,6 +4578,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const settingsPanel = document.getElementById('settings-panel');
     const settingCliSelect = document.getElementById('setting-cli-select');
     const settingAgentModelSelect = document.getElementById('setting-agent-model-select');
+    const settingCognitiveEngineAgent = document.getElementById('setting-cognitive-engine-agent');
     const settingCliPathCustom = document.getElementById('setting-clipath-custom');
     const settingOpenCodePanel = document.getElementById('setting-opencode-panel');
     const settingOpenCodeProvider = document.getElementById('setting-opencode-provider');
@@ -5446,6 +5469,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionBasic: '基础',
         settingsSectionAccount: 'SoloMap 账号',
         settingsSectionAgent: 'Agent 协作',
+        cognitiveEngineAgent: '智能内核',
+        cognitiveEngineHelp: '在后台更新今日安排，不会打开终端窗口；不可用时自动使用本地规则。',
+        cognitiveFollowMain: '跟随主 Agent',
+        cognitiveLocalOnly: '仅使用本地规则',
         settingsSectionData: '项目数据',
         settingsSectionInstructions: '默认指令',
         settingsSectionAbilities: '能力扩展',
@@ -5908,6 +5935,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionBasic: 'Basics',
         settingsSectionAccount: 'SoloMap Account',
         settingsSectionAgent: 'Agent Collaboration',
+        cognitiveEngineAgent: 'Intelligence engine',
+        cognitiveEngineHelp: 'Updates Today in the background without opening a terminal. Falls back to local rules when unavailable.',
+        cognitiveFollowMain: 'Follow main Agent',
+        cognitiveLocalOnly: 'Local rules only',
         settingsSectionData: 'Project Data',
         settingsSectionInstructions: 'Instructions',
         settingsSectionAbilities: 'Abilities',
@@ -6435,6 +6466,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('help-agent-model', currentLanguage === 'zh'
         ? '默认跟随当前 Agent 系列的自动模型；固定后会优先使用该模型。'
         : 'Uses the selected Agent family default unless you pin a specific model.');
+      setText('label-cognitive-engine-agent', t('cognitiveEngineAgent'));
+      setText('help-cognitive-engine-agent', t('cognitiveEngineHelp'));
+      setText('option-cognitive-follow-main', t('cognitiveFollowMain'));
+      setText('option-cognitive-local-only', t('cognitiveLocalOnly'));
+      if (settingCognitiveEngineAgent) setSoloSelectValue(settingCognitiveEngineAgent, getSoloSelectValue(settingCognitiveEngineAgent) || 'local_only');
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -6736,6 +6772,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (!family) return;
       agentModelPreferenceMap[family] = value || 'auto';
     });
+    bindSoloSelect(settingCognitiveEngineAgent, () => {});
     bindSoloSelect(settingOpenCodeProvider, (value) => {
       currentSettings.openCodeProvider = value || '';
       currentSettings.openCodeApiKeyConfigured = false;
@@ -7663,6 +7700,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         command: 'settings.update',
         cliPath: getEffectiveSettingCliPath(),
         agentModelPreferences: agentModelPreferenceMap,
+        cognitiveEngineAgent: settingCognitiveEngineAgent ? getSoloSelectValue(settingCognitiveEngineAgent) : 'local_only',
         openCodeProvider: getSoloSelectValue(settingOpenCodeProvider) || (currentSettings && currentSettings.openCodeProvider) || '',
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
@@ -7780,6 +7818,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
           Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
           applySettingCliPath(message.settings.cliPath || 'agy');
+          if (settingCognitiveEngineAgent) setSoloSelectValue(settingCognitiveEngineAgent, message.settings.cognitiveEngineAgent || 'local_only');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');

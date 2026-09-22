@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import * as path from 'path';
 
 import {
   claimRuntimeLease,
@@ -8,7 +9,8 @@ import {
   runShadowDecisionCycle,
   updateRuntimeState
 } from './autonomousRuntime';
-import { CopilotCliShadowEngine } from './copilotShadowEngine';
+import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
+import { LocalAgentCliEngine } from './localAgentCliEngine';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -33,13 +35,13 @@ function main(): void {
   }
 
   const runtimeId = argumentValue('--runtime-id') || crypto.randomUUID();
-  const cognitiveEngine = argumentValue('--cognitive-engine');
   const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid: process.pid });
   if (!lease.acquired) return;
 
   let stopping = false;
   let running = false;
   let timer: NodeJS.Timeout | undefined;
+  let activeEngine: LocalAgentCliEngine | undefined;
   const runCycle = async () => {
     if (stopping || running) return;
     running = true;
@@ -49,25 +51,47 @@ function main(): void {
         return;
       }
       const current = readCurrentRegisteredShadowDecision(globalDataPath);
-      const decision = cognitiveEngine === 'copilot'
-        ? (current?.engineStatus === 'completed' ? current : await runCognitiveShadowDecisionCycle({
+      const cognitiveConfig = readCognitiveRuntimeConfig(globalDataPath);
+      const cognitiveConfigRevision = cognitiveRuntimeConfigRevision(cognitiveConfig);
+      const engine = cognitiveConfig.mode === 'agent_cli' ? new LocalAgentCliEngine({
+        agentCli: cognitiveConfig.agentCli,
+        model: cognitiveConfig.model,
+        configRevision: cognitiveConfigRevision,
+        workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work')
+      }) : null;
+      activeEngine = engine || undefined;
+      const decision = engine
+        ? (current?.engineStatus === 'completed' && current.engineId === engine.id ? current : await runCognitiveShadowDecisionCycle({
           globalDataPath,
-          engine: new CopilotCliShadowEngine()
+          engine,
+          engineConfigRevision: cognitiveConfigRevision,
+          beforeCommit: () => hasRuntimeLease(globalDataPath, runtimeId, process.pid)
+            && cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath)) === cognitiveConfigRevision
         }))
-        : (current || runShadowDecisionCycle({ globalDataPath }));
+        : runShadowDecisionCycle({ globalDataPath });
+      if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
+        stop();
+        return;
+      }
       updateRuntimeState(globalDataPath, runtimeId, {
         status: 'running',
         lastDecisionId: decision.decisionId,
         error: ''
       });
     } catch (error) {
-      const fallback = readCurrentRegisteredShadowDecision(globalDataPath) || runShadowDecisionCycle({ globalDataPath });
+      if (stopping) return;
+      if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
+        stop();
+        return;
+      }
+      const fallback = runShadowDecisionCycle({ globalDataPath });
       updateRuntimeState(globalDataPath, runtimeId, {
         status: 'running',
         lastDecisionId: fallback.decisionId,
         error: error instanceof Error ? error.message : String(error)
       });
     } finally {
+      activeEngine = undefined;
       running = false;
     }
   };
@@ -75,8 +99,9 @@ function main(): void {
     if (stopping) return;
     stopping = true;
     if (timer) clearInterval(timer);
+    activeEngine?.cancel();
     updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
-    process.exit(0);
+    process.exitCode = 0;
   };
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);

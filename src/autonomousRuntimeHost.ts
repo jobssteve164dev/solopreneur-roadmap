@@ -15,7 +15,6 @@ interface RuntimeHostOptions {
   globalDataPath: string;
   execPath?: string;
   runtimeId?: string;
-  cognitiveEngine?: 'copilot';
   now?: Date;
   isProcessAlive?: (pid: number) => boolean;
   spawnProcess?: (command: string, args: string[], options: childProcess.SpawnOptions) => RuntimeChild;
@@ -53,7 +52,6 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
     '--global-data-path', globalDataPath,
     '--runtime-id', runtimeId
   ];
-  if (options.cognitiveEngine) args.push('--cognitive-engine', options.cognitiveEngine);
   const child = spawnProcess(options.execPath || process.execPath, args, {
     detached: true,
     stdio: 'ignore',
