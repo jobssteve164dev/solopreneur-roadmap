@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.474 - 2026-09-22
+
+### Added
+- bound today suggestions and add headless execution foundation (42c756b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.473 - 2026-09-22
 
 ### Added
