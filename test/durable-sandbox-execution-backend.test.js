@@ -1,4 +1,5 @@
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -20,9 +21,11 @@ function setup() {
   fs.mkdirSync(workspace, { recursive: true });
   const authorization = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
   const grant = authorization.setEnabled(project, true, [project]);
+  const sandboxInputs = [];
   const sandbox = {
     probe: async () => ({ available: true, kind: 'test', reason: '' }),
     buildInvocation(input) {
+      sandboxInputs.push(input);
       return { command: input.command, args: input.args || [], env: { PATH: process.env.PATH || '' } };
     }
   };
@@ -34,8 +37,92 @@ function setup() {
     readBaseRevision: async () => 'base-1',
     pollIntervalMs: 20
   };
-  return { root, project, workspace, grant, options, authorization };
+  return { root, project, workspace, grant, options, authorization, sandboxInputs };
 }
+
+test('backend derives tool network access from the current project policy', async () => {
+  const fixture = setup();
+  const backend = new DurableSandboxExecutionBackend(fixture.options);
+  await backend.prepare({
+    projectPath: fixture.project, authorizationEpoch: fixture.grant.epoch,
+    workspacePath: fixture.workspace, command: process.execPath, args: ['-e', ''],
+    baseRevision: 'base-1', timeoutMs: 2_000
+  });
+  assert.equal(fixture.sandboxInputs[0].networkAccess, 'tool');
+
+  const offline = fixture.authorization.setPolicy(
+    fixture.project,
+    { enabled: true, toolNetworkDisabled: true },
+    [fixture.project]
+  );
+  const offlinePrepared = await backend.prepare({
+    projectPath: fixture.project, authorizationEpoch: offline.epoch,
+    workspacePath: fixture.workspace, command: process.execPath, args: ['-e', ''],
+    baseRevision: 'base-1', timeoutMs: 2_000
+  });
+  assert.equal(fixture.sandboxInputs[1].networkAccess, 'offline');
+  const offlineExecution = await backend.start(offlinePrepared.preparedId, 'operation-offline-evidence');
+  const offlineEvidence = await backend.collectEvidence(offlineExecution.executionId);
+  assert.equal(offlineEvidence.toolNetworkAccess, 'blocked');
+});
+
+test('changing tool network policy stops work authorized by the previous epoch', async () => {
+  const { project, workspace, grant, options, authorization } = setup();
+  const backend = new DurableSandboxExecutionBackend(options);
+  const prepared = await backend.prepare({
+    projectPath: project, authorizationEpoch: grant.epoch, workspacePath: workspace,
+    command: process.execPath, args: ['-e', 'setInterval(() => {}, 40)'],
+    baseRevision: 'base-1', timeoutMs: 5_000
+  });
+  const started = await backend.start(prepared.preparedId, 'operation-network-policy-change');
+  authorization.setPolicy(project, { enabled: true, toolNetworkDisabled: true }, [project]);
+
+  const evidence = await backend.collectEvidence(started.executionId);
+  assert.equal(evidence.status, 'cancelled');
+  assert.equal(evidence.terminationReason, 'authorization_revoked');
+  assert.equal(evidence.promotionEligible, false);
+});
+
+test('upgrade resumes a legacy operation and reports its former offline boundary', async () => {
+  const { root, project, workspace, grant, options } = setup();
+  const backend = new DurableSandboxExecutionBackend(options);
+  const input = {
+    projectPath: project, authorizationEpoch: grant.epoch, workspacePath: workspace,
+    command: process.execPath, args: ['-e', ''], baseRevision: 'base-1', timeoutMs: 2_000
+  };
+  const prepared = await backend.prepare(input);
+  const legacyFingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    projectPath: fs.realpathSync(project), workspacePath: fs.realpathSync(workspace),
+    baseRevision: input.baseRevision, authorizationEpoch: grant.epoch,
+    command: input.command, args: input.args, stdin: '', timeoutMs: input.timeoutMs
+  })).digest('hex');
+  const operationId = 'legacy-operation';
+  const executionId = 'legacy-execution';
+  const directory = path.join(options.stateRoot, 'executions', executionId);
+  const stdoutPath = path.join(directory, 'stdout.log');
+  const stderrPath = path.join(directory, 'stderr.log');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(stdoutPath, 'legacy');
+  fs.writeFileSync(stderrPath, '');
+  fs.writeFileSync(path.join(directory, 'state.json'), JSON.stringify({
+    executionId, operationId, preparedId: 'legacy-prepared', workspacePath: fs.realpathSync(workspace),
+    projectPath: fs.realpathSync(project), baseRevision: 'base-1', authorizationEpoch: grant.epoch,
+    status: 'succeeded', startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:00:01.000Z',
+    exitCode: 0, signal: null, terminationReason: '', workerPid: 0, childPid: 0,
+    stdoutPath, stderrPath, executionFingerprint: legacyFingerprint
+  }));
+  const operationPath = path.join(options.stateRoot, 'operations', `${crypto.createHash('sha256').update(`${fs.realpathSync(project)}\0${operationId}`).digest('hex')}.json`);
+  fs.mkdirSync(path.dirname(operationPath), { recursive: true });
+  fs.writeFileSync(operationPath, JSON.stringify({
+    executionId, operationId, preparedId: 'legacy-prepared', projectPath: fs.realpathSync(project),
+    baseRevision: 'base-1', authorizationEpoch: grant.epoch, executionFingerprint: legacyFingerprint
+  }));
+
+  const resumed = await backend.start(prepared.preparedId, operationId);
+  assert.equal(resumed.executionId, executionId);
+  const evidence = await backend.collectEvidence(executionId);
+  assert.equal(evidence.toolNetworkAccess, 'blocked');
+});
 
 test('a restarted backend resumes the same durable execution and operation id', async () => {
   const { project, workspace, grant, options } = setup();
@@ -61,6 +148,7 @@ test('a restarted backend resumes the same durable execution and operation id', 
   assert.equal(evidence.status, 'succeeded');
   assert.equal(evidence.stdout, 'done');
   assert.equal(evidence.promotionEligible, true);
+  assert.equal(evidence.toolNetworkAccess, 'allowed');
 });
 
 test('a restarted backend can re-prepare the same semantic operation and recover its execution', async () => {

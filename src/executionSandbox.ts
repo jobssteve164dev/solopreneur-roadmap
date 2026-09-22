@@ -1,5 +1,6 @@
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 
 export interface SandboxProbe {
   available: boolean;
@@ -15,7 +16,7 @@ export interface SandboxLaunch {
 
 export interface ExecutionSandbox {
   probe(): Promise<SandboxProbe>;
-  buildInvocation(input: { workspacePath: string; command: string; args: string[] }): SandboxLaunch;
+  buildInvocation(input: { workspacePath: string; command: string; args: string[]; networkAccess: 'tool' | 'offline' }): SandboxLaunch;
 }
 
 type ProbeRunner = (executable: string, args: string[]) => Promise<{ ok: boolean; reason: string }>;
@@ -31,11 +32,13 @@ function defaultProbeRunner(executable: string, args: string[]): Promise<{ ok: b
 export class LinuxBubblewrapSandbox implements ExecutionSandbox {
   private readonly executable: string;
   private readonly runProbe: ProbeRunner;
+  private readonly systemPathExists: (candidate: string) => boolean;
   private verified = false;
 
-  constructor(options: { executable?: string; runProbe?: ProbeRunner } = {}) {
+  constructor(options: { executable?: string; runProbe?: ProbeRunner; systemPathExists?: (candidate: string) => boolean } = {}) {
     this.executable = options.executable || '/usr/bin/bwrap';
     this.runProbe = options.runProbe || defaultProbeRunner;
+    this.systemPathExists = options.systemPathExists || fs.existsSync;
   }
 
   public async probe(): Promise<SandboxProbe> {
@@ -57,14 +60,35 @@ export class LinuxBubblewrapSandbox implements ExecutionSandbox {
     };
   }
 
-  public buildInvocation(input: { workspacePath: string; command: string; args: string[] }): SandboxLaunch {
+  public buildInvocation(input: { workspacePath: string; command: string; args: string[]; networkAccess: 'tool' | 'offline' }): SandboxLaunch {
     if (!this.verified) throw new Error('The operating-system sandbox must be verified before use.');
     const args = [
       '--die-with-parent', '--new-session',
-      '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup', '--unshare-net',
+      '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup',
       '--clearenv', '--setenv', 'HOME', '/home/solomap', '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin', '--setenv', 'NO_COLOR', '1',
       '--ro-bind', '/usr', '/usr'
     ];
+    if (input.networkAccess === 'offline') {
+      args.push('--unshare-net');
+    } else {
+      const networkSystemPaths = [
+        '/etc/resolv.conf', '/etc/nsswitch.conf', '/etc/hosts', '/etc/host.conf', '/etc/gai.conf',
+        '/etc/ca-certificates.conf', '/etc/ssl/certs', '/etc/ssl/cert.pem', '/etc/ssl/ca-bundle.pem', '/etc/ssl/openssl.cnf',
+        '/etc/pki/tls/certs/ca-bundle.crt', '/etc/pki/tls/cert.pem', '/etc/pki/ca-trust/extracted',
+        '/var/lib/ca-certificates/ca-bundle.pem'
+      ];
+      for (const systemPath of networkSystemPaths) {
+        if (!this.systemPathExists(systemPath)) continue;
+        const parentPaths: string[] = [];
+        for (let parent = path.dirname(systemPath); parent !== '/'; parent = path.dirname(parent)) {
+          parentPaths.unshift(parent);
+        }
+        for (const parent of parentPaths) {
+          if (!args.includes(parent)) args.push('--dir', parent);
+        }
+        args.push('--ro-bind', systemPath, systemPath);
+      }
+    }
     for (const systemPath of ['/bin', '/lib', '/lib64']) {
       if (fs.existsSync(systemPath)) args.push('--ro-bind', systemPath, systemPath);
     }
@@ -77,4 +101,3 @@ export class LinuxBubblewrapSandbox implements ExecutionSandbox {
     return { command: this.executable, args, env: { PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin' } };
   }
 }
-

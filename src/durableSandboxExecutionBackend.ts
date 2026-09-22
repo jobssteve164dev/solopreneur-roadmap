@@ -20,6 +20,10 @@ export interface AuthorizedExecutionPackage extends ExecutionPackage {
   authorizationEpoch: number;
 }
 
+interface PreparedExecutionPackage extends AuthorizedExecutionPackage {
+  networkAccess: 'tool' | 'offline';
+}
+
 export interface DurableExecutionEvidence {
   executionId: string;
   operationId: string;
@@ -27,6 +31,7 @@ export interface DurableExecutionEvidence {
   projectPath: string;
   baseRevision: string;
   authorizationEpoch: number;
+  toolNetworkAccess: 'allowed' | 'blocked';
   status: ExecutionStatus;
   startedAt: string;
   finishedAt: string;
@@ -39,7 +44,7 @@ export interface DurableExecutionEvidence {
 }
 
 interface PreparedRecord extends PreparedExecution {
-  input: AuthorizedExecutionPackage;
+  input: PreparedExecutionPackage;
   launch: SandboxLaunch;
   executionFingerprint: string;
 }
@@ -52,6 +57,7 @@ interface DurableState {
   projectPath: string;
   baseRevision: string;
   authorizationEpoch: number;
+  toolNetworkAccess: 'allowed' | 'blocked';
   status: ExecutionStatus;
   startedAt: string;
   finishedAt: string;
@@ -76,6 +82,7 @@ interface OperationRecord {
   projectPath: string;
   baseRevision: string;
   authorizationEpoch: number;
+  networkAccess?: 'tool' | 'offline';
   executionFingerprint: string;
 }
 
@@ -102,7 +109,21 @@ function processMatchesToken(pid: number, token: string): boolean {
   }
 }
 
-function executionFingerprint(input: AuthorizedExecutionPackage): string {
+function executionFingerprint(input: PreparedExecutionPackage): string {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    projectPath: input.projectPath,
+    workspacePath: input.workspacePath,
+    baseRevision: input.baseRevision,
+    authorizationEpoch: input.authorizationEpoch,
+    networkAccess: input.networkAccess,
+    command: input.command,
+    args: input.args || [],
+    stdin: input.stdin || '',
+    timeoutMs: input.timeoutMs
+  })).digest('hex');
+}
+
+function legacyExecutionFingerprint(input: AuthorizedExecutionPackage): string {
   return crypto.createHash('sha256').update(JSON.stringify({
     projectPath: input.projectPath,
     workspacePath: input.workspacePath,
@@ -200,7 +221,8 @@ export class DurableSandboxExecutionBackend {
     const probe = await this.sandbox.probe();
     if (!probe.available) throw new Error(`Operating-system sandbox unavailable: ${probe.reason}`);
     const projectPath = await fs.promises.realpath(input.projectPath);
-    if (!this.authorization.isCurrent(projectPath, input.authorizationEpoch)) {
+    const authorization = this.authorization.get(projectPath);
+    if (!authorization.enabled || authorization.epoch !== input.authorizationEpoch) {
       throw new Error('Project authorization is missing, revoked, or stale.');
     }
     const workspacePath = await fs.promises.realpath(input.workspacePath);
@@ -211,8 +233,9 @@ export class DurableSandboxExecutionBackend {
     const currentRevision = await this.readBaseRevision(workspacePath);
     if (currentRevision !== input.baseRevision) throw new Error(`Execution base revision changed from ${input.baseRevision} to ${currentRevision}.`);
     const preparedId = crypto.randomUUID();
-    const launch = this.sandbox.buildInvocation({ workspacePath, command: input.command, args: input.args || [] });
-    const normalizedInput = { ...input, projectPath, workspacePath };
+    const networkAccess = authorization.toolNetworkDisabled ? 'offline' : 'tool';
+    const launch = this.sandbox.buildInvocation({ workspacePath, command: input.command, args: input.args || [], networkAccess });
+    const normalizedInput: PreparedExecutionPackage = { ...input, projectPath, workspacePath, networkAccess };
     const record = {
       preparedId, workspacePath, baseRevision: input.baseRevision, input: normalizedInput, launch,
       executionFingerprint: executionFingerprint(normalizedInput)
@@ -246,6 +269,7 @@ export class DurableSandboxExecutionBackend {
       executionId, operationId, preparedId, workspacePath: prepared.workspacePath,
       projectPath: prepared.input.projectPath, baseRevision: prepared.baseRevision,
       authorizationEpoch: prepared.input.authorizationEpoch, status: 'running',
+      toolNetworkAccess: prepared.input.networkAccess === 'offline' ? 'blocked' : 'allowed',
       startedAt: new Date().toISOString(), finishedAt: '', exitCode: null, signal: null,
       terminationReason: '', workerPid: 0, childPid: 0,
       stdoutPath: path.join(directory, 'stdout.log'), stderrPath: path.join(directory, 'stderr.log'),
@@ -267,6 +291,7 @@ export class DurableSandboxExecutionBackend {
     const operation: OperationRecord = {
       executionId, operationId, preparedId, projectPath: prepared.input.projectPath,
       baseRevision: prepared.baseRevision, authorizationEpoch: prepared.input.authorizationEpoch,
+      networkAccess: prepared.input.networkAccess,
       executionFingerprint: prepared.executionFingerprint
     };
     fs.mkdirSync(path.dirname(operationPath), { recursive: true });
@@ -343,6 +368,7 @@ export class DurableSandboxExecutionBackend {
     return {
       executionId, operationId: state.operationId, workspacePath: state.workspacePath,
       projectPath: state.projectPath, baseRevision: state.baseRevision, authorizationEpoch: state.authorizationEpoch,
+      toolNetworkAccess: state.toolNetworkAccess,
       status: state.status, startedAt: state.startedAt, finishedAt: state.finishedAt,
       exitCode: state.exitCode, signal: state.signal,
       stdout: fs.existsSync(state.stdoutPath) ? fs.readFileSync(state.stdoutPath, 'utf8').slice(0, 65_536) : '',
@@ -368,10 +394,13 @@ export class DurableSandboxExecutionBackend {
 
   private handleForOperation(operationPath: string, prepared: PreparedRecord, operationId: string): ExecutionHandle {
     const operation = JSON.parse(fs.readFileSync(operationPath, 'utf8')) as OperationRecord;
+    const fingerprintMatches = operation.executionFingerprint === prepared.executionFingerprint
+      || (operation.networkAccess === undefined
+        && operation.executionFingerprint === legacyExecutionFingerprint(prepared.input));
     if (operation.operationId !== operationId
       || operation.projectPath !== prepared.input.projectPath || operation.baseRevision !== prepared.baseRevision
       || operation.authorizationEpoch !== prepared.input.authorizationEpoch
-      || operation.executionFingerprint !== prepared.executionFingerprint) {
+      || !fingerprintMatches) {
       throw new Error('Execution operation identity does not match the prepared project request.');
     }
     if (!this.authorization.isCurrent(operation.projectPath, operation.authorizationEpoch)) {
@@ -396,6 +425,10 @@ export class DurableSandboxExecutionBackend {
     if (!fs.existsSync(preparedPath)) return undefined;
     const record = JSON.parse(fs.readFileSync(preparedPath, 'utf8')) as PreparedRecord;
     if (record.preparedId !== preparedId) throw new Error('Persisted prepared execution identity is invalid.');
+    if (!record.input.networkAccess) {
+      record.input.networkAccess = record.launch.args.includes('--unshare-net') ? 'offline' : 'tool';
+      record.executionFingerprint = executionFingerprint(record.input);
+    }
     this.prepared.set(preparedId, record);
     return record;
   }
@@ -407,6 +440,10 @@ export class DurableSandboxExecutionBackend {
   private readState(executionId: string): DurableState {
     const statePath = this.statePath(executionId);
     if (!fs.existsSync(statePath)) throw new Error(`Execution not found: ${executionId}`);
-    return JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8')) as DurableState;
+    return {
+      ...state,
+      toolNetworkAccess: state.toolNetworkAccess === 'allowed' ? 'allowed' : 'blocked'
+    };
   }
 }

@@ -21,6 +21,7 @@ test('project authorization is persisted and advances its epoch only when the gr
 
   const granted = store.setEnabled(project, true, [project]);
   assert.equal(granted.enabled, true);
+  assert.equal(granted.toolNetworkDisabled, false);
   assert.equal(granted.epoch, 1);
 
   const restarted = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
@@ -34,6 +35,32 @@ test('project authorization is persisted and advances its epoch only when the gr
   assert.equal(revoked.epoch, 2);
   assert.equal(restarted.isCurrent(project, granted.epoch), false);
   assert.equal(restarted.isCurrent(project, revoked.epoch), false);
+});
+
+test('project tool network policy is persisted and invalidates the previous authorization epoch', () => {
+  const { root, project } = fixture();
+  const store = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+  const granted = store.setPolicy(project, { enabled: true, toolNetworkDisabled: false }, [project]);
+
+  const offline = store.setPolicy(project, { enabled: true, toolNetworkDisabled: true }, [project]);
+  assert.equal(offline.enabled, true);
+  assert.equal(offline.toolNetworkDisabled, true);
+  assert.equal(offline.epoch, granted.epoch + 1);
+  assert.equal(store.isCurrent(project, granted.epoch), false);
+
+  const unchanged = store.setPolicy(project, { enabled: true, toolNetworkDisabled: true }, [project]);
+  assert.deepEqual(unchanged, offline);
+  assert.deepEqual(new ProjectAutonomyAuthorizationStore({ globalDataPath: root }).get(project), offline);
+});
+
+test('changing autonomy preserves the project tool network policy', () => {
+  const { root, project } = fixture();
+  const store = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+  store.setPolicy(project, { enabled: true, toolNetworkDisabled: true }, [project]);
+
+  const revoked = store.setEnabled(project, false, [project]);
+  assert.equal(revoked.enabled, false);
+  assert.equal(revoked.toolNetworkDisabled, true);
 });
 
 test('project authorization rejects paths that are not registered', () => {

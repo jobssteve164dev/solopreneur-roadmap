@@ -2238,6 +2238,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     'project-type-select',
     'project-priority-select',
     'project-autonomy-enabled',
+    'project-tool-network-disabled',
     'setting-feedback-title',
     'setting-feedback-body',
     'btn-open-feedback',
@@ -2257,7 +2258,8 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
         priority: 'P1',
         description: 'Old desc',
         notes: 'Old notes',
-        autonomyEnabled: true
+        autonomyEnabled: true,
+        toolNetworkDisabled: true
       }]
     }
   });
@@ -2269,10 +2271,12 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.equal(elements['project-description-input'].value, 'Old desc');
   assert.equal(elements['project-notes-input'].value, 'Old notes');
   assert.equal(elements['project-autonomy-enabled'].checked, true);
+  assert.equal(elements['project-tool-network-disabled'].checked, true);
   elements['project-name-input'].value = 'New App';
   elements['project-description-input'].value = 'Project intro';
   elements['project-notes-input'].value = 'Project notes';
   elements['project-autonomy-enabled'].checked = false;
+  elements['project-tool-network-disabled'].checked = false;
   elements['project-type-select'].listeners.click({
     target: elements['project-type-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'content'),
     stopPropagation() {}
@@ -2291,6 +2295,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     && message.description === 'Project intro'
     && message.notes === 'Project notes'
     && message.autonomyEnabled === false
+    && message.toolNetworkDisabled === false
     && message.projectType === 'content'
     && message.priority === 'P0'
   ));
@@ -2347,7 +2352,9 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(html, /id="project-type-select"/);
   assert.match(html, /id="project-priority-select"/);
   assert.match(html, /id="project-autonomy-enabled"/);
+  assert.match(html, /id="project-tool-network-disabled"/);
   assert.match(html, /自动完成本地结果/);
+  assert.match(html, /禁止任务工具联网/);
   assert.match(script, /renderProjectSettings/);
   assert.match(script, /project\.updateMetadata/);
   assert.doesNotMatch(html, /id="btn-add-project"/);

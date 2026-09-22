@@ -1284,7 +1284,7 @@ async function handleSharedWebviewAction(
     'project.remove': async (request) => removeProject(context, String(request.projectPath || '')),
     'project.updateMetadata': async (request) => {
       const projectPath = String(request.projectPath || '');
-      const updatesAutonomy = request.autonomyEnabled !== undefined;
+      const updatesAutonomy = request.autonomyEnabled !== undefined || request.toolNetworkDisabled !== undefined;
       await updateProjectMetadata(context, projectPath, {
         name: request.name,
         type: request.projectType,
@@ -1297,7 +1297,13 @@ async function handleSharedWebviewAction(
         const authorization = new ProjectAutonomyAuthorizationStore({
           globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
         });
-        authorization.setEnabled(projectPath, Boolean(request.autonomyEnabled), projects.map(project => project.path));
+        const current = authorization.get(projectPath);
+        authorization.setPolicy(projectPath, {
+          enabled: request.autonomyEnabled === undefined ? current.enabled : Boolean(request.autonomyEnabled),
+          toolNetworkDisabled: request.toolNetworkDisabled === undefined
+            ? current.toolNetworkDisabled
+            : Boolean(request.toolNetworkDisabled)
+        }, projects.map(project => project.path));
         sendLocalProjectsToWebviews(context);
       }
       await respond({ command: 'projectMetadataSaved', projectPath, requestId: String(request.requestId || '') });
@@ -2193,7 +2199,7 @@ function getSelectedProjectPath(context: vscode.ExtensionContext): string {
   );
 }
 
-function getProjectState(context: vscode.ExtensionContext): { projects: Array<SolopreneurProject & { autonomyEnabled: boolean; autonomyEpoch: number }>; selectedProjectPath: string } {
+function getProjectState(context: vscode.ExtensionContext): { projects: Array<SolopreneurProject & { autonomyEnabled: boolean; toolNetworkDisabled: boolean; autonomyEpoch: number }>; selectedProjectPath: string } {
   const projects = getProjects(context);
   const authorization = new ProjectAutonomyAuthorizationStore({
     globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
@@ -2201,7 +2207,12 @@ function getProjectState(context: vscode.ExtensionContext): { projects: Array<So
   return {
     projects: projects.map(project => {
       const grant = authorization.get(project.path);
-      return { ...project, autonomyEnabled: grant.enabled, autonomyEpoch: grant.epoch };
+      return {
+        ...project,
+        autonomyEnabled: grant.enabled,
+        toolNetworkDisabled: grant.toolNetworkDisabled,
+        autonomyEpoch: grant.epoch
+      };
     }),
     selectedProjectPath: getSelectedProjectPathFromRegistry(projects, selectedProjectPathInMemory || context.globalState.get<string>(selectedProjectKey) || '')
   };

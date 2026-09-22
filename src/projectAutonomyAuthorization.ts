@@ -6,8 +6,14 @@ export interface ProjectAutonomyAuthorization {
   projectId: string;
   projectPath: string;
   enabled: boolean;
+  toolNetworkDisabled: boolean;
   epoch: number;
   updatedAt: string;
+}
+
+export interface ProjectAutonomyPolicy {
+  enabled: boolean;
+  toolNetworkDisabled: boolean;
 }
 
 interface LegacyAuthorizationFile {
@@ -47,6 +53,17 @@ function writeFile(filePath: string, value: unknown): void {
   fs.renameSync(temporaryPath, filePath);
 }
 
+function normalizeAuthorization(value: Partial<ProjectAutonomyAuthorization>, id: string, resolved: string): ProjectAutonomyAuthorization {
+  return {
+    projectId: String(value.projectId || id),
+    projectPath: String(value.projectPath || resolved),
+    enabled: Boolean(value.enabled),
+    toolNetworkDisabled: Boolean(value.toolNetworkDisabled),
+    epoch: Math.max(0, Number(value.epoch || 0)),
+    updatedAt: String(value.updatedAt || '')
+  };
+}
+
 export class ProjectAutonomyAuthorizationStore {
   public readonly filePath: string;
   private readonly legacyFilePath: string;
@@ -62,19 +79,25 @@ export class ProjectAutonomyAuthorizationStore {
     const id = projectId(resolved);
     const recordPath = path.join(this.filePath, `${id}.json`);
     if (fs.existsSync(recordPath)) {
-      try { return JSON.parse(fs.readFileSync(recordPath, 'utf8')) as ProjectAutonomyAuthorization; }
+      try { return normalizeAuthorization(JSON.parse(fs.readFileSync(recordPath, 'utf8')), id, resolved); }
       catch (error) { throw new Error(`Unable to read project autonomy authorization: ${error instanceof Error ? error.message : String(error)}`); }
     }
-    return readLegacyFile(this.legacyFilePath).projects[id] || {
+    return normalizeAuthorization(readLegacyFile(this.legacyFilePath).projects[id] || {
       projectId: id,
       projectPath: resolved,
       enabled: false,
+      toolNetworkDisabled: false,
       epoch: 0,
       updatedAt: ''
-    };
+    }, id, resolved);
   }
 
   public setEnabled(projectPathValue: string, enabled: boolean, registeredProjectPaths: string[]): ProjectAutonomyAuthorization {
+    const previous = this.get(projectPathValue);
+    return this.setPolicy(projectPathValue, { enabled, toolNetworkDisabled: previous.toolNetworkDisabled }, registeredProjectPaths);
+  }
+
+  public setPolicy(projectPathValue: string, policy: ProjectAutonomyPolicy, registeredProjectPaths: string[]): ProjectAutonomyAuthorization {
     const resolved = canonicalPath(projectPathValue);
     const registered = new Set(registeredProjectPaths.map(candidate => {
       try { return canonicalPath(candidate); } catch { return ''; }
@@ -84,11 +107,14 @@ export class ProjectAutonomyAuthorizationStore {
     }
     const id = projectId(resolved);
     const previous = this.get(resolved);
-    if (previous && previous.enabled === enabled) return previous;
+    const enabled = Boolean(policy.enabled);
+    const toolNetworkDisabled = Boolean(policy.toolNetworkDisabled);
+    if (previous.enabled === enabled && previous.toolNetworkDisabled === toolNetworkDisabled) return previous;
     const next: ProjectAutonomyAuthorization = {
       projectId: id,
       projectPath: resolved,
       enabled,
+      toolNetworkDisabled,
       epoch: Math.max(0, Number(previous?.epoch || 0)) + 1,
       updatedAt: new Date().toISOString()
     };
@@ -108,14 +134,15 @@ export function readProjectAutonomyAuthorization(filePath: string, projectPathVa
   const id = projectId(resolved);
   const recordPath = path.join(filePath, `${id}.json`);
   if (fs.existsSync(recordPath)) {
-    try { return JSON.parse(fs.readFileSync(recordPath, 'utf8')) as ProjectAutonomyAuthorization; }
+    try { return normalizeAuthorization(JSON.parse(fs.readFileSync(recordPath, 'utf8')), id, resolved); }
     catch (error) { throw new Error(`Unable to read project autonomy authorization: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  return readLegacyFile(`${filePath}.json`).projects[id] || {
+  return normalizeAuthorization(readLegacyFile(`${filePath}.json`).projects[id] || {
     projectId: id,
     projectPath: resolved,
     enabled: false,
+    toolNetworkDisabled: false,
     epoch: 0,
     updatedAt: ''
-  };
+  }, id, resolved);
 }

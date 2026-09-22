@@ -2119,6 +2119,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           <span class="settings-help" id="help-project-autonomy">SoloMap works in an isolated copy and never pushes, deploys, or changes the project you are currently editing. Work waits if safe isolation is unavailable.</span>
         </span>
       </label>
+      <label class="settings-toggle-row" for="project-tool-network-disabled">
+        <input type="checkbox" id="project-tool-network-disabled">
+        <span class="settings-toggle-copy">
+          <span class="settings-lbl-title" id="label-project-tool-network">Block task tools from the network</span>
+          <span class="settings-help" id="help-project-tool-network">Task tools can reach external services and may send project data by default. Turn this on to keep commands, tests, and installers offline; the Agent can still think and use its model.</span>
+        </span>
+      </label>
     </div>
 
     <div class="settings-card">
@@ -2227,6 +2234,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectDescriptionInput = document.getElementById('project-description-input');
     const projectNotesInput = document.getElementById('project-notes-input');
     const projectAutonomyEnabled = document.getElementById('project-autonomy-enabled');
+    const projectToolNetworkDisabled = document.getElementById('project-tool-network-disabled');
     let currentLanguage = 'zh';
     let currentNodes = [];
     let expandedNodeId = '';
@@ -2251,6 +2259,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         description: projectDescriptionInput.value,
         notes: projectNotesInput.value,
         autonomyEnabled: Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked),
+        toolNetworkDisabled: Boolean(projectToolNetworkDisabled && projectToolNetworkDisabled.checked),
         type: getSoloSelectValue(projectTypeSelect),
         priority: getSoloSelectValue(projectPrioritySelect)
       });
@@ -2321,6 +2330,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         projectPriority: '项目优先级',
         projectAutonomy: '自动完成本地结果（含提交）',
         projectAutonomyHelp: 'SoloMap 只会在隔离副本中修改、验证并创建本地提交；不会推送、部署，也不会改动你正在编辑的项目。设备无法安全隔离时会保持等待。',
+        projectToolNetwork: '禁止任务工具联网',
+        projectToolNetworkHelp: '任务工具默认可访问外部服务，也可能向外发送项目数据。开启后，命令、测试和安装步骤将无法联网；Agent 仍可思考和调用模型。SoloMap 不会因此主动推送或部署。',
         settingsSectionAutonomy: '自动工作',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode、grok）或可执行文件绝对路径。',
@@ -2539,6 +2550,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         projectPriority: 'Priority',
         projectAutonomy: 'Automatically complete local results (including commits)',
         projectAutonomyHelp: 'SoloMap only edits, verifies, and commits in an isolated copy. It never pushes, deploys, or changes the project you are editing. Work waits when safe isolation is unavailable.',
+        projectToolNetwork: 'Block task tools from the network',
+        projectToolNetworkHelp: 'Task tools can reach external services and may send project data by default. Turn this on to keep commands, tests, and installers offline; the Agent can still think and use its model. SoloMap will not actively push or deploy because of this setting.',
         settingsSectionAutonomy: 'Automatic Work',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, opencode, or grok, or an absolute executable path.',
@@ -2961,6 +2974,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('label-project-priority', t('projectPriority'));
       setText('label-project-autonomy', t('projectAutonomy'));
       setText('help-project-autonomy', t('projectAutonomyHelp'));
+      setText('label-project-tool-network', t('projectToolNetwork'));
+      setText('help-project-tool-network', t('projectToolNetworkHelp'));
       if (projectNameInput) projectNameInput.placeholder = t('projectNamePlaceholder');
       if (projectDescriptionInput) projectDescriptionInput.placeholder = t('projectDescriptionPlaceholder');
       if (projectNotesInput) projectNotesInput.placeholder = t('projectNotesPlaceholder');
@@ -3564,7 +3579,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         notes: projectNotesInput ? projectNotesInput.value.trim() : '',
         projectType: getSoloSelectValue(projectTypeSelect),
         priority: getSoloSelectValue(projectPrioritySelect),
-        autonomyEnabled: Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked)
+        autonomyEnabled: Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked),
+        toolNetworkDisabled: Boolean(projectToolNetworkDisabled && projectToolNetworkDisabled.checked)
       });
       settingsPanel.style.display = 'none';
       if (cliTestBadge) cliTestBadge.style.display = 'none';
@@ -3707,6 +3723,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         if (projectDescriptionInput) projectDescriptionInput.value = '';
         if (projectNotesInput) projectNotesInput.value = '';
         if (projectAutonomyEnabled) projectAutonomyEnabled.checked = false;
+        if (projectToolNetworkDisabled) projectToolNetworkDisabled.checked = false;
         setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), 'core_product');
         setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), '');
         return;
@@ -3715,6 +3732,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (projectDescriptionInput) projectDescriptionInput.value = project.description || '';
       if (projectNotesInput) projectNotesInput.value = project.notes || '';
       if (projectAutonomyEnabled) projectAutonomyEnabled.checked = Boolean(project.autonomyEnabled);
+      if (projectToolNetworkDisabled) projectToolNetworkDisabled.checked = Boolean(project.toolNetworkDisabled);
       setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), project.type || 'core_product');
       setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), project.priority || '');
     }
