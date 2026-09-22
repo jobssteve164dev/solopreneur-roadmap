@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.475 - 2026-09-22
+
+### Added
+- add durable sandboxed autonomous execution (b807588)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.474 - 2026-09-22
 
 ### Added
