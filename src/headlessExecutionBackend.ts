@@ -9,9 +9,9 @@ export interface BackendCapabilities {
   headless: true;
   visibleTerminal: false;
   processLifecycle: true;
-  durableResume: false;
-  operatingSystemSandbox: false;
-  readyForAutonomousWrites: false;
+  durableResume: boolean;
+  operatingSystemSandbox: boolean;
+  readyForAutonomousWrites: boolean;
 }
 
 export interface ExecutionPackage {

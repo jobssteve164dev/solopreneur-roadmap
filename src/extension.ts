@@ -176,6 +176,7 @@ import {
   readProjectRegistry as readProjectRegistryFile,
   writeProjectRegistry as writeProjectRegistryFile
 } from './projectRegistry';
+import { ProjectAutonomyAuthorizationStore } from './projectAutonomyAuthorization';
 import {
   buildFeedbackUsageSummary as buildFeedbackUsageSummaryFromStats,
   LocalUsageEvent,
@@ -1283,13 +1284,22 @@ async function handleSharedWebviewAction(
     'project.remove': async (request) => removeProject(context, String(request.projectPath || '')),
     'project.updateMetadata': async (request) => {
       const projectPath = String(request.projectPath || '');
+      const updatesAutonomy = request.autonomyEnabled !== undefined;
       await updateProjectMetadata(context, projectPath, {
         name: request.name,
         type: request.projectType,
         priority: request.priority,
         description: request.description,
         notes: request.notes
-      });
+      }, !updatesAutonomy);
+      if (updatesAutonomy) {
+        const projects = getProjects(context);
+        const authorization = new ProjectAutonomyAuthorizationStore({
+          globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
+        });
+        authorization.setEnabled(projectPath, Boolean(request.autonomyEnabled), projects.map(project => project.path));
+        sendLocalProjectsToWebviews(context);
+      }
       await respond({ command: 'projectMetadataSaved', projectPath, requestId: String(request.requestId || '') });
     },
     'project.togglePinned': async (request) => toggleProjectPinned(context, String(request.projectPath || '')),
@@ -2183,10 +2193,16 @@ function getSelectedProjectPath(context: vscode.ExtensionContext): string {
   );
 }
 
-function getProjectState(context: vscode.ExtensionContext): { projects: SolopreneurProject[]; selectedProjectPath: string } {
+function getProjectState(context: vscode.ExtensionContext): { projects: Array<SolopreneurProject & { autonomyEnabled: boolean; autonomyEpoch: number }>; selectedProjectPath: string } {
   const projects = getProjects(context);
+  const authorization = new ProjectAutonomyAuthorizationStore({
+    globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
+  });
   return {
-    projects,
+    projects: projects.map(project => {
+      const grant = authorization.get(project.path);
+      return { ...project, autonomyEnabled: grant.enabled, autonomyEpoch: grant.epoch };
+    }),
     selectedProjectPath: getSelectedProjectPathFromRegistry(projects, selectedProjectPathInMemory || context.globalState.get<string>(selectedProjectKey) || '')
   };
 }
@@ -2304,7 +2320,12 @@ function scheduleProjectRunIndexBackfill(context: vscode.ExtensionContext, proje
   }, 0);
 }
 
-async function updateProjectMetadata(context: vscode.ExtensionContext, projectPath: string, updates: Partial<Pick<SolopreneurProject, 'name' | 'type' | 'priority' | 'description' | 'notes'>>): Promise<void> {
+async function updateProjectMetadata(
+  context: vscode.ExtensionContext,
+  projectPath: string,
+  updates: Partial<Pick<SolopreneurProject, 'name' | 'type' | 'priority' | 'description' | 'notes'>>,
+  broadcast = true
+): Promise<void> {
   const projects = getProjects(context);
   const nextProjects = projects.map((project) => {
     if (project.path !== projectPath) {
@@ -2320,7 +2341,7 @@ async function updateProjectMetadata(context: vscode.ExtensionContext, projectPa
     };
   });
   await saveProjects(context, nextProjects);
-  sendLocalProjectsToWebviews(context);
+  if (broadcast) sendLocalProjectsToWebviews(context);
 }
 
 async function toggleProjectPinned(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
@@ -2872,6 +2893,13 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
   );
   if (confirmed !== '确认删除') {
     return;
+  }
+
+  const authorization = new ProjectAutonomyAuthorizationStore({
+    globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
+  });
+  if (authorization.get(projectPath).enabled) {
+    authorization.setEnabled(projectPath, false, projects.map(candidate => candidate.path));
   }
 
   const solopreneurDir = path.join(projectPath, '.solopreneur');

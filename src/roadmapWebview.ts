@@ -1588,6 +1588,38 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       color: var(--text-main);
     }
 
+    .settings-toggle-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      min-height: 44px;
+      padding: 8px;
+      border: 1px solid var(--border-glass);
+      border-radius: 7px;
+      cursor: pointer;
+    }
+
+    .settings-toggle-row input {
+      width: 18px;
+      height: 18px;
+      margin: 2px 0 0;
+      accent-color: #00e5ff;
+      flex: 0 0 auto;
+    }
+
+    .settings-toggle-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .settings-help {
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
     .enhancement-list {
       display: flex;
       flex-direction: column;
@@ -2079,6 +2111,17 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     </div>
 
     <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-run-all"></span><span id="settings-section-autonomy">Automatic Work</span></div>
+      <label class="settings-toggle-row" for="project-autonomy-enabled">
+        <input type="checkbox" id="project-autonomy-enabled">
+        <span class="settings-toggle-copy">
+          <span class="settings-lbl-title" id="label-project-autonomy">Automatically complete local results (including commits)</span>
+          <span class="settings-help" id="help-project-autonomy">SoloMap works in an isolated copy and never pushes, deploys, or changes the project you are currently editing. Work waits if safe isolation is unavailable.</span>
+        </span>
+      </label>
+    </div>
+
+    <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-symbol-class"></span><span id="settings-section-data">Project Shape</span></div>
       <div class="settings-field">
         <label class="settings-lbl-title" id="label-project-type">Category</label>
@@ -2183,6 +2226,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectNameInput = document.getElementById('project-name-input');
     const projectDescriptionInput = document.getElementById('project-description-input');
     const projectNotesInput = document.getElementById('project-notes-input');
+    const projectAutonomyEnabled = document.getElementById('project-autonomy-enabled');
     let currentLanguage = 'zh';
     let currentNodes = [];
     let expandedNodeId = '';
@@ -2206,6 +2250,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         name: projectNameInput.value,
         description: projectDescriptionInput.value,
         notes: projectNotesInput.value,
+        autonomyEnabled: Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked),
         type: getSoloSelectValue(projectTypeSelect),
         priority: getSoloSelectValue(projectPrioritySelect)
       });
@@ -2274,6 +2319,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         projectNotesPlaceholder: '补充边界、目标、提醒或协作上下文...',
         projectType: '项目类别',
         projectPriority: '项目优先级',
+        projectAutonomy: '自动完成本地结果（含提交）',
+        projectAutonomyHelp: 'SoloMap 只会在隔离副本中修改、验证并创建本地提交；不会推送、部署，也不会改动你正在编辑的项目。设备无法安全隔离时会保持等待。',
+        settingsSectionAutonomy: '自动工作',
         cliPath: 'Agent CLI 命令或路径',
         cliPathHelp: '填写全局安装的 CLI 命令（如 agy、codex、cursor、claude、copilot、opencode、grok）或可执行文件绝对路径。',
         globalPrompt: '全局默认提示词',
@@ -2489,6 +2537,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         projectNotesPlaceholder: 'Add boundaries, goals, reminders, or collaboration context...',
         projectType: 'Category',
         projectPriority: 'Priority',
+        projectAutonomy: 'Automatically complete local results (including commits)',
+        projectAutonomyHelp: 'SoloMap only edits, verifies, and commits in an isolated copy. It never pushes, deploys, or changes the project you are editing. Work waits when safe isolation is unavailable.',
+        settingsSectionAutonomy: 'Automatic Work',
         cliPath: 'CLI Command or Path',
         cliPathHelp: 'Name of a globally installed CLI such as agy, codex, cursor, claude, copilot, opencode, or grok, or an absolute executable path.',
         globalPrompt: 'Default Agent Instructions',
@@ -2881,6 +2932,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('settings-section-account', t('settingsSectionAccount'));
       setText('settings-section-agent', t('settingsSectionAgent'));
       setText('settings-section-data', t('settingsSectionData'));
+      setText('settings-section-autonomy', t('settingsSectionAutonomy'));
       setText('settings-section-instructions', t('settingsSectionInstructions'));
       setText('settings-section-abilities', t('settingsSectionAbilities'));
       setText('option-review-high-risk', t('reviewHighRisk'));
@@ -2907,6 +2959,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('label-project-notes', t('projectNotes'));
       setText('label-project-type', t('projectType'));
       setText('label-project-priority', t('projectPriority'));
+      setText('label-project-autonomy', t('projectAutonomy'));
+      setText('help-project-autonomy', t('projectAutonomyHelp'));
       if (projectNameInput) projectNameInput.placeholder = t('projectNamePlaceholder');
       if (projectDescriptionInput) projectDescriptionInput.placeholder = t('projectDescriptionPlaceholder');
       if (projectNotesInput) projectNotesInput.placeholder = t('projectNotesPlaceholder');
@@ -3509,7 +3563,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         description: projectDescriptionInput ? projectDescriptionInput.value.trim() : '',
         notes: projectNotesInput ? projectNotesInput.value.trim() : '',
         projectType: getSoloSelectValue(projectTypeSelect),
-        priority: getSoloSelectValue(projectPrioritySelect)
+        priority: getSoloSelectValue(projectPrioritySelect),
+        autonomyEnabled: Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked)
       });
       settingsPanel.style.display = 'none';
       if (cliTestBadge) cliTestBadge.style.display = 'none';
@@ -3651,6 +3706,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         if (projectNameInput) projectNameInput.value = '';
         if (projectDescriptionInput) projectDescriptionInput.value = '';
         if (projectNotesInput) projectNotesInput.value = '';
+        if (projectAutonomyEnabled) projectAutonomyEnabled.checked = false;
         setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), 'core_product');
         setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), '');
         return;
@@ -3658,6 +3714,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (projectNameInput) projectNameInput.value = project.name || '';
       if (projectDescriptionInput) projectDescriptionInput.value = project.description || '';
       if (projectNotesInput) projectNotesInput.value = project.notes || '';
+      if (projectAutonomyEnabled) projectAutonomyEnabled.checked = Boolean(project.autonomyEnabled);
       setSoloSelectOptions(projectTypeSelect, getProjectTypeOptions(), project.type || 'core_product');
       setSoloSelectOptions(projectPrioritySelect, getProjectPriorityOptions(), project.priority || '');
     }

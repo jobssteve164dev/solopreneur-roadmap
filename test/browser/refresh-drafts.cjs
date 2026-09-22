@@ -6,7 +6,7 @@ const { chromium } = require('playwright');
 const root = path.resolve(__dirname, '../..');
 const webview = { asWebviewUri: () => '', cspSource: '' };
 const uri = { fsPath: root };
-const project = { path: '/fixture/a', name: 'Project A', description: 'Saved description', notes: 'Saved notes', type: 'core_product', priority: 'P1' };
+const project = { path: '/fixture/a', name: 'Project A', description: 'Saved description', notes: 'Saved notes', type: 'core_product', priority: 'P1', autonomyEnabled: true };
 const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt', agentModelPreferences: {} };
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true });
@@ -34,6 +34,7 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
       await projects(project.path);
       await page.locator('#btn-toggle-settings').click();
       if (surface === 'roadmap') {
+        check(await page.locator('#project-autonomy-enabled').isChecked(), 'project autonomy authorization is visible in project settings');
         await page.locator('#project-type-select [data-solo-trigger]').click();
         await page.locator('#project-type-select [data-solo-option-value="content"]').click();
         await projects(project.path);
@@ -48,6 +49,7 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         check(await page.locator('#project-name-input').inputValue() === 'Project B', 'switch shows target project settings');
         await projects(project.path);
         check(await page.locator('#project-name-input').inputValue() === 'Draft A', 'return restores project draft');
+        await page.locator('#project-autonomy-enabled').uncheck();
       } else {
         await page.locator('#setting-language [data-solo-trigger]').click();
         await page.locator('#setting-language [data-solo-option-value="en"]').click();
@@ -67,6 +69,7 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
       const saved = await page.evaluate(() => window.messages.filter(m => m.command === 'settings.update' || m.command === 'project.updateMetadata'));
       const save = saved.find(m => m.command === (surface === 'roadmap' ? 'project.updateMetadata' : 'settings.update'));
       if (surface === 'roadmap') check(!saved.some(m => m.command === 'settings.update'), 'project save only writes project settings');
+      if (surface === 'roadmap') check(save.autonomyEnabled === false, 'project save carries the explicit autonomy choice');
       await page.locator('#btn-toggle-settings').click();
       await input.fill('Newer draft');
       await send({ command: 'settingsLoaded', settings });

@@ -11,6 +11,7 @@ import {
 } from './autonomousRuntime';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { LocalAgentCliEngine } from './localAgentCliEngine';
+import { initializeAutonomousExecutionRuntime } from './autonomousExecutionRuntime';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -22,13 +23,14 @@ function intervalValue(): number {
   return Number.isFinite(parsed) ? Math.max(5_000, Math.round(parsed)) : 30_000;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const globalDataPath = argumentValue('--global-data-path');
   if (!globalDataPath) {
     process.stderr.write('SoloMap Runtime requires --global-data-path.\n');
     process.exitCode = 2;
     return;
   }
+  await initializeAutonomousExecutionRuntime({ globalDataPath });
   if (process.argv.includes('--once')) {
     runShadowDecisionCycle({ globalDataPath });
     return;
@@ -109,4 +111,7 @@ function main(): void {
   timer = setInterval(() => void runCycle(), intervalValue());
 }
 
-main();
+void main().catch(error => {
+  process.stderr.write(`SoloMap Runtime could not initialize autonomous execution: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

@@ -1,0 +1,66 @@
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const test = require('node:test');
+
+const {
+  ProjectAutonomyAuthorizationStore
+} = require('../out/projectAutonomyAuthorization.js');
+
+function fixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-auth-'));
+  const project = path.join(root, 'project');
+  fs.mkdirSync(project);
+  return { root, project };
+}
+
+test('project authorization is persisted and advances its epoch only when the grant changes', () => {
+  const { root, project } = fixture();
+  const store = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+
+  const granted = store.setEnabled(project, true, [project]);
+  assert.equal(granted.enabled, true);
+  assert.equal(granted.epoch, 1);
+
+  const restarted = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+  assert.deepEqual(restarted.get(project), granted);
+
+  const unchanged = restarted.setEnabled(project, true, [project]);
+  assert.deepEqual(unchanged, granted);
+
+  const revoked = restarted.setEnabled(project, false, [project]);
+  assert.equal(revoked.enabled, false);
+  assert.equal(revoked.epoch, 2);
+  assert.equal(restarted.isCurrent(project, granted.epoch), false);
+  assert.equal(restarted.isCurrent(project, revoked.epoch), false);
+});
+
+test('project authorization rejects paths that are not registered', () => {
+  const { root, project } = fixture();
+  const other = path.join(root, 'other');
+  fs.mkdirSync(other);
+  const store = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+
+  assert.throws(
+    () => store.setEnabled(other, true, [project]),
+    /not registered/i
+  );
+  assert.equal(store.get(other).enabled, false);
+});
+
+test('project grants use independent atomic records so another project cannot restore a revoked epoch', () => {
+  const { root, project } = fixture();
+  const other = path.join(root, 'other');
+  fs.mkdirSync(other);
+  const store = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+  store.setEnabled(project, true, [project, other]);
+  store.setEnabled(other, true, [project, other]);
+  const revoked = store.setEnabled(project, false, [project, other]);
+  store.setEnabled(other, false, [project, other]);
+
+  assert.equal(fs.statSync(store.filePath).isDirectory(), true);
+  assert.equal(fs.readdirSync(store.filePath).filter(name => name.endsWith('.json')).length, 2);
+  assert.equal(store.get(project).enabled, false);
+  assert.equal(store.get(project).epoch, revoked.epoch);
+});

@@ -49,8 +49,12 @@ function removeFixture(fixture) {
   const snapshotPath = path.join(runtimeRoot, 'today-shadow.json');
   const statePath = path.join(runtimeRoot, 'state.json');
   const cognitiveConfigPath = path.join(runtimeRoot, 'cognitive-config.json');
-  for (const filePath of [eventsPath, feedbackPath, snapshotPath, statePath, cognitiveConfigPath]) {
+  const executionRuntimePath = path.join(runtimeRoot, 'execution-runtime.json');
+  for (const filePath of [eventsPath, feedbackPath, snapshotPath, statePath, cognitiveConfigPath, executionRuntimePath]) {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  }
+  for (const directoryPath of [path.join(runtimeRoot, 'autonomous-executions'), path.join(runtimeRoot, 'isolated-workspaces')]) {
+    if (fs.existsSync(directoryPath)) fs.rmdirSync(directoryPath);
   }
   if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
   fs.unlinkSync(path.join(fixture.globalRoot, 'projects.json'));
