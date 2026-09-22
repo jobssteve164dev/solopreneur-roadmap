@@ -42,6 +42,7 @@ import {
 } from './agentCli';
 import { ensureSolomapMaintenanceWorkspace } from './solomapGlobal';
 import { sendTextWhenTerminalReady } from './terminalCompatibility';
+import { recordShadowDecisionFeedback } from './autonomousRuntime';
 
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
@@ -215,6 +216,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           case 'runDailyReview': {
             const review = startDailyReviewAgent(this._getSettings(), this._getProjects().projects, this._extensionUri);
             this._view?.webview.postMessage({ command: 'dailyReviewLoaded', review });
+            break;
+          }
+          case 'recordTodayShadowFeedback': {
+            const outcome = String(data.outcome || '');
+            if (!['accepted', 'overridden', 'ignored'].includes(outcome)) {
+              throw new Error('Today arrangement feedback outcome is invalid.');
+            }
+            recordShadowDecisionFeedback(this._getSettings().globalDataPath, {
+              operationId: String(data.operationId || ''),
+              decisionId: String(data.decisionId || ''),
+              recommendedProjectPath: String(data.recommendedProjectPath || ''),
+              selectedProjectPath: String(data.selectedProjectPath || ''),
+              outcome: outcome as 'accepted' | 'overridden' | 'ignored',
+              recordedAt: new Date().toISOString()
+            });
             break;
           }
           case 'openDependencyAction':

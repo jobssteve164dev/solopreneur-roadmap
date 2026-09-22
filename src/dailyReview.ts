@@ -7,6 +7,7 @@ import { SolopreneurSettings } from './pluginContracts';
 import { buildProjectPortfolioSummaries, commonParent, getDailyWorkRhythm, getLocalDateKey, normalizeGlobalDataPath, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
 import { GlobalEngineeringSnapshot, ensureGlobalEngineeringStore } from './globalEngineeringStore';
 import { sendTextWhenTerminalReady } from './terminalCompatibility';
+import { projectShadowDecisionForToday, readCurrentShadowDecision } from './autonomousRuntime';
 
 export interface DailyReviewTodo {
   title: string;
@@ -41,6 +42,11 @@ export interface DailyReviewArtifact {
   promptPath?: string;
   outputLog?: string;
   error?: string;
+  decisionId?: string;
+  baselineProjectPath?: string;
+  recommendedProjectPath?: string;
+  sourceRevision?: string;
+  readOnly?: boolean;
 }
 
 
@@ -195,20 +201,24 @@ function normalizeDailyReviewArtifact(value: any, resultPath = ''): DailyReviewA
     resultPath: String(value.resultPath || resultPath),
     promptPath: String(value.promptPath || ''),
     outputLog: String(value.outputLog || ''),
-    error: String(value.error || '')
+    error: String(value.error || ''),
+    decisionId: String(value.decisionId || ''),
+    baselineProjectPath: String(value.baselineProjectPath || ''),
+    recommendedProjectPath: String(value.recommendedProjectPath || ''),
+    sourceRevision: String(value.sourceRevision || ''),
+    readOnly: Boolean(value.readOnly)
   };
 }
 
 export function readTodayReview(globalDataPath: string, projects: SolopreneurProject[]): DailyReviewArtifact | null {
   const globalRoot = normalizeGlobalDataPath(globalDataPath, projects);
   const resultPath = getDailyReviewPath(globalRoot);
-  if (!fs.existsSync(resultPath)) {
-    return null;
-  }
-  try {
-    return normalizeDailyReviewArtifact(JSON.parse(fs.readFileSync(resultPath, 'utf8')), resultPath);
-  } catch {
-    return {
+  let manualReview: DailyReviewArtifact | null = null;
+  if (fs.existsSync(resultPath)) {
+    try {
+      manualReview = normalizeDailyReviewArtifact(JSON.parse(fs.readFileSync(resultPath, 'utf8')), resultPath);
+    } catch {
+      manualReview = {
       schemaVersion: 1,
       date: getLocalDateKey(),
       generatedAt: '',
@@ -221,8 +231,13 @@ export function readTodayReview(globalDataPath: string, projects: SolopreneurPro
       inputSnapshot: { projectCount: projects.length, learningCandidateCount: 0, blockedDependencyCount: 0, reviewMode: getDailyWorkRhythm() },
       resultPath,
       error: 'Today review cache is not valid JSON.'
-    };
+      };
+    }
   }
+  if (manualReview && manualReview.status !== 'failed') return manualReview;
+  const shadowDecision = readCurrentShadowDecision(globalRoot, projects);
+  if (shadowDecision) return projectShadowDecisionForToday(shadowDecision) as DailyReviewArtifact;
+  return manualReview;
 }
 
 

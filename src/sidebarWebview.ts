@@ -9474,10 +9474,29 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
 
       function buildTodayPlanItems(portfolio, selectedProjectPath) {
+        const shadowOrder = new Map();
+        if (currentDailyReview && currentDailyReview.source === 'runtime_shadow' && Array.isArray(currentDailyReview.todos)) {
+          currentDailyReview.todos.forEach((item, index) => {
+            if (item && item.projectPath && !shadowOrder.has(item.projectPath)) shadowOrder.set(item.projectPath, index);
+          });
+        }
         const projects = (portfolio || [])
           .filter(project => project && project.path)
           .slice()
-          .sort((a, b) => todayPlanScore(b) - todayPlanScore(a) || priorityRank(a.globalPriority) - priorityRank(b.globalPriority) || portfolioTieBreak(a, b));
+          .sort((a, b) => {
+            const aShadowRank = shadowOrder.has(a.path) ? shadowOrder.get(a.path) : Number.MAX_SAFE_INTEGER;
+            const bShadowRank = shadowOrder.has(b.path) ? shadowOrder.get(b.path) : Number.MAX_SAFE_INTEGER;
+            return aShadowRank - bShadowRank
+              || todayPlanScore(b) - todayPlanScore(a)
+              || priorityRank(a.globalPriority) - priorityRank(b.globalPriority)
+              || portfolioTieBreak(a, b);
+          });
+        if (shadowOrder.size) {
+          return projects.slice(0, 3).map((project, index) => ({
+            slot: index === 0 ? t('todaySlotMain') : t('todaySlotClose'),
+            project
+          }));
+        }
         const used = new Set();
         const take = (slot, predicate) => {
           const project = projects.find(candidate => !used.has(candidate.path) && predicate(candidate));
@@ -9502,10 +9521,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           clearTimeout(dailyReviewPollTimer);
           dailyReviewPollTimer = null;
         }
-        if (!currentDailyReview || currentDailyReview.status !== 'running') return;
+        const isRunning = currentDailyReview && currentDailyReview.status === 'running';
+        const isRuntimeDriven = !currentDailyReview || currentDailyReview.source === 'runtime_shadow';
+        if (!isRunning && !isRuntimeDriven) return;
         dailyReviewPollTimer = setTimeout(() => {
           vscode.postMessage({ command: 'getDailyReview' });
-        }, 2500);
+        }, isRunning ? 2500 : 30000);
+        if (dailyReviewPollTimer && typeof dailyReviewPollTimer.unref === 'function') dailyReviewPollTimer.unref();
       }
 
       function renderDailyReview(review) {
@@ -9571,11 +9593,28 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       function openDailyReviewTarget(item) {
         const projectPath = item && item.projectPath ? String(item.projectPath) : '';
         if (!projectPath) return;
+        recordTodayDecisionFeedback(projectPath);
         activateProjectInSidebar(projectPath);
         vscode.postMessage({ command: 'project.select', projectPath });
         if (item.nodeId) {
           vscode.postMessage({ command: 'showFullRoadmap' });
         }
+      }
+
+      function recordTodayDecisionFeedback(projectPath) {
+        const review = currentDailyReview || {};
+        const decisionId = String(review.decisionId || '');
+        const selectedProjectPath = String(projectPath || '');
+        if (review.source !== 'runtime_shadow' || !decisionId || !selectedProjectPath) return;
+        const recommendedProjectPath = String(review.recommendedProjectPath || '');
+        vscode.postMessage({
+          command: 'recordTodayShadowFeedback',
+          operationId: decisionId + ':' + selectedProjectPath,
+          decisionId,
+          recommendedProjectPath,
+          selectedProjectPath,
+          outcome: recommendedProjectPath === selectedProjectPath ? 'accepted' : 'overridden'
+        });
       }
 
       function renderGlobalFocus(portfolio, selectedProjectPath) {
@@ -9698,6 +9737,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {
           item.addEventListener('click', () => {
             const projectPath = item.getAttribute('data-global-focus-project') || '';
+            recordTodayDecisionFeedback(projectPath);
             if (projectPath === currentProjects.selectedProjectPath) return;
             activateProjectInSidebar(projectPath);
             vscode.postMessage({
@@ -9715,6 +9755,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             e.stopPropagation();
             const projectPath = btn.getAttribute('data-action-project-path') || '';
             const nodeId = btn.getAttribute('data-action-node-id') || '';
+            recordTodayDecisionFeedback(projectPath);
             if (nodeId) {
               vscode.postMessage({
                 command: 'project.continue',

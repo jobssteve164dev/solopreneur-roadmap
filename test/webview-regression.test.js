@@ -1175,6 +1175,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     globalThis.__renderProjectDeliveryPanel = renderProjectDeliveryPanel;
     globalThis.__buildSecurityActionPrompt = buildSecurityActionPrompt;
     globalThis.__renderGlobalFocus = renderGlobalFocus;
+    globalThis.__recordTodayDecisionFeedback = recordTodayDecisionFeedback;
     globalThis.__renderIssueDetailWithPayload = (payload) => { issueDetails = payload; return renderIssueDetail('/workspace/app'); };
     globalThis.__renderProjectConversationComposer = renderProjectConversationComposer;
     globalThis.__setCurrentCliForTest = (cliPath) => {
@@ -1695,6 +1696,34 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   const extractTodayProjectOrder = (html) => [...String(html).matchAll(/global-focus-name">([^<]+)</g)].map((match) => match[1]);
   const initialTodayProjectOrder = extractTodayProjectOrder(initialTodayPlan);
   assert.deepEqual(initialTodayProjectOrder, ['Alpha', 'Beta']);
+  postedMessages.length = 0;
+  dispatchMessage({
+    command: 'dailyReviewLoaded',
+    review: {
+      source: 'runtime_shadow',
+      status: 'completed',
+      decisionId: 'decision-1',
+      recommendedProjectPath: '/workspace/beta',
+      todos: [
+        { projectPath: '/workspace/beta', title: '推进 Beta', reason: '今天更适合先收口 Beta。' },
+        { projectPath: '/workspace/alpha', title: '推进 Alpha', reason: '随后继续 Alpha。' }
+      ],
+      needsConfirmation: []
+    }
+  });
+  assert.deepEqual(extractTodayProjectOrder(elements['global-focus-panel'].innerHTML), ['Beta', 'Alpha']);
+  context.__recordTodayDecisionFeedback('/workspace/beta');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(postedMessages.find(message => message.command === 'recordTodayShadowFeedback'))),
+    {
+      command: 'recordTodayShadowFeedback',
+      operationId: 'decision-1:/workspace/beta',
+      decisionId: 'decision-1',
+      recommendedProjectPath: '/workspace/beta',
+      selectedProjectPath: '/workspace/beta',
+      outcome: 'accepted'
+    }
+  );
 
   dispatchMessage({
     command: 'projectsLoaded',
@@ -1705,7 +1734,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     }
   });
   const afterSelectionTodayPlan = elements['global-focus-panel'].innerHTML;
-  assert.deepEqual(extractTodayProjectOrder(afterSelectionTodayPlan), initialTodayProjectOrder);
+  assert.deepEqual(extractTodayProjectOrder(afterSelectionTodayPlan), ['Beta', 'Alpha']);
 
   dispatchMessage({
     command: 'projectDeliveryLoaded',
@@ -1732,7 +1761,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     }
   });
   const afterDeliveryRecovery = elements['global-focus-panel'].innerHTML;
-  assert.deepEqual(extractTodayProjectOrder(afterDeliveryRecovery), initialTodayProjectOrder);
+  assert.deepEqual(extractTodayProjectOrder(afterDeliveryRecovery), ['Beta', 'Alpha']);
   assert.match(elements['portfolio-list'].innerHTML, /project-next-action-copy"[^>]*>推进 Beta/);
   const beforePartialUpdate = JSON.parse(JSON.stringify(context.__getCurrentPortfolio()));
   dispatchMessage({

@@ -183,6 +183,7 @@ import {
   recordLocalUsageEvent as recordLocalUsageEventInStats
 } from './localUsageStats';
 import { recordLocalDiagnosticError } from './localDiagnostics';
+import { ensureAutonomousRuntime } from './autonomousRuntimeHost';
 import {
   buildCollaborationInviteCode,
   createCollaborationLobbySession,
@@ -355,6 +356,17 @@ export async function activate(context: vscode.ExtensionContext) {
     } catch (error) {
       console.error('SoloMap global runtime refresh failed during activation:', error);
     }
+  }
+  try {
+    const configuredCli = String(getPersistedSettings(context).cliPath || '').replace(/\\/g, '/').split('/').pop()?.toLowerCase();
+    ensureAutonomousRuntime({
+      extensionPath: context.extensionPath,
+      globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
+      cognitiveEngine: configuredCli === 'copilot' || configuredCli === 'copilot.exe' ? 'copilot' : undefined
+    });
+  } catch (error) {
+    recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
+    console.error('SoloMap autonomous runtime failed to start:', error);
   }
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
