@@ -173,7 +173,8 @@ test('Pro subscription page carries signed upgrade state into Passport start', a
   assert.match(html, /Goal-driven autopilot/);
   assert.match(html, /Already subscribed\? Get activation code/);
   assert.match(html, /\$31\.00/);
-  assert.match(html, /"price":"31\.00"/);
+  assert.doesNotMatch(html, /"@type":"Product"/);
+  assert.doesNotMatch(html, /"@type":"Offer"/);
   assert.match(html, /VS Code Marketplace/);
   assert.match(html, /Privacy \/ Local-first note/);
   assert.doesNotMatch(html, /Passport|bridgeId|entitlement key|toolCount|CloudMCP|Planner|Builder|Verifier|scoring|micro execution|exchange code/);
