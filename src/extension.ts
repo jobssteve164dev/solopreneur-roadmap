@@ -213,6 +213,7 @@ import {
   createPassportAuthNonce,
   flowModeFeature,
   hasProEntitlement as hasProEntitlementForSettings,
+  isPassportVerificationUnavailable,
   normalizeProAccountStatus,
   passportProduct,
   PassportDeviceStartResult,
@@ -295,6 +296,7 @@ let persistedSettingsCacheSource = '';
 let persistedSettingsCacheWorkspaceRoot = '';
 let pendingPersistedSettings: SolopreneurSettings | null = null;
 let persistedSettingsWriteQueue: Promise<void> = Promise.resolve();
+let passportCredentialMutationQueue: Promise<void> = Promise.resolve();
 const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
 
@@ -604,6 +606,9 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize storage in the background after the UI provider is registered.
   void ensureSyncEngine(context);
+  void refreshProAccountStatus(context).catch((error) => {
+    console.warn('SoloMap account status refresh failed during activation:', error);
+  });
   setTimeout(() => {
     recordLocalUsageEvent(context, 'activation');
     const retentionResults = pruneProjectsOutputLogs(getProjects(context).map((project) => project.path));
@@ -783,27 +788,59 @@ async function handleSharedWebviewAction(
     },
     'collaboration.joinLobby': async (request) => {
       const diagnosticDataPath = getPersistedSettings(context).globalDataPath;
-      const cached = await readPassportGrant(context);
+      let cached = await readPassportGrant(context);
       if (!cached) {
         recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.login', 'missing_account_grant');
-        await clearStoredProAccess(context);
-        await respond({ command: 'collaborationLobbyLoginRequired' });
+        const cleared = await clearStoredProAccess(context, { requireMissingCredential: true });
+        await respond({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
         return;
       }
-      const verified = await verifyPassportGrant(cached.grant);
-      if (!verified.authenticated) {
+      if (!buildProAccountStatus(cached).authenticated) {
+        const cleared = await clearStoredProAccess(context, { expectedGrant: cached.grant });
+        await respond({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
+        return;
+      }
+      let verified = await verifyPassportGrant(cached.grant);
+      if (!await isCurrentPassportGrant(context, cached.grant)) {
+        cached = await readPassportGrant(context);
+        if (!cached) {
+          await respond({ command: 'collaborationLobbyLoginRequired' });
+          return;
+        }
+        verified = await verifyPassportGrant(cached.grant);
+        if (!await isCurrentPassportGrant(context, cached.grant)) {
+          await respond({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
+          return;
+        }
+      }
+      if (!buildProAccountStatus(verified).authenticated && !isPassportVerificationUnavailable(verified)) {
         recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.login', String(verified.reason || 'account_grant_rejected'));
-        await clearStoredProAccess(context);
-        await respond({ command: 'collaborationLobbyLoginRequired' });
+        const cleared = await clearStoredProAccess(context, { expectedGrant: cached.grant });
+        await respond({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
         return;
       }
-      await writePassportGrant(context, verified, verified.grant || cached.grant);
-      const result = await createCollaborationLobbySession(String(request.nickname || ''), verified.grant || cached.grant, fetch);
+      if (!isPassportVerificationUnavailable(verified)) {
+        const written = await writePassportGrant(context, verified, verified.grant || cached.grant, { expectedGrant: cached.grant });
+        if (!written) {
+          await respond({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
+          return;
+        }
+      }
+      const sessionGrant = verified.grant || cached.grant;
+      const result = await createCollaborationLobbySession(String(request.nickname || ''), sessionGrant, fetch);
+      if (!await isCurrentPassportGrant(context, sessionGrant)) {
+        await respond({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
+        return;
+      }
       if (!result.ok) {
         recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.join', String(result.error || 'lobby_join_failed'));
+        let loginCleared = true;
+        if (result.error === 'login_required') {
+          loginCleared = await clearStoredProAccess(context, { expectedGrant: sessionGrant });
+        }
         await respond({
-          command: result.error === 'login_required' ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed',
-          error: String(result.error || 'lobby_join_failed')
+          command: result.error === 'login_required' && loginCleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed',
+          error: loginCleared ? String(result.error || 'lobby_join_failed') : 'account_changed'
         });
         return;
       }
@@ -1236,14 +1273,11 @@ async function handleSharedWebviewAction(
       await beginAccountAuthorization(context);
       await broadcastSettings(context);
     },
+    'account.refresh': async () => {
+      await refreshProAccountStatus(context);
+    },
     'account.logout': async () => {
-      await context.secrets.delete(passportGrantSecretKey);
-      const saved = getPersistedSettings(context);
-      await updatePersistedSettings(context, {
-        proEntitlements: clearProEntitlements(saved.proEntitlements || {}),
-        proAccount: { authenticated: false, allowed: false, email: '', expiresAt: '' }
-      });
-      await broadcastSettings(context);
+      await clearStoredProAccess(context);
     },
     'entitlement.upgrade': async () => {
       await handleManageProAuthorization(context, 'login');
@@ -1594,22 +1628,50 @@ function getProjectGrowthPanelCopy(context: vscode.ExtensionContext): {
   };
 }
 
-async function clearStoredProAccess(context: vscode.ExtensionContext): Promise<void> {
-  const saved = getPersistedSettings(context);
-  await updatePersistedSettings(context, {
-    proEntitlements: clearProEntitlements(saved.proEntitlements || {}),
-    proAccount: { authenticated: false, allowed: false, email: '', expiresAt: '' }
-  });
-  await broadcastSettings(context);
+interface PassportCredentialMutationOptions {
+  expectedGrant?: string;
+  requireMissingCredential?: boolean;
+  broadcast?: boolean;
+  includeFlowInBroadcast?: boolean;
 }
 
-async function broadcastSettings(context: vscode.ExtensionContext): Promise<void> {
+async function runPassportCredentialMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  const run = passportCredentialMutationQueue.then(mutation, mutation);
+  passportCredentialMutationQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function clearStoredProAccess(
+  context: vscode.ExtensionContext,
+  options: PassportCredentialMutationOptions = {}
+): Promise<boolean> {
+  const cleared = await runPassportCredentialMutation(async () => {
+    if (options.requireMissingCredential && await readPassportGrant(context)) return false;
+    if (options.expectedGrant) {
+      const current = await readPassportGrant(context);
+      if (current?.grant !== options.expectedGrant) return false;
+    }
+    await context.secrets.delete(passportGrantSecretKey);
+    const saved = getPersistedSettings(context);
+    await updatePersistedSettings(context, {
+      proEntitlements: clearProEntitlements(saved.proEntitlements || {}),
+      proAccount: { authenticated: false, allowed: false, email: '', expiresAt: '' }
+    });
+    return true;
+  });
+  if (cleared && options.broadcast !== false) {
+    await broadcastSettings(context, options.includeFlowInBroadcast !== false);
+  }
+  return cleared;
+}
+
+async function broadcastSettings(context: vscode.ExtensionContext, includeFlow = true): Promise<void> {
   if (sidebarProvider) {
     sidebarProvider.sendSettings();
   }
   if (activePanel) {
     postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
-    await postFlowStateToWebview(context);
+    if (includeFlow) await postFlowStateToWebview(context);
   }
 }
 
@@ -1652,7 +1714,12 @@ async function readPassportGrant(context: vscode.ExtensionContext): Promise<Pass
   }
 }
 
-async function writePassportGrant(context: vscode.ExtensionContext, result: PassportVerifyResult, grant: string): Promise<void> {
+async function writePassportGrant(
+  context: vscode.ExtensionContext,
+  result: PassportVerifyResult,
+  grant: string,
+  options: PassportCredentialMutationOptions = {}
+): Promise<boolean> {
   const payload: PassportGrantCache = {
     grant,
     email: String(result.email || ''),
@@ -1662,62 +1729,125 @@ async function writePassportGrant(context: vscode.ExtensionContext, result: Pass
     expiresAt: String(result.expiresAt || ''),
     checkedAt: new Date().toISOString()
   };
-  await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
-  const saved = getPersistedSettings(context);
-  const verifiedEntitlements = result.allowed && Array.isArray(result.entitlements)
-    ? result.entitlements.map((item) => String(item || '').trim()).filter(Boolean)
-    : [];
-  const proEntitlements = clearProEntitlements(saved.proEntitlements || {});
-  for (const featureKey of verifiedEntitlements) {
-    proEntitlements[featureKey] = true;
-  }
-  await updatePersistedSettings(context, {
-    proEntitlements,
-    proAccount: buildProAccountStatus(result)
+  const written = await runPassportCredentialMutation(async () => {
+    if (options.expectedGrant) {
+      const current = await readPassportGrant(context);
+      if (current?.grant !== options.expectedGrant) return false;
+    }
+    await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
+    const saved = getPersistedSettings(context);
+    const verifiedEntitlements = result.allowed && Array.isArray(result.entitlements)
+      ? result.entitlements.map((item) => String(item || '').trim()).filter(Boolean)
+      : [];
+    const proEntitlements = clearProEntitlements(saved.proEntitlements || {});
+    for (const featureKey of verifiedEntitlements) {
+      proEntitlements[featureKey] = true;
+    }
+    await updatePersistedSettings(context, {
+      proEntitlements,
+      proAccount: buildProAccountStatus(result)
+    });
+    return true;
   });
-  await broadcastSettings(context);
+  if (written && options.broadcast !== false) {
+    await broadcastSettings(context, options.includeFlowInBroadcast !== false);
+  }
+  return written;
+}
+
+async function isCurrentPassportGrant(context: vscode.ExtensionContext, expectedGrant: string): Promise<boolean> {
+  const current = await readPassportGrant(context);
+  return current?.grant === expectedGrant;
 }
 
 async function hasStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
   const cached = await readPassportGrant(context);
   if (!cached) {
-    await clearStoredProAccess(context);
+    await clearStoredProAccess(context, { requireMissingCredential: true, includeFlowInBroadcast: false });
+    return false;
+  }
+  if (!buildProAccountStatus(cached).authenticated) {
+    await clearStoredProAccess(context, { expectedGrant: cached.grant, includeFlowInBroadcast: false });
     return false;
   }
   const verified = await verifyPassportGrant(cached.grant);
-  if (verified.allowed && verified.entitlements?.includes(strategyPyramidFeature)) {
-    await writePassportGrant(context, verified, cached.grant);
-    return true;
+  if (!await isCurrentPassportGrant(context, cached.grant)) {
+    return false;
   }
-  await writePassportGrant(context, verified, cached.grant);
+  if (isPassportVerificationUnavailable(verified)) {
+    return hasProEntitlement(getPersistedSettings(context), 'strategyPyramid');
+  }
+  if (!buildProAccountStatus(verified).authenticated) {
+    await clearStoredProAccess(context, { expectedGrant: cached.grant, includeFlowInBroadcast: false });
+    return false;
+  }
+  if (verified.allowed && verified.entitlements?.includes(strategyPyramidFeature)) {
+    const written = await writePassportGrant(context, verified, verified.grant || cached.grant, {
+      expectedGrant: cached.grant,
+      includeFlowInBroadcast: false
+    });
+    return written;
+  }
+  await writePassportGrant(context, verified, verified.grant || cached.grant, {
+    expectedGrant: cached.grant,
+    includeFlowInBroadcast: false
+  });
   return false;
 }
 
 async function hasFlowModeAccess(context: vscode.ExtensionContext): Promise<boolean> {
   const cached = await readPassportGrant(context);
   if (!cached) {
-    await clearStoredProAccess(context);
+    await clearStoredProAccess(context, { requireMissingCredential: true, includeFlowInBroadcast: false });
+    return false;
+  }
+  if (!buildProAccountStatus(cached).authenticated) {
+    await clearStoredProAccess(context, { expectedGrant: cached.grant, includeFlowInBroadcast: false });
     return false;
   }
   const verified = await verifyPassportGrant(cached.grant);
-  if (verified.allowed && verified.entitlements?.includes(flowModeFeature)) {
-    await writePassportGrant(context, verified, cached.grant);
-    return true;
+  if (!await isCurrentPassportGrant(context, cached.grant)) {
+    return false;
   }
-  await writePassportGrant(context, verified, cached.grant);
+  if (isPassportVerificationUnavailable(verified)) {
+    return hasProEntitlement(getPersistedSettings(context), flowModeFeature);
+  }
+  if (!buildProAccountStatus(verified).authenticated) {
+    await clearStoredProAccess(context, { expectedGrant: cached.grant, includeFlowInBroadcast: false });
+    return false;
+  }
+  if (verified.allowed && verified.entitlements?.includes(flowModeFeature)) {
+    const written = await writePassportGrant(context, verified, verified.grant || cached.grant, {
+      expectedGrant: cached.grant,
+      includeFlowInBroadcast: false
+    });
+    return written;
+  }
+  await writePassportGrant(context, verified, verified.grant || cached.grant, {
+    expectedGrant: cached.grant,
+    includeFlowInBroadcast: false
+  });
   return false;
 }
 
 async function refreshProAccountStatus(context: vscode.ExtensionContext): Promise<void> {
   const cached = await readPassportGrant(context);
   if (!cached) {
-    if (!hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) {
-      await clearStoredProAccess(context);
-    }
+    await clearStoredProAccess(context, { requireMissingCredential: true });
+    return;
+  }
+  if (!buildProAccountStatus(cached).authenticated) {
+    await clearStoredProAccess(context, { expectedGrant: cached.grant });
     return;
   }
   const verified = await verifyPassportGrant(cached.grant);
-  await writePassportGrant(context, verified, cached.grant);
+  if (!await isCurrentPassportGrant(context, cached.grant)) return;
+  if (isPassportVerificationUnavailable(verified)) return;
+  if (!buildProAccountStatus(verified).authenticated) {
+    await clearStoredProAccess(context, { expectedGrant: cached.grant });
+    return;
+  }
+  await writePassportGrant(context, verified, verified.grant || cached.grant, { expectedGrant: cached.grant });
 }
 
 async function beginPassportAuthorization(): Promise<void> {

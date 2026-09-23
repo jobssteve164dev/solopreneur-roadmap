@@ -3157,7 +3157,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
-        const authenticated = Boolean(currentSettings && currentSettings.proAccount && currentSettings.proAccount.authenticated);
+        const authenticated = SoloMapWebview.isAccountAuthenticated(currentSettings);
         vscode.postMessage({ command: authenticated ? 'entitlement.upgrade' : 'account.login' });
       });
     }
@@ -3232,7 +3232,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function renderProAccount(settings) {
       SoloMapWebview.renderProAccount(proAccountPanel, settings, t, currentLanguage);
       if (!btnOpenProAuthorization) return;
-      const authenticated = Boolean(settings && settings.proAccount && settings.proAccount.authenticated);
+      const authenticated = SoloMapWebview.isAccountAuthenticated(settings);
       const unlocked = hasStrategyPyramidPro(settings);
       btnOpenProAuthorization.style.display = unlocked ? 'none' : '';
       const actionText = btnOpenProAuthorization.querySelector('span:last-child');

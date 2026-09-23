@@ -333,20 +333,24 @@ function bootstrapSoloMapWebviewRuntime(): void {
     }
   }
 
-  function hasProEntitlement(settings: any, feature: string): boolean {
-    const entitlements = settings?.proEntitlements || {};
+  function isAccountAuthenticated(settings: any): boolean {
     const account = settings?.proAccount || {};
     const expiresAtMs = account.expiresAt ? Date.parse(String(account.expiresAt)) : NaN;
-    if (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now()) return false;
+    return Boolean(account.authenticated) && Number.isFinite(expiresAtMs) && expiresAtMs > Date.now();
+  }
+
+  function hasProEntitlement(settings: any, feature: string): boolean {
+    const entitlements = settings?.proEntitlements || {};
+    if (!isAccountAuthenticated(settings)) return false;
     return Boolean(entitlements[feature]);
   }
 
   function renderProAccount(panel: Element | null, settings: any, t: (key: string) => string, language: string): void {
     if (!panel) return;
     const account = settings?.proAccount || {};
-    const authenticated = Boolean(account.authenticated);
+    const authenticated = isAccountAuthenticated(settings);
     const unlocked = hasProEntitlement(settings || {}, 'strategy_pyramid');
-    const email = String(account.email || '').trim();
+    const email = authenticated ? String(account.email || '').trim() : '';
     panel.innerHTML =
       '<div class="dependency-item"><div class="dependency-info">' +
       '<div class="dependency-name">' + escapeHtml(t('accountName')) + '</div>' +
@@ -555,6 +559,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     applySettingCliPath,
     getEffectiveReviewerCliPath,
     applyReviewerCliPath,
+    isAccountAuthenticated,
     hasProEntitlement,
     renderProAccount,
     renderOnboardingPanel,

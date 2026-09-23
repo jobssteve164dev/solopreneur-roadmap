@@ -4768,7 +4768,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function collaborationExpectedTier() {
       const account = currentSettings && currentSettings.proAccount || {};
-      return account.allowed ? 'pro' : (account.authenticated ? 'account' : 'anonymous');
+      const authenticated = SoloMapWebview.isAccountAuthenticated(currentSettings);
+      return authenticated && account.allowed ? 'pro' : (authenticated ? 'account' : 'anonymous');
     }
 
     function collaborationQuotaLabel(_tier) {
@@ -5169,7 +5170,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           ? collaborationRooms.map(room => '<button type="button" class="collaboration-room-item" data-collaboration-open-room="' + escapeHtml(room.roomId) + '"><span class="collaboration-room-item-main"><span class="collaboration-room-item-name">' + escapeHtml(room.title || t('collaborationRoomDefault')) + '</span><span class="collaboration-room-item-time">' + escapeHtml(collaborationFormatRemaining(room.expiresAt) + ' ' + t('collaborationRemaining')) + '</span></span><span class="codicon codicon-chevron-right"></span></button>').join('')
           : '<div class="collaboration-empty">' + escapeHtml(t('collaborationRoomsEmpty')) + '</div>';
         const collaborationBusy = collaborationConnectionState === 'creating' || collaborationConnectionState === 'joining';
-        const lobbyAuthenticated = Boolean(currentSettings && currentSettings.proAccount && currentSettings.proAccount.authenticated);
+        const lobbyAuthenticated = SoloMapWebview.isAccountAuthenticated(currentSettings);
         const lobbyAction = lobbyAuthenticated
           ? '<button type="button" class="collaboration-primary" data-collaboration-lobby' + (collaborationBusy ? ' disabled' : '') + '>' + escapeHtml(collaborationConnectionState === 'joining' ? t('collaborationJoining') : t('collaborationLobbyJoin')) + '</button>'
           : '<button type="button" class="collaboration-primary" data-open-account-settings>' + escapeHtml(t('collaborationOpenAccountSettings')) + '</button>';
@@ -6555,6 +6556,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           collaborationPanel.style.display = 'block';
           btnToggleCollaboration.classList.add('is-active');
           vscode.postMessage({ command: 'collaboration.getRooms' });
+          vscode.postMessage({ command: 'account.refresh' });
           renderCollaborationPanel();
         }
       });
@@ -6832,7 +6834,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     if (btnOpenProAuthorization) {
       btnOpenProAuthorization.addEventListener('click', () => {
-        const authenticated = Boolean(currentSettings && currentSettings.proAccount && currentSettings.proAccount.authenticated);
+        const authenticated = SoloMapWebview.isAccountAuthenticated(currentSettings);
         vscode.postMessage({ command: authenticated ? 'entitlement.upgrade' : 'account.login' });
       });
     }
@@ -6978,7 +6980,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function renderProAccount(settings) {
       SoloMapWebview.renderProAccount(proAccountPanel, settings, t, currentLanguage);
       if (!btnOpenProAuthorization) return;
-      const authenticated = Boolean(settings && settings.proAccount && settings.proAccount.authenticated);
+      const authenticated = SoloMapWebview.isAccountAuthenticated(settings);
       const unlocked = hasStrategyPyramidPro(settings);
       btnOpenProAuthorization.style.display = unlocked ? 'none' : '';
       if (btnAccountLogout) btnAccountLogout.style.display = authenticated ? '' : 'none';

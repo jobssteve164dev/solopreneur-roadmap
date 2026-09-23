@@ -1093,6 +1093,7 @@ async function verifySignedGrantWithLiveAccess(env, grant) {
   return {
     authenticated: true,
     allowed: Boolean(access.allowed),
+    verificationUnavailable: Boolean(access.verificationUnavailable),
     reason: String(access.reason || (access.allowed ? "allowed" : "access_denied")),
     email: String(access.email || signed.email || ""),
     userId: String(access.userId || signed.userId || ""),
@@ -1216,6 +1217,7 @@ async function checkPassportAccessForUser(env, userinfo) {
     if (!response.ok || body.ok === false) {
       return {
         allowed: false,
+        verificationUnavailable: response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500,
         reason: String(body?.error?.code || data?.reason || `passport_access_http_${response.status}`),
         email: String(body?.error?.details?.email || data?.email || email),
         userId: String(body?.error?.details?.userId || data?.userId || data?.user_id || userId),
@@ -1245,10 +1247,11 @@ async function checkPassportAccessForUser(env, userinfo) {
     };
   }
   if (env.SOLOMAP_PASSPORT_REQUIRE_UPSTREAM === "1") {
-    return { allowed: false, reason: "missing_passport_verify_url" };
+    return { allowed: false, verificationUnavailable: true, reason: "missing_passport_verify_url" };
   }
   return {
     allowed: false,
+    verificationUnavailable: true,
     reason: "passport_verify_not_configured",
     email,
     userId,
@@ -1264,6 +1267,7 @@ async function resolvePassportAccessForUser(env, userinfo) {
     console.error("Unable to verify SoloMap Pro access", error);
     return {
       allowed: false,
+      verificationUnavailable: true,
       reason: "passport_access_unavailable",
       email: String(userinfo.email || ""),
       userId: String(userinfo.userId || userinfo.sub || ""),

@@ -1120,6 +1120,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'btn-stop-focus-timer',
     'text-start-focus-timer',
     'text-stop-focus-timer',
+    'btn-toggle-collaboration',
+    'btn-close-collaboration',
+    'collaboration-panel',
+    'collaboration-content',
     'scheduled-tasks-title',
     'scheduled-tasks-next',
     'scheduled-tasks-target',
@@ -1458,13 +1462,22 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.equal(savedSettingsRequest.cognitiveEngineAgent, 'codex');
   dispatchMessage({ command: 'settingsSaved', requestId: savedSettingsRequest.requestId, settings: savedSettingsRequest });
   postedMessages.length = 0;
+  elements['btn-toggle-collaboration'].listeners.click();
+  assert.ok(postedMessages.some((message) => message.command === 'account.refresh'));
+  assert.ok(postedMessages.some((message) => message.command === 'collaboration.getRooms'));
+  assert.ok(
+    postedMessages.findIndex((message) => message.command === 'collaboration.getRooms')
+      < postedMessages.findIndex((message) => message.command === 'account.refresh')
+  );
+  elements['btn-toggle-collaboration'].listeners.click();
+  postedMessages.length = 0;
   elements['btn-open-pro-authorization'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'account.login'));
   dispatchMessage({
     command: 'settingsLoaded',
     settings: {
       language: 'zh',
-      proAccount: { authenticated: true, allowed: false, email: 'free@solomap.app' },
+      proAccount: { authenticated: true, allowed: false, email: 'free@solomap.app', expiresAt: '2999-01-01T00:00:00.000Z' },
       proEntitlements: {}
     }
   });
@@ -1478,7 +1491,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     command: 'settingsLoaded',
     settings: {
       language: 'zh',
-      proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app' },
+      proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2999-01-01T00:00:00.000Z' },
       proEntitlements: { strategy_pyramid: true }
     }
   });
@@ -1487,6 +1500,17 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   postedMessages.length = 0;
   elements['btn-account-logout'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'account.logout'));
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: {
+      language: 'zh',
+      proAccount: { authenticated: true, allowed: true, email: 'expired@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' },
+      proEntitlements: { strategy_pyramid: true }
+    }
+  });
+  assert.match(elements['pro-account-panel'].innerHTML, /未登录/);
+  assert.doesNotMatch(elements['pro-account-panel'].innerHTML, /expired@solomap\.app|SoloMap Pro/);
+  assert.equal(elements['btn-account-logout'].style.display, 'none');
   elements['btn-check-dependencies'].listeners.click();
   assert.equal(elements['dependency-panel'].style.display, 'block');
   assert.equal(elements['btn-check-dependencies'].attributes['aria-expanded'], 'true');
@@ -5000,6 +5024,9 @@ test('strategy pyramid command blocks free users with a Pro upgrade action', asy
       },
       store() {
         return Promise.resolve();
+      },
+      delete() {
+        return Promise.resolve();
       }
     },
     globalState: {
@@ -5074,11 +5101,15 @@ test('strategy pyramid Pro upgrade supports device auth code entry', async () =>
     extensionPath: projectRoot,
     subscriptions: [],
     secrets: {
-      get() {
-        return Promise.resolve(undefined);
+      get(key) {
+        return Promise.resolve(storedSecrets.get(key));
       },
       store(key, value) {
         storedSecrets.set(key, value);
+        return Promise.resolve();
+      },
+      delete(key) {
+        storedSecrets.delete(key);
         return Promise.resolve();
       }
     },
@@ -5151,6 +5182,10 @@ test('SoloMap account login uses a device code and accepts a free signed-in acco
       store(key, value) {
         storedSecrets.set(key, value);
         return Promise.resolve();
+      },
+      delete(key) {
+        storedSecrets.delete(key);
+        return Promise.resolve();
       }
     },
     globalState: {
@@ -5202,6 +5237,10 @@ test('passport callback verifies and stores a user grant before unlocking Pro', 
       },
       store(key, value) {
         storedSecrets.set(key, value);
+        return Promise.resolve();
+      },
+      delete(key) {
+        storedSecrets.delete(key);
         return Promise.resolve();
       }
     },
@@ -5856,10 +5895,322 @@ test('pro account module keeps expired remote grants from unlocking local featur
     proEntitlements: { strategy_pyramid: true },
     proAccount: { authenticated: true, allowed: true, expiresAt: '2999-01-01T00:00:00.000Z' }
   }, 'strategyPyramid'), true);
+  assert.deepEqual(proAccount.buildProAccountStatus({
+    authenticated: false,
+    allowed: false,
+    reason: 'invalid_identity',
+    email: 'expired@solomap.app',
+    userId: 'expired-user',
+    expiresAt: '2020-01-01T00:00:00.000Z'
+  }), {
+    authenticated: false,
+    allowed: false,
+    email: '',
+    expiresAt: ''
+  });
+  assert.equal(proAccount.buildProAccountStatus({
+    authenticated: true,
+    allowed: true,
+    email: 'expired@solomap.app',
+    expiresAt: '2020-01-01T00:00:00.000Z'
+  }).authenticated, false);
+  assert.equal(proAccount.isPassportVerificationUnavailable({
+    allowed: false,
+    reason: 'verify_http_408'
+  }), true);
+  assert.equal(proAccount.isPassportVerificationUnavailable({
+    authenticated: true,
+    allowed: false,
+    reason: 'service_unavailable'
+  }), true);
   assert.deepEqual(
     proAccount.clearProEntitlements({ pro: true, solomap_pro: true, strategy_pyramid: true, flow_mode: true, other: true }),
     { other: true }
   );
+});
+
+test('account refresh preserves verified Pro state when live entitlement lookup is unavailable', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
+      'module.exports.__getPersistedSettings = getPersistedSettings;'
+    ].join('\n')
+  );
+  const originalGrant = JSON.stringify({
+    grant: 'cached-pro-grant',
+    email: 'pro@solomap.app',
+    userId: 'pro-user',
+    entitlements: ['strategy_pyramid'],
+    expiresAt: '2999-01-01T00:00:00.000Z',
+    checkedAt: '2026-01-01T00:00:00.000Z'
+  });
+  let saved = {
+    proEntitlements: { strategy_pyramid: true },
+    proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2999-01-01T00:00:00.000Z' }
+  };
+  const secrets = new Map([['solopreneur.passportGrant', originalGrant]]);
+  extensionModule.__vscodeTestState.fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      authenticated: true,
+      allowed: false,
+      reason: 'passport_access_unavailable',
+      email: 'pro@solomap.app',
+      userId: 'pro-user',
+      entitlements: [],
+      expiresAt: '2999-01-01T00:00:00.000Z'
+    })
+  });
+  const context = {
+    secrets: {
+      get: key => Promise.resolve(secrets.get(key)),
+      store: (key, value) => { secrets.set(key, value); return Promise.resolve(); },
+      delete: key => { secrets.delete(key); return Promise.resolve(); }
+    },
+    globalState: {
+      get: () => saved,
+      update: (_key, value) => { saved = value; return Promise.resolve(); }
+    }
+  };
+
+  await extensionModule.__refreshProAccountStatus(context);
+
+  assert.equal(extensionModule.__getPersistedSettings(context).proAccount.allowed, true);
+  assert.equal(extensionModule.__getPersistedSettings(context).proEntitlements.strategy_pyramid, true);
+  assert.equal(secrets.get('solopreneur.passportGrant'), originalGrant);
+});
+
+test('account refresh removes an expired credential and its visible login state', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
+      'module.exports.__getPersistedSettings = getPersistedSettings;'
+    ].join('\n')
+  );
+  let saved = {
+    proEntitlements: { strategy_pyramid: true },
+    proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2020-01-01T00:00:00.000Z' }
+  };
+  const secrets = new Map([['solopreneur.passportGrant', JSON.stringify({
+    grant: 'expired-grant',
+    email: 'pro@solomap.app',
+    userId: 'pro-user',
+    entitlements: ['strategy_pyramid'],
+    expiresAt: '2020-01-01T00:00:00.000Z',
+    checkedAt: '2020-01-01T00:00:00.000Z'
+  })]]);
+  const deletedSecretKeys = [];
+  let fetchCalls = 0;
+  extensionModule.__vscodeTestState.fetchImpl = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        authenticated: false,
+        allowed: false,
+        reason: 'invalid_identity',
+        email: 'pro@solomap.app',
+        userId: 'pro-user',
+        entitlements: ['strategy_pyramid'],
+        expiresAt: '2020-01-01T00:00:00.000Z'
+      })
+    };
+  };
+  const context = {
+    secrets: {
+      get: key => Promise.resolve(secrets.get(key)),
+      store: (key, value) => { secrets.set(key, value); return Promise.resolve(); },
+      delete: key => { deletedSecretKeys.push(key); secrets.delete(key); return Promise.resolve(); }
+    },
+    globalState: {
+      get: () => saved,
+      update: (_key, value) => { saved = value; return Promise.resolve(); }
+    }
+  };
+
+  await extensionModule.__refreshProAccountStatus(context);
+
+  assert.equal(extensionModule.__getPersistedSettings(context).proAccount.authenticated, false);
+  assert.equal(extensionModule.__getPersistedSettings(context).proEntitlements.strategy_pyramid, undefined);
+  assert.deepEqual(deletedSecretKeys, ['solopreneur.passportGrant']);
+  assert.equal(secrets.has('solopreneur.passportGrant'), false);
+  assert.equal(fetchCalls, 0);
+});
+
+test('a late refresh for an older grant cannot overwrite a newly signed-in account', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
+      'module.exports.__writePassportGrant = writePassportGrant;',
+      'module.exports.__getPersistedSettings = getPersistedSettings;'
+    ].join('\n')
+  );
+  let saved = {
+    proEntitlements: {},
+    proAccount: { authenticated: true, allowed: false, email: 'old@solomap.app', expiresAt: '2999-01-01T00:00:00.000Z' }
+  };
+  const secrets = new Map([['solopreneur.passportGrant', JSON.stringify({
+    grant: 'old-grant', email: 'old@solomap.app', userId: 'old-user', entitlements: [],
+    expiresAt: '2999-01-01T00:00:00.000Z', checkedAt: '2026-01-01T00:00:00.000Z'
+  })]]);
+  let resolveOldVerification;
+  extensionModule.__vscodeTestState.fetchImpl = () => new Promise(resolve => { resolveOldVerification = resolve; });
+  const context = {
+    secrets: {
+      get: key => Promise.resolve(secrets.get(key)),
+      store: (key, value) => { secrets.set(key, value); return Promise.resolve(); },
+      delete: key => { secrets.delete(key); return Promise.resolve(); }
+    },
+    globalState: {
+      get: () => saved,
+      update: (_key, value) => { saved = value; return Promise.resolve(); }
+    }
+  };
+
+  const oldRefresh = extensionModule.__refreshProAccountStatus(context);
+  await new Promise(resolve => setImmediate(resolve));
+  await extensionModule.__writePassportGrant(context, {
+    authenticated: true,
+    allowed: true,
+    email: 'new@solomap.app',
+    userId: 'new-user',
+    entitlements: ['strategy_pyramid'],
+    expiresAt: '2999-01-01T00:00:00.000Z'
+  }, 'new-grant');
+  resolveOldVerification({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      authenticated: false,
+      allowed: false,
+      reason: 'invalid_identity',
+      email: 'old@solomap.app',
+      userId: 'old-user',
+      expiresAt: '2020-01-01T00:00:00.000Z'
+    })
+  });
+  await oldRefresh;
+
+  const account = extensionModule.__getPersistedSettings(context).proAccount;
+  assert.equal(account.email, 'new@solomap.app');
+  assert.equal(account.allowed, true);
+  assert.match(secrets.get('solopreneur.passportGrant'), /new-grant/);
+});
+
+test('account credential mutations serialize so stale cleanup cannot erase a new login', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__clearStoredProAccess = clearStoredProAccess;',
+      'module.exports.__writePassportGrant = writePassportGrant;',
+      'module.exports.__getPersistedSettings = getPersistedSettings;'
+    ].join('\n')
+  );
+  let saved = {
+    proEntitlements: {},
+    proAccount: { authenticated: true, allowed: false, email: 'old@solomap.app', expiresAt: '2999-01-01T00:00:00.000Z' }
+  };
+  const secrets = new Map([['solopreneur.passportGrant', JSON.stringify({
+    grant: 'old-grant', email: 'old@solomap.app', userId: 'old-user', entitlements: [],
+    expiresAt: '2999-01-01T00:00:00.000Z', checkedAt: '2026-01-01T00:00:00.000Z'
+  })]]);
+  let releaseExpectedRead;
+  let delayExpectedRead = true;
+  const context = {
+    secrets: {
+      get: key => {
+        const value = secrets.get(key);
+        if (delayExpectedRead) {
+          delayExpectedRead = false;
+          return new Promise(resolve => { releaseExpectedRead = () => resolve(value); });
+        }
+        return Promise.resolve(value);
+      },
+      store: (key, value) => { secrets.set(key, value); return Promise.resolve(); },
+      delete: key => { secrets.delete(key); return Promise.resolve(); }
+    },
+    globalState: {
+      get: () => saved,
+      update: (_key, value) => { saved = value; return Promise.resolve(); }
+    }
+  };
+
+  const staleCleanup = extensionModule.__clearStoredProAccess(context, { expectedGrant: 'old-grant' });
+  await new Promise(resolve => setImmediate(resolve));
+  const newLogin = extensionModule.__writePassportGrant(context, {
+    authenticated: true,
+    allowed: true,
+    email: 'new@solomap.app',
+    userId: 'new-user',
+    entitlements: ['strategy_pyramid'],
+    expiresAt: '2999-01-01T00:00:00.000Z'
+  }, 'new-grant');
+  releaseExpectedRead();
+  await Promise.all([staleCleanup, newLogin]);
+
+  assert.match(secrets.get('solopreneur.passportGrant'), /new-grant/);
+  assert.equal(extensionModule.__getPersistedSettings(context).proAccount.email, 'new@solomap.app');
+  assert.equal(await extensionModule.__clearStoredProAccess(context, { requireMissingCredential: true }), false);
+  assert.match(secrets.get('solopreneur.passportGrant'), /new-grant/);
+});
+
+test('account refresh with an open roadmap panel performs one bounded Flow recheck', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    [
+      'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
+      'module.exports.__setAccountRefreshPanel = (panel, projectPath) => { activePanel = panel; activeProjectRoot = projectPath; };'
+    ].join('\n')
+  );
+  let saved = {
+    proEntitlements: { strategy_pyramid: true, flow_mode: true },
+    proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2999-01-01T00:00:00.000Z' }
+  };
+  const secrets = new Map([['solopreneur.passportGrant', JSON.stringify({
+    grant: 'current-grant', email: 'pro@solomap.app', userId: 'pro-user',
+    entitlements: ['strategy_pyramid', 'flow_mode'], expiresAt: '2999-01-01T00:00:00.000Z', checkedAt: '2026-01-01T00:00:00.000Z'
+  })]]);
+  let fetchCalls = 0;
+  extensionModule.__vscodeTestState.fetchImpl = async () => {
+    fetchCalls += 1;
+    if (fetchCalls > 3) throw new Error('recursive Passport refresh');
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        authenticated: true,
+        allowed: true,
+        email: 'pro@solomap.app',
+        userId: 'pro-user',
+        entitlements: ['strategy_pyramid', 'flow_mode'],
+        expiresAt: '2999-01-01T00:00:00.000Z'
+      })
+    };
+  };
+  const context = {
+    secrets: {
+      get: key => Promise.resolve(secrets.get(key)),
+      store: (key, value) => { secrets.set(key, value); return Promise.resolve(); },
+      delete: key => { secrets.delete(key); return Promise.resolve(); }
+    },
+    globalState: {
+      get: () => saved,
+      update: (_key, value) => { saved = value; return Promise.resolve(); }
+    }
+  };
+  const posted = [];
+  extensionModule.__setAccountRefreshPanel({ webview: { postMessage: message => { posted.push(message); return Promise.resolve(true); } } }, projectRoot);
+
+  await extensionModule.__refreshProAccountStatus(context);
+
+  assert.equal(fetchCalls, 2);
+  assert.equal(posted.filter(message => message.command === 'settingsLoaded').length, 2);
+  assert.ok(posted.some(message => message.command === 'flowStateLoaded'));
 });
 
 test('agent model selection normalizes preferences and message shape', () => {

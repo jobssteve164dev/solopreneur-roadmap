@@ -20,6 +20,7 @@ export interface PassportGrantCache {
 export interface PassportVerifyResult {
   authenticated?: boolean;
   allowed: boolean;
+  verificationUnavailable?: boolean;
   reason?: string;
   grant?: string;
   email?: string;
@@ -28,6 +29,14 @@ export interface PassportVerifyResult {
   deviceLimit?: number;
   expiresAt?: string;
 }
+
+const unavailableVerificationReasons = new Set([
+  'verify_failed',
+  'passport_access_unavailable',
+  'missing_product_secret',
+  'missing_passport_verify_url',
+  'passport_verify_not_configured'
+]);
 
 export interface PassportDeviceStartResult {
   ok: boolean;
@@ -43,11 +52,14 @@ export const flowModeFeature = 'flow_mode';
 
 export function normalizeProAccountStatus(value: unknown): ProAccountStatus {
   const source = (value && typeof value === 'object' ? value : {}) as Partial<ProAccountStatus>;
+  const expiresAt = String(source.expiresAt || '');
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
+  const authenticated = Boolean(source.authenticated) && Number.isFinite(expiresAtMs) && expiresAtMs > Date.now();
   return {
-    authenticated: Boolean(source.authenticated),
-    allowed: Boolean(source.allowed),
-    email: String(source.email || ''),
-    expiresAt: String(source.expiresAt || '')
+    authenticated,
+    allowed: authenticated && Boolean(source.allowed),
+    email: authenticated ? String(source.email || '') : '',
+    expiresAt: authenticated ? expiresAt : ''
   };
 }
 
@@ -78,13 +90,32 @@ export function clearProEntitlements(entitlements: Record<string, boolean> = {})
 
 export function buildProAccountStatus(result: PassportVerifyResult | PassportGrantCache | null | undefined): ProAccountStatus {
   const source = (result || {}) as Partial<PassportVerifyResult & PassportGrantCache>;
-  const allowed = Boolean((source as PassportVerifyResult).allowed);
+  const expiresAt = String(source.expiresAt || '');
+  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
+  const hasExplicitAuthentication = typeof source.authenticated === 'boolean';
+  const claimedAuthentication = hasExplicitAuthentication
+    ? source.authenticated === true
+    : Boolean(source.email || source.userId);
+  const authenticated = claimedAuthentication && Number.isFinite(expiresAtMs) && expiresAtMs > Date.now();
+  const allowed = authenticated && Boolean((source as PassportVerifyResult).allowed);
   return {
-    authenticated: Boolean(source.email || source.userId || allowed),
+    authenticated,
     allowed,
-    email: String(source.email || ''),
-    expiresAt: String(source.expiresAt || '')
+    email: authenticated ? String(source.email || '') : '',
+    expiresAt: authenticated ? expiresAt : ''
   };
+}
+
+export function isPassportVerificationUnavailable(result: PassportVerifyResult | null | undefined): boolean {
+  if (result?.verificationUnavailable === true) return true;
+  const reason = String(result?.reason || '').trim().toLowerCase();
+  if (unavailableVerificationReasons.has(reason)) return true;
+  if (/(?:unavailable|timeout|temporar|upstream|rate[_-]?limit|overload|gateway|network|internal[_-]?error)/.test(reason)) {
+    return true;
+  }
+  const httpMatch = reason.match(/^(?:verify|passport(?:_access)?)_http_(\d{3})$/);
+  if (!httpMatch) return false;
+  return !new Set([400, 401, 403, 410, 422]).has(Number(httpMatch[1]));
 }
 
 export function getPassportBaseUrl(): string {
@@ -159,9 +190,13 @@ export async function verifyPassportGrant(
       return { allowed: false, reason: `verify_http_${response.status}` };
     }
     const body = await response.json() as PassportVerifyResult;
+    const authenticated = typeof body.authenticated === 'boolean'
+      ? body.authenticated
+      : Boolean(body.allowed || body.email || body.userId);
     return {
-      authenticated: Boolean(body.authenticated || body.allowed || body.email || body.userId),
+      authenticated,
       allowed: Boolean(body.allowed),
+      verificationUnavailable: body.verificationUnavailable === true,
       reason: String(body.reason || ''),
       grant: String(body.grant || ''),
       email: String(body.email || ''),

@@ -1079,10 +1079,17 @@ test('a signed-in account grant refreshes newly available Pro access', async () 
     SOLOMAP_PASSPORT_VERIFY_URL: 'https://passport.szlk.ai/api/v1/entitlements/access-check'
   };
   let accessAllowed = false;
+  let accessUnavailable = false;
   const originalFetch = global.fetch;
   global.fetch = async (input) => {
     const url = String(input);
     if (url === 'https://passport.szlk.ai/api/v1/entitlements/access-check') {
+      if (accessUnavailable) {
+        return new Response(JSON.stringify({ ok: false, error: { code: 'service_unavailable' } }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
       return new Response(JSON.stringify({
         ok: true,
         data: {
@@ -1125,6 +1132,18 @@ test('a signed-in account grant refreshes newly available Pro access', async () 
     assert.equal(refreshed.authenticated, true);
     assert.equal(refreshed.allowed, true);
     assert.deepEqual(refreshed.entitlements, ['strategy_pyramid', 'flow_mode', 'collaboration_pro']);
+
+    accessUnavailable = true;
+    const unavailableResponse = await worker.default.fetch(new Request('https://solomap.app/api/passport/verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ grant: signedIn.grant })
+    }), env);
+    const unavailable = await unavailableResponse.json();
+    assert.equal(unavailable.authenticated, true);
+    assert.equal(unavailable.allowed, false);
+    assert.equal(unavailable.verificationUnavailable, true);
+    assert.equal(unavailable.reason, 'service_unavailable');
   } finally {
     global.fetch = originalFetch;
   }
