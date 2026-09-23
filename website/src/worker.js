@@ -1615,7 +1615,7 @@ async function buildProSubscriptionPage(request, env) {
     pagePath,
     alternatePath
   )}
-  ${buildProStructuredData(copy, origin, pagePath, proPlan)}
+  ${buildProStructuredData(copy, origin, pagePath)}
   ${buildStyles()}
 </head>
 <body>
@@ -4443,6 +4443,7 @@ function renderHeroPreview(locale) {
           <figcaption class="sr-only">${escapeHtml(locale === "zh" ? "产品流程示意，不是真实项目数据截图。" : "Product workflow illustration; not a screenshot of real project data.")}</figcaption>
         </figure>`;
 }
+
 function buildStructuredData(t, origin, pagePath) {
   const pageUrl = absoluteUrl(pagePath, origin);
   const software = {
@@ -4496,27 +4497,8 @@ function buildStructuredData(t, origin, pagePath) {
   <script type="application/ld+json">${JSON.stringify(website)}</script>`;
 }
 
-function buildProStructuredData(copy, origin, pagePath, proPlan) {
+function buildProStructuredData(copy, origin, pagePath) {
   const pageUrl = absoluteUrl(pagePath, origin);
-  const product = {
-    "@context": "https://schema.org",
-    "@type": "Product",
-    name: proPlan ? getPlanDisplay(proPlan, pagePath.startsWith("/zh") ? "zh" : "en").name : "SoloMap Pro",
-    description: copy.metaDescription,
-    brand: {
-      "@type": "Brand",
-      name: "SoloMap"
-    },
-    url: pageUrl,
-    image: SCREENSHOT_URL,
-    ...(proPlan ? { offers: {
-      "@type": "Offer",
-      price: (Number(proPlan.amountCents) / 100).toFixed(2),
-      priceCurrency: String(proPlan.currency).toUpperCase(),
-      availability: "https://schema.org/InStock",
-      url: pageUrl
-    } } : {})
-  };
   const webpage = {
     "@context": "https://schema.org",
     "@type": "WebPage",
@@ -4553,8 +4535,7 @@ function buildProStructuredData(copy, origin, pagePath, proPlan) {
       }
     ]
   };
-  return `<script type="application/ld+json">${JSON.stringify(product)}</script>
-  <script type="application/ld+json">${JSON.stringify(webpage)}</script>
+  return `<script type="application/ld+json">${JSON.stringify(webpage)}</script>
   <script type="application/ld+json">${JSON.stringify(breadcrumb)}</script>`;
 }
 
