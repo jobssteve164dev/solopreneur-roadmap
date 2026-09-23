@@ -416,7 +416,7 @@ test('the step session index is only a pointer to the still-confirmed run bindin
     runId: '92',
     provider: 'claude',
     workspaceRoot,
-    cliPath: agentCliUtils.resolveExecutablePath('claude') || 'claude',
+    cliPath: agentCliUtils.resolveExecutableIdentityPath('claude') || agentCliUtils.resolveExecutablePath('claude') || 'claude',
     bindingNonce: 'index-pointer-nonce',
     method: 'caller_assigned',
     contract: 'official_stable'

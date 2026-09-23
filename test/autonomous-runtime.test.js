@@ -112,7 +112,7 @@ test('a shadow decision loses display authority when roadmap facts change', () =
     runtime.runShadowDecisionCycle({
       globalDataPath: fixture.globalRoot,
       projectRegistryFileName: 'projects.json',
-      now: new Date('2026-09-22T08:00:00.000Z')
+      now: new Date()
     });
     const projects = [
       { name: 'Alpha', path: fixture.alpha, priority: 'P1' },
@@ -309,7 +309,7 @@ test('Today arrangement reads the current Runtime shadow decision', () => {
     runtime.runShadowDecisionCycle({
       globalDataPath: fixture.globalRoot,
       projectRegistryFileName: 'projects.json',
-      now: new Date('2026-09-22T08:00:00.000Z')
+      now: new Date()
     });
     Module._load = function(request, parent, isMain) {
       if (request === 'vscode') return { Uri: { joinPath() { return {}; } } };
