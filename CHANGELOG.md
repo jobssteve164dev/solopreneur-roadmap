@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.480 - 2026-09-24
+
+### Added
+- embed Pi agent runtime (16a3154)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.479 - 2026-09-23
 
 ### Tests
