@@ -18,6 +18,7 @@ import { ProjectAutonomyAuthorizationStore } from './projectAutonomyAuthorizatio
 export interface AuthorizedExecutionPackage extends ExecutionPackage {
   projectPath: string;
   authorizationEpoch: number;
+  requestedNetworkAccess?: 'offline';
 }
 
 interface PreparedExecutionPackage extends AuthorizedExecutionPackage {
@@ -233,7 +234,7 @@ export class DurableSandboxExecutionBackend {
     const currentRevision = await this.readBaseRevision(workspacePath);
     if (currentRevision !== input.baseRevision) throw new Error(`Execution base revision changed from ${input.baseRevision} to ${currentRevision}.`);
     const preparedId = crypto.randomUUID();
-    const networkAccess = authorization.toolNetworkDisabled ? 'offline' : 'tool';
+    const networkAccess = authorization.toolNetworkDisabled || input.requestedNetworkAccess === 'offline' ? 'offline' : 'tool';
     const launch = this.sandbox.buildInvocation({ workspacePath, command: input.command, args: input.args || [], networkAccess });
     const normalizedInput: PreparedExecutionPackage = { ...input, projectPath, workspacePath, networkAccess };
     const record = {

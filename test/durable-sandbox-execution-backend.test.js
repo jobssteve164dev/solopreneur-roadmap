@@ -66,6 +66,22 @@ test('backend derives tool network access from the current project policy', asyn
   assert.equal(offlineEvidence.toolNetworkAccess, 'blocked');
 });
 
+test('an execution package can only narrow an enabled project network policy to offline', async () => {
+  const fixture = setup();
+  const backend = new DurableSandboxExecutionBackend(fixture.options);
+
+  const prepared = await backend.prepare({
+    projectPath: fixture.project, authorizationEpoch: fixture.grant.epoch,
+    workspacePath: fixture.workspace, command: process.execPath, args: ['-e', ''],
+    baseRevision: 'base-1', timeoutMs: 2_000, requestedNetworkAccess: 'offline'
+  });
+
+  assert.equal(fixture.sandboxInputs[0].networkAccess, 'offline');
+  const execution = await backend.start(prepared.preparedId, 'operation-requested-offline');
+  const evidence = await backend.collectEvidence(execution.executionId);
+  assert.equal(evidence.toolNetworkAccess, 'blocked');
+});
+
 test('changing tool network policy stops work authorized by the previous epoch', async () => {
   const { project, workspace, grant, options, authorization } = setup();
   const backend = new DurableSandboxExecutionBackend(options);
