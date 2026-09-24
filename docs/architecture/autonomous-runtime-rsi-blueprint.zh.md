@@ -4,9 +4,9 @@
 
 这份文档固定 SoloMap 如何从依赖用户主动点击的项目驾驶舱，演进为能够持续观察项目、主动选择工作、调用 Agent 执行、独立验证结果并改进自身策略的本地自主运行时。
 
-核心判断只有一句：**SoloMap 必须成为拥有目标、项目事实、执行权和学习闭环的常驻本地主体；Pi、Copilot SDK 与现有 Agent CLI 都只是可替换的认知或执行能力。**
+核心判断只有一句：**SoloMap 必须成为拥有目标、项目事实、执行权和学习闭环的常驻本地主体；内置 Pi Agent 负责统一认知循环，现有 Agent CLI 负责复用用户已登录的模型额度能力。**
 
-设计状态：方向已确认，完整自主 Runtime 尚未实施；当前已落地“今日安排”的只读认知决策切片、本地 Agent CLI 模型管道，以及阶段 2 的项目授权、操作系统沙箱准入和持久执行恢复基础。本文是后续架构与分阶段验证的基线，不代表当前产品已经具备完整自主交付能力，也不修改现有路线图状态或完成标准。
+设计状态：阶段 0 的常驻 Runtime 基础和阶段 1 的只读影子决策已经落地；当前同时具备内置 Pi Agent、本地 Agent CLI 模型额度管道，以及阶段 2 的项目授权、操作系统沙箱准入和持久执行恢复基础。本文是后续架构与分阶段验证的基线，不代表当前产品已经具备完整自主交付能力，也不修改现有路线图状态或完成标准。
 
 ## 最终用户结果
 
@@ -89,10 +89,8 @@ VS Code 插件 ─────────── SoloMap Autonomous Runtime ─�
        │                       │                        │
        └───────────────────────┼────────────────────────┘
                                │
-                    Cognitive Engine Adapter
-                       ├── Copilot SDK
-                       ├── Pi SDK / RPC
-                       └── 后续兼容引擎
+                    Embedded Pi Agent
+                       └── Agent CLI Model Allowance Adapter
                                │
                      Execution Backend Adapter
                        ├── 本地 Agent CLI
@@ -300,9 +298,9 @@ interface ExecutionBackend {
 
 ### 用户本地 Agent CLI 作为模型管道
 
-智能内核优先复用用户已经安装、登录并选择的本地 Agent CLI，而不是要求用户再次配置模型 API Key。Runtime 通过统一 `LocalAgentCliEngine` 把结构化决策包发送给 CLI，并把供应商输出收敛为相同的 `ActionProposal`。
+内置 Pi Agent 复用用户已经安装、登录并选择的本地 Agent CLI，而不是要求用户再次配置模型 API Key。Runtime 通过模型额度适配层把 Pi 的模型请求发送给 CLI，并把供应商输出收敛为相同的 `ActionProposal`。
 
-- 设置页只提供一项“智能内核”：跟随主 Agent、指定一个兼容 Agent，或仅使用本地规则。
+- 设置页只提供“模型额度来源”：跟随主 Agent，或指定一个兼容 Agent CLI；Pi Agent 作为内部固定内核，不形成第二套用户选择。
 - “跟随主 Agent”复用该 Agent 已有的模型偏好；不会再暴露第二套模型供应商心智。
 - Runtime 使用直接子进程和标准输入输出调用 CLI，不经过 Shell，不创建或显示 VS Code Terminal。
 - 认知调用工作目录与项目工作区隔离，不发送本地路径，不继承无关环境变量，不授予写文件或自动批准权限；支持空工具集的 CLI 必须关闭全部工具，其他 CLI 只有在其当前版本提供可验证的只读计划模式与沙箱时才能接入。只读计划模式仍可能具备受限读取工具，因此不能被描述为“纯模型 API”，也不能获得项目工作区路径。
@@ -311,13 +309,11 @@ interface ExecutionBackend {
 
 认知适配器与执行适配器必须分离。现有带有 `allow-all`、绕过审批或写工作区权限的任务命令不能用于智能内核推理；即使二者调用同一个 CLI，也必须使用不同的参数构造、能力声明、工作目录和审计事件。候选内容统一走标准输入，不能放进进程参数；当前版本无法满足这些条件的 CLI 不出现在可选兼容列表中，只能回落本地规则。
 
-### 首发候选
+### 内置认知内核
 
-首个可用模型管道采用用户本地 Agent CLI 适配层，以最小成本验证今日安排的认知增益。它不是最终绑定：首个深度引擎仍优先验证 GitHub Copilot SDK，理由是其提供正式 SDK、JSON-RPC Runtime、持久会话、工具权限 Hook、自定义 Agent、子 Agent、MCP、Skills、BYOK 和遥测。
+认知循环固定采用内置 Pi Agent。Pi 不直接持有供应商 API Key，也不继承任务执行权限；模型调用统一经用户选择的 Agent CLI 登录额度管道完成，工具与写入能力继续经过 SoloMap 权限代理和操作系统隔离。
 
-Pi 保留为第二候选和开放研究底座。它适合需要深度控制 Agent loop、工具、扩展和本地运行时的场景，但其默认进程权限不构成安全边界，必须继续经过 SoloMap 权限代理与操作系统隔离。
-
-选择首发引擎不改变 SoloMap 的状态、授权、验证或学习契约。任何单一引擎不可用时，Runtime 可以停止本轮或选择已验证兼容的替代引擎，但不能静默降低权限和完成标准。
+内核选择不改变 SoloMap 的状态、授权、验证或学习契约。模型额度管道不可用时，Runtime 保留确定性推荐并记录故障，不能静默降低权限和完成标准。
 
 ## 执行后端
 
@@ -653,8 +649,8 @@ Runtime 落地后，设备 E2EE 端点从插件生命周期中独立出来：设
 - 已登记项目读取、事件账本、任务身份、租约和检查点。
 - 插件连接、健康状态、暂停和恢复。
 - 统一 Cognitive Engine 与 Execution Backend 契约。
-- 设置页提供统一智能内核选择，并把兼容 Agent CLI 作为无终端模型管道接入 Runtime。
-- 使用同一探针任务包比较 Copilot SDK 与 Pi 的守护运行、恢复、权限拦截、认证、成本和故障行为；首发选择以结果为准。
+- Runtime 固定内置 Pi Agent，并把兼容 Agent CLI 作为无终端模型额度管道接入。
+- 设置页只让用户选择模型额度来源，不暴露内部认知引擎差异。
 
 验收：
 
@@ -662,8 +658,8 @@ Runtime 落地后，设备 E2EE 端点从插件生命周期中独立出来：设
 - 两个 VS Code 窗口不能创建两个写入主体。
 - Runtime 只看见用户登记项目。
 - 未接入任何模型时，现有手动执行路径保持不变。
-- 切换智能内核后常驻 Runtime 无需新建终端或重启 VS Code 即可采用新配置；不兼容 CLI 自动回到本地规则。
-- Copilot SDK 与 Pi 探针产生可比较证据；“优先验证 Copilot SDK”不等于提前绑定。
+- 切换模型额度来源后常驻 Runtime 无需新建终端或重启 VS Code 即可采用新配置；模型管道不可用时保留确定性推荐，不影响现有手动执行路径。
+- Pi Agent 无工具权限，模型请求只通过用户所选 Agent CLI 的已登录额度管道完成。
 - 升级会先 drain 到可恢复检查点，迁移失败能回到旧版本；卸载会撤销启动项、设备身份和持续授权，同时保留项目文件与正式结果。
 
 ### 阶段 1：影子决策
@@ -817,9 +813,6 @@ Runtime 落地后，设备 E2EE 端点从插件生命周期中独立出来：设
 
 ## 外部能力参考
 
-- GitHub Copilot SDK：<https://github.com/github/copilot-sdk>
-- GitHub Copilot SDK 自定义 Agent：<https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/custom-agents>
-- GitHub Copilot SDK 会话持久化：<https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/session-persistence>
 - GitHub Agentic Workflows：<https://github.github.com/gh-aw/about/>
 - GitHub Agent Tasks API：<https://docs.github.com/en/rest/agent-tasks/agent-tasks>
 - Pi Agent Harness：<https://github.com/earendil-works/pi>

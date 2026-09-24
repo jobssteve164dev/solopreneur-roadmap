@@ -128,6 +128,44 @@ export class ProjectAutonomyAuthorizationStore {
   }
 }
 
+export function revokeAllProjectAutonomyAuthorizations(globalDataPath: string): void {
+  const authorizationRoot = path.join(globalDataPath, 'runtime', 'project-autonomy-authorizations');
+  const records = new Map<string, ProjectAutonomyAuthorization>();
+  const remember = (id: string, value: Partial<ProjectAutonomyAuthorization>) => {
+    const normalized = normalizeAuthorization(value, id, String(value.projectPath || ''));
+    const previous = records.get(id);
+    if (!previous || normalized.epoch >= previous.epoch) records.set(id, normalized);
+  };
+
+  for (const [id, value] of Object.entries(readLegacyFile(`${authorizationRoot}.json`).projects)) {
+    remember(id, value);
+  }
+  if (fs.existsSync(authorizationRoot)) {
+    for (const name of fs.readdirSync(authorizationRoot)) {
+      if (!name.endsWith('.json')) continue;
+      const recordPath = path.join(authorizationRoot, name);
+      if (!fs.statSync(recordPath).isFile()) continue;
+      const id = name.slice(0, -'.json'.length);
+      try {
+        remember(id, JSON.parse(fs.readFileSync(recordPath, 'utf8')));
+      } catch (error) {
+        throw new Error(`Unable to revoke project autonomy authorization: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  const updatedAt = new Date().toISOString();
+  for (const [id, previous] of records) {
+    writeFile(path.join(authorizationRoot, `${id}.json`), {
+      ...previous,
+      projectId: id,
+      enabled: false,
+      epoch: previous.epoch + 1,
+      updatedAt
+    } satisfies ProjectAutonomyAuthorization);
+  }
+}
+
 export function readProjectAutonomyAuthorization(filePath: string, projectPathValue: string): ProjectAutonomyAuthorization {
   let resolved = String(projectPathValue || '').trim();
   try { resolved = canonicalPath(resolved); } catch { /* Preserve identity for a removed project. */ }

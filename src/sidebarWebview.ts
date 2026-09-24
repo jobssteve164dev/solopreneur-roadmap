@@ -4251,15 +4251,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
 
     <div class="settings-field">
-      <label class="settings-lbl-title" id="label-cognitive-engine-agent">智能内核</label>
-      <div class="solo-select settings-select" id="setting-cognitive-engine-agent" data-solo-select data-value="local_only">
+      <label class="settings-lbl-title" id="label-cognitive-engine-agent">模型额度来源</label>
+      <div class="solo-select settings-select" id="setting-cognitive-engine-agent" data-solo-select data-value="follow_main">
         <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false">
-          <span class="solo-select-trigger-label" data-solo-label>仅使用本地规则</span>
+          <span class="solo-select-trigger-label" data-solo-label>跟随主 Agent</span>
           <span class="codicon codicon-chevron-down solo-select-caret"></span>
         </button>
         <div class="solo-select-menu" data-solo-menu role="listbox">
-          <button type="button" class="solo-select-option" data-solo-option-value="follow_main" aria-selected="false" id="option-cognitive-follow-main">跟随主 Agent</button>
-          <button type="button" class="solo-select-option" data-solo-option-value="local_only" aria-selected="true" id="option-cognitive-local-only">仅使用本地规则</button>
+          <button type="button" class="solo-select-option" data-solo-option-value="follow_main" aria-selected="true" id="option-cognitive-follow-main">跟随主 Agent</button>
           <button type="button" class="solo-select-option" data-solo-option-value="agy" aria-selected="false">Antigravity</button>
           <button type="button" class="solo-select-option" data-solo-option-value="codex" aria-selected="false">Codex</button>
           <button type="button" class="solo-select-option" data-solo-option-value="cursor" aria-selected="false">Cursor</button>
@@ -4268,7 +4267,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         </div>
       </div>
       <div id="help-cognitive-engine-agent" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px; line-height: 1.45;">
-        在后台更新今日安排，不会打开终端窗口；不可用时自动使用本地规则。
+        内置 Pi Agent 使用所选 Agent CLI 的登录额度，在后台更新今日安排，不会打开终端窗口。
       </div>
     </div>
 
@@ -4686,6 +4685,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const roadmapRevisionPendingAfterIds = {};
     const roadmapRevisionResults = {};
     let currentDailyReview = null;
+    const ignoredTodayDecisionIds = new Set();
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
     let currentCliPath = 'agy';
@@ -5450,6 +5450,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         dailyReviewFailed: '审视失败，请打开运行日志查看原因。',
         dailyReviewEmpty: '还没有 Agent 审视结果。',
         dailyReviewConfirm: '需要确认',
+        dailyReviewIgnore: '今天先不采用',
         onboardingKicker: '新手开始',
         onboardingTitle: '先把一个项目交给 SoloMap',
         onboardingCopy: '选择一个本地项目文件夹。SoloMap 会带你确认项目类型，然后生成第一张可推进路线图。',
@@ -5470,10 +5471,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionBasic: '基础',
         settingsSectionAccount: 'SoloMap 账号',
         settingsSectionAgent: 'Agent 协作',
-        cognitiveEngineAgent: '智能内核',
-        cognitiveEngineHelp: '在后台更新今日安排，不会打开终端窗口；不可用时自动使用本地规则。',
+        cognitiveEngineAgent: '模型额度来源',
+        cognitiveEngineHelp: '内置 Pi Agent 使用所选 Agent CLI 的登录额度，在后台更新今日安排，不会打开终端窗口。',
         cognitiveFollowMain: '跟随主 Agent',
-        cognitiveLocalOnly: '仅使用本地规则',
         settingsSectionData: '项目数据',
         settingsSectionInstructions: '默认指令',
         settingsSectionAbilities: '能力扩展',
@@ -5916,6 +5916,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         dailyReviewFailed: 'Review failed. Open the run log for details.',
         dailyReviewEmpty: 'No Agent review yet.',
         dailyReviewConfirm: 'Needs confirmation',
+        dailyReviewIgnore: 'Not today',
         onboardingKicker: 'Get started',
         onboardingTitle: 'Give SoloMap one local project first',
         onboardingCopy: 'Choose a local project folder. SoloMap will ask for its type, then help create the first actionable roadmap.',
@@ -5936,10 +5937,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionBasic: 'Basics',
         settingsSectionAccount: 'SoloMap Account',
         settingsSectionAgent: 'Agent Collaboration',
-        cognitiveEngineAgent: 'Intelligence engine',
-        cognitiveEngineHelp: 'Updates Today in the background without opening a terminal. Falls back to local rules when unavailable.',
+        cognitiveEngineAgent: 'Model allowance source',
+        cognitiveEngineHelp: 'The built-in Pi Agent uses the selected Agent CLI login allowance to update Today in the background without opening a terminal.',
         cognitiveFollowMain: 'Follow main Agent',
-        cognitiveLocalOnly: 'Local rules only',
         settingsSectionData: 'Project Data',
         settingsSectionInstructions: 'Instructions',
         settingsSectionAbilities: 'Abilities',
@@ -6470,8 +6470,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('label-cognitive-engine-agent', t('cognitiveEngineAgent'));
       setText('help-cognitive-engine-agent', t('cognitiveEngineHelp'));
       setText('option-cognitive-follow-main', t('cognitiveFollowMain'));
-      setText('option-cognitive-local-only', t('cognitiveLocalOnly'));
-      if (settingCognitiveEngineAgent) setSoloSelectValue(settingCognitiveEngineAgent, getSoloSelectValue(settingCognitiveEngineAgent) || 'local_only');
+      if (settingCognitiveEngineAgent) setSoloSelectValue(settingCognitiveEngineAgent, getSoloSelectValue(settingCognitiveEngineAgent) || 'follow_main');
       setText('label-global-prompt', t('globalPrompt'));
       settingGlobalPrompt.placeholder = t('globalPromptPlaceholder');
       setText('help-global-prompt', t('globalPromptHelp'));
@@ -7702,7 +7701,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         command: 'settings.update',
         cliPath: getEffectiveSettingCliPath(),
         agentModelPreferences: agentModelPreferenceMap,
-        cognitiveEngineAgent: settingCognitiveEngineAgent ? getSoloSelectValue(settingCognitiveEngineAgent) : 'local_only',
+        cognitiveEngineAgent: settingCognitiveEngineAgent ? getSoloSelectValue(settingCognitiveEngineAgent) : 'follow_main',
         openCodeProvider: getSoloSelectValue(settingOpenCodeProvider) || (currentSettings && currentSettings.openCodeProvider) || '',
         language: getSoloSelectValue(settingLanguage),
         globalPrompt: settingGlobalPrompt.value.trim(),
@@ -7820,7 +7819,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
           Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
           applySettingCliPath(message.settings.cliPath || 'agy');
-          if (settingCognitiveEngineAgent) setSoloSelectValue(settingCognitiveEngineAgent, message.settings.cognitiveEngineAgent || 'local_only');
+          if (settingCognitiveEngineAgent) setSoloSelectValue(settingCognitiveEngineAgent, message.settings.cognitiveEngineAgent && message.settings.cognitiveEngineAgent !== 'local_only' ? message.settings.cognitiveEngineAgent : 'follow_main');
           settingGlobalPrompt.value = message.settings.globalPrompt || '';
           if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
           applyReviewerCliPath(message.settings.reviewerCliPath || '');
@@ -8137,6 +8136,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'dailyReviewLoaded':
           currentDailyReview = message.review || null;
+          if (currentDailyReview && currentDailyReview.feedbackOutcome === 'ignored' && currentDailyReview.decisionId) {
+            ignoredTodayDecisionIds.add(String(currentDailyReview.decisionId));
+          }
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -9516,7 +9518,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
       function buildTodayPlanItems(portfolio, selectedProjectPath) {
         const shadowOrder = new Map();
-        if (currentDailyReview && currentDailyReview.source === 'runtime_shadow' && Array.isArray(currentDailyReview.todos)) {
+        if (currentDailyReview
+          && currentDailyReview.source === 'runtime_shadow'
+          && !ignoredTodayDecisionIds.has(String(currentDailyReview.decisionId || ''))
+          && Array.isArray(currentDailyReview.todos)) {
           currentDailyReview.todos.forEach((item, index) => {
             if (item && item.projectPath && !shadowOrder.has(item.projectPath)) shadowOrder.set(item.projectPath, index);
           });
@@ -9573,6 +9578,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
       function renderDailyReview(review) {
         if (!review) return '';
+        if (review.decisionId && ignoredTodayDecisionIds.has(String(review.decisionId))) return '';
         if (review.status === 'running') {
           return '<div class="daily-review-panel"><div class="daily-review-summary">' + escapeHtml(t('dailyReviewRunning')) + '</div></div>';
         }
@@ -9629,6 +9635,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             \${review.summary ? \`<div class="daily-review-summary">\${escapeHtml(review.summary)}</div>\` : ''}
             \${otherTodosHtml}
             \${otherConfirmsHtml}
+            \${review.source === 'runtime_shadow' && review.decisionId ? \`<button class="global-review-btn" type="button" data-ignore-today-decision>\${escapeHtml(t('dailyReviewIgnore'))}</button>\` : ''}
           </div>
         \`;
       }
@@ -9649,6 +9656,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const decisionId = String(review.decisionId || '');
         const selectedProjectPath = String(projectPath || '');
         if (review.source !== 'runtime_shadow' || !decisionId || !selectedProjectPath) return;
+        if (ignoredTodayDecisionIds.has(decisionId) || review.feedbackOutcome === 'ignored') return;
         const recommendedProjectPath = String(review.recommendedProjectPath || '');
         vscode.postMessage({
           command: 'recordTodayShadowFeedback',
@@ -9658,6 +9666,22 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           selectedProjectPath,
           outcome: recommendedProjectPath === selectedProjectPath ? 'accepted' : 'overridden'
         });
+      }
+
+      function ignoreTodayDecision() {
+        const review = currentDailyReview || {};
+        const decisionId = String(review.decisionId || '');
+        if (review.source !== 'runtime_shadow' || !decisionId) return;
+        ignoredTodayDecisionIds.add(decisionId);
+        vscode.postMessage({
+          command: 'recordTodayShadowFeedback',
+          operationId: decisionId + ':ignored',
+          decisionId,
+          recommendedProjectPath: String(review.recommendedProjectPath || ''),
+          selectedProjectPath: '',
+          outcome: 'ignored'
+        });
+        renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
       }
 
       function renderGlobalFocus(portfolio, selectedProjectPath) {
@@ -9827,6 +9851,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             openDailyReviewTarget((currentDailyReview && currentDailyReview.needsConfirmation || [])[index]);
           });
         });
+        const ignoreTodayDecisionButton = globalFocusPanel.querySelector('[data-ignore-today-decision]');
+        if (ignoreTodayDecisionButton) ignoreTodayDecisionButton.addEventListener('click', ignoreTodayDecision);
         startDailyReviewPolling();
       }
 

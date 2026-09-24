@@ -5,7 +5,8 @@ const path = require('path');
 const test = require('node:test');
 
 const {
-  ProjectAutonomyAuthorizationStore
+  ProjectAutonomyAuthorizationStore,
+  revokeAllProjectAutonomyAuthorizations
 } = require('../out/projectAutonomyAuthorization.js');
 
 function fixture() {
@@ -90,4 +91,25 @@ test('project grants use independent atomic records so another project cannot re
   assert.equal(fs.readdirSync(store.filePath).filter(name => name.endsWith('.json')).length, 2);
   assert.equal(store.get(project).enabled, false);
   assert.equal(store.get(project).epoch, revoked.epoch);
+});
+
+test('global revocation preserves records and advances beyond legacy authorization epochs', () => {
+  const { root, project } = fixture();
+  const store = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+  const granted = store.setEnabled(project, true, [project]);
+  const record = JSON.parse(fs.readFileSync(path.join(store.filePath, `${granted.projectId}.json`), 'utf8'));
+  fs.writeFileSync(`${store.filePath}.json`, JSON.stringify({
+    schemaVersion: 1,
+    projects: {
+      [granted.projectId]: { ...record, enabled: true, epoch: granted.epoch + 4 }
+    }
+  }), 'utf8');
+
+  revokeAllProjectAutonomyAuthorizations(root);
+
+  const revoked = store.get(project);
+  assert.equal(revoked.enabled, false);
+  assert.equal(revoked.epoch, granted.epoch + 5);
+  assert.equal(fs.existsSync(path.join(store.filePath, `${granted.projectId}.json`)), true);
+  assert.equal(fs.existsSync(`${store.filePath}.json`), true);
 });

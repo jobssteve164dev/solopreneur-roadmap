@@ -7,6 +7,8 @@ const MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES = 40 * 1024 * 1024;
 const REQUIRED_FILES = [
   'extension/out/extension.js',
+  'extension/out/piAgentRuntime.mjs',
+  'extension/out/autonomousRuntimeUninstall.js',
   'extension/resources/activitybar.svg',
   'extension/resources/logo.png',
   'extension/resources/logo_with_text.svg',

@@ -71,6 +71,20 @@ export interface ShadowFeedback {
   recordedAt: string;
 }
 
+export interface ShadowDecisionEvaluation {
+  schemaVersion: 1;
+  updatedAt: string;
+  feedbackCount: number;
+  acceptedCount: number;
+  overriddenCount: number;
+  ignoredCount: number;
+  cognitiveWins: number;
+  baselineWins: number;
+  ties: number;
+  netGain: number;
+  result: 'gain' | 'no_gain' | 'insufficient_evidence';
+}
+
 interface ShadowCycleOptions {
   globalDataPath: string;
   projectRegistryFileName?: string;
@@ -111,6 +125,10 @@ function runtimeStatePath(globalDataPath: string): string {
 
 function runtimeClaimPath(globalDataPath: string): string {
   return path.join(runtimeRoot(globalDataPath), 'state.claim');
+}
+
+function shadowEvaluationPath(globalDataPath: string): string {
+  return path.join(runtimeRoot(globalDataPath), 'shadow-evaluation.json');
 }
 
 function stableHash(value: string): string {
@@ -297,7 +315,7 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
 
 export function hasRuntimeLease(globalDataPath: string, runtimeId: string, pid: number): boolean {
   const current = readRuntimeState(globalDataPath);
-  return Boolean(current && current.runtimeId === runtimeId && current.pid === pid && current.status === 'running');
+  return Boolean(current && current.runtimeId === runtimeId && current.pid === pid && (current.status === 'running' || current.status === 'paused'));
 }
 
 export function updateRuntimeState(globalDataPath: string, runtimeId: string, patch: Partial<RuntimeState>, now = new Date()): RuntimeState | null {
@@ -428,7 +446,7 @@ export function readCurrentRegisteredShadowDecision(globalDataPath: string, proj
   return readCurrentShadowDecision(globalDataPath, projects);
 }
 
-export function projectShadowDecisionForToday(decision: ShadowDecision): any {
+export function projectShadowDecisionForToday(decision: ShadowDecision, feedbackOutcome = ''): any {
   return {
     schemaVersion: 1,
     decisionId: decision.decisionId,
@@ -459,8 +477,24 @@ export function projectShadowDecisionForToday(decision: ShadowDecision): any {
     baselineProjectPath: decision.baselineProjectPath,
     recommendedProjectPath: decision.recommendedProjectPath,
     sourceRevision: decision.sourceRevision,
-    readOnly: true
+    readOnly: true,
+    ...(feedbackOutcome ? { feedbackOutcome } : {})
   };
+}
+
+export function readShadowDecisionFeedbackOutcome(globalDataPath: string, decisionId: string): string {
+  const feedbackPath = path.join(runtimeRoot(globalDataPath), 'shadow-feedback.jsonl');
+  if (!fs.existsSync(feedbackPath)) return '';
+  const rows = fs.readFileSync(feedbackPath, 'utf8').split('\n').filter(Boolean);
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    try {
+      const row = JSON.parse(rows[index]);
+      if (String(row.decisionId || '') === decisionId) return String(row.outcome || '');
+    } catch {
+      // Ignore malformed historical ledger rows.
+    }
+  }
+  return '';
 }
 
 export function recordShadowDecisionFeedback(globalDataPath: string, input: ShadowFeedback): void {
@@ -471,12 +505,14 @@ export function recordShadowDecisionFeedback(globalDataPath: string, input: Shad
   if (!fs.existsSync(snapshotPath)) throw new Error('Shadow feedback requires a current decision.');
   const decision = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')) as ShadowDecision;
   if (decision.decisionId !== input.decisionId) throw new Error('Shadow feedback decision is no longer current.');
+  if (readShadowDecisionFeedbackOutcome(globalDataPath, decision.decisionId) === 'ignored') return;
   const selectedProjectPath = String(input.selectedProjectPath || '');
-  if (!decision.recommendations.some(item => item.projectPath === selectedProjectPath)) {
+  const ignored = input.outcome === 'ignored';
+  if (!ignored && !decision.recommendations.some(item => item.projectPath === selectedProjectPath)) {
     throw new Error('Shadow feedback target is not part of the current decision.');
   }
   const recommendedProjectPath = decision.recommendedProjectPath;
-  const outcome = recommendedProjectPath === selectedProjectPath ? 'accepted' : 'overridden';
+  const outcome = ignored ? 'ignored' : recommendedProjectPath === selectedProjectPath ? 'accepted' : 'overridden';
   const existing = fs.existsSync(feedbackPath)
     ? fs.readFileSync(feedbackPath, 'utf8').split('\n').filter(Boolean).some((line) => {
       try {
@@ -495,6 +531,63 @@ export function recordShadowDecisionFeedback(globalDataPath: string, input: Shad
     recommendedProjectPath,
     selectedProjectPath,
     outcome,
+    cognitive: decision.engineStatus === 'completed' && Boolean(decision.engineId),
+    engineId: decision.engineId || '',
     recordedAt: String(input.recordedAt || new Date().toISOString())
   }) + '\n', { encoding: 'utf8', mode: 0o600 });
+  writeJsonAtomic(shadowEvaluationPath(globalDataPath), buildShadowDecisionEvaluation(globalDataPath));
+}
+
+function buildShadowDecisionEvaluation(globalDataPath: string): ShadowDecisionEvaluation {
+  const feedbackPath = path.join(runtimeRoot(globalDataPath), 'shadow-feedback.jsonl');
+  const rows = fs.existsSync(feedbackPath)
+    ? fs.readFileSync(feedbackPath, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line) as Record<string, unknown>];
+      } catch {
+        return [];
+      }
+    })
+    : [];
+  let cognitiveWins = 0;
+  let baselineWins = 0;
+  let ties = 0;
+  for (const row of rows) {
+    if (row.outcome === 'ignored' || row.cognitive !== true) continue;
+    if (row.recommendedProjectPath === row.baselineProjectPath) {
+      if (row.selectedProjectPath === row.recommendedProjectPath) ties += 1;
+    } else if (row.selectedProjectPath === row.recommendedProjectPath) {
+      cognitiveWins += 1;
+    } else if (row.selectedProjectPath === row.baselineProjectPath) {
+      baselineWins += 1;
+    }
+  }
+  const netGain = cognitiveWins - baselineWins;
+  const comparisonCount = cognitiveWins + baselineWins + ties;
+  return {
+    schemaVersion: 1,
+    updatedAt: new Date().toISOString(),
+    feedbackCount: rows.length,
+    acceptedCount: rows.filter(row => row.outcome === 'accepted').length,
+    overriddenCount: rows.filter(row => row.outcome === 'overridden').length,
+    ignoredCount: rows.filter(row => row.outcome === 'ignored').length,
+    cognitiveWins,
+    baselineWins,
+    ties,
+    netGain,
+    result: comparisonCount === 0 ? 'insufficient_evidence' : netGain > 0 ? 'gain' : 'no_gain'
+  };
+}
+
+export function readShadowDecisionEvaluation(globalDataPath: string): ShadowDecisionEvaluation {
+  const evaluationPath = shadowEvaluationPath(globalDataPath);
+  if (fs.existsSync(evaluationPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(evaluationPath, 'utf8')) as ShadowDecisionEvaluation;
+      if (parsed.schemaVersion === 1) return parsed;
+    } catch {
+      // Rebuild from the append-only feedback ledger below.
+    }
+  }
+  return buildShadowDecisionEvaluation(globalDataPath);
 }

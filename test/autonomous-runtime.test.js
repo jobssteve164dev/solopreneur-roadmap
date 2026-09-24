@@ -46,11 +46,12 @@ function removeFixture(fixture) {
   const runtimeRoot = path.join(fixture.globalRoot, 'runtime');
   const eventsPath = path.join(runtimeRoot, 'events.jsonl');
   const feedbackPath = path.join(runtimeRoot, 'shadow-feedback.jsonl');
+  const evaluationPath = path.join(runtimeRoot, 'shadow-evaluation.json');
   const snapshotPath = path.join(runtimeRoot, 'today-shadow.json');
   const statePath = path.join(runtimeRoot, 'state.json');
   const cognitiveConfigPath = path.join(runtimeRoot, 'cognitive-config.json');
   const executionRuntimePath = path.join(runtimeRoot, 'execution-runtime.json');
-  for (const filePath of [eventsPath, feedbackPath, snapshotPath, statePath, cognitiveConfigPath, executionRuntimePath]) {
+  for (const filePath of [eventsPath, feedbackPath, evaluationPath, snapshotPath, statePath, cognitiveConfigPath, executionRuntimePath]) {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
   for (const directoryPath of [path.join(runtimeRoot, 'autonomous-executions'), path.join(runtimeRoot, 'isolated-workspaces')]) {
@@ -150,6 +151,84 @@ test('shadow feedback records one accepted or overridden outcome per operation',
     assert.equal(rows.length, 1);
     assert.equal(rows[0].outcome, 'overridden');
     assert.equal(rows[0].selectedProjectPath, fixture.alpha);
+    assert.equal(runtime.readShadowDecisionEvaluation(fixture.globalRoot).result, 'insufficient_evidence');
+  } finally {
+    removeFixture(fixture);
+  }
+});
+
+test('shadow evaluation quantifies whether cognitive choices beat the deterministic baseline', async () => {
+  const fixture = createFixture();
+  try {
+    const decision = await runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      projectRegistryFileName: 'projects.json',
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      engine: {
+        id: 'pi-test-engine',
+        async plan(input) {
+          return {
+            candidateId: input.candidates.find(candidate => candidate.name === 'Alpha').id,
+            reason: 'Alpha 能在今天形成更完整的交付闭环。'
+          };
+        }
+      }
+    });
+
+    runtime.recordShadowDecisionFeedback(fixture.globalRoot, {
+      operationId: 'evaluation-1',
+      decisionId: decision.decisionId,
+      selectedProjectPath: fixture.alpha,
+      recordedAt: '2026-09-22T08:10:00.000Z'
+    });
+    const evaluation = runtime.readShadowDecisionEvaluation(fixture.globalRoot);
+
+    assert.equal(evaluation.feedbackCount, 1);
+    assert.equal(evaluation.cognitiveWins, 1);
+    assert.equal(evaluation.baselineWins, 0);
+    assert.equal(evaluation.ties, 0);
+    assert.equal(evaluation.result, 'gain');
+    assert.equal(evaluation.netGain, 1);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.globalRoot, 'runtime', 'shadow-feedback.jsonl'), 'utf8').trim()).cognitive, true);
+  } finally {
+    removeFixture(fixture);
+  }
+});
+
+test('ignoring a shadow decision is counted without pretending a project was selected', () => {
+  const fixture = createFixture();
+  try {
+    const decision = runtime.runShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      projectRegistryFileName: 'projects.json',
+      now: new Date('2026-09-22T08:00:00.000Z')
+    });
+    runtime.recordShadowDecisionFeedback(fixture.globalRoot, {
+      operationId: 'ignored-1',
+      decisionId: decision.decisionId,
+      selectedProjectPath: '',
+      outcome: 'ignored',
+      recordedAt: '2026-09-22T08:15:00.000Z'
+    });
+    runtime.recordShadowDecisionFeedback(fixture.globalRoot, {
+      operationId: 'accepted-after-ignore',
+      decisionId: decision.decisionId,
+      selectedProjectPath: decision.recommendedProjectPath,
+      outcome: 'accepted',
+      recordedAt: '2026-09-22T08:16:00.000Z'
+    });
+
+    const evaluation = runtime.readShadowDecisionEvaluation(fixture.globalRoot);
+    const feedbackRows = fs.readFileSync(path.join(fixture.globalRoot, 'runtime', 'shadow-feedback.jsonl'), 'utf8').trim().split('\n');
+    const row = JSON.parse(feedbackRows[0]);
+    assert.equal(feedbackRows.length, 1);
+    assert.equal(row.outcome, 'ignored');
+    assert.equal(row.selectedProjectPath, '');
+    assert.equal(evaluation.ignoredCount, 1);
+    assert.equal(evaluation.cognitiveWins, 0);
+    assert.equal(evaluation.result, 'insufficient_evidence');
+    assert.equal(runtime.readShadowDecisionFeedbackOutcome(fixture.globalRoot, decision.decisionId), 'ignored');
+    assert.equal(runtime.projectShadowDecisionForToday(decision, 'ignored').feedbackOutcome, 'ignored');
   } finally {
     removeFixture(fixture);
   }
@@ -182,6 +261,22 @@ test('runtime lease allows one live owner and reclaims a stopped owner', () => {
     assert.equal(competing.owner.runtimeId, 'runtime-a');
     assert.equal(reclaimed.acquired, true);
     assert.equal(reclaimed.owner.runtimeId, 'runtime-c');
+  } finally {
+    removeFixture(fixture);
+  }
+});
+
+test('a paused runtime keeps its single-writer lease until it resumes', () => {
+  const fixture = createFixture();
+  try {
+    runtime.claimRuntimeLease(fixture.globalRoot, {
+      runtimeId: 'runtime-paused',
+      pid: process.pid,
+      isProcessAlive: pid => pid === process.pid
+    });
+    runtime.updateRuntimeState(fixture.globalRoot, 'runtime-paused', { status: 'paused' });
+
+    assert.equal(runtime.hasRuntimeLease(fixture.globalRoot, 'runtime-paused', process.pid), true);
   } finally {
     removeFixture(fixture);
   }

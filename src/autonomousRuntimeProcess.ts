@@ -10,8 +10,9 @@ import {
   updateRuntimeState
 } from './autonomousRuntime';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
-import { LocalAgentCliEngine } from './localAgentCliEngine';
+import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { initializeAutonomousExecutionRuntime } from './autonomousExecutionRuntime';
+import { startRuntimeControlServer } from './autonomousRuntimeControl';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -41,11 +42,52 @@ async function main(): Promise<void> {
   if (!lease.acquired) return;
 
   let stopping = false;
+  let paused = false;
   let running = false;
+  let rerunRequested = false;
   let timer: NodeJS.Timeout | undefined;
-  let activeEngine: LocalAgentCliEngine | undefined;
-  const runCycle = async () => {
+  let activeEngine: EmbeddedPiAgentEngine | undefined;
+  let controlServer: { close(): Promise<void> } | undefined;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    if (timer) clearInterval(timer);
+    activeEngine?.cancel();
+    updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+    void controlServer?.close();
+    process.exitCode = 0;
+  };
+  controlServer = await startRuntimeControlServer({
+    globalDataPath,
+    runtimeId,
+    onCommand(command) {
+      if (command === 'pause' || command === 'drain') {
+        paused = true;
+        activeEngine?.cancel();
+        updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
+        if (command === 'drain') setTimeout(stop, 25).unref();
+        return { status: 'paused' };
+      }
+      if (command === 'resume') {
+        paused = false;
+        updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
+        if (running) rerunRequested = true;
+        else void runCycle();
+        return { status: 'running' };
+      }
+      if (command === 'stop') {
+        stop();
+        return { status: 'stopped' };
+      }
+      return { status: paused ? 'paused' : 'running' };
+    }
+  });
+  async function runCycle(): Promise<void> {
     if (stopping || running) return;
+    if (paused) {
+      updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
+      return;
+    }
     running = true;
     try {
       if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
@@ -55,7 +97,7 @@ async function main(): Promise<void> {
       const current = readCurrentRegisteredShadowDecision(globalDataPath);
       const cognitiveConfig = readCognitiveRuntimeConfig(globalDataPath);
       const cognitiveConfigRevision = cognitiveRuntimeConfigRevision(cognitiveConfig);
-      const engine = cognitiveConfig.mode === 'agent_cli' ? new LocalAgentCliEngine({
+      const engine = cognitiveConfig.mode === 'agent_cli' ? new EmbeddedPiAgentEngine({
         agentCli: cognitiveConfig.agentCli,
         model: cognitiveConfig.model,
         configRevision: cognitiveConfigRevision,
@@ -67,7 +109,8 @@ async function main(): Promise<void> {
           globalDataPath,
           engine,
           engineConfigRevision: cognitiveConfigRevision,
-          beforeCommit: () => hasRuntimeLease(globalDataPath, runtimeId, process.pid)
+          beforeCommit: () => !paused
+            && hasRuntimeLease(globalDataPath, runtimeId, process.pid)
             && cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath)) === cognitiveConfigRevision
         }))
         : runShadowDecisionCycle({ globalDataPath });
@@ -82,6 +125,10 @@ async function main(): Promise<void> {
       });
     } catch (error) {
       if (stopping) return;
+      if (paused) {
+        updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
+        return;
+      }
       if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
         stop();
         return;
@@ -95,16 +142,12 @@ async function main(): Promise<void> {
     } finally {
       activeEngine = undefined;
       running = false;
+      if (rerunRequested && !paused && !stopping) {
+        rerunRequested = false;
+        void runCycle();
+      }
     }
-  };
-  const stop = () => {
-    if (stopping) return;
-    stopping = true;
-    if (timer) clearInterval(timer);
-    activeEngine?.cancel();
-    updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
-    process.exitCode = 0;
-  };
+  }
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
   void runCycle();

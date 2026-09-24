@@ -14,7 +14,7 @@ export interface CognitiveCliInvocation {
   shell: false;
 }
 
-type CognitiveCliRunner = (invocation: CognitiveCliInvocation) => Promise<string>;
+export type CognitiveCliRunner = (invocation: CognitiveCliInvocation) => Promise<string>;
 
 function modelArgs(model: string): string[] {
   return model && model !== 'auto' ? ['--model', model] : [];
@@ -38,10 +38,10 @@ export function buildCognitiveCliInvocation(agentCli: string, model: string, pro
   } else {
     throw new Error(`${family || agentCli} does not expose a safe headless cognitive mode.`);
   }
-  return { command: agentCli, args, stdin, cwd, env: allowedEnvironment(), shell: false };
+  return { command: agentCli, args, stdin, cwd, env: cognitiveCliEnvironment(), shell: false };
 }
 
-function allowedEnvironment(): NodeJS.ProcessEnv {
+export function cognitiveCliEnvironment(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries({
     PATH: process.env.PATH,
     HOME: process.env.HOME,
@@ -63,11 +63,11 @@ function allowedEnvironment(): NodeJS.ProcessEnv {
   }).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
 }
 
-function runInvocation(invocation: CognitiveCliInvocation, registerCancel: (cancel?: () => void) => void): Promise<string> {
+export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, registerCancel: (cancel?: () => void) => void): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = childProcess.spawn(invocation.command, invocation.args, {
       cwd: invocation.cwd,
-      env: invocation.env || allowedEnvironment(),
+      env: invocation.env || cognitiveCliEnvironment(),
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
@@ -112,7 +112,7 @@ function runInvocation(invocation: CognitiveCliInvocation, registerCancel: (canc
   });
 }
 
-function buildPrompt(input: CognitiveShadowInput): string {
+export function buildCognitiveDecisionPrompt(input: CognitiveShadowInput): string {
   return [
     '你是 SoloMap 今日安排的只读决策器。',
     '只能从候选中选择今天最值得先推进的一项。不要调用工具，不要读取文件，不要执行任务。',
@@ -121,7 +121,7 @@ function buildPrompt(input: CognitiveShadowInput): string {
   ].join('\n');
 }
 
-function parseProposal(value: string): CognitiveShadowProposal {
+export function parseCognitiveDecisionProposal(value: string): CognitiveShadowProposal {
   const source = String(value || '').trim();
   const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
   const candidate = fenced || source.slice(source.indexOf('{'), source.lastIndexOf('}') + 1);
@@ -141,14 +141,14 @@ export class LocalAgentCliEngine implements CognitiveShadowEngine {
     this.agentCli = options.runner ? options.agentCli : resolveAgentCliWithinFamily(options.agentCli, options.agentCli);
     this.model = String(options.model || 'auto');
     this.workingDirectory = options.workingDirectory;
-    this.runner = options.runner || ((invocation) => runInvocation(invocation, cancel => { this.cancelActive = cancel; }));
+    this.runner = options.runner || ((invocation) => runCognitiveCliInvocation(invocation, cancel => { this.cancelActive = cancel; }));
     this.id = `agent-cli:${getAgentCliFamily(this.agentCli)}:${this.model}:${String(options.configRevision || 'unversioned')}`;
   }
 
   public async plan(input: CognitiveShadowInput): Promise<CognitiveShadowProposal> {
     if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
-    const invocation = buildCognitiveCliInvocation(this.agentCli, this.model, buildPrompt(input), this.workingDirectory);
-    const proposal = parseProposal(await this.runner(invocation));
+    const invocation = buildCognitiveCliInvocation(this.agentCli, this.model, buildCognitiveDecisionPrompt(input), this.workingDirectory);
+    const proposal = parseCognitiveDecisionProposal(await this.runner(invocation));
     if (!input.candidates.some(candidate => candidate.id === proposal.candidateId)) {
       throw new Error('Local Agent CLI selected an unknown Today arrangement candidate.');
     }

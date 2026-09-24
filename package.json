@@ -11,7 +11,7 @@
   },
   "homepage": "https://solomap.app",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.106.0"
   },
   "categories": [
     "AI",
@@ -60,6 +60,21 @@
       {
         "command": "solopreneur.refreshProjectGrowthData",
         "title": "SoloMap: Refresh Project Growth Data",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.pauseAutonomousRuntime",
+        "title": "SoloMap: Pause Background Intelligence",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.resumeAutonomousRuntime",
+        "title": "SoloMap: Resume Background Intelligence",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.removeAutonomousRuntimeService",
+        "title": "SoloMap: Remove Background Service",
         "category": "SoloMap"
       }
     ],
@@ -184,7 +199,8 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "vscode:uninstall": "node ./out/autonomousRuntimeUninstall.js",
+    "compile": "tsc -p ./ && node scripts/bundle-pi-runtime.cjs",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
     "test": "node --test test/*.test.js",
@@ -207,11 +223,14 @@
     "sql.js": "^1.8.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
     "@types/istanbul-lib-coverage": "2.0.6",
     "@types/node": "^16.18.34",
     "@types/papaparse": "^5.3.7",
     "@types/sql.js": "^1.4.11",
     "@types/vscode": "^1.75.0",
+    "esbuild": "0.28.2",
     "typescript": "^4.9.5"
   }
 }

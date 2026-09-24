@@ -185,6 +185,8 @@ import {
 } from './localUsageStats';
 import { recordLocalDiagnosticError } from './localDiagnostics';
 import { ensureAutonomousRuntime } from './autonomousRuntimeHost';
+import { sendRuntimeControlCommand } from './autonomousRuntimeControl';
+import { disableAutonomousRuntimeService, ensureAutonomousRuntimeService } from './autonomousRuntimeService';
 import { writeCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import {
   buildCollaborationInviteCode,
@@ -364,10 +366,13 @@ export async function activate(context: vscode.ExtensionContext) {
   try {
     const runtimeSettings = getPersistedSettings(context);
     syncCognitiveRuntimeConfig(runtimeSettings);
-    ensureAutonomousRuntime({
-      extensionPath: context.extensionPath,
-      globalDataPath: normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath)
-    });
+    const globalDataPath = normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath);
+    try {
+      await ensureAutonomousRuntimeService({ extensionPath: context.extensionPath, globalDataPath });
+    } catch (serviceError) {
+      recordLocalDiagnosticError(runtimeSettings.globalDataPath, 'autonomous-runtime.service', serviceError);
+      ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
+    }
   } catch (error) {
     recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
     console.error('SoloMap autonomous runtime failed to start:', error);
@@ -395,6 +400,33 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(showRoadmapDisposable);
+
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.pauseAutonomousRuntime', async () => {
+    const settings = getPersistedSettings(context);
+    await sendRuntimeControlCommand(settings.globalDataPath, 'pause');
+    vscode.window.showInformationMessage(settings.language === 'en' ? 'SoloMap background intelligence paused.' : 'SoloMap 后台智能已暂停。');
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.resumeAutonomousRuntime', async () => {
+    const settings = getPersistedSettings(context);
+    try {
+      await sendRuntimeControlCommand(settings.globalDataPath, 'resume');
+    } catch {
+      await ensureAutonomousRuntimeService({
+        extensionPath: context.extensionPath,
+        globalDataPath: normalizeGlobalDataPathForExtension(settings.globalDataPath),
+        ignoreDisabled: true
+      });
+    }
+    vscode.window.showInformationMessage(settings.language === 'en' ? 'SoloMap background intelligence resumed.' : 'SoloMap 后台智能已恢复。');
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.removeAutonomousRuntimeService', async () => {
+    const settings = getPersistedSettings(context);
+    await disableAutonomousRuntimeService({
+      extensionPath: context.extensionPath,
+      globalDataPath: normalizeGlobalDataPathForExtension(settings.globalDataPath)
+    });
+    vscode.window.showInformationMessage(settings.language === 'en' ? 'SoloMap background service removed. Project files were kept.' : 'SoloMap 后台服务已移除，项目文件均已保留。');
+  }));
 
   const showFlowDisposable = vscode.commands.registerCommand(
     'solopreneur.showFlow',
@@ -1517,7 +1549,7 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   const baseSettings = {
     cliPath: saved.cliPath || config.get('cliPath') || 'agy',
     agentModelPreferences: normalizeAgentModelPreferences(saved.agentModelPreferences),
-    cognitiveEngineAgent: String(saved.cognitiveEngineAgent || 'local_only'),
+    cognitiveEngineAgent: String(saved.cognitiveEngineAgent && saved.cognitiveEngineAgent !== 'local_only' ? saved.cognitiveEngineAgent : 'follow_main'),
     openCodeProvider: normalizeOpenCodeProvider(saved.openCodeProvider)
       || getOpenCodeProviderFromModel(normalizeAgentModelPreferences(saved.agentModelPreferences).opencode),
     language: saved.language || config.get('language') || 'zh',
@@ -2186,8 +2218,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     cliPath: hasSetting('cliPath') ? (String(settings.cliPath || '').trim() || 'agy') : (currentSettings.cliPath || 'agy'),
     agentModelPreferences: mergeAgentModelPreferences(currentSettings.agentModelPreferences, hasSetting('agentModelPreferences') ? settings.agentModelPreferences : undefined),
     cognitiveEngineAgent: hasSetting('cognitiveEngineAgent')
-      ? String(settings.cognitiveEngineAgent || 'local_only').trim()
-      : String(currentSettings.cognitiveEngineAgent || 'local_only').trim(),
+      ? String(settings.cognitiveEngineAgent || 'follow_main').trim()
+      : String(currentSettings.cognitiveEngineAgent || 'follow_main').trim(),
     openCodeProvider: hasSetting('openCodeProvider')
       ? normalizeOpenCodeProvider(settings.openCodeProvider)
       : normalizeOpenCodeProvider(currentSettings.openCodeProvider),
@@ -2259,18 +2291,19 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   const nextRuntimeRoot = normalizeGlobalDataPathForExtension(nextSettings.globalDataPath);
   if (previousRuntimeRoot !== nextRuntimeRoot) {
     writeCognitiveRuntimeConfig(previousRuntimeRoot, { mode: 'local_only', agentCli: '', model: 'auto' });
-    ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: nextRuntimeRoot });
+    try {
+      await ensureAutonomousRuntimeService({ extensionPath: context.extensionPath, globalDataPath: nextRuntimeRoot });
+    } catch (serviceError) {
+      recordLocalDiagnosticError(nextRuntimeRoot, 'autonomous-runtime.service', serviceError);
+      ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: nextRuntimeRoot });
+    }
   }
 }
 
 function syncCognitiveRuntimeConfig(settings: SolopreneurSettings): void {
   const globalDataPath = normalizeGlobalDataPathForExtension(settings.globalDataPath);
-  const selection = String(settings.cognitiveEngineAgent || 'local_only').trim();
-  if (selection === 'local_only') {
-    writeCognitiveRuntimeConfig(globalDataPath, { mode: 'local_only', agentCli: '', model: 'auto' });
-    return;
-  }
-  const agentCli = selection === 'follow_main' ? String(settings.cliPath || 'agy') : selection;
+  const selection = String(settings.cognitiveEngineAgent || 'follow_main').trim();
+  const agentCli = selection === 'follow_main' || selection === 'local_only' ? String(settings.cliPath || 'agy') : selection;
   const family = getAgentCliFamily(agentCli);
   const model = String(settings.agentModelPreferences?.[family] || 'auto');
   writeCognitiveRuntimeConfig(globalDataPath, { mode: 'agent_cli', agentCli, model });

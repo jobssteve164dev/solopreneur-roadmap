@@ -823,6 +823,7 @@ test('large views and terminals use packaged runtime icons supported across VS C
   assert.doesNotMatch(vscodeIgnore, /^resources\/logo_with_text\.svg$/m);
   assert.match(packageAudit, /'extension\/\.playwright-cli\/'/);
   assert.match(packageAudit, /'extension\/resources\/logo\.png'/);
+  assert.match(packageAudit, /'extension\/out\/piAgentRuntime\.mjs'/);
   assert.match(packageAudit, /'extension\/resources\/logo_with_text\.svg'/);
 });
 
@@ -1058,6 +1059,12 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(html, /id="automation-trigger-select"/);
   assert.match(html, /id="setting-cognitive-engine-agent"/);
   assert.match(html, /id="help-cognitive-engine-agent"/);
+  assert.match(html, /id="setting-cognitive-engine-agent" data-solo-select data-value="follow_main"/);
+  assert.doesNotMatch(html, /data-solo-option-value="local_only"/);
+  assert.match(script, /模型额度来源/);
+  assert.match(script, /内置 Pi Agent 使用所选 Agent CLI 的登录额度/);
+  assert.match(script, /data-ignore-today-decision/);
+  assert.match(script, /outcome: 'ignored'/);
   assert.match(html, /id="automation-action-select"/);
   assert.match(html, /id="automation-time-input"/);
   assert.match(html, /id="btn-open-scheduled-tasks"/);
@@ -1195,6 +1202,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     globalThis.__buildSecurityActionPrompt = buildSecurityActionPrompt;
     globalThis.__renderGlobalFocus = renderGlobalFocus;
     globalThis.__recordTodayDecisionFeedback = recordTodayDecisionFeedback;
+    globalThis.__ignoreTodayDecision = ignoreTodayDecision;
     globalThis.__renderIssueDetailWithPayload = (payload) => { issueDetails = payload; return renderIssueDetail('/workspace/app'); };
     globalThis.__renderProjectConversationComposer = renderProjectConversationComposer;
     globalThis.__setCurrentCliForTest = (cliPath) => {
@@ -1414,6 +1422,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
 
   elements['btn-toggle-settings'].listeners.click();
   assert.equal(elements['settings-panel'].style.display, 'block');
+  assert.equal(elements['setting-cognitive-engine-agent'].getAttribute('data-value'), 'follow_main');
   assert.equal(elements['dependency-panel'].style.display, '');
   context.__setCurrentCliForTest('opencode');
   context.__syncOpenCodeSettingsForTest();
@@ -1767,6 +1776,14 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
       selectedProjectPath: '/workspace/beta',
       outcome: 'accepted'
     }
+  );
+  context.__ignoreTodayDecision();
+  const feedbackCountAfterIgnore = postedMessages.filter(message => message.command === 'recordTodayShadowFeedback').length;
+  context.__recordTodayDecisionFeedback('/workspace/beta');
+  assert.equal(
+    postedMessages.filter(message => message.command === 'recordTodayShadowFeedback').length,
+    feedbackCountAfterIgnore,
+    'selecting a project after ignoring a decision must not replace ignored feedback'
   );
 
   dispatchMessage({

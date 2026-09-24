@@ -7,7 +7,7 @@ import { SolopreneurSettings } from './pluginContracts';
 import { buildProjectPortfolioSummaries, commonParent, getDailyWorkRhythm, getLocalDateKey, normalizeGlobalDataPath, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
 import { GlobalEngineeringSnapshot, ensureGlobalEngineeringStore } from './globalEngineeringStore';
 import { sendTextWhenTerminalReady } from './terminalCompatibility';
-import { projectShadowDecisionForToday, readCurrentShadowDecision } from './autonomousRuntime';
+import { projectShadowDecisionForToday, readCurrentShadowDecision, readShadowDecisionFeedbackOutcome } from './autonomousRuntime';
 
 export interface DailyReviewTodo {
   title: string;
@@ -47,6 +47,7 @@ export interface DailyReviewArtifact {
   recommendedProjectPath?: string;
   sourceRevision?: string;
   readOnly?: boolean;
+  feedbackOutcome?: string;
 }
 
 
@@ -236,7 +237,10 @@ export function readTodayReview(globalDataPath: string, projects: SolopreneurPro
   }
   if (manualReview && manualReview.status !== 'failed') return manualReview;
   const shadowDecision = readCurrentShadowDecision(globalRoot, projects);
-  if (shadowDecision) return projectShadowDecisionForToday(shadowDecision) as DailyReviewArtifact;
+  if (shadowDecision) return projectShadowDecisionForToday(
+    shadowDecision,
+    readShadowDecisionFeedbackOutcome(globalRoot, shadowDecision.decisionId)
+  ) as DailyReviewArtifact;
   return manualReview;
 }
 
