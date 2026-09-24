@@ -26,6 +26,19 @@ type PiAiModule = {
   };
 };
 
+export interface PiDeliveryInput {
+  taskId: string;
+  instruction: string;
+  allowedFiles: Array<{ path: string; content: string }>;
+}
+
+export interface PiDeliveryProposal {
+  engineId: string;
+  modelPipe: string;
+  summary: string;
+  operations: Array<{ type: 'replace_text'; path: string; oldText: string; newText: string }>;
+}
+
 const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>;
 
 async function loadPi(): Promise<{ agent: PiAgentModule; ai: PiAiModule }> {
@@ -161,6 +174,80 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
         throw new Error('Pi Agent model pipe did not return a valid JSON decision.');
       }
       return proposal;
+    } finally {
+      this.activeAgent = undefined;
+      this.cancelInvocation = undefined;
+    }
+  }
+
+  public async proposeDelivery(input: PiDeliveryInput): Promise<PiDeliveryProposal> {
+    this.cancelled = false;
+    if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
+    const pi = await loadPi();
+    if (this.cancelled) throw new Error('Pi Agent model pipe was cancelled.');
+    const allowed = new Set(input.allowedFiles.map(file => file.path));
+    const model = embeddedModel(this.model);
+    const agent = new pi.agent.Agent({
+      initialState: {
+        systemPrompt: '你是 SoloMap 内置 Pi Agent，负责完成用户交付任务。Agent CLI 只提供模型能力；请根据输入文件提出可直接执行的修改。',
+        model,
+        tools: []
+      },
+      streamFn: (_selectedModel: unknown, context: { messages?: Array<Record<string, unknown>> }) => {
+        const stream = pi.ai.createAssistantMessageEventStream();
+        if (this.cancelled) {
+          stream.push({ type: 'error', reason: 'aborted', error: assistantMessage(this.model, '', 'aborted', 'Pi Agent model pipe was cancelled.') });
+          return stream;
+        }
+        stream.push({ type: 'start', partial: assistantMessage(this.model, '', 'pending') });
+        const invocation = buildCognitiveCliInvocation(this.agentCli, this.model, transcriptPrompt(context), this.workingDirectory);
+        void this.runner(invocation).then(output => {
+          stream.push({ type: 'done', reason: 'stop', message: assistantMessage(this.model, output, 'stop') });
+        }, error => {
+          const message = error instanceof Error ? error.message : String(error);
+          stream.push({ type: 'error', reason: 'error', error: assistantMessage(this.model, '', 'error', message) });
+        });
+        return stream;
+      }
+    });
+    this.activeAgent = agent;
+    try {
+      await agent.prompt([
+        `任务 ID：${input.taskId}`,
+        `任务要求：${input.instruction}`,
+        '只输出合法 JSON，不要输出解释：{"summary":"完成了什么","operations":[{"type":"replace_text","path":"文件路径","oldText":"唯一匹配的原文","newText":"替换后的内容"}]}',
+        '可修改文件与当前内容：',
+        JSON.stringify(input.allowedFiles)
+      ].join('\n'));
+      const response = [...agent.state.messages].reverse().find(message => message.role === 'assistant');
+      if (!response) throw new Error('Pi Agent did not return a delivery proposal.');
+      const source = messageText(response).trim();
+      const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+      const candidate = fenced || source.slice(source.indexOf('{'), source.lastIndexOf('}') + 1);
+      const parsed = JSON.parse(candidate) as Record<string, unknown>;
+      if (typeof parsed.summary !== 'string' || !parsed.summary.trim() || !Array.isArray(parsed.operations)) {
+        throw new Error('Pi Agent model pipe returned an invalid delivery proposal.');
+      }
+      const operations = parsed.operations.map(value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Pi Agent model pipe returned an invalid delivery operation.');
+        const operation = value as Record<string, unknown>;
+        if (operation.type !== 'replace_text' || typeof operation.path !== 'string' || !allowed.has(operation.path)
+          || typeof operation.oldText !== 'string' || !operation.oldText
+          || typeof operation.newText !== 'string' || operation.newText === operation.oldText) {
+          throw new Error('Pi Agent model pipe returned an invalid delivery operation.');
+        }
+        return { type: 'replace_text' as const, path: operation.path, oldText: operation.oldText, newText: operation.newText };
+      });
+      if (!operations.length) throw new Error('Pi Agent model pipe returned an empty delivery proposal.');
+      return {
+        engineId: this.id,
+        modelPipe: getAgentCliFamily(this.agentCli),
+        summary: parsed.summary.trim(),
+        operations
+      };
+    } catch (error) {
+      if (error instanceof Error && /Pi Agent/.test(error.message)) throw error;
+      throw new Error('Pi Agent model pipe did not return a valid JSON delivery proposal.');
     } finally {
       this.activeAgent = undefined;
       this.cancelInvocation = undefined;

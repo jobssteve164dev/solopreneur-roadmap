@@ -1,9 +1,11 @@
 import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import * as path from 'path';
 
 import { claimRuntimeLease, readRuntimeState } from './autonomousRuntime';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
 
 interface RuntimeChild {
   pid?: number;
@@ -63,4 +65,40 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
   claimRuntimeLease(globalDataPath, { runtimeId, pid, now, isProcessAlive: () => false });
   child.unref();
   return { started: true, pid, runtimeId };
+}
+
+export function startPiMainPathDelivery(options: {
+  extensionPath: string;
+  globalDataPath: string;
+  request: PiMainPathRequest;
+  execPath?: string;
+}): Promise<PiMainPathResult> {
+  const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
+  const requestRoot = path.join(globalDataPath, 'runtime', 'pi-delivery-requests');
+  fs.mkdirSync(requestRoot, { recursive: true });
+  const requestPath = path.join(requestRoot, `${crypto.randomUUID()}.json`);
+  fs.writeFileSync(requestPath, JSON.stringify(options.request), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  const entryPath = path.join(options.extensionPath, 'out', 'autonomousRuntimeProcess.js');
+  return new Promise((resolve, reject) => {
+    childProcess.execFile(options.execPath || process.execPath, [
+      entryPath,
+      '--global-data-path', globalDataPath,
+      '--delivery-request-file', requestPath
+    ], {
+      windowsHide: true,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      maxBuffer: 1024 * 1024
+    }, (error, stdout, stderr) => {
+      try { fs.unlinkSync(requestPath); } catch { /* The exact one-shot request may already be gone. */ }
+      if (error) {
+        reject(new Error(`SoloMap Pi delivery failed: ${String(stderr || error.message).trim()}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout) as PiMainPathResult);
+      } catch {
+        reject(new Error('SoloMap Pi delivery returned an invalid result.'));
+      }
+    });
+  });
 }

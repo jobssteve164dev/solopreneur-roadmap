@@ -13,6 +13,7 @@ import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './co
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { initializeAutonomousExecutionRuntime } from './autonomousExecutionRuntime';
 import { startRuntimeControlServer } from './autonomousRuntimeControl';
+import { runPiMainPathRequestFile } from './piMainPathRuntime';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -29,6 +30,12 @@ async function main(): Promise<void> {
   if (!globalDataPath) {
     process.stderr.write('SoloMap Runtime requires --global-data-path.\n');
     process.exitCode = 2;
+    return;
+  }
+  const deliveryRequestFile = argumentValue('--delivery-request-file');
+  if (deliveryRequestFile) {
+    const result = await runPiMainPathRequestFile(globalDataPath, deliveryRequestFile);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
   await initializeAutonomousExecutionRuntime({ globalDataPath });

@@ -210,6 +210,7 @@
     "package:vsix": "node scripts/package-vsix.cjs",
     "verify:vsix": "node scripts/verify-vsix-package.cjs",
     "check:plan-single-track": "node scripts/check-plan-single-track.mjs",
+    "pi:deliver": "npm run compile --silent && node scripts/run-pi-main-path-delivery.cjs",
     "install:local-dev": "node scripts/install-local-dev.js",
     "build-webview": "echo 'No webview build configured yet'"
   },

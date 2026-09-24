@@ -62,6 +62,33 @@ test('embedded Pi Agent rejects tool calls from the Agent CLI model pipe', async
   }), /valid JSON decision/);
 });
 
+test('embedded Pi Agent creates a file delivery proposal through the selected Agent CLI model pipe', async () => {
+  const invocations = [];
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', model: 'gpt-test', configRevision: 'delivery-1',
+    runner: async invocation => {
+      invocations.push(invocation);
+      return JSON.stringify({
+        summary: '补充主路径说明',
+        operations: [{ type: 'replace_text', path: 'docs/runtime.md', oldText: '旧内容', newText: '新内容' }]
+      });
+    }
+  });
+
+  const proposal = await engine.proposeDelivery({
+    taskId: 'docs-smoke', instruction: '补充主路径说明',
+    allowedFiles: [{ path: 'docs/runtime.md', content: '旧内容' }]
+  });
+
+  assert.equal(proposal.engineId, 'pi-agent:agent-cli:codex:gpt-test:delivery-1');
+  assert.equal(proposal.modelPipe, 'codex');
+  assert.deepEqual(proposal.operations, [
+    { type: 'replace_text', path: 'docs/runtime.md', oldText: '旧内容', newText: '新内容' }
+  ]);
+  assert.equal(invocations.length, 1);
+  assert.match(invocations[0].stdin, /docs\/runtime\.md/);
+});
+
 test('cancelling while Pi loads prevents the Agent CLI allowance pipe from starting', async () => {
   let calls = 0;
   const engine = new EmbeddedPiAgentEngine({
