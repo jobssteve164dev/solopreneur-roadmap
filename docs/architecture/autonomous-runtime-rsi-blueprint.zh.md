@@ -689,6 +689,8 @@ Runtime 落地后，设备 E2EE 端点从插件生命周期中独立出来：设
 - Runtime 通过 headless Execution Backend 执行，不显式新建 VS Code Terminal；用户主动交互任务仍可使用原生终端。
 - 隔离工作区、全局单写任务、暂停、取消、崩溃恢复和预算生效。
 
+**最小本地交付编排切片的实现边界：** Runtime 必须从已授权项目的固定 base revision 创建独立工作树，Agent CLI 只能在任务允许路径内产出改动。执行与验证证据合格且授权 epoch 仍有效后，受控 Git broker 才能创建本地提交，并通过 CAS 写入 `refs/solomap/tasks/<task-id>`。默认不推送、不发布、不改当前分支；采用动作另行发生。操作系统沙箱探针失败时必须拒绝运行，不能降级。
+
 验收：
 
 - 同一任务重复事件不会重复启动或重复提交。
