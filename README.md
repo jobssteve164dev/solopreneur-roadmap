@@ -5,7 +5,7 @@
 <h1 align="center">SoloMap - AI Coding Agent Roadmap</h1>
 
 <p align="center">
-  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
+  <strong>English</strong> | <a href="https://github.com/jobssteve164dev/solopreneur-roadmap/blob/main/README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">

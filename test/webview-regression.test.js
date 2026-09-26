@@ -773,7 +773,7 @@ test('extension manifest uses SoloMap visible branding', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
 
   assert.equal(manifest.displayName, 'SoloMap - AI Coding Agent Roadmap');
-  assert.equal(manifest.description, 'AI coding agent cockpit for solo developers. Run Claude Code, Codex, Cursor Agent and other local agents, keep sessions organized, and turn scattered AI chats into a Git-friendly project roadmap. / 面向独立开发者的 AI 编码智能体驾驶舱：运行 Claude Code、Codex、Cursor Agent 等本地智能体，整理会话，并把零散 AI 对话沉淀为 Git 友好的项目路线图。');
+  assert.equal(manifest.description, 'AI coding agent cockpit for solo developers. Run Claude Code, Codex, Cursor Agent and other local agents, keep sessions organized, and turn scattered AI chats into a Git-friendly project roadmap.');
   assert.deepEqual(manifest.categories, ['AI', 'Chat', 'Machine Learning', 'Visualization', 'Other']);
   assert.ok(manifest.keywords.includes('ai-agent'));
   assert.ok(manifest.keywords.includes('ai-coding'));
@@ -862,17 +862,24 @@ test('website-only changes do not trigger extension publishing', () => {
   assert.match(websiteWorkflow, /-\s*'website\/\*\*'/);
 });
 
-test('readme uses bilingual marketplace copy and marketplace-compatible remote logo', () => {
+test('marketplace description keeps English and Chinese content on separate pages', () => {
   const readme = fs.readFileSync(path.join(projectRoot, 'README.md'), 'utf8');
+  const chineseReadme = fs.readFileSync(path.join(projectRoot, 'README.zh-CN.md'), 'utf8');
+  const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
+  const publishWorkflow = fs.readFileSync(path.join(projectRoot, '.github', 'workflows', 'publish.yml'), 'utf8');
 
   assert.match(readme, /raw\.githubusercontent\.com\/jobssteve164dev\/solopreneur-roadmap\/main\/resources\/logo_with_text\.png/);
-  assert.match(readme, /Are you suffering from "AI Chat Hell"\? \/ 你是否正陷入“AI 乱聊地狱”？/);
-  assert.match(readme, /Core Capabilities \/ 核心能力/);
-  assert.match(readme, /Quick Start \/ 快速开始/);
-  assert.match(readme, /Integrated Agent CLIs \/ 本地 Agent 支持/);
-  assert.match(readme, /Privacy & Architecture \/ 本地数据结构/);
-  assert.match(readme, /Privacy/);
-  assert.match(readme, /Feedback/);
+  assert.match(readme, /href="https:\/\/github\.com\/jobssteve164dev\/solopreneur-roadmap\/blob\/main\/README\.zh-CN\.md">简体中文<\/a>/);
+  assert.doesNotMatch(readme.replace('简体中文', ''), /[\u3400-\u9fff]/);
+  assert.match(chineseReadme, /href="https:\/\/github\.com\/jobssteve164dev\/solopreneur-roadmap\/blob\/main\/README\.md">English<\/a>/);
+  assert.match(chineseReadme, /核心能力/);
+  assert.doesNotMatch(manifest.description, /[\u3400-\u9fff]/);
+
+  for (const readmePath of ['README.md', 'README.zh-CN.md']) {
+    const escapedPath = readmePath.replace('.', '\\.');
+    assert.match(publishWorkflow, new RegExp(`- '${escapedPath}'`));
+    assert.match(publishWorkflow, new RegExp(`(?:^|\\|)${escapedPath}(?:\\|)`));
+  }
 });
 
 test('feedback issue URL includes local usage summary when provided', () => {
