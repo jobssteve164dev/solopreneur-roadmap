@@ -11,6 +11,10 @@ import {
   parseCognitiveDecisionProposal,
   runCognitiveCliInvocation
 } from './localAgentCliEngine';
+import type {
+  StrategyPyramidCognitiveInput,
+  StrategyPyramidCognitiveJudgment
+} from './strategyPyramid';
 
 type PiAgentModule = {
   Agent: new (options: Record<string, unknown>) => {
@@ -174,6 +178,79 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
         throw new Error('Pi Agent model pipe did not return a valid JSON decision.');
       }
       return proposal;
+    } finally {
+      this.activeAgent = undefined;
+      this.cancelInvocation = undefined;
+    }
+  }
+
+  public async judgeStrategyPyramid(input: StrategyPyramidCognitiveInput): Promise<StrategyPyramidCognitiveJudgment> {
+    this.cancelled = false;
+    if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
+    const pi = await loadPi();
+    if (this.cancelled) throw new Error('Pi Agent model pipe was cancelled.');
+    const model = embeddedModel(this.model);
+    const agent = new pi.agent.Agent({
+      initialState: {
+        systemPrompt: '你是 SoloMap 战略金字塔的只读智能内核。只根据提供的项目事实判断一人公司的战略状态，不得调用工具、读取文件或执行任务。',
+        model,
+        tools: []
+      },
+      streamFn: (_selectedModel: unknown, context: { messages?: Array<Record<string, unknown>> }) => {
+        const stream = pi.ai.createAssistantMessageEventStream();
+        if (this.cancelled) {
+          stream.push({ type: 'error', reason: 'aborted', error: assistantMessage(this.model, '', 'aborted', 'Pi Agent model pipe was cancelled.') });
+          return stream;
+        }
+        stream.push({ type: 'start', partial: assistantMessage(this.model, '', 'pending') });
+        const invocation = buildCognitiveCliInvocation(this.agentCli, this.model, transcriptPrompt(context), this.workingDirectory);
+        void this.runner(invocation).then(output => {
+          stream.push({ type: 'done', reason: 'stop', message: assistantMessage(this.model, output, 'stop') });
+        }, error => {
+          const message = error instanceof Error ? error.message : String(error);
+          stream.push({ type: 'error', reason: 'error', error: assistantMessage(this.model, '', 'error', message) });
+        });
+        return stream;
+      }
+    });
+    this.activeAgent = agent;
+    try {
+      await agent.prompt([
+        '根据项目事实生成战略判断。判断必须具体、可执行，不得编造收入、用户、市场或验证结果。',
+        '尊重每个项目 strategy 中的当前战略标记，尤其不得给冻结或收缩中的项目生成相反建议。',
+        '只输出一行合法 JSON，字段必须为：confidence(low|medium|high)、stageTitle、mainJudgment、strategicAction、constraint、risks、moves、recommendedScenarioPath、projects。',
+        'moves 每项包含 horizon、title、reason、evidence；projects 每项包含输入中的 id、action、risk、advice，advice 包含 doubleDown、reduce、observe。',
+        '项目事实：',
+        JSON.stringify(input)
+      ].join('\n'));
+      const response = [...agent.state.messages].reverse().find(message => message.role === 'assistant');
+      if (!response) throw new Error('Pi Agent did not return a strategy pyramid judgment.');
+      const source = messageText(response).trim();
+      const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+      const candidate = fenced || source.slice(source.indexOf('{'), source.lastIndexOf('}') + 1);
+      const parsed = JSON.parse(candidate) as StrategyPyramidCognitiveJudgment;
+      const nonEmpty = (value: unknown) => typeof value === 'string' && Boolean(value.trim());
+      if (!['low', 'medium', 'high'].includes(parsed.confidence)
+        || !nonEmpty(parsed.stageTitle) || !nonEmpty(parsed.mainJudgment)
+        || !nonEmpty(parsed.strategicAction) || !nonEmpty(parsed.constraint)
+        || !nonEmpty(parsed.recommendedScenarioPath)
+        || !Array.isArray(parsed.risks) || !parsed.risks.every(nonEmpty)
+        || !Array.isArray(parsed.moves) || !parsed.moves.length
+        || !parsed.moves.every(move => nonEmpty(move?.horizon) && nonEmpty(move?.title) && nonEmpty(move?.reason)
+          && Array.isArray(move?.evidence) && move.evidence.every(nonEmpty))
+        || !Array.isArray(parsed.projects)
+        || parsed.projects.length !== input.projects.length
+        || new Set(parsed.projects.map(project => project?.id)).size !== input.projects.length
+        || !input.projects.every(project => parsed.projects.some(item => item?.id === project.id))
+        || !parsed.projects.every(project => input.projects.some(item => item.id === project?.id)
+          && nonEmpty(project?.action) && nonEmpty(project?.risk)
+          && nonEmpty(project?.advice?.doubleDown) && nonEmpty(project?.advice?.reduce) && nonEmpty(project?.advice?.observe))) {
+        throw new Error('Pi Agent model pipe returned an invalid strategy pyramid judgment.');
+      }
+      return parsed;
+    } catch (error) {
+      if (error instanceof Error && /Pi Agent/.test(error.message)) throw error;
+      throw new Error('Pi Agent model pipe did not return a valid JSON strategy pyramid judgment.');
     } finally {
       this.activeAgent = undefined;
       this.cancelInvocation = undefined;

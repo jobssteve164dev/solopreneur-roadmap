@@ -34,6 +34,9 @@ export interface StrategyPyramidProjectSummary {
   loop: MethodologyStageKey;
   action: string;
   risk: string;
+  intelligentAction?: string;
+  intelligentRisk?: string;
+  intelligentAdvice?: StrategyPyramidProjectAdvice;
   evidence: string[];
   abilities: string[];
   roleScores: StrategyPyramidProjectRoleScores;
@@ -46,6 +49,7 @@ export interface StrategyPyramidProjectSummary {
   totalNodes: number;
   progressPercent: number;
   nodes: StrategyPyramidNodeSummary[];
+  actualMinutes?: number;
 }
 
 export interface StrategyPyramidLoopSummary {
@@ -165,9 +169,187 @@ export interface StrategyPyramidSnapshot {
   scenarios: StrategyPyramidScenario[];
   recommendedScenarioPath: string;
   projects: StrategyPyramidProjectSummary[];
+  decisionSource?: 'rules' | 'cognitive' | 'rules_fallback';
+  engineId?: string;
+  engineConfigRevision?: string;
+  engineStatus?: 'completed' | 'failed' | 'unavailable';
+  engineError?: string;
+}
+
+export interface StrategyPyramidCognitiveInput {
+  generatedAt: string;
+  totals: {
+    projects: number;
+    build: number;
+    sell: number;
+    learn: number;
+    improve: number;
+  };
+  projects: Array<{
+    id: string;
+    name: string;
+    type: string;
+    actualMinutes: number;
+    completedNodes: number;
+    failedNodes: number;
+    runningNodes: number;
+    inProgressNodes: number;
+    pendingNodes: number;
+    totalNodes: number;
+    nodes: StrategyPyramidNodeSummary[];
+    strategy: {
+      role: string;
+      businessStage: string;
+      revenueTier: string;
+      timeLoad: string;
+      action: string;
+      abilities: string[];
+    };
+    learning: {
+      eventCount: number;
+      candidateCount: number;
+      promotedCount: number;
+      riskSignals: number;
+      verificationSignals: number;
+      strategySignals: number;
+    };
+  }>;
+}
+
+export interface StrategyPyramidCognitiveJudgment {
+  confidence: 'low' | 'medium' | 'high';
+  stageTitle: string;
+  mainJudgment: string;
+  strategicAction: string;
+  constraint: string;
+  risks: string[];
+  moves: StrategyPyramidMoveSummary[];
+  recommendedScenarioPath: string;
+  projects: Array<{
+    id: string;
+    action: string;
+    risk: string;
+    advice: StrategyPyramidProjectAdvice;
+  }>;
+}
+
+export interface StrategyPyramidCognitiveEngine {
+  id: string;
+  judgeStrategyPyramid(input: StrategyPyramidCognitiveInput): Promise<StrategyPyramidCognitiveJudgment>;
+}
+
+export function createStrategyPyramidRequestGate(): { begin(): () => boolean } {
+  let revision = 0;
+  return {
+    begin() {
+      const requestRevision = ++revision;
+      return () => requestRevision === revision;
+    }
+  };
 }
 
 export type MethodologyStageKey = 'build' | 'sell' | 'learn' | 'improve';
+
+export function buildStrategyPyramidCognitiveInput(snapshot: StrategyPyramidSnapshot): StrategyPyramidCognitiveInput {
+  const learningByPath = new Map(snapshot.learningSignals.map(signal => [signal.projectPath, signal]));
+  const input: StrategyPyramidCognitiveInput = {
+    generatedAt: snapshot.generatedAt,
+    totals: {
+      projects: snapshot.totalProjects,
+      build: snapshot.buildCount,
+      sell: snapshot.sellCount,
+      learn: snapshot.learnCount,
+      improve: snapshot.improveCount
+    },
+    projects: snapshot.projects.map((project, index) => {
+      const learning = learningByPath.get(project.path);
+      return {
+        id: `project-${index + 1}`,
+        name: project.name,
+        type: project.type,
+        actualMinutes: Number(project.actualMinutes || 0),
+        completedNodes: project.completedNodes,
+        failedNodes: project.failedNodes,
+        runningNodes: project.runningNodes,
+        inProgressNodes: project.inProgressNodes,
+        pendingNodes: project.pendingNodes,
+        totalNodes: project.totalNodes,
+        nodes: project.nodes,
+        strategy: {
+          role: project.role,
+          businessStage: project.businessStage,
+          revenueTier: project.revenueTier,
+          timeLoad: project.timeLoad,
+          action: project.action,
+          abilities: [...project.abilities]
+        },
+        learning: {
+          eventCount: Number(learning?.eventCount || 0),
+          candidateCount: Number(learning?.candidateCount || 0),
+          promotedCount: Number(learning?.promotedCount || 0),
+          riskSignals: Number(learning?.riskSignals || 0),
+          verificationSignals: Number(learning?.verificationSignals || 0),
+          strategySignals: Number(learning?.strategySignals || 0)
+        }
+      };
+    })
+  };
+  const projectRoots = snapshot.projects.map(project => project.path).filter(Boolean);
+  const sanitize = (value: unknown): unknown => {
+    if (typeof value === 'string') {
+      let cleaned = value;
+      for (const projectRoot of projectRoots) {
+        cleaned = cleaned.split(projectRoot).join('[local-path]');
+        cleaned = cleaned.split(projectRoot.replace(/\\/g, '/')).join('[local-path]');
+      }
+      return cleaned
+        .replace(/file:\/\/[A-Za-z]:[\\/][^\s"'`,;\])}]+/gi, '[local-path]')
+        .replace(/\\\\[^\\\s"'`,;\])}]+(?:\\[^\\\s"'`,;\])}]+)+/g, '[local-path]')
+        .replace(/[A-Za-z]:[\\/](?:[^\s"'`,;\])}]+[\\/])*[^\s"'`,;\])}]*/g, '[local-path]')
+        .replace(/(^|[^A-Za-z0-9._~\/-])\/(?!\/)[^/\s]+(?:\/[^/\s]+)*/g, '$1[local-path]');
+    }
+    if (Array.isArray(value)) return value.map(sanitize);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitize(item)]));
+    }
+    return value;
+  };
+  return sanitize(input) as StrategyPyramidCognitiveInput;
+}
+
+export function applyCognitiveStrategyPyramidJudgment(
+  snapshot: StrategyPyramidSnapshot,
+  judgment: StrategyPyramidCognitiveJudgment,
+  engine: { engineId: string; engineConfigRevision: string }
+): StrategyPyramidSnapshot {
+  const projectJudgments = new Map(judgment.projects.map(project => [project.id, project]));
+  return {
+    ...snapshot,
+    confidence: judgment.confidence,
+    stageTitle: judgment.stageTitle,
+    stageProfile: { ...snapshot.stageProfile, title: judgment.stageTitle },
+    mainJudgment: judgment.mainJudgment,
+    strategicAction: judgment.strategicAction,
+    constraint: judgment.constraint,
+    risks: [...judgment.risks],
+    moves: judgment.moves.map(move => ({ ...move, evidence: [...move.evidence] })),
+    recommendedScenarioPath: judgment.recommendedScenarioPath,
+    projects: snapshot.projects.map((project, index) => {
+      const replacement = projectJudgments.get(`project-${index + 1}`);
+      return replacement ? {
+        ...project,
+        intelligentAction: replacement.action,
+        intelligentRisk: replacement.risk,
+        intelligentAdvice: { ...replacement.advice }
+      } : project;
+    }),
+    decisionSource: 'cognitive',
+    engineId: engine.engineId,
+    engineConfigRevision: engine.engineConfigRevision,
+    engineStatus: 'completed',
+    engineError: ''
+  };
+}
 
 function normalizeGlobalDataPath(rawPath: string): string {
   return normalizeGlobalDataPathForExtension(rawPath);
@@ -918,12 +1100,17 @@ function mapAbilityCategory(ability: string): string {
   return 'operations';
 }
 
-function writeStrategyPyramidSnapshot(globalDataPath: string, snapshot: StrategyPyramidSnapshot): void {
+function writeStrategyPyramidSnapshot(
+  globalDataPath: string,
+  snapshot: StrategyPyramidSnapshot,
+  includeDerivedRegistries = true
+): void {
   try {
     const globalRoot = normalizeGlobalDataPath(globalDataPath);
     const strategyRoot = path.join(globalRoot, 'strategy');
     fs.mkdirSync(strategyRoot, { recursive: true });
     fs.writeFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+    if (!includeDerivedRegistries) return;
     const projectRows = snapshot.projects.map((project) => ({
       projectPath: project.path,
       role: displayRoleToCsv(project.role),
@@ -965,17 +1152,38 @@ function strategySourceSignature(projectEntries: StrategyPyramidProject[], globa
     fileSignature(path.join(project.path, '.solopreneur', 'roadmap.csv')),
     fileSignature(path.join(project.path, '.solopreneur', 'project_journal.db'))
   ].join(':')).join('|');
-  return `${projectFacts}|${fileSignature(path.join(normalizeGlobalDataPath(globalDataPath), 'strategy', 'project-strategy.csv'))}`;
+  const globalRoot = normalizeGlobalDataPath(globalDataPath);
+  const directorySignature = (directoryPath: string) => {
+    try {
+      return fs.readdirSync(directoryPath, { withFileTypes: true })
+        .filter(entry => entry.isFile())
+        .map(entry => `${entry.name}:${fileSignature(path.join(directoryPath, entry.name))}`)
+        .sort()
+        .join(',');
+    } catch {
+      return 'missing';
+    }
+  };
+  const learningRoot = path.join(globalRoot, 'learning');
+  const learningFacts = [
+    fileSignature(path.join(learningRoot, 'ledger', 'events.jsonl')),
+    directorySignature(path.join(learningRoot, 'candidates')),
+    directorySignature(path.join(learningRoot, 'approved')),
+    directorySignature(path.join(learningRoot, 'candidate-decisions'))
+  ].join('|');
+  return `${projectFacts}|${fileSignature(path.join(globalRoot, 'strategy', 'project-strategy.csv'))}|${learningFacts}`;
 }
 
 export function readCachedStrategyPyramidSnapshot(
   projectEntries: StrategyPyramidProject[],
-  globalDataPath: string
+  globalDataPath: string,
+  engineConfigRevision = ''
 ): StrategyPyramidSnapshot | null {
   try {
     const strategyRoot = path.join(normalizeGlobalDataPath(globalDataPath), 'strategy');
     const metadata = JSON.parse(fs.readFileSync(path.join(strategyRoot, 'pyramid-snapshot-meta.json'), 'utf8'));
     if (metadata.signature !== strategySourceSignature(projectEntries, globalDataPath)) return null;
+    if (String(metadata.engineConfigRevision || '') !== engineConfigRevision) return null;
     return JSON.parse(fs.readFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), 'utf8')) as StrategyPyramidSnapshot;
   } catch {
     return null;
@@ -984,14 +1192,15 @@ export function readCachedStrategyPyramidSnapshot(
 
 function writeStrategyPyramidSnapshotMetadata(
   projectEntries: StrategyPyramidProject[],
-  globalDataPath: string
+  globalDataPath: string,
+  engineConfigRevision = ''
 ): void {
   try {
     const strategyRoot = path.join(normalizeGlobalDataPath(globalDataPath), 'strategy');
     fs.mkdirSync(strategyRoot, { recursive: true });
     fs.writeFileSync(
       path.join(strategyRoot, 'pyramid-snapshot-meta.json'),
-      JSON.stringify({ version: 1, signature: strategySourceSignature(projectEntries, globalDataPath) }),
+      JSON.stringify({ version: 1, signature: strategySourceSignature(projectEntries, globalDataPath), engineConfigRevision }),
       'utf8'
     );
   } catch (error) {
@@ -1002,7 +1211,8 @@ function writeStrategyPyramidSnapshotMetadata(
 export function buildStrategyPyramidSnapshotData(
   projectEntries: StrategyPyramidProject[],
   globalDataPath: string,
-  fallbackWorkspaceRoot = process.cwd()
+  fallbackWorkspaceRoot = process.cwd(),
+  persist = true
 ): StrategyPyramidSnapshot {
   const savedStrategies = readProjectStrategyCsv(globalDataPath);
 
@@ -1093,7 +1303,7 @@ export function buildStrategyPyramidSnapshotData(
   const learnCount = countLoop('learn');
   const improveCount = countLoop('improve');
   const learningSummary = readLearningSummary(projects[0]?.path || fallbackWorkspaceRoot, globalDataPath);
-  const learningSignals: StrategyPyramidLearningSignal[] = learningSummary.projectSignals.slice(0, 8).map((item) => ({
+  const learningSignals: StrategyPyramidLearningSignal[] = learningSummary.projectSignals.map((item) => ({
     projectName: item.projectName,
     projectPath: item.projectPath,
     eventCount: item.eventCount,
@@ -1150,10 +1360,47 @@ export function buildStrategyPyramidSnapshotData(
     learningSignals,
     scenarios: buildStrategyScenarios(projects, abilities),
     recommendedScenarioPath: inferRecommendedScenarioPath(projects, sellCount, learnCount),
-    projects
+    projects,
+    decisionSource: 'rules_fallback',
+    engineStatus: 'unavailable'
   };
 
-  writeStrategyPyramidSnapshot(globalDataPath, snapshot);
-  writeStrategyPyramidSnapshotMetadata(projectEntries, globalDataPath);
+  if (persist) {
+    writeStrategyPyramidSnapshot(globalDataPath, snapshot);
+    writeStrategyPyramidSnapshotMetadata(projectEntries, globalDataPath);
+  }
   return snapshot;
+}
+
+export async function buildCognitiveStrategyPyramidSnapshotData(
+  projectEntries: StrategyPyramidProject[],
+  globalDataPath: string,
+  fallbackWorkspaceRoot: string,
+  engine: StrategyPyramidCognitiveEngine,
+  engineConfigRevision: string,
+  beforeCommit?: () => boolean
+): Promise<StrategyPyramidSnapshot> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (beforeCommit && !beforeCommit()) {
+      throw new Error('Strategy pyramid model configuration changed while intelligent judgment was running.');
+    }
+    const baseline = buildStrategyPyramidSnapshotData(projectEntries, globalDataPath, fallbackWorkspaceRoot, false);
+    const sourceSignature = strategySourceSignature(projectEntries, globalDataPath);
+    const judgment = await engine.judgeStrategyPyramid(buildStrategyPyramidCognitiveInput(baseline));
+    if (strategySourceSignature(projectEntries, globalDataPath) !== sourceSignature) {
+      if (attempt === 0) continue;
+      throw new Error('Strategy pyramid facts changed while intelligent judgment was running.');
+    }
+    if (beforeCommit && !beforeCommit()) {
+      throw new Error('Strategy pyramid model configuration changed while intelligent judgment was running.');
+    }
+    const snapshot = applyCognitiveStrategyPyramidJudgment(baseline, judgment, {
+      engineId: engine.id,
+      engineConfigRevision
+    });
+    writeStrategyPyramidSnapshot(globalDataPath, snapshot, false);
+    writeStrategyPyramidSnapshotMetadata(projectEntries, globalDataPath, engineConfigRevision);
+    return snapshot;
+  }
+  throw new Error('Strategy pyramid facts changed while intelligent judgment was running.');
 }

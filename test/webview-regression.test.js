@@ -447,7 +447,10 @@ function loadCompiledModule(relativePath, exportPatch) {
           return loadCompiledModule('out/dailyReview.js', '');
         }
         if (id === './cognitiveRuntimeConfig') {
-          return { writeCognitiveRuntimeConfig() {} };
+          return require(path.join(projectRoot, 'out/cognitiveRuntimeConfig.js'));
+        }
+        if (id === './piAgentEngine') {
+          return require(path.join(projectRoot, 'out/piAgentEngine.js'));
         }
         if (id === './globalEngineeringStore') {
           return require(path.join(projectRoot, 'out/globalEngineeringStore.js'));
@@ -4796,6 +4799,8 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   const snapshot = {
     generatedAt: '2026-06-05T00:00:00.000Z',
     confidence: 'medium',
+    decisionSource: 'cognitive',
+    engineStatus: 'completed',
     stageTitle: 'Build 偏重期',
     mainJudgment: 'Build 信号明显偏重，继续新增功能会降低商业化验证效率。',
     strategicAction: '加码核心产品的商业化验证，补上销售与反馈信号。',
@@ -4805,7 +4810,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
     sellCount: 1,
     learnCount: 1,
     improveCount: 1,
-    risks: ['存在失败环节，应先收口再继续加码。'],
+    risks: ['模型风险：付费证据仍为空。'],
     loops: [
       { key: 'build', label: 'Build', title: '产品与交付', count: 2, projectNames: ['SoloMap'], judgment: '1 个项目形成 Build 信号' },
       { key: 'sell', label: 'Sell', title: '收入与市场', count: 1, projectNames: ['SoloMap'], judgment: '1 个项目形成 Sell 信号' },
@@ -4820,7 +4825,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
       { key: 'reality-inventory', title: '现实锚点与投资库存', health: 'strong', signal: '1 个项目进入组合视野。', action: '冻结低复利项目，把注意力留给核心验证。' }
     ],
     moves: [
-      { horizon: '未来 30 天', title: '补齐商业化与反馈验证', reason: '当前组合的建设动作多于市场信号。' },
+      { horizon: '未来 30 天', title: '模型动作：完成首个付费验证', reason: '当前组合的建设动作多于市场信号。', evidence: ['尚无付费证据'] },
       { horizon: '本季度', title: '减少低复利维护投入', reason: '组合价值来自复利关系。' }
     ],
     abilities: [
@@ -4862,6 +4867,13 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
       loop: 'sell',
       action: '继续当前推进',
       risk: '',
+      intelligentAction: '模型项目建议：集中验证定价',
+      intelligentRisk: '模型项目风险：功能建设挤占销售',
+      intelligentAdvice: {
+        doubleDown: '模型加码：真实销售',
+        reduce: '模型收缩：新增功能',
+        observe: '模型观察：付费转化'
+      },
       evidence: ['2/5 个环节已完成', '当前有推进中的环节'],
       abilities: ['AI 产品编排'],
       roleScores: {
@@ -4888,12 +4900,14 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   };
 
   const proHtml = extensionModule.__getStrategyPyramidWebviewHtml(createWebviewStub(), context, snapshot);
+  const renderedBody = proHtml.slice(0, proHtml.lastIndexOf('<script>'));
   assert.match(proHtml, /一人公司战略驾驶舱/);
   assert.match(proHtml, /Build/);
   assert.match(proHtml, /Sell/);
   assert.match(proHtml, /Learn/);
   assert.match(proHtml, /Improve/);
   assert.match(proHtml, /当前战略状态|Build 偏重期/);
+  assert.match(proHtml, /智能内核判断/);
   assert.match(proHtml, /战略动作/);
   assert.match(proHtml, /边界约束/);
   assert.match(proHtml, /结构信号/);
@@ -4902,7 +4916,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   assert.match(proHtml, /市场信誉/);
   assert.match(proHtml, /时间结构/);
   assert.match(proHtml, /1-3 个月结构风险/);
-  assert.match(proHtml, /结构机会/);
+  assert.doesNotMatch(renderedBody, /中等结构风险|结构机会/);
   assert.match(proHtml, /自由选择与个人品牌/);
   assert.match(proHtml, /可复利收入系统/);
   assert.match(proHtml, /市场覆盖与信誉/);
@@ -4924,13 +4938,20 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   assert.match(proHtml, /场景 B/);
   assert.match(proHtml, /场景 C/);
   assert.match(proHtml, /推荐路径/);
+  assert.match(renderedBody, /模型风险：付费证据仍为空/);
+  assert.match(renderedBody, /模型动作：完成首个付费验证/);
+  assert.match(renderedBody, /模型项目建议：集中验证定价/);
+  assert.match(renderedBody, /模型项目风险：功能建设挤占销售/);
+  assert.match(renderedBody, /模型加码：真实销售/);
+  assert.match(renderedBody, /模型收缩：新增功能/);
+  assert.match(renderedBody, /模型观察：付费转化/);
   assert.match(proHtml, /data-project-index="0"/);
   assert.doesNotMatch(proHtml, /查看项目|data-open-project|解锁战略金字塔|升级 Pro|GitHub|Passport|CloudMCP|entitlement|strategy_pyramid|snapshot|CSV|JSON|内部|配置|组件目的|来自 SoloMap 已确认|今日安排第|今天先跑/);
   assert.doesNotThrow(() => new vm.Script(extractLastScript(proHtml)));
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), true);
 });
 
-test('strategy pyramid snapshot aggregates portfolio signals and writes a reusable global view', () => {
+test('strategy pyramid snapshot sends portfolio facts through the intelligent kernel and writes its judgment', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     'module.exports.__buildStrategyPyramidSnapshot = buildStrategyPyramidSnapshot;'
@@ -4992,11 +5013,37 @@ test('strategy pyramid snapshot aggregates portfolio signals and writes a reusab
     }
   };
 
-  const snapshot = extensionModule.__buildStrategyPyramidSnapshot(context);
+  const snapshot = await extensionModule.__buildStrategyPyramidSnapshot(context, {
+    id: 'pi-agent:agent-cli:agy:gpt-test:strategy-test',
+    async judgeStrategyPyramid(input) {
+      return {
+        confidence: 'medium',
+        stageTitle: '商业验证期',
+        mainJudgment: `当前 ${input.totals.projects} 个项目需要补齐商业验证。`,
+        strategicAction: '集中核心产品的销售与反馈验证。',
+        constraint: '验证完成前不新增产品线。',
+        risks: ['商业化证据不足。'],
+        moves: [
+          { horizon: '未来 30 天', title: '验证核心产品转化', reason: '建设信号已经充足。', evidence: ['SoloMap 路线图包含销售环节'] },
+          { horizon: '本季度', title: '按验证结果收缩组合', reason: '先形成收入证据再分配投入。', evidence: ['当前有 2 个项目'] }
+        ],
+        recommendedScenarioPath: '推荐路径：先验证核心产品收入，再决定是否扩展组合。',
+        projects: input.projects.map(project => ({
+          id: project.id,
+          action: '推进真实市场验证',
+          risk: '收入证据不足',
+          advice: { doubleDown: '销售与反馈', reduce: '新增功能', observe: '真实转化' }
+        }))
+      };
+    }
+  });
   const snapshotPath = path.join(globalRoot, 'strategy', 'pyramid-snapshot.json');
   const projectStrategyPath = path.join(globalRoot, 'strategy', 'project-strategy.csv');
   const abilityRegistryPath = path.join(globalRoot, 'strategy', 'ability-registry.csv');
   assert.equal(snapshot.totalProjects, 2);
+  assert.equal(snapshot.decisionSource, 'cognitive');
+  assert.equal(snapshot.engineStatus, 'completed');
+  assert.equal(snapshot.mainJudgment, '当前 2 个项目需要补齐商业验证。');
   assert.equal(snapshot.stageTitle.length > 0, true);
   assert.equal(snapshot.stageProfile.defaultQuestion.length > 0, true);
   assert.match(snapshot.mainJudgment, /组合|项目|Build|收入|反馈|核心/);
@@ -5014,11 +5061,21 @@ test('strategy pyramid snapshot aggregates portfolio signals and writes a reusab
   assert.ok(snapshot.moves.length >= 2);
   assert.ok(snapshot.projects.some((project) => project.name === 'SoloMap' && project.role === '核心产品' && project.roleScores.brandValue >= 1));
   assert.ok(fs.existsSync(snapshotPath));
-  assert.ok(fs.existsSync(projectStrategyPath));
-  assert.ok(fs.existsSync(abilityRegistryPath));
+  assert.equal(fs.existsSync(projectStrategyPath), false);
+  assert.equal(fs.existsSync(abilityRegistryPath), false);
   const written = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
   assert.equal(written.totalProjects, 2);
   assert.equal(written.layers.length, 5);
+
+  const fallback = await extensionModule.__buildStrategyPyramidSnapshot(context, {
+    id: 'pi-agent:agent-cli:agy:gpt-test:strategy-failure',
+    async judgeStrategyPyramid() {
+      throw new Error('model pipe unavailable');
+    }
+  });
+  assert.equal(fallback.decisionSource, 'rules_fallback');
+  assert.equal(fallback.engineStatus, 'failed');
+  assert.equal(fallback.totalProjects, 2);
   assert.match(fs.readFileSync(projectStrategyPath, 'utf8'), /projectPath,role,businessStage,revenueTier,timeLoad,strategicAction,abilities,updatedAt/);
   assert.match(fs.readFileSync(abilityRegistryPath, 'utf8'), /abilityId,name,category,marketRelevance,notes,updatedAt/);
 });

@@ -50,7 +50,16 @@ import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } fro
 import { backfillRunIndexFromDigests } from './runIndexMaintenance';
 import { clearProjectGrowthViewCache, getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
 import { runProjectCoverageAnalysis } from './projectCoverage';
-import { buildStrategyPyramidSnapshotData, readCachedStrategyPyramidSnapshot, saveProjectStrategyData } from './strategyPyramid';
+import {
+  buildCognitiveStrategyPyramidSnapshotData,
+  buildStrategyPyramidSnapshotData,
+  createStrategyPyramidRequestGate,
+  readCachedStrategyPyramidSnapshot,
+  saveProjectStrategyData,
+  StrategyPyramidCognitiveEngine
+} from './strategyPyramid';
+import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
+import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
@@ -271,6 +280,7 @@ import { locateCodexSessionByBindingNonce, readCodexTurnCompletionSince } from '
 let syncEngine: SyncEngine | null = null;
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
+const strategyPyramidRequestGate = createStrategyPyramidRequestGate();
 let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPath = '';
 let projectGrowthLoadSequence = 0;
@@ -3845,7 +3855,10 @@ async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext, for
   if (!panel) {
     return;
   }
+  const isLatestRequest = strategyPyramidRequestGate.begin();
+  const canPublishToPanel = () => activeStrategyPyramidPanel === panel && isLatestRequest();
   if (!await hasLocalStrategyPyramidAccess(context)) {
+    if (!canPublishToPanel()) return;
     panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
       title: '需要 SoloMap Pro',
       message: '战略金字塔需要 Pro。你仍然可以先使用本地路线图和项目卡片；登录或升级后这里会读取本地项目组合数据。',
@@ -3856,24 +3869,39 @@ async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext, for
   }
   const strategyProjects = getProjects(context);
   const strategyGlobalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
-  const cachedSnapshot = forceRefresh ? null : readCachedStrategyPyramidSnapshot(strategyProjects, strategyGlobalDataPath);
+  const cognitiveConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
+  const engineConfigRevision = cognitiveConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(cognitiveConfig) : '';
+  const projectRevision = JSON.stringify(strategyProjects.map(project => [project.path, project.name, project.type || '']));
+  const canPublishCurrentSource = () => {
+    if (!canPublishToPanel()) return false;
+    const currentConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
+    const currentEngineRevision = currentConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(currentConfig) : '';
+    const currentProjectRevision = JSON.stringify(getProjects(context).map(project => [project.path, project.name, project.type || '']));
+    return currentEngineRevision === engineConfigRevision && currentProjectRevision === projectRevision;
+  };
+  const cachedSnapshot = forceRefresh ? null : readCachedStrategyPyramidSnapshot(
+    strategyProjects,
+    strategyGlobalDataPath,
+    engineConfigRevision
+  );
   if (cachedSnapshot) {
+    if (!canPublishCurrentSource()) return;
     panel.webview.html = getStrategyPyramidWebviewHtml(panel.webview, context, cachedSnapshot);
     return;
   }
   await postLocalDataLoad(
-    () => buildStrategyPyramidSnapshot(context),
+    () => buildStrategyPyramidSnapshot(context, undefined, canPublishCurrentSource),
     (snapshot) => {
-      if (!activeStrategyPyramidPanel) return;
-      activeStrategyPyramidPanel.webview.html = getStrategyPyramidWebviewHtml(
-        activeStrategyPyramidPanel.webview,
+      if (!canPublishCurrentSource()) return;
+      panel.webview.html = getStrategyPyramidWebviewHtml(
+        panel.webview,
         context,
         snapshot
       );
     },
     (message) => {
-      if (!activeStrategyPyramidPanel) return;
-      activeStrategyPyramidPanel.webview.html = buildLocalDataStatusHtml(activeStrategyPyramidPanel.webview, context, {
+      if (!canPublishCurrentSource()) return;
+      panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
         title: '战略金字塔加载失败',
         message: '本地项目组合数据没有成功读取。',
         detail: message,
@@ -3885,12 +3913,49 @@ async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext, for
   );
 }
 
-function buildStrategyPyramidSnapshot(context: vscode.ExtensionContext) {
-  return buildStrategyPyramidSnapshotData(
-    getProjects(context),
-    normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
-    getWorkspaceRoot() || process.cwd()
-  );
+async function buildStrategyPyramidSnapshot(
+  context: vscode.ExtensionContext,
+  engineOverride?: StrategyPyramidCognitiveEngine,
+  beforeCommit?: () => boolean
+) {
+  const projects = getProjects(context);
+  const globalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const workspaceRoot = getWorkspaceRoot() || process.cwd();
+  const cognitiveConfig = readCognitiveRuntimeConfig(globalDataPath);
+  const engineConfigRevision = engineOverride
+    ? String(engineOverride.id.split(':').pop() || 'test')
+    : cognitiveRuntimeConfigRevision(cognitiveConfig);
+  const engine = engineOverride || (cognitiveConfig.mode === 'agent_cli' ? new EmbeddedPiAgentEngine({
+    agentCli: cognitiveConfig.agentCli,
+    model: cognitiveConfig.model,
+    configRevision: engineConfigRevision,
+    workingDirectory: path.join(globalDataPath, 'runtime', 'strategy-pyramid-work')
+  }) : null);
+  if (!engine) {
+    return buildStrategyPyramidSnapshotData(projects, globalDataPath, workspaceRoot);
+  }
+  try {
+    return await buildCognitiveStrategyPyramidSnapshotData(
+      projects,
+      globalDataPath,
+      workspaceRoot,
+      engine,
+      engineConfigRevision,
+      () => (!beforeCommit || beforeCommit())
+        && (Boolean(engineOverride) || cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath)) === engineConfigRevision)
+    );
+  } catch (error) {
+    if (beforeCommit && !beforeCommit()) throw error;
+    const fallback = buildStrategyPyramidSnapshotData(projects, globalDataPath, workspaceRoot);
+    return {
+      ...fallback,
+      decisionSource: 'rules_fallback' as const,
+      engineId: engine.id,
+      engineConfigRevision,
+      engineStatus: 'failed' as const,
+      engineError: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 async function saveProjectStrategy(

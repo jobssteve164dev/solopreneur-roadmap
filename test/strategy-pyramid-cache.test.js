@@ -31,6 +31,13 @@ test('strategy pyramid reuses its local snapshot until a project source changes'
 
     fs.appendFileSync(path.join(solopreneurPath, 'roadmap.csv'), '2,Verify demand,Learn,Pending\n');
     assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath), null);
+
+    const regenerated = buildStrategyPyramidSnapshotData(projects, globalDataPath, projectPath);
+    assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath).generatedAt, regenerated.generatedAt);
+    const learningLedgerPath = path.join(globalDataPath, 'learning', 'ledger');
+    fs.mkdirSync(learningLedgerPath, { recursive: true });
+    fs.writeFileSync(path.join(learningLedgerPath, 'events.jsonl'), '{"eventType":"verified"}\n');
+    assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath), null);
   } finally {
     for (const filePath of [
       path.join(strategyPath, 'pyramid-snapshot-meta.json'),

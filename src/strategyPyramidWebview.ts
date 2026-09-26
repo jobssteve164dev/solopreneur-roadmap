@@ -36,6 +36,12 @@ export function getStrategyPyramidWebviewHtml(
   const mainJudgment = snapshot.mainJudgment || '从项目组合判断现在该加码、收缩、暂停、转向，还是孵化新方向。';
   const strategicAction = snapshot.strategicAction || '选择一个项目补上最缺的市场或反馈信号。';
   const constraint = snapshot.constraint || '不要让项目数量替代真实验证。';
+  const isCognitive = snapshot.decisionSource === 'cognitive' && snapshot.engineStatus === 'completed';
+  const decisionMeta = isCognitive
+    ? '智能内核判断 · 基于本地项目、路线图和学习信号'
+    : snapshot.engineStatus === 'failed'
+      ? '智能判断暂不可用，当前显示基础判断'
+      : '当前显示基础判断 · 在设置中选择模型额度来源后启用智能判断';
   const topProjects: any[] = snapshot.projects || [];
 
   const loops: any[] = snapshot.loops || [];
@@ -45,6 +51,10 @@ export function getStrategyPyramidWebviewHtml(
   const structureSignals: any[] = snapshot.structureSignals || [];
   const riskSignals: any[] = snapshot.riskSignals || [];
   const opportunitySignals: any[] = snapshot.opportunitySignals || [];
+  const visibleRiskSignals: any[] = isCognitive
+    ? (snapshot.risks || []).map((summary: string, index: number) => ({ severity: index === 0 ? 'high' : 'medium', title: '智能内核风险判断', summary }))
+    : riskSignals;
+  const visibleOpportunitySignals: any[] = isCognitive ? [] : opportunitySignals;
   const scenarios: any[] = snapshot.scenarios || [];
   const recommendedScenarioPath = snapshot.recommendedScenarioPath || '';
 
@@ -64,8 +74,12 @@ export function getStrategyPyramidWebviewHtml(
     timeLoad: project.timeLoad,
     actualMinutes: (project as any).actualMinutes || 0,
     strategicRelation: project.strategicRelation,
+    loop: project.loop,
     action: project.action,
     risk: project.risk || '暂无明显结构风险',
+    intelligentAction: project.intelligentAction || '',
+    intelligentRisk: project.intelligentRisk || '',
+    intelligentAdvice: project.intelligentAdvice || null,
     progressPercent: project.progressPercent,
     roleScores: project.roleScores,
     advice: project.advice,
@@ -1002,7 +1016,7 @@ export function getStrategyPyramidWebviewHtml(
         <div class="cockpit-main">
           <div class="state-badge">当前战略状态：${strategyEscapeHtml(stageTitle)}</div>
           <h2 class="cockpit-title">${strategyEscapeHtml(mainJudgment)}</h2>
-          <div class="cockpit-meta">置信度：${strategyEscapeHtml(snapshot.confidence === 'high' ? '高' : snapshot.confidence === 'medium' ? '中' : '低')} · 基于本地项目、路线图阶段和推进信号聚合</div>
+          <div class="cockpit-meta">置信度：${strategyEscapeHtml(snapshot.confidence === 'high' ? '高' : snapshot.confidence === 'medium' ? '中' : '低')} · ${strategyEscapeHtml(decisionMeta)}</div>
         </div>
         <div class="cockpit-grid">
           <div class="cockpit-item">
@@ -1033,7 +1047,7 @@ export function getStrategyPyramidWebviewHtml(
         <div class="glass-card">
           <div class="section-title"><span class="codicon codicon-warning"></span>1-3 个月结构风险与机会</div>
           <div class="risks-list">
-            ${riskSignals.map((signal) => `
+            ${visibleRiskSignals.map((signal) => `
               <div class="risk-alert ${strategyEscapeHtml(signal.severity)}">
                 <span class="codicon codicon-warning"></span>
                 <div>
@@ -1042,7 +1056,7 @@ export function getStrategyPyramidWebviewHtml(
                 </div>
               </div>
             `).join('')}
-            ${opportunitySignals.map((signal) => `
+            ${visibleOpportunitySignals.map((signal) => `
               <div class="risk-alert healthy">
                 <span class="codicon codicon-circle-large-filled"></span>
                 <div>
@@ -1054,6 +1068,23 @@ export function getStrategyPyramidWebviewHtml(
           </div>
         </div>
       </div>
+
+      ${moves.length ? `
+        <div class="glass-card" style="margin-top: 16px;">
+          <div class="section-title"><span class="codicon codicon-target"></span>近期战略动作</div>
+          <div class="risks-list">
+            ${moves.map((move) => `
+              <div class="risk-alert healthy">
+                <span class="codicon codicon-arrow-right"></span>
+                <div>
+                  <strong>${strategyEscapeHtml(move.horizon)} · ${strategyEscapeHtml(move.title)}</strong>
+                  <p>${strategyEscapeHtml(move.reason)}</p>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
     </section>
 
     <!-- TAB 2: 战略金字塔 -->
@@ -1145,6 +1176,23 @@ export function getStrategyPyramidWebviewHtml(
             <div class="quadrant-cards" id="quad-improve"></div>
           </div>
         </div>
+        ${topProjects.some(project => project.intelligentAction) ? `
+          <div class="section-title" style="margin-top: 22px;"><span class="codicon codicon-sparkle"></span>逐项目智能建议</div>
+          <div class="risks-list">
+            ${topProjects.filter(project => project.intelligentAction).map(project => `
+              <div class="risk-alert medium">
+                <span class="codicon codicon-lightbulb"></span>
+                <div>
+                  <strong>${strategyEscapeHtml(project.name)} · ${strategyEscapeHtml(project.intelligentAction)}</strong>
+                  <p>${strategyEscapeHtml(project.intelligentRisk || '')}</p>
+                  <p>加码：${strategyEscapeHtml(project.intelligentAdvice?.doubleDown || '')}</p>
+                  <p>收缩：${strategyEscapeHtml(project.intelligentAdvice?.reduce || '')}</p>
+                  <p>观察：${strategyEscapeHtml(project.intelligentAdvice?.observe || '')}</p>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
       </div>
     </section>
 
@@ -1293,6 +1341,11 @@ export function getStrategyPyramidWebviewHtml(
     <div class="project-detail-sec">
       <strong>项目推进情况与诊断</strong>
       <div id="drawer-p-metrics">-</div>
+    </div>
+
+    <div class="project-detail-sec" id="drawer-p-intelligent" style="display: none;">
+      <strong>智能建议</strong>
+      <div id="drawer-p-intelligent-content">-</div>
     </div>
 
     <div class="drawer-actions">
@@ -1489,6 +1542,30 @@ export function getStrategyPyramidWebviewHtml(
         ul.appendChild(li);
       });
       metricsContainer.appendChild(ul);
+
+      const intelligentContainer = document.getElementById('drawer-p-intelligent');
+      const intelligentContent = document.getElementById('drawer-p-intelligent-content');
+      if (project.intelligentAction) {
+        intelligentContainer.style.display = '';
+        intelligentContent.innerHTML = '';
+        const advice = project.intelligentAdvice || {};
+        const intelligentList = document.createElement('ul');
+        [
+          '建议：' + project.intelligentAction,
+          '风险：' + (project.intelligentRisk || '暂无'),
+          '加码：' + (advice.doubleDown || '暂无'),
+          '收缩：' + (advice.reduce || '暂无'),
+          '观察：' + (advice.observe || '暂无')
+        ].forEach(item => {
+          const li = document.createElement('li');
+          li.textContent = item;
+          intelligentList.appendChild(li);
+        });
+        intelligentContent.appendChild(intelligentList);
+      } else {
+        intelligentContainer.style.display = 'none';
+        intelligentContent.textContent = '-';
+      }
 
       drawer.classList.add('open');
     }
