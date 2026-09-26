@@ -6209,6 +6209,67 @@ function renderBlogCards(posts, locale, limit = posts.length) {
   </a>`).join("");
 }
 
+function serializeJsonLd(value) {
+  return JSON.stringify(value).replaceAll("<", "\\u003c");
+}
+
+function blogMarkdownText(value) {
+  return String(value || "")
+    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/^>\s?/, "")
+    .replace(/^[-*]\s+/, "")
+    .trim();
+}
+
+function extractBlogFaqs(markdown = "") {
+  const lines = markdown.split("\n");
+  let faqStart = -1;
+  let scanningCode = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (/^```/.test(line)) {
+      scanningCode = !scanningCode;
+      continue;
+    }
+    if (!scanningCode && /^##\s+(frequently asked questions|faq|常见问题|常見問題)\s*$/i.test(line)) {
+      faqStart = index;
+      break;
+    }
+  }
+  if (faqStart < 0) return [];
+
+  const faqs = [];
+  let question = "";
+  let answer = [];
+  let inCode = false;
+  const flush = () => {
+    const text = answer.join(" ").trim();
+    if (question && text) faqs.push({ question, answer: text });
+    question = "";
+    answer = [];
+  };
+  for (const rawLine of lines.slice(faqStart + 1)) {
+    const line = rawLine.trim();
+    if (/^```/.test(line)) {
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) continue;
+    if (/^##\s+/.test(line)) break;
+    const heading = line.match(/^###\s+(.+)$/);
+    if (heading) {
+      flush();
+      question = blogMarkdownText(heading[1]);
+      continue;
+    }
+    if (question && line) answer.push(blogMarkdownText(line));
+  }
+  flush();
+  return faqs;
+}
+
 function buildBlogIndexPage(locale, origin, posts) {
   const t = content[locale];
   const localized = posts.filter((post) => post.locale === locale)
@@ -6222,7 +6283,7 @@ function buildBlogIndexPage(locale, origin, posts) {
     "@context": "https://schema.org", "@type": "Blog", name: "SoloMap OPC Blog", url: `${origin}${path}`,
     description, blogPost: localized.map((post) => ({ "@type": "BlogPosting", headline: post.title, url: post.canonicalUrl, datePublished: post.publishedAt }))
   };
-  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { ...t.meta, title, description, ogDescription: description } }, origin, path)}<script type="application/ld+json">${JSON.stringify(structured)}</script>${buildStyles()}</head>
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: { ...t.meta, title, description, ogDescription: description } }, origin, path)}<script type="application/ld+json">${serializeJsonLd(structured)}</script>${buildStyles()}</head>
   <body>${buildHeader(t, locale, path)}<main id="main-content" class="blog-page shell"><div class="blog-intro"><span class="eyebrow">OPC Blog</span><h1>${locale === "zh" ? "一个人做产品，也要让市场找得到你。" : "Build alone. Get discovered."}</h1><p>${escapeHtml(description)}</p></div>
   ${localized.length ? `<div class="blog-grid">${renderBlogCards(localized, locale)}</div>` : `<div class="blog-empty">${locale === "zh" ? "第一批实战文章正在准备中。你可以先从 SoloMap 文档开始。" : "The first field guides are being prepared. Start with the SoloMap docs in the meantime."} <a href="${t.docsPath}">${locale === "zh" ? "查看文档" : "Browse docs"} →</a></div>`}</main>${buildFooter(t)}</body></html>`;
 }
@@ -6238,8 +6299,16 @@ function buildBlogArticlePage(locale, origin, post, posts) {
     author: { "@type": "Organization", name: post.author }, publisher: { "@type": "Organization", name: "SoloMap", url: origin },
     image: post.ogImageUrl || `${origin}/solomap-social-card.png`, keywords: post.tags.join(", ")
   };
+  const faqs = extractBlogFaqs(post.contentMarkdown);
+  const faqStructured = faqs.length ? {
+    "@context": "https://schema.org", "@type": "FAQPage",
+    mainEntity: faqs.map(({ question, answer }) => ({
+      "@type": "Question", name: question,
+      acceptedAnswer: { "@type": "Answer", text: answer }
+    }))
+  } : null;
   const alternatePath = alternate ? new URL(alternate.canonicalUrl).pathname : false;
-  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: metadata }, origin, path, alternatePath)}<script type="application/ld+json">${JSON.stringify(structured)}</script>${buildStyles()}</head>
+  return `<!doctype html><html lang="${t.lang}"><head>${buildHead({ ...t, meta: metadata }, origin, path, alternatePath)}<script type="application/ld+json">${serializeJsonLd(structured)}</script>${faqStructured ? `<script type="application/ld+json">${serializeJsonLd(faqStructured)}</script>` : ""}${buildStyles()}</head>
   <body>${buildHeader(t, locale, path, alternate ? blogPath(alternate.locale, alternate.slug) : blogPath(locale === "zh" ? "en" : "zh"))}<main id="main-content" class="article-shell"><nav class="docs-breadcrumbs"><a href="${t.homePath}">SoloMap</a> / <a href="${blogPath(locale)}">OPC Blog</a></nav><article><header class="article-header"><span class="blog-category">${escapeHtml(post.categoryLabel)}</span><h1>${escapeHtml(post.title)}</h1><p class="lead">${escapeHtml(post.description)}</p><div class="blog-meta">${escapeHtml(post.author)} · ${escapeHtml(formatBlogDate(post.publishedAt, locale))} · ${post.readingTime} ${locale === "zh" ? "分钟阅读" : "min read"}</div></header><div class="article-body">${renderMarkdown(post.contentMarkdown)}</div></article><section class="docs-related"><a href="${blogPath(locale)}">← ${locale === "zh" ? "返回 OPC Blog" : "Back to OPC Blog"}</a></section></main>${buildFooter(t)}</body></html>`;
 }
 
@@ -6495,7 +6564,16 @@ function buildSitemapXsl() {
 `;
 }
 
-function buildLlmsTxt(origin) {
+function buildLlmsTxt(origin, blogPosts = []) {
+  const blogIndex = blogPosts
+    .slice()
+    .sort((left, right) => {
+      const rightTimestamp = Date.parse(right.publishedAt);
+      const leftTimestamp = Date.parse(left.publishedAt);
+      return (Number.isFinite(rightTimestamp) ? rightTimestamp : 0) - (Number.isFinite(leftTimestamp) ? leftTimestamp : 0);
+    })
+    .map((post) => `- ${post.title}: ${post.canonicalUrl}`)
+    .join("\n");
   return `# SoloMap
 
 SoloMap is a local-first working agreement for people building products with AI coding agents in VS Code.
@@ -6555,6 +6633,8 @@ SoloMap is a local-first human-Agent working agreement for AI-built projects in 
 - VS Code Marketplace: ${MARKETPLACE_URL}
 - Open VSX: ${OPEN_VSX_URL}
 - GitHub: ${GITHUB_URL}
+
+${blogIndex ? `## Latest OPC Blog articles\n\n${blogIndex}\n` : ""}
 `;
 }
 
@@ -6914,7 +6994,8 @@ Sitemap: ${origin}/sitemap.xml
     }
 
     if (url.pathname === "/llms.txt") {
-      return textResponse(buildLlmsTxt(origin));
+      const projection = await getActiveBlogProjection(env).catch(() => ({ posts: [] }));
+      return textResponse(buildLlmsTxt(origin, projection.posts));
     }
 
     if (url.pathname === "/sitemap.xml") {

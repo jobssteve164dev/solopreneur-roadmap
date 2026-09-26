@@ -14,7 +14,7 @@ const post = {
   translationKey: "roadmap-guide",
   title: "A practical roadmap for solo developers",
   description: "Move from an idea to verified product progress.",
-  contentMarkdown: "## Start with one outcome\n\nBuild what users can actually try.\n\n- Ship\n- Learn",
+  contentMarkdown: "## Start with one outcome\n\nBuild what users can actually try.\n\n- Ship\n- Learn\n\n## Frequently asked questions\n\n### What should the roadmap track?\n\nTrack user outcomes and the evidence that proves them.\n\n### Does every task belong on the roadmap?\n\nNo. Keep routine implementation details in the task itself.",
   author: "SoloMap Team",
   category: "solo-operations",
   categoryLabel: "Solo Operations",
@@ -62,6 +62,9 @@ test("homepage, Blog index, article, and sitemap use one read-only projection", 
   const articleHtml = await article.text();
   assert.match(articleHtml, /<h2>Start with one outcome<\/h2>/);
   assert.match(articleHtml, /"@type":"BlogPosting"/);
+  assert.match(articleHtml, /"@type":"FAQPage"/);
+  assert.match(articleHtml, /"name":"What should the roadmap track\?"/);
+  assert.match(articleHtml, /"text":"Track user outcomes and the evidence that proves them\."/);
   assert.match(articleHtml, /version-1|A practical roadmap/);
   assert.doesNotMatch(articleHtml, /rel="alternate" hreflang="zh-Hans"/);
   assert.match(articleHtml, /class="language-link" href="\/zh\/blog\?lang=zh"/);
@@ -78,6 +81,51 @@ test("homepage, Blog index, article, and sitemap use one read-only projection", 
   const sitemap = await worker.fetch(new Request("https://solomap.app/sitemap.xml"), env, ctx);
   assert.equal(sitemap.status, 200);
   assert.match(await sitemap.text(), /\/blog\/solo-developer-roadmap/);
+});
+
+test("Blog JSON-LD cannot be closed by projected content and FAQ extraction ignores code fences", async () => {
+  const hostile = {
+    ...post,
+    title: "Probe </script><script>globalThis.pwned=1</script>",
+    contentMarkdown: "## Example\n\n```md\n## Frequently asked questions\n\n### Hidden prelude question?\n\nNot a visible FAQ.\n```\n\n## Frequently asked questions\n\n### Visible question?\n\nA **visible** answer with a [source](https://example.com).\n\n```md\n### Hidden code heading?\n\nNot a visible FAQ.\n```\n\n### Second visible question?\n\nA second answer."
+  };
+  const env = { BLOG_PROJECTION: projectionNamespace([hostile]), SITE_ORIGIN: "https://solomap.app" };
+  const indexHtml = await (await worker.fetch(new Request("https://solomap.app/blog"), env, ctx)).text();
+  const articleHtml = await (await worker.fetch(new Request("https://solomap.app/blog/solo-developer-roadmap"), env, ctx)).text();
+
+  assert.doesNotMatch(indexHtml, /<\/script><script>globalThis\.pwned/);
+  assert.doesNotMatch(articleHtml, /<\/script><script>globalThis\.pwned/);
+  assert.match(articleHtml, /"name":"Visible question\?"/);
+  assert.match(articleHtml, /"name":"Second visible question\?"/);
+  assert.doesNotMatch(articleHtml, /"name":"Hidden prelude question\?"/);
+  assert.doesNotMatch(articleHtml, /"name":"Hidden code heading\?"/);
+  assert.match(articleHtml, /"text":"A visible answer with a source\."/);
+});
+
+test("llms index exposes every published Blog article from the active projection", async () => {
+  const newer = { ...post, id: "post-2", versionId: "version-2", slug: "newer", title: "Newer article", canonicalUrl: "https://solomap.app/blog/newer", publishedAt: "2026-09-01T12:00:00.000Z" };
+  const response = await worker.fetch(new Request("https://solomap.app/llms.txt"), {
+    BLOG_PROJECTION: projectionNamespace([post, newer]),
+    SITE_ORIGIN: "https://solomap.app"
+  }, ctx);
+  const text = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(text, /## Latest OPC Blog articles/);
+  assert.match(text, /A practical roadmap for solo developers: https:\/\/solomap\.app\/blog\/solo-developer-roadmap/);
+  assert.ok(text.indexOf("Newer article") < text.indexOf("A practical roadmap"));
+
+  const fallback = await worker.fetch(new Request("https://solomap.app/llms.txt"), {
+    BLOG_PROJECTION: {
+      idFromName(name) { return name; },
+      get() { return { async fetch() { throw new Error("projection unavailable"); } }; }
+    },
+    SITE_ORIGIN: "https://solomap.app"
+  }, ctx);
+  const fallbackText = await fallback.text();
+  assert.equal(fallback.status, 200);
+  assert.match(fallbackText, /^# SoloMap/m);
+  assert.doesNotMatch(fallbackText, /## Latest OPC Blog articles/);
 });
 
 test("analytics endpoint rejects missing consent and enqueues an allowed anonymous page view", async () => {
