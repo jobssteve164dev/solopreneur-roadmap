@@ -5322,6 +5322,14 @@ function buildAgentShellScript(
   const loggedCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
   const commandPreview = effectiveDirectExecutionCommand ? loggedCommand : `${agentCli} [${sessionMode}]`;
   const executionCommand = effectiveDirectExecutionCommand || defaultExecutionCommand;
+  const quotedAgentCli = shellQuote(agentCli);
+  const codexDaemonFallbackCommand = agentProvider === 'codex'
+    ? executionCommand.startsWith(`${quotedAgentCli} resume `)
+      ? `${quotedAgentCli} resume --no-daemon ${executionCommand.slice(`${quotedAgentCli} resume `.length)}`
+      : executionCommand.startsWith(`${quotedAgentCli} `)
+        ? `${quotedAgentCli} --no-daemon ${executionCommand.slice(`${quotedAgentCli} `.length)}`
+        : ''
+    : '';
   let sessionBindingHeadRevision = 0;
   if (version2IdentityBinding) {
     createSessionBinding(sessionFilePath, {
@@ -5430,17 +5438,30 @@ function buildAgentShellScript(
       `${shellQuote(process.execPath)} -e ${shellQuote('const fs=require("fs");const path=require("path");const identity=require(process.argv[1]);const statusFile=process.argv[2];const sessionFile=process.argv[3];const sessionId=process.argv[4];identity.appendSessionBindingRevision(sessionFile,1,{sessionId,method:"provider_created",contract:"official_stable",state:"planned",evidence:{source:"cursor_create_chat"}});const status=JSON.parse(fs.readFileSync(statusFile,"utf8"));status.plannedNativeSessionId=sessionId;status.sessionBindingHeadRevision=2;const tmp=statusFile+"."+process.pid+".tmp";fs.writeFileSync(tmp,JSON.stringify(status));fs.renameSync(tmp,statusFile);')} ${shellQuote(path.join(__dirname, 'sessionIdentity.js'))} ${shellQuote(statusFilePath)} ${shellQuote(sessionFilePath)} "$solomap_cursor_session_id"`
     ]
     : [];
-  const trackedExecutionCommand = `if [ -r "/proc/$$/stat" ]; then solomap_agent_birth="proc:$(awk '{print \$22}' "/proc/$$/stat")"; else solomap_agent_birth="ps:$(ps -o lstart= -p "$$" 2>/dev/null)"; fi; printf '%s\n%s\n' "$$" "$solomap_agent_birth" > ${shellQuote(agentProcessPidFilePath)}; exec sh -c ${shellQuote(executionCommand)}`;
+  const buildTrackedExecutionCommand = (command: string) => `if [ -r "/proc/$$/stat" ]; then solomap_agent_birth="proc:$(awk '{print \$22}' "/proc/$$/stat")"; else solomap_agent_birth="ps:$(ps -o lstart= -p "$$" 2>/dev/null)"; fi; printf '%s\n%s\n' "$$" "$solomap_agent_birth" > ${shellQuote(agentProcessPidFilePath)}; exec sh -c ${shellQuote(command)}`;
+  const trackedExecutionCommand = buildTrackedExecutionCommand(executionCommand);
+  const trackedCodexDaemonFallbackCommand = codexDaemonFallbackCommand
+    ? buildTrackedExecutionCommand(codexDaemonFallbackCommand)
+    : '';
+  const codexDaemonRecoveryCondition = codexDaemonFallbackCommand
+    ? `[ "$status" -ne 0 ] && { grep -F -q 'app server did not become ready' ${shellQuote(outputFilePath)} 2>/dev/null || grep -F -q 'app-server-control.sock: No such file or directory' ${shellQuote(outputFilePath)} 2>/dev/null; }`
+    : '';
   const terminalExecutionScript = interactiveSession
     ? [
       'if command -v script >/dev/null 2>&1; then',
       `script -q -f -e -c ${shellQuote(trackedExecutionCommand)} ${shellQuote(outputFilePath)};`,
       'status=$?;',
+      codexDaemonFallbackCommand
+        ? `if ${codexDaemonRecoveryCondition}; then printf '\n%s\n' ${shellQuote('SoloMap: session startup was unavailable; retrying automatically.')} | tee -a ${shellQuote(outputFilePath)}; script -q -f -e -a -c ${shellQuote(trackedCodexDaemonFallbackCommand)} ${shellQuote(outputFilePath)}; status=$?; fi;`
+        : '',
       'else',
       `sh -c ${shellQuote(trackedExecutionCommand)} 2>&1 | tee ${shellQuote(outputFilePath)};`,
       'status=${PIPESTATUS[0]};',
+      codexDaemonFallbackCommand
+        ? `if ${codexDaemonRecoveryCondition}; then printf '\n%s\n' ${shellQuote('SoloMap: session startup was unavailable; retrying automatically.')} | tee -a ${shellQuote(outputFilePath)}; sh -c ${shellQuote(trackedCodexDaemonFallbackCommand)} 2>&1 | tee -a ${shellQuote(outputFilePath)}; status=\${PIPESTATUS[0]}; fi;`
+        : '',
       'fi'
-    ].join(' ')
+    ].filter(Boolean).join(' ')
     : [
       `sh -c ${shellQuote(trackedExecutionCommand)} 2>&1 | tee ${shellQuote(outputFilePath)};`,
       'status=${PIPESTATUS[0]}'

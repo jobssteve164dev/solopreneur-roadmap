@@ -8911,6 +8911,112 @@ test('session capture writer never emits legacy guessed identities for new runs'
   assert.equal(fs.existsSync(sessionFilePath), false);
 });
 
+test('generated Codex launchers recover once without the daemon after its readiness socket is unavailable', () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+  );
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-daemon-recovery-'));
+  const fakeBinRoot = path.join(workspaceRoot, 'bin');
+  const fakeCodexPath = path.join(fakeBinRoot, 'codex');
+  const capturedArgsPath = path.join(workspaceRoot, 'codex-args.txt');
+  fs.mkdirSync(fakeBinRoot, { recursive: true });
+  fs.writeFileSync(fakeCodexPath, [
+    '#!/usr/bin/env bash',
+    `printf '%s\\n' "$*" >> ${JSON.stringify(capturedArgsPath)}`,
+    'if [[ "${SOLOMAP_TEST_CODEX_ERROR:-}" == "unrelated" ]]; then',
+    "  printf '%s\\n' 'Error: authentication failed'",
+    '  exit 1',
+    'fi',
+    'if [[ " $* " == *" --no-daemon "* ]]; then',
+    "  printf '%s\\n' 'Codex session recovered'",
+    '  exit 0',
+    'fi',
+    "printf '%s\\n' 'Error: app server did not become ready on /tmp/app-server-control.sock'",
+    "printf '%s\\n' 'failed to connect to /tmp/app-server-control.sock: No such file or directory (os error 2)'",
+    'exit 1'
+  ].join('\n'), 'utf8');
+  fs.chmodSync(fakeCodexPath, 0o755);
+
+  const cases = [
+    { runId: 91, nativeSessionId: '', directCommand: '', runKind: 'solo' },
+    {
+      runId: 92,
+      nativeSessionId: '019ecd99-4325-7050-8e71-7def92359d30',
+      directCommand: `'${fakeCodexPath}' resume --no-alt-screen -C '${workspaceRoot}' 019ecd99-4325-7050-8e71-7def92359d30 'Continue'`,
+      runKind: 'solo_continue'
+    }
+  ];
+
+  for (const input of cases) {
+    const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', String(input.runId));
+    const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', `${input.runId}.json`);
+    const built = extensionModule.__buildAgentShellScript(
+      fakeCodexPath,
+      '',
+      'Keep this Codex conversation open.',
+      workspaceRoot,
+      '__solo__',
+      input.runId,
+      'Start or continue this Codex conversation.',
+      undefined,
+      input.nativeSessionId,
+      input.directCommand,
+      input.runKind,
+      '',
+      '',
+      'auto',
+      '',
+      'off',
+      {},
+      runDir,
+      statusFilePath
+    );
+    const before = fs.existsSync(capturedArgsPath) ? fs.readFileSync(capturedArgsPath, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+
+    childProcess.execFileSync('bash', [built.runScriptPath], { cwd: workspaceRoot, stdio: 'pipe' });
+    const invocations = fs.readFileSync(capturedArgsPath, 'utf8').trim().split('\n').filter(Boolean).slice(before);
+    assert.equal(invocations.length, 2, `run ${input.runId} should retry exactly once`);
+    assert.doesNotMatch(invocations[0], /--no-daemon/);
+    assert.match(invocations[1], /--no-daemon/);
+    assert.match(fs.readFileSync(built.outputFilePath, 'utf8'), /Codex session recovered/);
+  }
+
+  const unrelatedRunDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '93');
+  const unrelatedStatusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '93.json');
+  const unrelated = extensionModule.__buildAgentShellScript(
+    fakeCodexPath,
+    '',
+    'Keep this Codex conversation open.',
+    workspaceRoot,
+    '__solo__',
+    93,
+    'Do not retry unrelated failures.',
+    undefined,
+    '',
+    '',
+    'solo',
+    '',
+    '',
+    'auto',
+    '',
+    'off',
+    {},
+    unrelatedRunDir,
+    unrelatedStatusFilePath
+  );
+  const beforeUnrelated = fs.readFileSync(capturedArgsPath, 'utf8').trim().split('\n').filter(Boolean).length;
+  childProcess.execFileSync('bash', [unrelated.runScriptPath], {
+    cwd: workspaceRoot,
+    env: { ...process.env, SOLOMAP_TEST_CODEX_ERROR: 'unrelated' },
+    stdio: 'pipe'
+  });
+  const unrelatedInvocations = fs.readFileSync(capturedArgsPath, 'utf8').trim().split('\n').filter(Boolean).slice(beforeUnrelated);
+  assert.equal(unrelatedInvocations.length, 1);
+  assert.doesNotMatch(unrelatedInvocations[0], /--no-daemon/);
+  assert.match(fs.readFileSync(unrelated.outputFilePath, 'utf8'), /authentication failed/);
+});
+
 test('generated Cursor launcher passes the provider-created chat ID into the native TUI resume command', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
