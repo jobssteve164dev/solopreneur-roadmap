@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.485 - 2026-09-26
+
+### Fixed
+- recover Codex sessions from daemon startup failures (253eb11)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.484 - 2026-09-26
 
 ### Added
