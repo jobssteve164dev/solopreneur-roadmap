@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.488 - 2026-09-29
+
+### Fixed
+- keep smart kernel chat responsive at startup (1293329)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.487 - 2026-09-29
 
 ### Added
