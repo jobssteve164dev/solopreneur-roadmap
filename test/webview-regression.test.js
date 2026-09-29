@@ -143,6 +143,100 @@ test('settings capability refresh reads skills installed after the first cached 
   assert.ok(refreshed.skills.some((skill) => skill.id === 'installed-after-load'));
 });
 
+test('built-in MCP tools appear in the shared connector settings without entering Agent CLI candidates', () => {
+  const extensionModule = loadCompiledModule('out/extension.js',
+    'module.exports.__getPersistedSettings = getPersistedSettings;');
+  const { readSolomapMcpRegistry, buildSolomapMcpCandidateInstructions } =
+    require(path.join(projectRoot, 'out/solomapGlobal.js'));
+  const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-builtin-mcp-'));
+  extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalRoot;
+  const settings = extensionModule.__getPersistedSettings({ globalState: { get: () => ({}) } });
+  const builtIn = settings.connectors.find(connector => connector.id === 'builtin:solomap-intelligence');
+  assert.ok(builtIn);
+  assert.equal(builtIn.source.kind, 'builtin');
+  assert.deepEqual(builtIn.permissions.tools.sort(),
+    ['get_current_project', 'get_plugin_settings', 'list_projects']);
+  assert.equal(builtIn.permissions.externalAccess, false);
+  assert.equal(readSolomapMcpRegistry(projectRoot, globalRoot).connectors.some(connector => connector.id === builtIn.id), false);
+  assert.doesNotMatch(buildSolomapMcpCandidateInstructions(projectRoot, globalRoot, '查询当前项目'), /solomap-intelligence/);
+});
+
+test('built-in MCP settings do not hide an existing connector with the server name', () => {
+  const extensionModule = loadCompiledModule('out/extension.js',
+    'module.exports.__getPersistedSettings = getPersistedSettings;');
+  const { writeSolomapMcpRegistry } = require(path.join(projectRoot, 'out/solomapGlobal.js'));
+  const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-id-conflict-'));
+  extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalRoot;
+  writeSolomapMcpRegistry(projectRoot, globalRoot, {
+    version: 1, updatedAt: '',
+    connectors: [{ id: 'solomap-intelligence', title: 'Existing connector', status: 'installed' }]
+  });
+  const settings = extensionModule.__getPersistedSettings({ globalState: { get: () => ({}) } });
+  assert.ok(settings.connectors.some(connector => connector.id === 'builtin:solomap-intelligence'
+    && connector.source.kind === 'builtin'));
+  assert.ok(settings.connectors.some(connector => connector.id === 'solomap-intelligence'
+    && connector.title === 'Existing connector'));
+});
+
+test('shared connector settings do not offer uninstall for a built-in MCP service', () => {
+  const { getSharedWebviewRuntimeScript } = require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
+  const sandbox = { globalThis: {}, Event: class Event {} };
+  vm.runInNewContext(getSharedWebviewRuntimeScript(), sandbox);
+  const element = () => ({
+    style: {}, attributes: {}, listeners: {},
+    setAttribute(name, value) { this.attributes[name] = value; },
+    removeAttribute(name) { delete this.attributes[name]; },
+    getAttribute(name) { return this.attributes[name] || ''; },
+    addEventListener(name, listener) { this.listeners[name] = listener; }
+  });
+  const menu = element();
+  const label = element();
+  const select = element();
+  select.classList = { remove() {} };
+  select.querySelector = selector => selector === '[data-solo-menu]' ? menu
+    : selector === '[data-solo-label]' ? label : null;
+  select.querySelectorAll = () => [...menu.innerHTML.matchAll(/data-solo-option-value="([^"]+)"/g)]
+    .map((match) => ({
+      getAttribute: name => name === 'data-solo-option-value' ? match[1] : '',
+      setAttribute() {}, textContent: match[1]
+    }));
+  select.dispatchEvent = () => {};
+  const elements = {
+    select, urlContainer: element(), urlInput: element(), urlHelp: element(),
+    detailCard: element(), detailTitle: element(), detailDescription: element(),
+    detailStatus: element(), detailMeta: element(),
+    installButton: element(), uninstallButton: element()
+  };
+  const posted = [];
+  const controller = sandbox.globalThis.SoloMapWebview.createAbilityController({
+    elements, t: key => key, postMessage: message => posted.push(message), showMessage() {}
+  });
+  const settings = { connectors: [
+    { id: 'builtin:solomap-intelligence', title: '项目与设置查询', source: { kind: 'builtin' } },
+    { id: 'github-readonly', title: 'GitHub', source: { kind: 'builtin' } }
+  ] };
+  const items = controller.buildItems(settings);
+  assert.equal(items.find(item => item.originId === 'builtin:solomap-intelligence').canUninstall, false);
+  assert.equal(items.find(item => item.originId === 'github-readonly').canUninstall, true);
+  controller.render(settings);
+  const choose = id => select.listeners.click({
+    stopPropagation() {},
+    target: { closest: selector => selector === '[data-solo-option-value]'
+      ? { getAttribute: () => `connector-${id}` } : null }
+  });
+  choose('builtin:solomap-intelligence');
+  assert.equal(elements.detailTitle.textContent, '项目与设置查询');
+  assert.equal(elements.uninstallButton.getAttribute('disabled'), 'true');
+  elements.uninstallButton.listeners.click();
+  assert.deepEqual(posted, []);
+  choose('github-readonly');
+  assert.equal(elements.uninstallButton.getAttribute('disabled'), '');
+  elements.uninstallButton.listeners.click();
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].command, 'ability.uninstallMcp');
+  assert.equal(posted[0].mcpId, 'github-readonly');
+});
+
 test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'timePlan.ts'), 'utf8');
   assert.match(source, /validateTimePlanValue/);
@@ -451,6 +545,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         }
         if (id === './piAgentEngine') {
           return require(path.join(projectRoot, 'out/piAgentEngine.js'));
+        }
+        if (id === './intelligenceMcp') {
+          return require(path.join(projectRoot, 'out/intelligenceMcp.js'));
         }
         if (id === './globalEngineeringStore') {
           return require(path.join(projectRoot, 'out/globalEngineeringStore.js'));

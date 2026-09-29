@@ -410,6 +410,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
         title: connector.title || connector.id,
         description: connector.description || '',
         installed: true,
+        canUninstall: !(connector.id === 'builtin:solomap-intelligence' && connector.source?.kind === 'builtin'),
         statusLabel: config.t('installedStatus'),
         statusClass: 'ready',
         meta: config.t('connectorMetaPrefix') + (connector.type || 'mcp')
@@ -491,7 +492,8 @@ function bootstrapSoloMapWebviewRuntime(): void {
           elements.uninstallButton.setAttribute('disabled', 'true');
         } else {
           elements.installButton.setAttribute('disabled', 'true');
-          elements.uninstallButton.removeAttribute('disabled');
+          if (selected.canUninstall === false) elements.uninstallButton.setAttribute('disabled', 'true');
+          else elements.uninstallButton.removeAttribute('disabled');
         }
       }
       bindSoloSelect(elements.select, (value) => {
@@ -519,6 +521,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
 
     function uninstall(): void {
       if (!selectedId || !currentSettings) return;
+      if (buildItems(currentSettings).find((item) => item.id === selectedId)?.canUninstall === false) return;
       const actions = [
         ['skill-', 'uninstallingSkillMessage', 'ability.uninstallSkill', 'skillId'],
         ['connector-', 'uninstallingMcpMessage', 'ability.uninstallMcp', 'mcpId'],

@@ -60,7 +60,7 @@ import {
 } from './strategyPyramid';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
-import { createIntelligenceReadTools } from './intelligenceReadTools';
+import { createIntelligenceMcpSession, getIntelligenceMcpConnector } from './intelligenceMcp';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
@@ -639,19 +639,7 @@ export async function activate(context: vscode.ExtensionContext) {
           configRevision: config.revision,
           workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work')
         });
-        return engine.chat(messages, {
-          selectedProject: projects.find(project => project.path === selectedProjectPath)?.name || '',
-          projects: projects.map(project => ({
-            name: project.name,
-            ...(project.priority ? { priority: project.priority } : {}),
-            ...(project.description ? { description: project.description.slice(0, 500) } : {})
-          })),
-          ...(todayReview ? { today: {
-            summary: todayReview.summary,
-            items: todayReview.todos.map(item => item.title)
-          } } : {}),
-          ...(syncEngine && activeProjectRoot === selectedProjectPath ? { currentSteps: syncEngine.getNodes().map(node => ({ title: node.title, status: node.status })) } : {})
-        }, createIntelligenceReadTools({
+        const mcp = await createIntelligenceMcpSession({
           getProjects: getIntelligenceProjects,
           getSelectedProjectPath: getIntelligenceSelectedProjectPath,
           getCurrentSteps: () => syncEngine && activeProjectRoot === getIntelligenceSelectedProjectPath()
@@ -665,7 +653,24 @@ export async function activate(context: vscode.ExtensionContext) {
               cognitiveModel: currentConfig.model
             };
           }
-        }));
+        });
+        try {
+          return await engine.chat(messages, {
+            selectedProject: projects.find(project => project.path === selectedProjectPath)?.name || '',
+            projects: projects.map(project => ({
+              name: project.name,
+              ...(project.priority ? { priority: project.priority } : {}),
+              ...(project.description ? { description: project.description.slice(0, 500) } : {})
+            })),
+            ...(todayReview ? { today: {
+              summary: todayReview.summary,
+              items: todayReview.todos.map(item => item.title)
+            } } : {}),
+            ...(syncEngine && activeProjectRoot === selectedProjectPath ? { currentSteps: syncEngine.getNodes().map(node => ({ title: node.title, status: node.status })) } : {})
+          }, mcp.client);
+        } finally {
+          await mcp.close();
+        }
       });
       intelligenceConversationStores.set(globalDataPath, store);
     }
@@ -1663,7 +1668,10 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     enhancementStatuses: refreshSolomapEnhancementStatusSummaries(settingsWorkspaceRoot, baseSettings.globalDataPath),
     enabledEnhancements: getEnabledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
     skills: readSolomapSkillRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).skills || [],
-    connectors: readSolomapMcpRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).connectors || []
+    connectors: [
+      getIntelligenceMcpConnector(),
+      ...(readSolomapMcpRegistry(settingsWorkspaceRoot, baseSettings.globalDataPath).connectors || [])
+    ]
   };
   persistedSettingsCacheSource = savedSource;
   persistedSettingsCacheWorkspaceRoot = settingsWorkspaceRoot;

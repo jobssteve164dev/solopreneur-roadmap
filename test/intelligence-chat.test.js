@@ -4,6 +4,38 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+test('smart kernel read tools are discovered and called through standard MCP', async () => {
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const session = await createIntelligenceMcpSession({
+    getProjects: () => [{ name: 'Alpha', path: '/private/alpha' }],
+    getSelectedProjectPath: () => '/private/alpha',
+    getCurrentSteps: () => [{ title: '完成登录', status: 'Pending' }],
+    getSettings: () => ({ language: 'zh', cognitiveAgent: 'codex', cognitiveModel: 'gpt-test', telegramBotToken: 'secret' })
+  });
+  try {
+    assert.ok(session.client instanceof Client);
+    const tools = await session.client.listTools();
+    assert.deepEqual(tools.tools.map(tool => tool.name).sort(),
+      ['get_current_project', 'get_plugin_settings', 'list_projects']);
+    assert.ok(tools.tools.every(tool => tool.annotations?.readOnlyHint === true && tool.inputSchema.type === 'object'));
+    const project = await session.client.callTool({ name: 'get_current_project', arguments: {} });
+    assert.deepEqual(JSON.parse(project.content[0].text), {
+      selectedProject: { name: 'Alpha' }, currentSteps: [{ title: '完成登录', status: 'Pending' }]
+    });
+    assert.doesNotMatch(JSON.stringify(project), /\/private\/alpha/);
+    const settings = await session.client.callTool({ name: 'get_plugin_settings', arguments: {} });
+    assert.deepEqual(JSON.parse(settings.content[0].text), {
+      language: 'zh', cognitiveAgent: 'codex', cognitiveModel: 'gpt-test'
+    });
+    assert.doesNotMatch(JSON.stringify(settings), /secret/);
+    const write = await session.client.callTool({ name: 'update_settings', arguments: {} });
+    assert.equal(write.isError, true);
+  } finally {
+    await session.close();
+  }
+});
+
 test('smart kernel chat uses the selected read-only model pipe with conversation context', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const invocations = [];
@@ -29,10 +61,10 @@ test('smart kernel chat uses the selected read-only model pipe with conversation
 
 test('smart kernel chat answers a project question after reading current plugin data', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
-  const { createIntelligenceReadTools } = require('../out/intelligenceReadTools.js');
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
   let selected = 'Alpha';
   const prompts = [];
-  const tools = createIntelligenceReadTools({
+  const session = await createIntelligenceMcpSession({
     getProjects: () => [{ name: 'Alpha', path: '/alpha' }, { name: 'Beta', path: '/beta' }],
     getSelectedProjectPath: () => selected === 'Alpha' ? '/alpha' : '/beta',
     getCurrentSteps: () => [{ title: selected === 'Alpha' ? '完成登录' : '验证付费', status: 'Pending' }],
@@ -49,7 +81,8 @@ test('smart kernel chat answers a project question after reading current plugin 
   });
   selected = 'Beta';
   const reply = await engine.chat([{ role: 'user', content: '当前项目还要做什么？' }],
-    { selectedProject: 'Alpha', projects: ['Alpha'] }, tools);
+    { selectedProject: 'Alpha', projects: ['Alpha'] }, session.client);
+  await session.close();
   assert.equal(reply, '当前项目 Beta 尚需验证付费。');
   assert.equal(prompts.length, 2);
   assert.match(prompts[1], /Beta/);
@@ -71,8 +104,8 @@ test('smart kernel read tools expose current language without secrets or write m
 
 test('smart kernel chat accepts a fenced read tool request and answers from its result', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
-  const { createIntelligenceReadTools } = require('../out/intelligenceReadTools.js');
-  const tools = createIntelligenceReadTools({
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const session = await createIntelligenceMcpSession({
     getProjects: () => [], getSelectedProjectPath: () => '', getCurrentSteps: () => null,
     getSettings: () => ({ language: 'en', cognitiveAgent: 'codex', cognitiveModel: 'gpt-test' })
   });
@@ -86,7 +119,8 @@ test('smart kernel chat accepts a fenced read tool request and answers from its 
     }
   });
   const answer = await engine.chat([{ role: 'user', content: '现在用什么模型？' }],
-    { selectedProject: '', projects: [] }, tools);
+    { selectedProject: '', projects: [] }, session.client);
+  await session.close();
   assert.equal(answer, '当前智能内核使用 Codex 的 gpt-test 模型。');
   assert.equal(calls, 2);
 });
@@ -95,27 +129,27 @@ test('smart kernel chat does not show broken tool JSON as a reply', async () => 
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => '{"toolCall":{' });
   await assert.rejects(() => engine.chat([{ role: 'user', content: '查当前项目' }],
-    { selectedProject: '', projects: [] }, { call: async () => ({}) }), /invalid read tool request/i);
+    { selectedProject: '', projects: [] }, { listTools: async () => ({ tools: [] }) }), /invalid read tool request/i);
 });
 
 test('smart kernel chat does not show an early truncated tool request as a reply', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => '{"toolCall"' });
   await assert.rejects(() => engine.chat([{ role: 'user', content: '查当前项目' }],
-    { selectedProject: '', projects: [] }, { call: async () => ({}) }), /invalid read tool request/i);
+    { selectedProject: '', projects: [] }, { listTools: async () => ({ tools: [] }) }), /invalid read tool request/i);
 });
 
 test('smart kernel chat can answer with a plain code fragment', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => '{ key: value }' });
   assert.equal(await engine.chat([{ role: 'user', content: '给我一个对象片段' }],
-    { selectedProject: '', projects: [] }, { call: async () => ({}) }), '{ key: value }');
+    { selectedProject: '', projects: [] }, { listTools: async () => ({ tools: [] }) }), '{ key: value }');
 });
 
 test('smart kernel chat rejects an unlisted tool before returning an answer', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
-  const { createIntelligenceReadTools } = require('../out/intelligenceReadTools.js');
-  const tools = createIntelligenceReadTools({
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const session = await createIntelligenceMcpSession({
     getProjects: () => [], getSelectedProjectPath: () => '', getCurrentSteps: () => null,
     getSettings: () => ({ language: 'zh' })
   });
@@ -123,7 +157,66 @@ test('smart kernel chat rejects an unlisted tool before returning an answer', as
     agentCli: 'codex', runner: async () => '{"toolCall":{"name":"update_settings"}}'
   });
   await assert.rejects(() => engine.chat([{ role: 'user', content: '改设置' }],
-    { selectedProject: '', projects: [] }, tools), /Unknown read tool/);
+    { selectedProject: '', projects: [] }, session.client), /Unknown read tool/);
+  await session.close();
+});
+
+test('smart kernel refuses a writable tool returned by an MCP server', async () => {
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
+  const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const server = new McpServer({ name: 'mixed-tools', version: '1.0.0' });
+  let writes = 0;
+  server.registerTool('update_settings', {
+    description: 'Change settings', inputSchema: {},
+    annotations: { readOnlyHint: false, destructiveHint: false }
+  }, async () => {
+    writes += 1;
+    return { content: [{ type: 'text', text: 'changed' }] };
+  });
+  const client = new Client({ name: 'kernel-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => '{"toolCall":{"name":"update_settings"}}' });
+    await assert.rejects(() => engine.chat([{ role: 'user', content: '改设置' }],
+      { selectedProject: '', projects: [] }, client), /Unknown read tool/);
+    assert.equal(writes, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test('smart kernel refuses an unapproved MCP tool falsely marked read-only', async () => {
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { InMemoryTransport } = require('@modelcontextprotocol/sdk/inMemory.js');
+  const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const server = new McpServer({ name: 'mixed-tools', version: '1.0.0' });
+  let writes = 0;
+  server.registerTool('update_settings', {
+    description: 'Change settings', inputSchema: {},
+    annotations: { readOnlyHint: true, destructiveHint: false }
+  }, async () => {
+    writes += 1;
+    return { content: [{ type: 'text', text: 'changed' }] };
+  });
+  const client = new Client({ name: 'kernel-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => '{"toolCall":{"name":"update_settings"}}' });
+    await assert.rejects(() => engine.chat([{ role: 'user', content: '改设置' }],
+      { selectedProject: '', projects: [] }, client), /Unknown read tool/);
+    assert.equal(writes, 0);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });
 
 test('smart kernel chat does not show a malformed tool request as a reply', async () => {
@@ -132,7 +225,7 @@ test('smart kernel chat does not show a malformed tool request as a reply', asyn
     agentCli: 'codex', runner: async () => '{"toolCall":{}}'
   });
   await assert.rejects(() => engine.chat([{ role: 'user', content: '查当前项目' }],
-    { selectedProject: '', projects: [] }, { call: async () => ({}) }), /invalid read tool request/i);
+    { selectedProject: '', projects: [] }, { listTools: async () => ({ tools: [] }) }), /invalid read tool request/i);
 });
 
 test('smart kernel chat saves a separate durable conversation and resumes its history', async t => {

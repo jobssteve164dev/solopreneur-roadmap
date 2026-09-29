@@ -1,11 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
 import { getAgentCliFamily, resolveAgentCliWithinFamily } from './agentCli';
 import { CognitiveShadowEngine, CognitiveShadowInput, CognitiveShadowProposal } from './autonomousRuntime';
 import { IntelligenceMessage } from './intelligenceChat';
-import { IntelligenceReadTools } from './intelligenceReadTools';
+import { getIntelligenceMcpConnector } from './intelligenceMcp';
 import {
   buildCognitiveCliInvocation,
   CognitiveCliInvocation,
@@ -133,18 +134,23 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     projects: Array<string | { name: string; priority?: string; description?: string }>;
     today?: { summary: string; items: string[] };
     currentSteps?: Array<{ title: string; status: string }>;
-  }, readTools?: IntelligenceReadTools): Promise<string> {
+  }, readTools?: Pick<Client, 'listTools' | 'callTool'>): Promise<string> {
     if (!messages.length || messages[messages.length - 1].role !== 'user') {
       throw new Error('Intelligence chat requires a user message.');
     }
     this.cancelled = false;
     if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
+    const allowedNames = new Set(getIntelligenceMcpConnector().permissions?.tools || []);
+    const availableTools = readTools ? (await readTools.listTools()).tools.filter(tool =>
+      allowedNames.has(tool.name) && tool.annotations?.readOnlyHint === true
+      && tool.annotations?.destructiveHint !== true) : [];
+    const toolNames = new Set(availableTools.map(tool => tool.name));
     const prompt = [
       '你是 SoloMap 的智能内核，帮助独立开发者思考下一步、权衡方案并厘清阻碍。',
       '直接回答最后一条用户消息。结合对话历史和已提供的项目名称；不知道的事实就明确说不知道，不编造项目进展。',
       '使用与用户最后一条消息相同的语言回答。',
       readTools
-        ? '你可以查询 SoloMap 的只读工具：list_projects、get_current_project、get_plugin_settings。需要当前插件事实才能回答时，先只输出一行 JSON：{"toolCall":{"name":"工具名"}}。收到工具结果后再回答。不得请求其他工具、读取文件或执行任务；用户要求更改设置或执行任务时，说明当前只能查询。'
+        ? `你可以查询 SoloMap 的只读 MCP 工具：${JSON.stringify(availableTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。需要当前插件事实才能回答时，先只输出一行 JSON：{"toolCall":{"name":"工具名","arguments":{}}}。收到工具结果后再回答。不得请求其他工具、读取文件或执行任务；用户要求更改设置或执行任务时，说明当前只能查询。`
         : '这里只进行对话，不调用工具、不读取文件、不执行任务。用户要执行时，指出需要回到对应项目操作。',
       JSON.stringify({ projectContext, messages })
     ].join('\n');
@@ -156,6 +162,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
         if (this.cancelled) throw new Error('Intelligence chat was cancelled.');
         if (!answer) throw new Error('Intelligence did not return an answer.');
         let toolName = '';
+        let toolArguments: Record<string, unknown> = {};
         let requestedTool = false;
         const fenced = answer.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
         const candidate = fenced ? fenced[1].trim() : answer;
@@ -164,6 +171,12 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
           if (parsed && typeof parsed === 'object' && Object.prototype.hasOwnProperty.call(parsed, 'toolCall')) {
             requestedTool = true;
             toolName = typeof parsed.toolCall?.name === 'string' ? parsed.toolCall.name : '';
+            if (parsed.toolCall?.arguments !== undefined) {
+              if (!parsed.toolCall.arguments || typeof parsed.toolCall.arguments !== 'object' || Array.isArray(parsed.toolCall.arguments)) {
+                throw new Error('Intelligence returned an invalid read tool request.');
+              }
+              toolArguments = parsed.toolCall.arguments;
+            }
           }
         } catch {
           if (/^\s*\{\s*["']?toolCall\b/.test(candidate)) {
@@ -173,8 +186,14 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
         if (requestedTool && !toolName) throw new Error('Intelligence returned an invalid read tool request.');
         if (!toolName) return answer;
         if (!readTools) throw new Error('Intelligence read tools are unavailable.');
+        if (!toolNames.has(toolName)) throw new Error(`Unknown read tool: ${toolName}`);
         if (attempt === 3) throw new Error('Intelligence exceeded the read tool call limit.');
-        const result = await readTools.call(toolName);
+        const response = await readTools.callTool({ name: toolName, arguments: toolArguments });
+        if (response.isError) throw new Error(`Intelligence read tool failed: ${toolName}`);
+        const content = Array.isArray(response.content) ? response.content : [];
+        const result = content.filter((part: unknown): part is { type: 'text'; text: string } =>
+          Boolean(part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'))
+          .map(part => part.text).join('\n');
         if (this.cancelled) throw new Error('Intelligence chat was cancelled.');
         currentPrompt = [currentPrompt, `ASSISTANT_TOOL_CALL: ${JSON.stringify({ name: toolName })}`,
           `SOLOMAP_TOOL_RESULT: ${JSON.stringify(result)}`,
