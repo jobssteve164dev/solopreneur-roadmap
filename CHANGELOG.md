@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.490 - 2026-09-29
+
+### Added
+- route intelligence tools through MCP (3b5a657)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.489 - 2026-09-29
 
 ### Added
