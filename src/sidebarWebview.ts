@@ -4685,6 +4685,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const roadmapRevisionPendingAfterIds = {};
     const roadmapRevisionResults = {};
     let currentDailyReview = null;
+    let initialDataReadyReported = false;
     const ignoredTodayDecisionIds = new Set();
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
@@ -7941,6 +7942,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           updateScheduledTasksTarget();
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath || '');
+          if (!initialDataReadyReported) {
+            initialDataReadyReported = true;
+            vscode.postMessage({ command: 'sidebarInitialDataReady' });
+          }
           break;
 
         case 'projectIssuesLoaded':

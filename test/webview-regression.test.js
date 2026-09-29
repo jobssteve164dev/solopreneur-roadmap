@@ -2211,6 +2211,59 @@ test('sidebar resolve survives persisted state and startup data failures', async
   }
 });
 
+test('sidebar reports initial data ready only after rendering its first portfolio', () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, ids);
+  assert.equal(postedMessages.some(message => message.command === 'sidebarInitialDataReady'), false);
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects: [], selectedProjectPath: '', portfolio: [] } });
+  assert.equal(postedMessages.filter(message => message.command === 'sidebarInitialDataReady').length, 1);
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects: [], selectedProjectPath: '', portfolio: [] } });
+  assert.equal(postedMessages.filter(message => message.command === 'sidebarInitialDataReady').length, 1);
+});
+
+test('sidebar starts background service reconciliation once after its ready signal', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let listener;
+  let starts = 0;
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '/workspace/.solomap-global' }),
+    updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: '' }),
+    onInitialDataReady: () => { starts += 1; }
+  });
+  provider.resolveWebviewView({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage: () => Promise.resolve(true),
+    onDidReceiveMessage: callback => { listener = callback; }
+  } }, {}, {});
+  assert.equal(starts, 0);
+  await listener({ command: 'sidebarInitialDataReady' });
+  await listener({ command: 'sidebarInitialDataReady' });
+  assert.equal(starts, 1);
+});
+
+test('sidebar sends an empty first portfolio so startup can finish without registered projects', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }),
+    updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: '' })
+  });
+  provider.sendDailyReview = () => {};
+  provider.resolveWebviewView({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage: message => { posted.push(message); return Promise.resolve(true); },
+    onDidReceiveMessage: () => {}
+  } }, {}, {});
+  provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(posted.some(message => message.command === 'projectsLoaded' && message.projects.projects.length === 0));
+});
+
 test('full roadmap webview runtime script parses and opens settings panel', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',

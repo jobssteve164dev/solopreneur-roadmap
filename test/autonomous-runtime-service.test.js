@@ -108,6 +108,22 @@ test('extension exposes pause, resume and service removal through the authentica
   assert.equal(manifest.scripts['vscode:uninstall'], 'node ./out/autonomousRuntimeUninstall.js');
 });
 
+test('sidebar registration and initial data request do not wait for background intelligence startup', () => {
+  const projectRoot = path.resolve(__dirname, '..');
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const activation = extensionSource.slice(
+    extensionSource.indexOf('export async function activate('),
+    extensionSource.indexOf('\nlet projectActionLaunchQueue:')
+  );
+  const providerRegistration = activation.indexOf('registerWebviewViewProvider(');
+  const runtimeStart = activation.lastIndexOf('ensureAutonomousRuntimeService({');
+  assert.ok(providerRegistration >= 0 && runtimeStart > providerRegistration);
+  assert.doesNotMatch(activation.slice(0, activation.indexOf('const showRoadmapDisposable')), /ensureAutonomousRuntimeService/);
+  assert.match(activation.slice(0, providerRegistration), /onInitialDataReady: reconcileIntelligenceServiceOnce/);
+  assert.ok(activation.indexOf('ensureSolomapMemoryStore(activationProjectRoot') > providerRegistration);
+  assert.match(activation.slice(providerRegistration), /reconcileIntelligenceServiceOnce\(\);/);
+});
+
 test('failed service upgrade restores and restarts the previous definition', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-rollback-'));
   const homeDir = path.join(root, 'home');

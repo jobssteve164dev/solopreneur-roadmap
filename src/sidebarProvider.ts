@@ -53,6 +53,7 @@ interface SidebarProviderDependencies {
   getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   getProjectConversationSnapshot?: (projectPath: string) => Promise<SidebarConversationSnapshot>;
   dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
+  onInitialDataReady?: () => void;
 }
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
@@ -67,6 +68,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<SidebarConversationSnapshot>;
   private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
+  private readonly _onInitialDataReady?: () => void;
+  private _initialDataReady = false;
   private readonly _conversationSnapshotLoads = new Map<string, {
     promise: Promise<SidebarConversationSnapshot>;
     startedAt: number;
@@ -106,6 +109,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     this._getProjectConversationHistory = dependencies.getProjectConversationHistory;
     this._getProjectConversationSnapshot = dependencies.getProjectConversationSnapshot;
     this._dispatchSharedAction = dependencies.dispatchSharedAction;
+    this._onInitialDataReady = dependencies.onInitialDataReady;
     this._projectLoader = new SidebarProjectLoader({
       isAvailable: () => Boolean(this._view),
       postMessage: (message) => { this._view?.webview.postMessage(message); },
@@ -148,6 +152,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           return;
         }
         switch (data.command) {
+          case 'sidebarInitialDataReady':
+            if (!this._initialDataReady) {
+              this._initialDataReady = true;
+              this._onInitialDataReady?.();
+            }
+            break;
           case 'getNodes':
             this.sendNodesToWebview();
             break;
@@ -474,6 +484,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       if (index >= ordered.length) {
         const portfolio = projects.map((project) => summaries.get(project.path)).filter(Boolean) as ProjectPortfolioSummary[];
+        if (projects.length === 0) {
+          this.postCorePortfolio(projects, selectedProjectPath, portfolio, globalDataPath);
+        }
         if (portfolio.length === projects.length) {
           writeSidebarPortfolioSnapshot(globalDataPath, sourceProjectSignature, portfolio);
         }

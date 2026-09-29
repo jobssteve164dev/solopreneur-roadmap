@@ -30,7 +30,7 @@ interface RuntimeServiceOptions {
   globalDataPath: string;
   execPath?: string;
   environment?: NodeJS.ProcessEnv;
-  runCommand?: (command: string, args: string[]) => void;
+  runCommand?: (command: string, args: string[]) => void | Promise<void>;
   sendControl?: (command: RuntimeControlCommand) => Promise<unknown>;
   waitForDrain?: () => Promise<void>;
   waitForHealth?: () => Promise<void>;
@@ -156,8 +156,15 @@ export function buildRuntimeServicePlan(options: RuntimeServiceOptions): Runtime
   };
 }
 
-function defaultRunCommand(command: string, args: string[]): void {
-  childProcess.execFileSync(command, args, { stdio: 'ignore', windowsHide: true });
+function defaultRunCommand(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = childProcess.spawn(command, args, { stdio: 'ignore', windowsHide: true });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with status ${code ?? 'unknown'}.`));
+    });
+  });
 }
 
 function writeDefinition(filePath: string, contents: string): void {
@@ -236,7 +243,7 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
     if (drained) await waitForDrain();
     if (previous !== null && plan.prepareUpgradeCommand) {
       try {
-        runCommand(...plan.prepareUpgradeCommand);
+        await runCommand(...plan.prepareUpgradeCommand);
       } catch {
         // A stale definition may no longer be loaded.
       }
@@ -247,7 +254,7 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
     if (!changed && plan.statusCommand) {
       let loaded = false;
       try {
-        runCommand(...plan.statusCommand);
+        await runCommand(...plan.statusCommand);
         loaded = true;
       } catch {
         // The definition exists but is not currently loaded.
@@ -257,28 +264,28 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
         return { installed: true, definitionPath: plan.definitionPath, changed };
       }
     }
-    if (plan.reloadCommand) runCommand(...plan.reloadCommand);
-    runCommand(...plan.installCommand);
-    if (changed && plan.restartCommand) runCommand(...plan.restartCommand);
+    if (plan.reloadCommand) await runCommand(...plan.reloadCommand);
+    await runCommand(...plan.installCommand);
+    if (changed && plan.restartCommand) await runCommand(...plan.restartCommand);
     await waitForHealth();
     return { installed: true, definitionPath: plan.definitionPath, changed };
   } catch (error) {
     if (changed) {
       if (previous === null) {
         try { await sendControl('stop'); } catch { /* The failed service may not have opened IPC. */ }
-        try { runCommand(...plan.uninstallCommand); } catch { /* Service activation may have failed before registration. */ }
+        try { await runCommand(...plan.uninstallCommand); } catch { /* Service activation may have failed before registration. */ }
         if (fs.existsSync(plan.definitionPath)) fs.unlinkSync(plan.definitionPath);
       } else {
         try {
-          if (plan.prepareUpgradeCommand) runCommand(...plan.prepareUpgradeCommand);
+          if (plan.prepareUpgradeCommand) await runCommand(...plan.prepareUpgradeCommand);
         } catch {
           // The failed replacement may already be unloaded.
         }
         writeDefinition(plan.definitionPath, previous);
         try {
-          if (plan.reloadCommand) runCommand(...plan.reloadCommand);
-          runCommand(...plan.installCommand);
-          if (plan.restartCommand) runCommand(...plan.restartCommand);
+          if (plan.reloadCommand) await runCommand(...plan.reloadCommand);
+          await runCommand(...plan.installCommand);
+          if (plan.restartCommand) await runCommand(...plan.restartCommand);
           await waitForHealth();
         } catch {
           // Preserve the original upgrade error while leaving the old definition on disk.
@@ -299,13 +306,13 @@ export async function uninstallAutonomousRuntimeService(options: RuntimeServiceO
     // The service manager may already have stopped the Runtime.
   }
   try {
-    runCommand(...plan.uninstallCommand);
+    await runCommand(...plan.uninstallCommand);
   } catch {
     // Missing service managers and already removed definitions are safe during cleanup.
   }
   if (fs.existsSync(plan.definitionPath)) fs.unlinkSync(plan.definitionPath);
   if (plan.reloadCommand) {
-    try { runCommand(...plan.reloadCommand); } catch { /* The service manager may be unavailable. */ }
+    try { await runCommand(...plan.reloadCommand); } catch { /* The service manager may be unavailable. */ }
   }
   const registryPath = serviceRegistryPath(options.platform || process.platform, options.homeDir || os.homedir(), options.environment || cognitiveCliEnvironment());
   if (fs.existsSync(registryPath)) fs.unlinkSync(registryPath);

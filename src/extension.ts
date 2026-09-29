@@ -365,28 +365,6 @@ export async function activate(context: vscode.ExtensionContext) {
   persistedSettingsCacheWorkspaceRoot = '';
   pendingPersistedSettings = null;
   persistedSettingsWriteQueue = Promise.resolve();
-  const activationProjectRoot = getSelectedProjectPath(context) || getWorkspaceRoot();
-  if (activationProjectRoot) {
-    try {
-      ensureSolomapMemoryStore(activationProjectRoot, getPersistedSettings(context).globalDataPath);
-    } catch (error) {
-      console.error('SoloMap global runtime refresh failed during activation:', error);
-    }
-  }
-  try {
-    const runtimeSettings = getPersistedSettings(context);
-    syncCognitiveRuntimeConfig(runtimeSettings);
-    const globalDataPath = normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath);
-    try {
-      await ensureAutonomousRuntimeService({ extensionPath: context.extensionPath, globalDataPath });
-    } catch (serviceError) {
-      recordLocalDiagnosticError(runtimeSettings.globalDataPath, 'autonomous-runtime.service', serviceError);
-      ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
-    }
-  } catch (error) {
-    recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
-    console.error('SoloMap autonomous runtime failed to start:', error);
-  }
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('solopreneur')) {
@@ -623,6 +601,13 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   } as any;
 
+  let intelligenceServiceReconciled = false;
+  const reconcileIntelligenceServiceOnce = () => {
+    if (intelligenceServiceReconciled) return;
+    intelligenceServiceReconciled = true;
+    void reconcileBackgroundIntelligenceService(context);
+  };
+
   // Register Sidebar Webview View Provider
   sidebarProvider = new SolopreneurSidebarProvider(
     context.extensionUri,
@@ -635,7 +620,8 @@ export async function activate(context: vscode.ExtensionContext) {
       getStepConversationHistory: async (projectPath, nodeId) => getStepConversationHistoryForProject(context, projectPath, nodeId),
       getProjectConversationHistory: async (projectPath) => getProjectConversationHistoryForProject(context, projectPath),
       getProjectConversationSnapshot: async (projectPath) => getProjectConversationSnapshotForProject(context, projectPath),
-      dispatchSharedAction: async (message, target) => handleSharedWebviewAction(context, message, 'sidebar', target)
+      dispatchSharedAction: async (message, target) => handleSharedWebviewAction(context, message, 'sidebar', target),
+      onInitialDataReady: reconcileIntelligenceServiceOnce
     }
   );
 
@@ -652,6 +638,15 @@ export async function activate(context: vscode.ExtensionContext) {
     console.warn('SoloMap account status refresh failed during activation:', error);
   });
   setTimeout(() => {
+    reconcileIntelligenceServiceOnce();
+    const activationProjectRoot = getSelectedProjectPath(context) || getWorkspaceRoot();
+    if (activationProjectRoot) {
+      try {
+        ensureSolomapMemoryStore(activationProjectRoot, getPersistedSettings(context).globalDataPath);
+      } catch (error) {
+        console.error('SoloMap global runtime refresh failed during activation:', error);
+      }
+    }
     recordLocalUsageEvent(context, 'activation');
     const retentionResults = pruneProjectsOutputLogs(getProjects(context).map((project) => project.path));
     for (const result of retentionResults) {
@@ -665,6 +660,24 @@ export async function activate(context: vscode.ExtensionContext) {
     scheduleFocusReminder(context);
     scheduleTimedAutomationTask(context);
   }, 15_000);
+}
+
+async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const runtimeSettings = getPersistedSettings(context);
+    syncCognitiveRuntimeConfig(runtimeSettings);
+    const globalDataPath = normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath);
+    try {
+      await ensureAutonomousRuntimeService({ extensionPath: context.extensionPath, globalDataPath });
+    } catch (serviceError) {
+      recordLocalDiagnosticError(runtimeSettings.globalDataPath, 'autonomous-runtime.service', serviceError);
+      ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
+    }
+    sidebarProvider?.sendDailyReview();
+  } catch (error) {
+    recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
+    console.error('SoloMap autonomous runtime failed to start:', error);
+  }
 }
 
 let projectActionLaunchQueue: Promise<void> = Promise.resolve();
