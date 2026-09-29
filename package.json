@@ -220,6 +220,7 @@
     "dependency-cruiser": "^16.10.4",
     "istanbul-lib-coverage": "3.2.2",
     "jose": "^6.2.8",
+    "markdown-it": "15.0.2",
     "papaparse": "^5.4.1",
     "sql.js": "^1.8.0"
   },

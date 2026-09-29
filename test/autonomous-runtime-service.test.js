@@ -23,6 +23,52 @@ test('linux runtime service starts at login and restarts after crashes', () => {
   assert.match(plan.definition, /PATH=\/home\/alice\/\.local\/bin:\/usr\/bin/);
   assert.match(plan.definition, /autonomousRuntimeProcess\.js/);
   assert.deepEqual(plan.installCommand, ['systemctl', ['--user', 'enable', '--now', 'solomap-runtime.service']]);
+  assert.deepEqual(plan.statusCommand, ['systemctl', ['--user', 'is-active', '--quiet', 'solomap-runtime.service']]);
+});
+
+test('a healthy unchanged Linux runtime does not reload or reinstall during extension startup', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-existing-'));
+  const homeDir = path.join(root, 'home');
+  const globalRoot = path.join(root, '.solomap-global');
+  const options = { platform: 'linux', homeDir, extensionPath: '/opt/solomap', globalDataPath: globalRoot, execPath: '/usr/bin/code' };
+  const plan = service.buildRuntimeServicePlan(options);
+  const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
+  fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
+  fs.mkdirSync(globalRoot);
+  fs.writeFileSync(plan.definitionPath, plan.definition);
+  t.after(() => {
+    if (fs.existsSync(plan.definitionPath)) fs.unlinkSync(plan.definitionPath);
+    if (fs.existsSync(registryPath)) fs.unlinkSync(registryPath);
+    fs.rmdirSync(path.dirname(plan.definitionPath));
+    fs.rmdirSync(path.dirname(path.dirname(plan.definitionPath)));
+    fs.rmdirSync(path.dirname(registryPath));
+    fs.rmdirSync(path.join(homeDir, '.config'));
+    fs.rmdirSync(homeDir);
+    fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  });
+  const commands = [];
+  const result = await service.ensureAutonomousRuntimeService({
+    ...options,
+    runCommand(command, args) { commands.push([command, args]); },
+    async waitForHealth() {}
+  });
+  assert.equal(result.changed, false);
+  assert.deepEqual(commands, [plan.statusCommand]);
+  commands.length = 0;
+  await service.ensureAutonomousRuntimeService({
+    ...options,
+    runCommand(command, args) {
+      commands.push([command, args]);
+      if (args.includes('is-active')) throw new Error('service inactive');
+    },
+    async waitForHealth() {}
+  });
+  assert.deepEqual(commands, [
+    plan.statusCommand,
+    plan.reloadCommand,
+    plan.installCommand
+  ]);
 });
 
 test('service install drains a live runtime, writes atomically and activates the user service', async () => {

@@ -2220,16 +2220,35 @@ test('sidebar resolve survives persisted state and startup data failures', async
   }
 });
 
-test('sidebar reports initial data ready only after rendering its first portfolio', () => {
+test('sidebar reports initial data ready after its first portfolio can paint', () => {
   const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
   const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
   const script = extractLastScript(html);
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
-  const { postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, ids);
+  const { context, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, ids);
+  const frames = [];
+  context.requestAnimationFrame = callback => frames.push(callback);
   assert.equal(postedMessages.some(message => message.command === 'sidebarInitialDataReady'), false);
   dispatchMessage({ command: 'projectsLoaded', projects: { projects: [], selectedProjectPath: '', portfolio: [] } });
+  assert.equal(postedMessages.some(message => message.command === 'sidebarInitialDataReady'), false);
+  frames.shift()();
+  assert.equal(postedMessages.some(message => message.command === 'sidebarInitialDataReady'), false);
+  frames.shift()();
   assert.equal(postedMessages.filter(message => message.command === 'sidebarInitialDataReady').length, 1);
   dispatchMessage({ command: 'projectsLoaded', projects: { projects: [], selectedProjectPath: '', portfolio: [] } });
+  assert.equal(postedMessages.filter(message => message.command === 'sidebarInitialDataReady').length, 1);
+});
+
+test('sidebar starts background work after rendering when the webview cannot paint', async () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, ids);
+  context.requestAnimationFrame = () => {};
+  context.setTimeout = (callback, delay) => setTimeout(callback, delay === 1000 ? 0 : delay);
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects: [], selectedProjectPath: '', portfolio: [] } });
+  await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(postedMessages.filter(message => message.command === 'sidebarInitialDataReady').length, 1);
 });
 
@@ -2265,6 +2284,37 @@ test('sidebar offers smart kernel chat in the header and keeps feedback inside s
   assert.match(settings, /id="feedback-panel"/);
   assert.match(settings, /id="btn-open-feedback"/);
   assert.match(html, /command: 'intelligence\.send'/);
+  assert.doesNotMatch(html, /<script[^>]+src="[^"]*markdown-it/);
+  assert.doesNotMatch(html, /body\.intelligence-open \.sidebar-footer/);
+  assert.match(html, /\.intelligence-overlay\s*\{[^}]*height:\s*min\(560px,\s*calc\(100vh - 130px\)\)/);
+  assert.match(html, /@media \(max-height: 340px\)[\s\S]*?\.intelligence-overlay\s*\{[^}]*height:\s*calc\(100vh - 60px\)/);
+  assert.match(html, /@media \(max-height: 220px\)[\s\S]*?\.intelligence-composer textarea\s*\{[^}]*height:\s*32px/);
+});
+
+test('smart kernel reply uses Markdown rendering for headings, lists and code', () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const runtime = runScriptWithMinimalDom(script, ids,
+    "window.showMarkdownReply = content => { intelligenceView = 'thread'; intelligenceConversation = { messages: [{ role: 'assistant', content }] }; renderIntelligenceThread(); };");
+  let receivedMarkdown = '';
+  runtime.context.window.markdownit = options => {
+    const markdown = require('markdown-it')(options);
+    const render = markdown.render.bind(markdown);
+    markdown.render = content => { receivedMarkdown = content; return render(content); };
+    return markdown;
+  };
+  runtime.context.window.showMarkdownReply('# 标题\n\n- 一项\n\n```js\nconst x = 1;\n```');
+  const content = runtime.elements['intelligence-thread'].innerHTML;
+  assert.match(receivedMarkdown, /^# 标题/);
+  assert.match(content, /<h1>标题<\/h1>/);
+  assert.match(content, /<li>一项<\/li>/);
+  assert.match(content, /<pre><code class="language-js">const x = 1;/);
+  runtime.context.window.showMarkdownReply('<img src=x onerror=alert(1)>\n\n![外链图片](https://example.com/collect?token=abc)\n\n[坏链接](javascript:alert(1))\n\n| A | B |\n|---|---|\n| 1 | 2 |');
+  const unsafeContent = runtime.elements['intelligence-thread'].innerHTML;
+  assert.doesNotMatch(unsafeContent, /<img|href="javascript:/);
+  assert.match(unsafeContent, /<table>/);
 });
 
 test('sidebar routes smart kernel conversation messages without blocking other startup data', async () => {

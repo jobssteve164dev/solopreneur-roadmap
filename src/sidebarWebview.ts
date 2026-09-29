@@ -50,6 +50,7 @@ export function getSidebarFallbackHtml(message: string): string {
 export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     const codiconsUri = webview.asWebviewUri(joinExtensionUri(extensionUri, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
     const wordmarkUri = webview.asWebviewUri(joinExtensionUri(extensionUri, 'resources', 'logo_with_text.svg'));
+    const intelligenceMarkdownUri = webview.asWebviewUri(joinExtensionUri(extensionUri, 'node_modules', 'markdown-it', 'dist', 'browser', 'markdown-it.umd.min.js'));
     const defaultOpenCodeProviders = JSON.stringify(getDefaultOpenCodeProviderOptions());
     return `<!DOCTYPE html>
 <html lang="en">
@@ -244,17 +245,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     .intelligence-overlay {
-      position: fixed;
-      bottom: 10px;
       padding: 0;
       overflow: hidden;
-      height: auto;
-      max-height: none;
+      height: min(560px, calc(100vh - 130px));
+      max-height: calc(100vh - 130px);
       flex-direction: column;
-      z-index: 120;
     }
-
-    body.intelligence-open .sidebar-footer { display: none; }
 
     .intelligence-overlay .settings-header {
       margin: 0;
@@ -350,6 +346,28 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       background: rgba(255, 255, 255, 0.045);
     }
 
+    .intelligence-message.markdown { white-space: normal; }
+    .intelligence-message.markdown > :first-child { margin-top: 0; }
+    .intelligence-message.markdown > :last-child { margin-bottom: 0; }
+    .intelligence-message.markdown p { margin: 0 0 8px; }
+    .intelligence-message.markdown h1,
+    .intelligence-message.markdown h2,
+    .intelligence-message.markdown h3 { margin: 12px 0 7px; line-height: 1.3; }
+    .intelligence-message.markdown h1 { font-size: 15px; }
+    .intelligence-message.markdown h2 { font-size: 13px; }
+    .intelligence-message.markdown h3 { font-size: 12px; }
+    .intelligence-message.markdown ul,
+    .intelligence-message.markdown ol { margin: 5px 0 9px; padding-left: 19px; }
+    .intelligence-message.markdown li { margin: 3px 0; }
+    .intelligence-message.markdown a { color: #74eaff; }
+    .intelligence-message.markdown code { border-radius: 3px; padding: 1px 3px; background: rgba(255, 255, 255, 0.09); font-family: var(--vscode-editor-font-family, monospace); }
+    .intelligence-message.markdown pre { margin: 8px 0; padding: 9px; border-radius: 6px; overflow-x: auto; background: rgba(0, 0, 0, 0.27); }
+    .intelligence-message.markdown pre code { padding: 0; background: none; }
+    .intelligence-message.markdown blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid #00b0ff; color: var(--text-muted); }
+    .intelligence-message.markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+    .intelligence-message.markdown th,
+    .intelligence-message.markdown td { padding: 4px 6px; border: 1px solid var(--border-glass); }
+
     .intelligence-message.pending {
       color: var(--text-muted);
     }
@@ -390,6 +408,21 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     .intelligence-send:disabled { opacity: 0.45; cursor: default; }
     .intelligence-error { color: #ff8f98; font-size: 10px; line-height: 1.4; }
+
+    @media (max-height: 340px) {
+      .intelligence-overlay {
+        height: calc(100vh - 60px);
+        max-height: calc(100vh - 60px);
+        z-index: 101;
+      }
+      .intelligence-overlay .settings-header { padding: 7px 8px; }
+      .intelligence-composer { padding: 6px 8px; gap: 3px; }
+      .intelligence-composer textarea { min-height: 32px; }
+    }
+
+    @media (max-height: 220px) {
+      .intelligence-composer textarea { box-sizing: border-box; height: 32px; max-height: 32px; resize: none; }
+    }
 
     .collaboration-overlay .settings-header {
       margin: 0;
@@ -4681,6 +4714,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
   <script>
     ${getSharedWebviewRuntimeScript()}
     const vscode = acquireVsCodeApi();
+    const intelligenceMarkdownScriptUri = ${JSON.stringify(String(intelligenceMarkdownUri))};
     const {
       escapeHtml,
       statusClass,
@@ -4868,6 +4902,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let intelligencePendingConversationId = '';
     let intelligenceRequestSeq = 0;
     const intelligenceDrafts = new Map();
+    let intelligenceMarkdown = null;
+    let intelligenceMarkdownLoading = null;
     let currentCliPath = 'agy';
     let currentSettings = {};
     let settingsDataLoaded = false;
@@ -6811,9 +6847,45 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       intelligenceThread.style.display = 'block';
       btnIntelligenceBack.style.display = '';
       const messages = intelligenceConversation && Array.isArray(intelligenceConversation.messages) ? intelligenceConversation.messages : [];
-      intelligenceThread.innerHTML = messages.map(message => '<div class="intelligence-message ' + (message.role === 'user' ? 'user' : 'assistant') + '">' + escapeHtml(message.content || '') + '</div>').join('')
+      intelligenceThread.innerHTML = messages.map(message => {
+        const assistant = message.role !== 'user';
+        const parser = assistant ? getIntelligenceMarkdown() : null;
+        const content = parser ? parser.render(String(message.content || '')) : escapeHtml(message.content || '');
+        return '<div class="intelligence-message ' + (assistant ? 'assistant' : 'user') + (parser ? ' markdown' : '') + '">' + content + '</div>';
+      }).join('')
         + (intelligencePendingRequest && intelligenceConversationId === intelligencePendingConversationId ? '<div class="intelligence-message user">' + escapeHtml(intelligencePendingText) + '</div><div class="intelligence-message assistant pending">' + escapeHtml(t('intelligenceThinking')) + '</div>' : '');
       intelligenceThread.scrollTop = intelligenceThread.scrollHeight;
+    }
+
+    function getIntelligenceMarkdown() {
+      if (intelligenceMarkdown) return intelligenceMarkdown;
+      if (typeof window.markdownit !== 'function') return null;
+      intelligenceMarkdown = window.markdownit({ html: false, linkify: true, breaks: true }).disable('image');
+      intelligenceMarkdown.validateLink = url => /^(https?:|mailto:)/i.test(url);
+      intelligenceMarkdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+        tokens[index].attrSet('target', '_blank');
+        tokens[index].attrSet('rel', 'noopener noreferrer');
+        return renderer.renderToken(tokens, index, options);
+      };
+      return intelligenceMarkdown;
+    }
+
+    function loadIntelligenceMarkdown() {
+      if (getIntelligenceMarkdown()) return;
+      if (intelligenceMarkdownLoading || !document.head) return;
+      intelligenceMarkdownLoading = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = intelligenceMarkdownScriptUri;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('Intelligence Markdown could not load.'));
+        document.head.appendChild(script);
+      }).then(() => {
+        if (!getIntelligenceMarkdown()) throw new Error('Intelligence Markdown is unavailable.');
+        renderIntelligenceThread();
+      }).catch(error => {
+        intelligenceMarkdownLoading = null;
+        console.error('SoloMap intelligence Markdown failed to load:', error);
+      });
     }
 
     function sendIntelligenceMessage() {
@@ -6834,7 +6906,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     btnToggleIntelligence.addEventListener('click', () => {
       if (intelligencePanel.style.display === 'flex') {
         intelligencePanel.style.display = 'none';
-        document.body.classList.remove('intelligence-open');
         return;
       }
       settingsPanel.style.display = 'none';
@@ -6842,13 +6913,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       collaborationPanel.style.display = 'none';
       btnToggleCollaboration.classList.remove('is-active');
       intelligencePanel.style.display = 'flex';
-      document.body.classList.add('intelligence-open');
+      loadIntelligenceMarkdown();
       if (intelligenceView === 'home') vscode.postMessage({ command: 'intelligence.list' });
       intelligenceInput.focus();
     });
     btnCloseIntelligence.addEventListener('click', () => {
       intelligencePanel.style.display = 'none';
-      document.body.classList.remove('intelligence-open');
     });
     btnIntelligenceBack.addEventListener('click', () => showIntelligenceHome(false));
     btnIntelligenceNew.addEventListener('click', () => showIntelligenceHome(true));
@@ -6878,7 +6948,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           settingsPanel.style.display = 'none';
           focusTimerPanel.style.display = 'none';
           intelligencePanel.style.display = 'none';
-          document.body.classList.remove('intelligence-open');
           collaborationPanel.style.display = 'block';
           btnToggleCollaboration.classList.add('is-active');
           vscode.postMessage({ command: 'collaboration.getRooms' });
@@ -6902,7 +6971,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         } else {
           settingsPanel.style.display = 'none';
           intelligencePanel.style.display = 'none';
-          document.body.classList.remove('intelligence-open');
           if (collaborationPanel) collaborationPanel.style.display = 'none';
           if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
           focusTimerPanel.style.display = 'block';
@@ -7025,7 +7093,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       btnOpenScheduledTasks.addEventListener('click', () => {
         settingsPanel.style.display = 'none';
         intelligencePanel.style.display = 'none';
-        document.body.classList.remove('intelligence-open');
         focusTimerPanel.style.display = 'block';
         updateScheduledTasksTarget();
         renderScheduledTasksView();
@@ -7039,7 +7106,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsPanel.style.display = 'none';
       } else {
         intelligencePanel.style.display = 'none';
-        document.body.classList.remove('intelligence-open');
         if (focusTimerPanel) focusTimerPanel.style.display = 'none';
         if (collaborationPanel) collaborationPanel.style.display = 'none';
         if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
@@ -8307,7 +8373,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath || '');
           if (!initialDataReadyReported) {
             initialDataReadyReported = true;
-            vscode.postMessage({ command: 'sidebarInitialDataReady' });
+            let reported = false;
+            const reportInitialDataReady = () => {
+              if (reported) return;
+              reported = true;
+              clearTimeout(readyTimer);
+              vscode.postMessage({ command: 'sidebarInitialDataReady' });
+            };
+            const readyTimer = setTimeout(reportInitialDataReady, 1000);
+            if (typeof requestAnimationFrame === 'function') {
+              requestAnimationFrame(() => requestAnimationFrame(reportInitialDataReady));
+            }
           }
           break;
 

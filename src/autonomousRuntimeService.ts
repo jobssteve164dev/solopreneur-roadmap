@@ -100,6 +100,7 @@ export function buildRuntimeServicePlan(options: RuntimeServiceOptions): Runtime
         'WantedBy=default.target',
         ''
       ].join('\n'),
+      statusCommand: ['systemctl', ['--user', 'is-active', '--quiet', 'solomap-runtime.service']],
       reloadCommand: ['systemctl', ['--user', 'daemon-reload']],
       installCommand: ['systemctl', ['--user', 'enable', '--now', 'solomap-runtime.service']],
       restartCommand: ['systemctl', ['--user', 'restart', 'solomap-runtime.service']],

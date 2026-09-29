@@ -19,6 +19,7 @@ const REQUIRED_FILES = [
   'extension/node_modules/c8/bin/c8.js',
   'extension/node_modules/dependency-cruiser/bin/dependency-cruise.mjs',
   'extension/node_modules/istanbul-lib-coverage/index.js',
+  'extension/node_modules/markdown-it/dist/browser/markdown-it.umd.min.js',
   'extension/node_modules/papaparse/papaparse.js',
   'extension/node_modules/sql.js/dist/sql-wasm.js',
   'extension/node_modules/sql.js/dist/sql-wasm.wasm'
