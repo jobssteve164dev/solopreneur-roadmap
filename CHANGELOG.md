@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.487 - 2026-09-29
+
+### Added
+- add smart kernel chat to sidebar (02cf765)
+
+### Changed
+- explore intelligence conversation sidebar (9e8423b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.486 - 2026-09-29
 
 ### Changed
