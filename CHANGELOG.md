@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.486 - 2026-09-29
+
+### Changed
+- SoloMap pre-session auto-backup [2026-09-29T01:15:42.726Z] (4bbbf7d)
+
+### Fixed
+- keep sidebar startup ahead of runtime service checks (f35e66d)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.485 - 2026-09-26
 
 ### Fixed
