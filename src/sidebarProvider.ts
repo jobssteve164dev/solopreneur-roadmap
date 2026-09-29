@@ -43,6 +43,7 @@ import {
 import { ensureSolomapMaintenanceWorkspace } from './solomapGlobal';
 import { sendTextWhenTerminalReady } from './terminalCompatibility';
 import { recordShadowDecisionFeedback } from './autonomousRuntime';
+import { IntelligenceConversation, IntelligenceConversationStore } from './intelligenceChat';
 
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
@@ -54,6 +55,9 @@ interface SidebarProviderDependencies {
   getProjectConversationSnapshot?: (projectPath: string) => Promise<SidebarConversationSnapshot>;
   dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
   onInitialDataReady?: () => void;
+  listIntelligenceConversations?: () => ReturnType<IntelligenceConversationStore['list']>;
+  getIntelligenceConversation?: (id: string) => IntelligenceConversation | null;
+  sendIntelligenceMessage?: (text: string, id?: string) => Promise<IntelligenceConversation>;
 }
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
@@ -69,6 +73,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _getProjectConversationSnapshot?: (projectPath: string) => Promise<SidebarConversationSnapshot>;
   private readonly _dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
   private readonly _onInitialDataReady?: () => void;
+  private readonly _listIntelligenceConversations?: SidebarProviderDependencies['listIntelligenceConversations'];
+  private readonly _getIntelligenceConversation?: SidebarProviderDependencies['getIntelligenceConversation'];
+  private readonly _sendIntelligenceMessage?: SidebarProviderDependencies['sendIntelligenceMessage'];
   private _initialDataReady = false;
   private readonly _conversationSnapshotLoads = new Map<string, {
     promise: Promise<SidebarConversationSnapshot>;
@@ -110,6 +117,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     this._getProjectConversationSnapshot = dependencies.getProjectConversationSnapshot;
     this._dispatchSharedAction = dependencies.dispatchSharedAction;
     this._onInitialDataReady = dependencies.onInitialDataReady;
+    this._listIntelligenceConversations = dependencies.listIntelligenceConversations;
+    this._getIntelligenceConversation = dependencies.getIntelligenceConversation;
+    this._sendIntelligenceMessage = dependencies.sendIntelligenceMessage;
     this._projectLoader = new SidebarProjectLoader({
       isAvailable: () => Boolean(this._view),
       postMessage: (message) => { this._view?.webview.postMessage(message); },
@@ -152,6 +162,37 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           return;
         }
         switch (data.command) {
+          case 'intelligence.list':
+            this._view?.webview.postMessage({
+              command: 'intelligenceConversationsLoaded',
+              conversations: this._listIntelligenceConversations?.() || []
+            });
+            break;
+          case 'intelligence.get':
+            try {
+              this._view?.webview.postMessage({
+                command: 'intelligenceConversationLoaded',
+                conversation: this._getIntelligenceConversation?.(String(data.conversationId || '')) || null,
+                conversationId: String(data.conversationId || '')
+              });
+            } catch (error) {
+              this._view?.webview.postMessage({ command: 'intelligenceLoadFailed', message: error instanceof Error ? error.message : String(error) });
+            }
+            break;
+          case 'intelligence.send': {
+            const requestId = String(data.requestId || '');
+            try {
+              if (!this._sendIntelligenceMessage) throw new Error('Intelligence chat is unavailable.');
+              const conversation = await this._sendIntelligenceMessage(String(data.text || ''), String(data.conversationId || ''));
+              if (this._view !== webviewView) break;
+              this._view?.webview.postMessage({ command: 'intelligenceReplyLoaded', requestId, conversation });
+              this._view?.webview.postMessage({ command: 'intelligenceConversationsLoaded', conversations: this._listIntelligenceConversations?.() || [] });
+            } catch (error) {
+              if (this._view !== webviewView) break;
+              this._view?.webview.postMessage({ command: 'intelligenceReplyFailed', requestId, message: error instanceof Error ? error.message : String(error) });
+            }
+            break;
+          }
           case 'sidebarInitialDataReady':
             if (!this._initialDataReady) {
               this._initialDataReady = true;

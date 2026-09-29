@@ -12,6 +12,7 @@ export interface CognitiveCliInvocation {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   shell: false;
+  timeoutMs?: number;
 }
 
 export type CognitiveCliRunner = (invocation: CognitiveCliInvocation) => Promise<string>;
@@ -97,7 +98,7 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
     registerCancel(() => terminate(new Error('Local Agent CLI cognitive call was cancelled.')));
     const timer = setTimeout(() => {
       terminate(new Error('Local Agent CLI cognitive call timed out.'));
-    }, 60_000);
+    }, invocation.timeoutMs || 60_000);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', chunk => { stdout += String(chunk).slice(0, 65_536 - stdout.length); });

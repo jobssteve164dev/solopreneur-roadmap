@@ -28,11 +28,13 @@ const FORBIDDEN_PREFIXES = [
   'extension/.playwright-cli/',
   'extension/.solopreneur/',
   'extension/cache/',
+  'extension/design-demos/',
   'extension/docs/',
   'extension/output/',
   'extension/scripts/',
   'extension/src/',
   'extension/test/',
+  'extension/test-results/',
   'extension/website/'
 ];
 const FORBIDDEN_FILES = new Set([

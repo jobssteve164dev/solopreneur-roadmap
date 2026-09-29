@@ -4,6 +4,7 @@ import { pathToFileURL } from 'url';
 
 import { getAgentCliFamily, resolveAgentCliWithinFamily } from './agentCli';
 import { CognitiveShadowEngine, CognitiveShadowInput, CognitiveShadowProposal } from './autonomousRuntime';
+import { IntelligenceMessage } from './intelligenceChat';
 import {
   buildCognitiveCliInvocation,
   CognitiveCliInvocation,
@@ -124,6 +125,35 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     this.workingDirectory = options.workingDirectory;
     this.runner = options.runner || ((invocation: CognitiveCliInvocation) => runCognitiveCliInvocation(invocation, cancel => { this.cancelInvocation = cancel; }));
     this.id = `pi-agent:agent-cli:${getAgentCliFamily(this.agentCli)}:${this.model}:${String(options.configRevision || 'unversioned')}`;
+  }
+
+  public async chat(messages: IntelligenceMessage[], projectContext: {
+    selectedProject: string;
+    projects: Array<string | { name: string; priority?: string; description?: string }>;
+    today?: { summary: string; items: string[] };
+    currentSteps?: Array<{ title: string; status: string }>;
+  }): Promise<string> {
+    if (!messages.length || messages[messages.length - 1].role !== 'user') {
+      throw new Error('Intelligence chat requires a user message.');
+    }
+    this.cancelled = false;
+    if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
+    const prompt = [
+      '你是 SoloMap 的智能内核，帮助独立开发者思考下一步、权衡方案并厘清阻碍。',
+      '直接回答最后一条用户消息。结合对话历史和已提供的项目名称；不知道的事实就明确说不知道，不编造项目进展。',
+      '使用与用户最后一条消息相同的语言回答。',
+      '这里只进行对话，不调用工具、不读取文件、不执行任务。用户要执行时，指出需要回到对应项目操作。',
+      JSON.stringify({ projectContext, messages })
+    ].join('\n');
+    const invocation = { ...buildCognitiveCliInvocation(this.agentCli, this.model, prompt, this.workingDirectory), timeoutMs: 300_000 };
+    try {
+      const answer = String(await this.runner(invocation)).trim();
+      if (this.cancelled) throw new Error('Intelligence chat was cancelled.');
+      if (!answer) throw new Error('Intelligence did not return an answer.');
+      return answer;
+    } finally {
+      this.cancelInvocation = undefined;
+    }
   }
 
   public async plan(input: CognitiveShadowInput): Promise<CognitiveShadowProposal> {

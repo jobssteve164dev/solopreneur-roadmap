@@ -7,7 +7,9 @@ src/
 .github/
 .playwright-cli/
 docs/
+design-demos/
 test/
+test-results/
 website/
 output/
 scripts/

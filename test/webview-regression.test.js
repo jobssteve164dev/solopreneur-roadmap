@@ -642,6 +642,7 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
   const context = {
     Event,
     document: {
+      body: createElement('body'),
       getElementById: (id) => elements[id] || null,
       createElement,
       querySelectorAll() {
@@ -1013,7 +1014,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(html, /id="btn-add-scheduled-task"/);
   assert.match(script, /nextFocusReminderAt/);
   assert.match(script, /scheduledTasks/);
-  assert.match(html, /id="btn-toggle-feedback"/);
+  assert.match(html, /id="btn-toggle-intelligence"/);
   assert.match(html, /id="feedback-panel"/);
   assert.match(html, /id="btn-open-strategy-pyramid"/);
   assert.doesNotMatch(html, /id="btn-open-full"/);
@@ -1089,7 +1090,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /command: 'project\.continue',\s*projectPath: button\.getAttribute\('data-continue-next-action-project-path'\),\s*nodeId: button\.getAttribute\('data-continue-next-action-node-id'\),\s*agentCli: getLoadedAgentCliPath\(\)/);
   assert.match(html, /data-toggle-issue-form/);
   assert.match(html, /id="btn-toggle-collaboration"[^>]*><span class="codicon codicon-live-share"/);
-  assert.match(html, /id="btn-toggle-feedback"[^>]*><span class="codicon codicon-comment-discussion"/);
+  assert.match(html, /id="btn-toggle-intelligence"[^>]*><span class="codicon codicon-sparkle"/);
   assert.match(html, /\.collaboration-create-controls \.settings-input,[\s\S]*height:\s*40px/);
   assert.match(script, /data-collaboration-invite-code/);
   assert.match(script, /command: 'collaboration\.joinRoom'/);
@@ -1150,8 +1151,17 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'scheduled-task-prompt-input',
     'btn-add-scheduled-task',
     'text-add-scheduled-task',
-    'btn-toggle-feedback',
-    'btn-close-feedback',
+    'btn-toggle-intelligence',
+    'btn-close-intelligence',
+    'btn-intelligence-back',
+    'btn-intelligence-new',
+    'intelligence-panel',
+    'intelligence-home',
+    'intelligence-thread',
+    'intelligence-recent',
+    'intelligence-input',
+    'intelligence-send',
+    'intelligence-error',
     'feedback-panel',
     'feedback-title',
     'feedback-type-not-working',
@@ -1536,8 +1546,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   elements['btn-open-agent-install'].listeners.click();
   elements['btn-prepare-agent-automation'].listeners.click();
   elements['btn-open-github-auth'].listeners.click();
-  elements['btn-toggle-feedback'].listeners.click();
-  assert.equal(elements['feedback-panel'].style.display, 'block');
+  assert.ok(elements['feedback-panel']);
   elements['setting-feedback-title'].value = '希望加载更快';
   elements['setting-feedback-body'].value = '打开侧边栏时先显示项目。';
   elements['btn-open-feedback'].listeners.click();
@@ -2243,6 +2252,91 @@ test('sidebar starts background service reconciliation once after its ready sign
   await listener({ command: 'sidebarInitialDataReady' });
   await listener({ command: 'sidebarInitialDataReady' });
   assert.equal(starts, 1);
+});
+
+test('sidebar offers smart kernel chat in the header and keeps feedback inside settings', () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const header = html.slice(html.indexOf('<div class="header-container">'), html.indexOf('<div class="project-switcher">'));
+  const settings = html.slice(html.indexOf('<div class="settings-overlay" id="settings-panel">'));
+  assert.match(header, /id="btn-toggle-intelligence"/);
+  assert.doesNotMatch(header, /id="btn-toggle-feedback"/);
+  assert.match(html, /id="intelligence-panel"/);
+  assert.match(settings, /id="feedback-panel"/);
+  assert.match(settings, /id="btn-open-feedback"/);
+  assert.match(html, /command: 'intelligence\.send'/);
+});
+
+test('sidebar routes smart kernel conversation messages without blocking other startup data', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let listener;
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }),
+    updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: '' }),
+    listIntelligenceConversations: () => [],
+    sendIntelligenceMessage: async (text, id) => ({ id: id || 'new', title: text, messages: [{ role: 'user', content: text }, { role: 'assistant', content: '回答' }] })
+  });
+  provider.resolveWebviewView({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage: message => { posted.push(message); return Promise.resolve(true); },
+    onDidReceiveMessage: callback => { listener = callback; }
+  } }, {}, {});
+  await listener({ command: 'intelligence.list' });
+  await listener({ command: 'intelligence.send', requestId: 'request-1', text: '下一步做什么？' });
+  assert.ok(posted.some(message => message.command === 'intelligenceConversationsLoaded'));
+  assert.ok(posted.some(message => message.command === 'intelligenceReplyLoaded' && message.requestId === 'request-1' && message.conversation.id === 'new'));
+});
+
+test('sidebar does not deliver an old smart kernel reply to a recreated view', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let resolveReply;
+  let firstListener;
+  const laterMessages = [];
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }),
+    updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: '' }),
+    sendIntelligenceMessage: () => new Promise(resolve => { resolveReply = resolve; })
+  });
+  const createView = (onMessage, posted) => ({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage: message => { posted.push(message); return Promise.resolve(true); },
+    onDidReceiveMessage: onMessage
+  } });
+  provider.resolveWebviewView(createView(callback => { firstListener = callback; }, []), {}, {});
+  const pending = firstListener({ command: 'intelligence.send', requestId: 'request-1', text: '继续' });
+  provider.resolveWebviewView(createView(() => {}, laterMessages), {}, {});
+  resolveReply({ id: 'old', title: '继续', messages: [] });
+  await pending;
+  assert.equal(laterMessages.some(message => message.command === 'intelligenceReplyLoaded'), false);
+});
+
+test('smart kernel restores a failed message to its own conversation after navigation', () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const newConversation = runScriptWithMinimalDom(script, ids);
+  newConversation.elements['intelligence-input'].value = '先想清楚下一步';
+  newConversation.elements['intelligence-send'].listeners.click();
+  newConversation.elements['btn-intelligence-back'].listeners.click();
+  const firstRequest = newConversation.postedMessages.find(message => message.command === 'intelligence.send');
+  newConversation.dispatchMessage({ command: 'intelligenceReplyFailed', requestId: firstRequest.requestId });
+  assert.equal(newConversation.elements['intelligence-input'].value, '先想清楚下一步');
+  assert.equal(newConversation.elements['intelligence-error'].style.display, 'block');
+
+  const existingConversation = runScriptWithMinimalDom(script, ids,
+    "intelligenceConversationId = 'existing'; intelligenceView = 'thread'; window.readIntelligenceDraft = id => intelligenceDrafts.get(id);");
+  existingConversation.elements['intelligence-input'].value = '继续已有问题';
+  existingConversation.elements['intelligence-send'].listeners.click();
+  existingConversation.elements['btn-intelligence-back'].listeners.click();
+  const secondRequest = existingConversation.postedMessages.find(message => message.command === 'intelligence.send');
+  existingConversation.dispatchMessage({ command: 'intelligenceReplyFailed', requestId: secondRequest.requestId });
+  assert.equal(existingConversation.elements['intelligence-input'].value, '');
+  assert.equal(existingConversation.elements['intelligence-error'].style.display, 'none');
+  assert.equal(existingConversation.context.window.readIntelligenceDraft('existing'), '继续已有问题');
 });
 
 test('sidebar sends an empty first portfolio so startup can finish without registered projects', async () => {
@@ -3262,8 +3356,17 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
     'portfolio-title',
     'portfolio-list',
     'portfolio-filters',
-    'btn-toggle-feedback',
-    'btn-close-feedback',
+    'btn-toggle-intelligence',
+    'btn-close-intelligence',
+    'btn-intelligence-back',
+    'btn-intelligence-new',
+    'intelligence-panel',
+    'intelligence-home',
+    'intelligence-thread',
+    'intelligence-recent',
+    'intelligence-input',
+    'intelligence-send',
+    'intelligence-error',
     'feedback-panel',
     'feedback-title',
     'feedback-type-not-working',

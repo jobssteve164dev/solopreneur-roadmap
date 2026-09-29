@@ -196,6 +196,8 @@ import { recordLocalDiagnosticError } from './localDiagnostics';
 import { ensureAutonomousRuntime } from './autonomousRuntimeHost';
 import { sendRuntimeControlCommand } from './autonomousRuntimeControl';
 import { disableAutonomousRuntimeService, ensureAutonomousRuntimeService } from './autonomousRuntimeService';
+import { IntelligenceConversationStore } from './intelligenceChat';
+import { readTodayReview } from './dailyReview';
 import { writeCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import {
   buildCollaborationInviteCode,
@@ -607,6 +609,42 @@ export async function activate(context: vscode.ExtensionContext) {
     intelligenceServiceReconciled = true;
     void reconcileBackgroundIntelligenceService(context);
   };
+  const intelligenceConversationStores = new Map<string, IntelligenceConversationStore>();
+  const getIntelligenceConversationStore = () => {
+    const globalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+    let store = intelligenceConversationStores.get(globalDataPath);
+    if (!store) {
+      store = new IntelligenceConversationStore(globalDataPath, async (messages) => {
+        syncCognitiveRuntimeConfig(getPersistedSettings(context));
+        const config = readCognitiveRuntimeConfig(globalDataPath);
+        if (config.mode !== 'agent_cli') throw new Error('Choose an Agent in SoloMap settings to start a conversation.');
+        const projects = getProjects(context);
+        const selectedProjectPath = getSelectedProjectPath(context);
+        const todayReview = readTodayReview(globalDataPath, projects);
+        const engine = new EmbeddedPiAgentEngine({
+          agentCli: config.agentCli,
+          model: config.model,
+          configRevision: config.revision,
+          workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work')
+        });
+        return engine.chat(messages, {
+          selectedProject: projects.find(project => project.path === selectedProjectPath)?.name || '',
+          projects: projects.map(project => ({
+            name: project.name,
+            ...(project.priority ? { priority: project.priority } : {}),
+            ...(project.description ? { description: project.description.slice(0, 500) } : {})
+          })),
+          ...(todayReview ? { today: {
+            summary: todayReview.summary,
+            items: todayReview.todos.map(item => item.title)
+          } } : {}),
+          ...(syncEngine && activeProjectRoot === selectedProjectPath ? { currentSteps: syncEngine.getNodes().map(node => ({ title: node.title, status: node.status })) } : {})
+        });
+      });
+      intelligenceConversationStores.set(globalDataPath, store);
+    }
+    return store;
+  };
 
   // Register Sidebar Webview View Provider
   sidebarProvider = new SolopreneurSidebarProvider(
@@ -621,7 +659,10 @@ export async function activate(context: vscode.ExtensionContext) {
       getProjectConversationHistory: async (projectPath) => getProjectConversationHistoryForProject(context, projectPath),
       getProjectConversationSnapshot: async (projectPath) => getProjectConversationSnapshotForProject(context, projectPath),
       dispatchSharedAction: async (message, target) => handleSharedWebviewAction(context, message, 'sidebar', target),
-      onInitialDataReady: reconcileIntelligenceServiceOnce
+      onInitialDataReady: reconcileIntelligenceServiceOnce,
+      listIntelligenceConversations: () => getIntelligenceConversationStore().list(),
+      getIntelligenceConversation: (id) => getIntelligenceConversationStore().get(id),
+      sendIntelligenceMessage: (text, id) => getIntelligenceConversationStore().send(text, id)
     }
   );
 

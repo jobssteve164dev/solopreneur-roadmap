@@ -219,7 +219,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     /* Settings Panel Overlay */
     .settings-overlay,
     .focus-timer-overlay,
-    .feedback-overlay,
+    .intelligence-overlay,
     .collaboration-overlay {
       position: absolute;
       top: 45px;
@@ -242,6 +242,154 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       padding: 0;
       overflow: hidden;
     }
+
+    .intelligence-overlay {
+      position: fixed;
+      bottom: 10px;
+      padding: 0;
+      overflow: hidden;
+      height: auto;
+      max-height: none;
+      flex-direction: column;
+      z-index: 120;
+    }
+
+    body.intelligence-open .sidebar-footer { display: none; }
+
+    .intelligence-overlay .settings-header {
+      margin: 0;
+      padding: 12px;
+      flex: 0 0 auto;
+    }
+
+    .intelligence-home,
+    .intelligence-thread {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 16px 14px;
+    }
+
+    .intelligence-kicker {
+      color: var(--text-muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+
+    .intelligence-intro {
+      margin: 10px 0 7px;
+      color: var(--text-main);
+      font-size: 19px;
+      line-height: 1.3;
+      font-weight: 750;
+    }
+
+    .intelligence-description {
+      margin: 0 0 18px;
+      color: var(--text-muted);
+      font-size: 11px;
+      line-height: 1.6;
+    }
+
+    .intelligence-prompt,
+    .intelligence-recent-item {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 7px;
+      border: 1px solid var(--border-glass);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.035);
+      color: var(--text-main);
+      text-align: left;
+      font: inherit;
+      font-size: 11px;
+      line-height: 1.45;
+      cursor: pointer;
+    }
+
+    .intelligence-prompt:hover,
+    .intelligence-recent-item:hover {
+      border-color: rgba(0, 229, 255, 0.45);
+      background: rgba(0, 229, 255, 0.06);
+    }
+
+    .intelligence-recent-title {
+      margin: 17px 0 9px;
+      color: var(--text-muted);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .intelligence-recent-item span {
+      display: block;
+      margin-top: 3px;
+      color: var(--text-muted);
+      font-size: 9px;
+    }
+
+    .intelligence-message {
+      padding: 10px 11px;
+      margin-bottom: 10px;
+      border-radius: 8px;
+      color: var(--text-main);
+      font-size: 11px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .intelligence-message.user {
+      margin-left: 20px;
+      background: rgba(124, 77, 255, 0.16);
+    }
+
+    .intelligence-message.assistant {
+      margin-right: 12px;
+      background: rgba(255, 255, 255, 0.045);
+    }
+
+    .intelligence-message.pending {
+      color: var(--text-muted);
+    }
+
+    .intelligence-composer {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      flex: 0 0 auto;
+      padding: 11px 12px 12px;
+      border-top: 1px solid var(--border-glass);
+      background: rgba(15, 17, 26, 0.98);
+    }
+
+    .intelligence-composer-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 7px;
+    }
+
+    .intelligence-composer textarea {
+      flex: 1;
+      min-width: 0;
+      min-height: 54px;
+      max-height: 130px;
+      resize: vertical;
+    }
+
+    .intelligence-send {
+      flex: 0 0 32px;
+      height: 32px;
+      border: 0;
+      border-radius: 6px;
+      color: #081018;
+      background: #00e5ff;
+      cursor: pointer;
+    }
+
+    .intelligence-send:disabled { opacity: 0.45; cursor: default; }
+    .intelligence-error { color: #ff8f98; font-size: 10px; line-height: 1.4; }
 
     .collaboration-overlay .settings-header {
       margin: 0;
@@ -4030,7 +4178,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     <div class="header-actions">
       <button class="btn-gear btn-focus-timer" id="btn-toggle-focus-timer" title="Focus Timer"><span class="codicon codicon-clock"></span></button>
       <button class="btn-gear btn-collaboration" id="btn-toggle-collaboration" title="Quick co-create" aria-label="Quick co-create"><span class="codicon codicon-live-share"></span><span class="collaboration-badge" aria-hidden="true"></span></button>
-      <button class="btn-gear" id="btn-toggle-feedback" title="Feedback"><span class="codicon codicon-comment-discussion"></span></button>
+      <button class="btn-gear" id="btn-toggle-intelligence" title="智能内核" aria-label="智能内核"><span class="codicon codicon-sparkle"></span></button>
       <button class="btn-gear" id="btn-toggle-settings" title="SoloMap Settings"><span class="codicon codicon-settings-gear"></span></button>
     </div>
   </div>
@@ -4105,37 +4253,32 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
   </div>
 
-  <div class="feedback-overlay" id="feedback-panel">
+  <div class="intelligence-overlay" id="intelligence-panel">
     <div class="settings-header">
-      <h3><span class="codicon codicon-comment-discussion"></span> <span id="feedback-title">Feedback</span></h3>
-      <button class="btn-close-settings" id="btn-close-feedback"><span class="codicon codicon-close"></span></button>
-    </div>
-    <div class="feedback-type-row">
-      <button class="feedback-type-btn active" type="button" data-feedback-type="not_working" id="feedback-type-not-working">没跑通</button>
-      <button class="feedback-type-btn" type="button" data-feedback-type="next_step" id="feedback-type-next-step">不懂下一步</button>
-      <button class="feedback-type-btn" type="button" data-feedback-type="feature_request" id="feedback-type-feature">想要能力</button>
-    </div>
-    <div class="settings-field">
-      <input
-        type="text"
-        class="settings-input"
-        id="setting-feedback-title"
-        placeholder="What should be improved?"
-      >
-      <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 78px; margin-top: 5px;"></textarea>
-      <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
-    </div>
-    
-    <div class="feedback-rating-card">
-      <div class="rating-card-title">
-        <span class="codicon codicon-star-full rating-star-icon"></span>
-        <span id="text-rating-title">觉得 SoloMap 挺好用？</span>
+      <h3><span class="codicon codicon-sparkle"></span> <span id="intelligence-title">智能内核</span></h3>
+      <div class="header-actions">
+        <button class="btn-gear" id="btn-intelligence-back" type="button" aria-label="最近对话" style="display:none;"><span class="codicon codicon-arrow-left"></span></button>
+        <button class="btn-gear" id="btn-intelligence-new" type="button" aria-label="新对话"><span class="codicon codicon-add"></span></button>
+        <button class="btn-close-settings" id="btn-close-intelligence" type="button" aria-label="关闭智能内核"><span class="codicon codicon-close"></span></button>
       </div>
-      <div class="rating-card-desc" id="text-rating-desc">给个五星好评，支持我们持续更新！</div>
-      <button class="settings-action-btn rating-btn" id="btn-rate-extension" type="button">
-        <span class="codicon codicon-heart-filled"></span>
-        <span id="text-rate-btn">去评五星好评</span>
-      </button>
+    </div>
+    <div class="intelligence-home" id="intelligence-home">
+      <div class="intelligence-kicker" id="intelligence-kicker">和 SoloMap 聊聊</div>
+      <div class="intelligence-intro" id="intelligence-intro">下一步，想好了吗？</div>
+      <p class="intelligence-description" id="intelligence-description">说出你正在犹豫的事，先一起想清楚，再回到项目里动手。</p>
+      <button class="intelligence-prompt" type="button" data-intelligence-prompt="priority" id="intelligence-prompt-priority">帮我判断现在最该推进哪件事</button>
+      <button class="intelligence-prompt" type="button" data-intelligence-prompt="idea" id="intelligence-prompt-idea">这个想法值得现在做吗？</button>
+      <button class="intelligence-prompt" type="button" data-intelligence-prompt="blocker" id="intelligence-prompt-blocker">帮我梳理一下当前的阻碍</button>
+      <div class="intelligence-recent-title" id="intelligence-recent-title">最近对话</div>
+      <div id="intelligence-recent"></div>
+    </div>
+    <div class="intelligence-thread" id="intelligence-thread" style="display:none;"></div>
+    <div class="intelligence-composer">
+      <div class="intelligence-composer-row">
+        <textarea class="settings-input settings-textarea" id="intelligence-input" rows="2" aria-label="向智能内核提问" placeholder="说说你现在想解决什么…"></textarea>
+        <button class="intelligence-send" id="intelligence-send" type="button" aria-label="发送" disabled><span class="codicon codicon-arrow-up"></span></button>
+      </div>
+      <div class="intelligence-error" id="intelligence-error" role="alert" style="display:none;"></div>
     </div>
   </div>
 
@@ -4502,6 +4645,25 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
     </div>
 
+    <div class="settings-card" id="feedback-panel">
+      <div class="settings-card-title"><span class="codicon codicon-comment-discussion"></span><span id="feedback-title">Feedback</span></div>
+      <div class="feedback-type-row">
+        <button class="feedback-type-btn active" type="button" data-feedback-type="not_working" id="feedback-type-not-working">没跑通</button>
+        <button class="feedback-type-btn" type="button" data-feedback-type="next_step" id="feedback-type-next-step">不懂下一步</button>
+        <button class="feedback-type-btn" type="button" data-feedback-type="feature_request" id="feedback-type-feature">想要能力</button>
+      </div>
+      <div class="settings-field">
+        <input type="text" class="settings-input" id="setting-feedback-title" placeholder="What should be improved?">
+        <textarea class="settings-input settings-textarea" id="setting-feedback-body" placeholder="Add what happened and what you expected." style="min-height: 78px; margin-top: 5px;"></textarea>
+        <button class="settings-action-btn test-btn" id="btn-open-feedback" style="margin-top: 6px; width: 100%;"><span class="codicon codicon-github"></span><span id="text-open-feedback">Send Feedback</span></button>
+      </div>
+      <div class="feedback-rating-card">
+        <div class="rating-card-title"><span class="codicon codicon-star-full rating-star-icon"></span><span id="text-rating-title">觉得 SoloMap 挺好用？</span></div>
+        <div class="rating-card-desc" id="text-rating-desc">给个五星好评，支持我们持续更新！</div>
+        <button class="settings-action-btn rating-btn" id="btn-rate-extension" type="button"><span class="codicon codicon-heart-filled"></span><span id="text-rate-btn">去评五星好评</span></button>
+      </div>
+    </div>
+
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -4569,9 +4731,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnCloseCollaboration = document.getElementById('btn-close-collaboration');
     const collaborationPanel = document.getElementById('collaboration-panel');
     const collaborationContent = document.getElementById('collaboration-content');
-    const btnToggleFeedback = document.getElementById('btn-toggle-feedback');
-    const btnCloseFeedback = document.getElementById('btn-close-feedback');
-    const feedbackPanel = document.getElementById('feedback-panel');
+    const btnToggleIntelligence = document.getElementById('btn-toggle-intelligence');
+    const btnCloseIntelligence = document.getElementById('btn-close-intelligence');
+    const btnIntelligenceBack = document.getElementById('btn-intelligence-back');
+    const btnIntelligenceNew = document.getElementById('btn-intelligence-new');
+    const intelligencePanel = document.getElementById('intelligence-panel');
+    const intelligenceHome = document.getElementById('intelligence-home');
+    const intelligenceThread = document.getElementById('intelligence-thread');
+    const intelligenceRecent = document.getElementById('intelligence-recent');
+    const intelligenceInput = document.getElementById('intelligence-input');
+    const intelligenceSend = document.getElementById('intelligence-send');
+    const intelligenceError = document.getElementById('intelligence-error');
     const btnToggleSettings = document.getElementById('btn-toggle-settings');
     const btnCloseSettings = document.getElementById('btn-close-settings');
     const settingsPanel = document.getElementById('settings-panel');
@@ -4689,6 +4859,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const ignoredTodayDecisionIds = new Set();
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
+    let intelligenceConversations = [];
+    let intelligenceConversation = null;
+    let intelligenceConversationId = '';
+    let intelligenceView = 'home';
+    let intelligencePendingRequest = '';
+    let intelligencePendingText = '';
+    let intelligencePendingConversationId = '';
+    let intelligenceRequestSeq = 0;
+    const intelligenceDrafts = new Map();
     let currentCliPath = 'agy';
     let currentSettings = {};
     let settingsDataLoaded = false;
@@ -5671,6 +5850,22 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         feedbackNextStep: '不懂下一步',
         feedbackFeature: '想要能力',
         feedbackPanelTitle: '反馈',
+        intelligenceTitle: '智能内核',
+        intelligenceClose: '关闭智能内核',
+        intelligenceKicker: '和 SoloMap 聊聊',
+        intelligenceIntro: '下一步，想好了吗？',
+        intelligenceDescription: '说出你正在犹豫的事，先一起想清楚，再回到项目里动手。',
+        intelligencePromptPriority: '帮我判断现在最该推进哪件事',
+        intelligencePromptIdea: '这个想法值得现在做吗？',
+        intelligencePromptBlocker: '帮我梳理一下当前的阻碍',
+        intelligenceRecent: '最近对话',
+        intelligencePlaceholder: '说说你现在想解决什么…',
+        intelligenceInputLabel: '向智能内核提问',
+        intelligenceSend: '发送',
+        intelligenceThinking: '正在思考…',
+        intelligenceNoRecent: '还没有对话。',
+        intelligenceNewConversation: '新对话',
+        intelligenceError: '暂时无法回答，请重试。',
         feedbackTitlePlaceholder: '一句话说明想反馈的问题...',
         feedbackBodyPlaceholder: '补充现象、期望结果或改进建议...',
         openFeedback: '提交到 GitHub Issue',
@@ -6137,6 +6332,22 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         feedbackNextStep: 'Next step unclear',
         feedbackFeature: 'Feature request',
         feedbackPanelTitle: 'Feedback',
+        intelligenceTitle: 'Intelligence',
+        intelligenceClose: 'Close intelligence',
+        intelligenceKicker: 'Talk with SoloMap',
+        intelligenceIntro: 'What would you like to think through?',
+        intelligenceDescription: 'Explore a decision, then return to your project when you are ready to act.',
+        intelligencePromptPriority: 'Help me decide what to do next',
+        intelligencePromptIdea: 'Is this idea worth doing now?',
+        intelligencePromptBlocker: 'Help me understand what is blocking me',
+        intelligenceRecent: 'Recent conversations',
+        intelligencePlaceholder: 'What are you working through?',
+        intelligenceInputLabel: 'Ask intelligence',
+        intelligenceSend: 'Send',
+        intelligenceThinking: 'Thinking…',
+        intelligenceNoRecent: 'No conversations yet.',
+        intelligenceNewConversation: 'New conversation',
+        intelligenceError: 'Could not answer yet. Try again.',
         feedbackTitlePlaceholder: 'Summarize the issue or idea...',
         feedbackBodyPlaceholder: 'Add what happened, what you expected, or the suggestion...',
         openFeedback: 'Open GitHub Issue',
@@ -6421,7 +6632,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         btnCloseFocusTimer.title = t('closeTimePlan');
         btnCloseFocusTimer.setAttribute('aria-label', t('closeTimePlan'));
       }
-      if (btnToggleFeedback) btnToggleFeedback.title = t('feedbackPanelTitle');
+      btnToggleIntelligence.title = t('intelligenceTitle');
+      btnToggleIntelligence.setAttribute('aria-label', t('intelligenceTitle'));
+      btnCloseIntelligence.setAttribute('aria-label', t('intelligenceClose'));
+      btnIntelligenceBack.setAttribute('aria-label', t('intelligenceRecent'));
+      btnIntelligenceNew.setAttribute('aria-label', t('intelligenceNewConversation'));
       btnAddProject.title = t('chooseProject');
       setText('focus-timer-title', t('focusTimerTitle'));
       setText('collaboration-title', t('collaborationTitle'));
@@ -6445,6 +6660,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderTimePlanDrafts(currentTimePlans);
       updateScheduledTasksTarget();
       setText('feedback-title', t('feedbackPanelTitle'));
+      setText('intelligence-title', t('intelligenceTitle'));
+      setText('intelligence-kicker', t('intelligenceKicker'));
+      setText('intelligence-intro', t('intelligenceIntro'));
+      setText('intelligence-description', t('intelligenceDescription'));
+      setText('intelligence-prompt-priority', t('intelligencePromptPriority'));
+      setText('intelligence-prompt-idea', t('intelligencePromptIdea'));
+      setText('intelligence-prompt-blocker', t('intelligencePromptBlocker'));
+      setText('intelligence-recent-title', t('intelligenceRecent'));
+      intelligenceInput.placeholder = t('intelligencePlaceholder');
+      intelligenceInput.setAttribute('aria-label', t('intelligenceInputLabel'));
+      intelligenceSend.setAttribute('aria-label', t('intelligenceSend'));
       setText('feedback-type-not-working', t('feedbackNotWorking'));
       setText('text-rating-title', t('feedbackRatingTitle'));
       setText('text-rating-desc', t('feedbackRatingDesc'));
@@ -6540,8 +6766,107 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderProAccount(currentSettings);
       renderAutomationSettings(currentSettings);
       renderCollaborationPanel();
+      renderIntelligenceRecent();
+      renderIntelligenceThread();
       renderSidebar(currentNodes);
     }
+
+    function renderIntelligenceRecent() {
+      intelligenceRecent.innerHTML = intelligenceConversations.length
+        ? intelligenceConversations.map(conversation => '<button class="intelligence-recent-item" type="button" data-intelligence-id="' + escapeHtml(conversation.id) + '">' + escapeHtml(conversation.title || '') + '<span>' + escapeHtml(new Date(conversation.updatedAt).toLocaleDateString(currentLanguage === 'zh' ? 'zh-CN' : 'en-US')) + '</span></button>').join('')
+        : '<div class="intelligence-description">' + escapeHtml(t('intelligenceNoRecent')) + '</div>';
+      intelligenceRecent.querySelectorAll('[data-intelligence-id]').forEach(button => {
+        button.addEventListener('click', () => {
+          const id = button.getAttribute('data-intelligence-id') || '';
+          intelligenceDrafts.set(intelligenceConversationId, intelligenceInput.value);
+          intelligenceConversationId = id;
+          intelligenceConversation = null;
+          intelligenceView = 'thread';
+          intelligenceInput.value = intelligenceDrafts.get(id) || '';
+          intelligenceSend.disabled = Boolean(intelligencePendingRequest) || !intelligenceInput.value.trim();
+          renderIntelligenceThread();
+          vscode.postMessage({ command: 'intelligence.get', conversationId: id });
+        });
+      });
+    }
+
+    function showIntelligenceHome(clearDraft) {
+      intelligenceDrafts.set(intelligenceConversationId, intelligenceInput.value);
+      intelligenceView = 'home';
+      intelligenceConversationId = '';
+      intelligenceConversation = null;
+      intelligenceHome.style.display = 'block';
+      intelligenceThread.style.display = 'none';
+      btnIntelligenceBack.style.display = 'none';
+      if (clearDraft) intelligenceDrafts.set('', '');
+      intelligenceInput.value = intelligenceDrafts.get('') || '';
+      intelligenceSend.disabled = Boolean(intelligencePendingRequest) || !intelligenceInput.value.trim();
+      intelligenceError.style.display = 'none';
+      vscode.postMessage({ command: 'intelligence.list' });
+    }
+
+    function renderIntelligenceThread() {
+      if (intelligenceView !== 'thread') return;
+      intelligenceHome.style.display = 'none';
+      intelligenceThread.style.display = 'block';
+      btnIntelligenceBack.style.display = '';
+      const messages = intelligenceConversation && Array.isArray(intelligenceConversation.messages) ? intelligenceConversation.messages : [];
+      intelligenceThread.innerHTML = messages.map(message => '<div class="intelligence-message ' + (message.role === 'user' ? 'user' : 'assistant') + '">' + escapeHtml(message.content || '') + '</div>').join('')
+        + (intelligencePendingRequest && intelligenceConversationId === intelligencePendingConversationId ? '<div class="intelligence-message user">' + escapeHtml(intelligencePendingText) + '</div><div class="intelligence-message assistant pending">' + escapeHtml(t('intelligenceThinking')) + '</div>' : '');
+      intelligenceThread.scrollTop = intelligenceThread.scrollHeight;
+    }
+
+    function sendIntelligenceMessage() {
+      const text = String(intelligenceInput.value || '').trim();
+      if (!text || intelligencePendingRequest) return;
+      intelligenceView = 'thread';
+      intelligencePendingText = text;
+      intelligencePendingConversationId = intelligenceConversationId;
+      intelligencePendingRequest = 'intelligence-' + Date.now() + '-' + (++intelligenceRequestSeq) + '-' + Math.random().toString(36).slice(2);
+      intelligenceError.style.display = 'none';
+      intelligenceDrafts.set(intelligenceConversationId, '');
+      intelligenceInput.value = '';
+      intelligenceSend.disabled = true;
+      renderIntelligenceThread();
+      vscode.postMessage({ command: 'intelligence.send', requestId: intelligencePendingRequest, conversationId: intelligenceConversationId, text });
+    }
+
+    btnToggleIntelligence.addEventListener('click', () => {
+      if (intelligencePanel.style.display === 'flex') {
+        intelligencePanel.style.display = 'none';
+        document.body.classList.remove('intelligence-open');
+        return;
+      }
+      settingsPanel.style.display = 'none';
+      focusTimerPanel.style.display = 'none';
+      collaborationPanel.style.display = 'none';
+      btnToggleCollaboration.classList.remove('is-active');
+      intelligencePanel.style.display = 'flex';
+      document.body.classList.add('intelligence-open');
+      if (intelligenceView === 'home') vscode.postMessage({ command: 'intelligence.list' });
+      intelligenceInput.focus();
+    });
+    btnCloseIntelligence.addEventListener('click', () => {
+      intelligencePanel.style.display = 'none';
+      document.body.classList.remove('intelligence-open');
+    });
+    btnIntelligenceBack.addEventListener('click', () => showIntelligenceHome(false));
+    btnIntelligenceNew.addEventListener('click', () => showIntelligenceHome(true));
+    intelligencePanel.querySelectorAll('[data-intelligence-prompt]').forEach(button => {
+      button.addEventListener('click', () => {
+        const kind = button.getAttribute('data-intelligence-prompt');
+        intelligenceInput.value = t(kind === 'priority' ? 'intelligencePromptPriority' : kind === 'idea' ? 'intelligencePromptIdea' : 'intelligencePromptBlocker');
+        sendIntelligenceMessage();
+      });
+    });
+    intelligenceInput.addEventListener('input', () => { intelligenceSend.disabled = Boolean(intelligencePendingRequest) || !intelligenceInput.value.trim(); });
+    intelligenceInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        sendIntelligenceMessage();
+      }
+    });
+    intelligenceSend.addEventListener('click', sendIntelligenceMessage);
 
     // Toggle settings panel
     if (btnToggleCollaboration) {
@@ -6552,7 +6877,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         } else {
           settingsPanel.style.display = 'none';
           focusTimerPanel.style.display = 'none';
-          feedbackPanel.style.display = 'none';
+          intelligencePanel.style.display = 'none';
+          document.body.classList.remove('intelligence-open');
           collaborationPanel.style.display = 'block';
           btnToggleCollaboration.classList.add('is-active');
           vscode.postMessage({ command: 'collaboration.getRooms' });
@@ -6575,7 +6901,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           focusTimerPanel.style.display = 'none';
         } else {
           settingsPanel.style.display = 'none';
-          if (feedbackPanel) feedbackPanel.style.display = 'none';
+          intelligencePanel.style.display = 'none';
+          document.body.classList.remove('intelligence-open');
           if (collaborationPanel) collaborationPanel.style.display = 'none';
           if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
           focusTimerPanel.style.display = 'block';
@@ -6697,7 +7024,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     if (btnOpenScheduledTasks) {
       btnOpenScheduledTasks.addEventListener('click', () => {
         settingsPanel.style.display = 'none';
-        if (feedbackPanel) feedbackPanel.style.display = 'none';
+        intelligencePanel.style.display = 'none';
+        document.body.classList.remove('intelligence-open');
         focusTimerPanel.style.display = 'block';
         updateScheduledTasksTarget();
         renderScheduledTasksView();
@@ -6706,31 +7034,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
     }
 
-    if (btnToggleFeedback) {
-      btnToggleFeedback.addEventListener('click', () => {
-        if (feedbackPanel.style.display === 'block') {
-          feedbackPanel.style.display = 'none';
-        } else {
-          settingsPanel.style.display = 'none';
-          if (focusTimerPanel) focusTimerPanel.style.display = 'none';
-          if (collaborationPanel) collaborationPanel.style.display = 'none';
-          if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
-          feedbackPanel.style.display = 'block';
-        }
-      });
-    }
-
-    if (btnCloseFeedback) {
-      btnCloseFeedback.addEventListener('click', () => {
-        feedbackPanel.style.display = 'none';
-      });
-    }
-
     btnToggleSettings.addEventListener('click', () => {
       if (settingsPanel.style.display === 'block') {
         settingsPanel.style.display = 'none';
       } else {
-        feedbackPanel.style.display = 'none';
+        intelligencePanel.style.display = 'none';
+        document.body.classList.remove('intelligence-open');
         if (focusTimerPanel) focusTimerPanel.style.display = 'none';
         if (collaborationPanel) collaborationPanel.style.display = 'none';
         if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
@@ -7769,11 +8078,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     if (settingsPanel) {
-      settingsPanel.addEventListener('input', () => {
+      settingsPanel.addEventListener('input', event => {
+        if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
         settingsEditRevision += 1;
         settingsFormDirty = true;
       });
-      settingsPanel.addEventListener('change', () => {
+      settingsPanel.addEventListener('change', event => {
+        if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
         settingsEditRevision += 1;
         settingsFormDirty = true;
       });
@@ -7795,6 +8106,58 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     window.addEventListener('message', event => {
       const message = event.data;
       switch (message.command) {
+        case 'intelligenceConversationsLoaded':
+          intelligenceConversations = Array.isArray(message.conversations) ? message.conversations : [];
+          renderIntelligenceRecent();
+          break;
+        case 'intelligenceConversationLoaded':
+          if (message.conversationId !== intelligenceConversationId || intelligenceView !== 'thread') break;
+          if (!message.conversation) {
+            intelligenceError.textContent = t('intelligenceError');
+            intelligenceError.style.display = 'block';
+            break;
+          }
+          intelligenceConversation = message.conversation;
+          renderIntelligenceThread();
+          break;
+        case 'intelligenceReplyLoaded':
+          if (message.requestId !== intelligencePendingRequest) break;
+          intelligencePendingRequest = '';
+          intelligenceSend.disabled = !intelligenceInput.value.trim();
+          if (intelligenceView === 'thread' && intelligenceConversationId === intelligencePendingConversationId) {
+            intelligenceConversation = message.conversation;
+            intelligenceConversationId = message.conversation.id;
+            renderIntelligenceThread();
+          }
+          intelligencePendingText = '';
+          intelligencePendingConversationId = '';
+          break;
+        case 'intelligenceReplyFailed':
+          if (message.requestId !== intelligencePendingRequest) break;
+          intelligencePendingRequest = '';
+          const failedConversationId = intelligencePendingConversationId;
+          const savedDraft = intelligenceDrafts.get(failedConversationId) || '';
+          intelligenceDrafts.set(failedConversationId, intelligencePendingText + (savedDraft ? '\\n\\n' + savedDraft : ''));
+          const showingFailedConversation = intelligenceConversationId === failedConversationId
+            && (intelligenceView === 'thread' || (intelligenceView === 'home' && !failedConversationId));
+          if (showingFailedConversation) {
+            const currentDraft = intelligenceInput.value;
+            intelligenceInput.value = intelligencePendingText + (currentDraft ? '\\n\\n' + currentDraft : '');
+            intelligenceDrafts.set(failedConversationId, intelligenceInput.value);
+          }
+          intelligencePendingText = '';
+          intelligencePendingConversationId = '';
+          intelligenceSend.disabled = !intelligenceInput.value.trim();
+          renderIntelligenceThread();
+          if (showingFailedConversation) {
+            intelligenceError.textContent = t('intelligenceError');
+            intelligenceError.style.display = 'block';
+          }
+          break;
+        case 'intelligenceLoadFailed':
+          intelligenceError.textContent = t('intelligenceError');
+          intelligenceError.style.display = 'block';
+          break;
         case 'nodesUpdated':
           if (message.projectPath && activeProjectPath && message.projectPath !== activeProjectPath) {
             return;
