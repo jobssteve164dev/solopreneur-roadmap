@@ -23,6 +23,20 @@ test('read-only project enumeration never creates the registry', () => {
   assert.equal(fs.existsSync(path.join(parent, '.solomap-global', 'projects.json')), false);
 });
 
+test('conversation project snapshot preserves an offline selected project without writing the registry', t => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-conversation-projects-'));
+  t.after(() => fs.rmdirSync(parent));
+  const projects = registry.getProjectsSnapshot({
+    globalDataPath: parent,
+    projectRegistryFileName: 'projects.json',
+    legacyProjects: [{ name: 'Offline', path: path.join(parent, 'offline') }, { name: 'Online', path: parent }],
+    legacyHiddenProjects: [],
+    workspaceRoot: parent
+  });
+  assert.equal(registry.getSelectedProjectPath(projects, path.join(parent, 'offline')), path.join(parent, 'offline'));
+  assert.equal(fs.existsSync(path.join(parent, '.solomap-global', 'projects.json')), false);
+});
+
 test('read-only project enumeration excludes paths recorded as hidden', () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-registry-hidden-'));
   const visible = path.join(parent, 'visible');

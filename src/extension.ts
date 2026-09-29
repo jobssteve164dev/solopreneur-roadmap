@@ -60,6 +60,7 @@ import {
 } from './strategyPyramid';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
+import { createIntelligenceReadTools } from './intelligenceReadTools';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
@@ -178,6 +179,7 @@ import {
   getHiddenProjects as getHiddenProjectsFromRegistry,
   getProjects as getProjectsFromRegistry,
   getProjectsReadOnly as getProjectsReadOnlyFromRegistry,
+  getProjectsSnapshot as getProjectsSnapshotFromRegistry,
   getSelectedProjectPath as getSelectedProjectPathFromRegistry,
   normalizeGlobalDataPathForExtension as normalizeGlobalDataPathForRegistry,
   normalizeProjectsForStorage as normalizeProjectsForRegistryStorage,
@@ -621,6 +623,16 @@ export async function activate(context: vscode.ExtensionContext) {
         const projects = getProjects(context);
         const selectedProjectPath = getSelectedProjectPath(context);
         const todayReview = readTodayReview(globalDataPath, projects);
+        const getIntelligenceProjects = () => getProjectsSnapshotFromRegistry({
+          globalDataPath: getPersistedSettings(context).globalDataPath,
+          projectRegistryFileName,
+          legacyProjects: context.globalState.get<SolopreneurProject[]>(projectsKey) || [],
+          legacyHiddenProjects: context.globalState.get<string[]>(hiddenProjectsKey) || [],
+          workspaceRoot: getWorkspaceRoot()
+        });
+        const getIntelligenceSelectedProjectPath = () => getSelectedProjectPathFromRegistry(
+          getIntelligenceProjects(), selectedProjectPathInMemory || context.globalState.get<string>(selectedProjectKey) || ''
+        );
         const engine = new EmbeddedPiAgentEngine({
           agentCli: config.agentCli,
           model: config.model,
@@ -639,7 +651,21 @@ export async function activate(context: vscode.ExtensionContext) {
             items: todayReview.todos.map(item => item.title)
           } } : {}),
           ...(syncEngine && activeProjectRoot === selectedProjectPath ? { currentSteps: syncEngine.getNodes().map(node => ({ title: node.title, status: node.status })) } : {})
-        });
+        }, createIntelligenceReadTools({
+          getProjects: getIntelligenceProjects,
+          getSelectedProjectPath: getIntelligenceSelectedProjectPath,
+          getCurrentSteps: () => syncEngine && activeProjectRoot === getIntelligenceSelectedProjectPath()
+            ? syncEngine.getNodes().map(node => ({ title: node.title, status: node.status }))
+            : null,
+          getSettings: () => {
+            const currentConfig = readCognitiveRuntimeConfig(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
+            return {
+              language: getPersistedSettings(context).language,
+              cognitiveAgent: currentConfig.agentCli,
+              cognitiveModel: currentConfig.model
+            };
+          }
+        }));
       });
       intelligenceConversationStores.set(globalDataPath, store);
     }

@@ -152,6 +152,24 @@ export function getProjects(input: {
   return sortProjectsForDisplay(normalizedProjects);
 }
 
+export function getProjectsSnapshot(input: {
+  globalDataPath: string;
+  projectRegistryFileName: string;
+  legacyProjects: SolopreneurProject[];
+  legacyHiddenProjects: string[];
+  workspaceRoot?: string;
+}): SolopreneurProject[] {
+  const registry = readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
+  const savedProjects = registry ? registry.projects : input.legacyProjects;
+  const hiddenProjects = new Set(registry ? registry.hiddenProjects : input.legacyHiddenProjects);
+  const workspaceRoot = String(input.workspaceRoot || '').trim();
+  const projects = normalizeProjectsForStorage(savedProjects);
+  if (workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some(project => project.path === workspaceRoot)) {
+    projects.unshift({ name: projectName(workspaceRoot), path: workspaceRoot });
+  }
+  return sortProjectsForDisplay(normalizeProjectsForStorage(projects));
+}
+
 export function getProjectsReadOnly(input: {
   globalDataPath: string;
   projectRegistryFileName: string;
