@@ -17,6 +17,7 @@
 11. [中文品牌命名与定位分析](./product/chinese-naming-analysis.zh.md)：关于项目中文命名的多维度头脑风暴与品牌定位思考。
 12. [独立开发者生态与协作网络战略](./product/solo-developer-ecosystem-strategy.zh.md)：理解本地项目如何在用户授权下连接协作者、能力、反馈和商业机会，以及私密房间、公共共创与官网中继的长期边界。
 13. [CloudMCP JSON 记忆目标适配边界](./architecture/cloudmcp-json-memory-adapter.zh.md)：理解 SoloMap 作为可配置本地记忆目标时，与 CloudMCP 本地代理唯一写入口之间的职责边界。
+14. [Codex 运行时历史膨胀与陈旧回合调查报告](./architecture/codex-runtime-history-retention-investigation.zh.md)：查看 Codex 历史占用、陈旧 `inProgress` 回合的现场证据、根因边界和后续优化验收基线。
 
 ## UI 与交互基线
 
