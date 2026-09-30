@@ -75,7 +75,9 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     await page.locator('#setting-cognitive-engine-agent [data-solo-option-value="codex"]').click();
     assert.equal(await page.locator('#setting-cognitive-engine-agent').getAttribute('data-value'), 'codex');
     assert.match(await page.locator('#help-cognitive-engine-agent').textContent(), /不会打开终端窗口/);
-    await page.locator('#setting-telegram-enabled').check();
+    await page.locator('#setting-telegram-enabled [data-solo-trigger]').click();
+    await page.locator('#setting-telegram-enabled [data-solo-option-value="on"]').click();
+    assert.equal(await page.locator('#setting-telegram-enabled').getAttribute('data-value'), 'on');
     await page.locator('#setting-telegram-token').fill('mock-bot-token');
     assert.equal(await page.locator('#setting-telegram-token').getAttribute('type'), 'password');
     if (process.env.SOLOMAP_BROWSER_SCREENSHOT) {

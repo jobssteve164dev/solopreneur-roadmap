@@ -155,7 +155,7 @@ test('built-in MCP tools appear in the shared connector settings without enterin
   assert.ok(builtIn);
   assert.equal(builtIn.source.kind, 'builtin');
   assert.deepEqual(builtIn.permissions.tools.sort(),
-    ['get_current_project', 'get_plugin_settings', 'list_projects']);
+    ['get_current_project', 'get_plugin_settings', 'get_today_review', 'list_projects']);
   assert.equal(builtIn.permissions.externalAccess, false);
   assert.equal(readSolomapMcpRegistry(projectRoot, globalRoot).connectors.some(connector => connector.id === builtIn.id), false);
   assert.doesNotMatch(buildSolomapMcpCandidateInstructions(projectRoot, globalRoot, '查询当前项目'), /solomap-intelligence/);
@@ -705,6 +705,10 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
     { value: 'codex', label: 'Codex' },
     { value: 'copilot', label: 'GitHub Copilot' }
   ]);
+  wireSoloSelect(elements['setting-telegram-enabled'], [
+    { value: 'off', label: '关闭' },
+    { value: 'on', label: '开启' }
+  ]);
   wireSoloSelect(elements['setting-opencode-provider'], []);
   wireSoloSelect(elements['project-select'], []);
   wireSoloSelect(elements['project-type-select'], [
@@ -1113,6 +1117,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /scheduledTasks/);
   assert.match(html, /id="btn-toggle-intelligence"/);
   assert.match(html, /id="setting-telegram-enabled"/);
+  assert.match(html, /id="setting-telegram-enabled" data-solo-select data-value="off"/);
+  assert.doesNotMatch(html, /<input type="checkbox" id="setting-telegram-enabled"/);
   assert.match(html, /id="setting-telegram-token"/);
   assert.match(html, /id="telegram-binding-status"/);
   assert.match(html, /id="btn-telegram-unbind"/);
@@ -1571,7 +1577,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     stopPropagation() {}
   });
   elements['setting-global-data-path'].value = '/workspace/.solomap-global';
-  elements['setting-telegram-enabled'].checked = true;
+  elements['setting-telegram-enabled'].listeners.click({
+    target: elements['setting-telegram-enabled'].__options.find(option => option.getAttribute('data-solo-option-value') === 'on'),
+    stopPropagation() {}
+  });
   elements['setting-telegram-token'].value = 'new-bot-token';
   elements['setting-cognitive-engine-agent'].listeners.click({
     target: elements['setting-cognitive-engine-agent'].__options.find(option => option.getAttribute('data-solo-option-value') === 'codex'),

@@ -11,13 +11,14 @@ test('smart kernel read tools are discovered and called through standard MCP', a
     getProjects: () => [{ name: 'Alpha', path: '/private/alpha' }],
     getSelectedProjectPath: () => '/private/alpha',
     getCurrentSteps: () => [{ title: '完成登录', status: 'Pending' }],
-    getSettings: () => ({ language: 'zh', cognitiveAgent: 'codex', cognitiveModel: 'gpt-test', telegramBotToken: 'secret' })
+    getSettings: () => ({ language: 'zh', cognitiveAgent: 'codex', cognitiveModel: 'gpt-test', telegramBotToken: 'secret' }),
+    getTodayReview: () => ({ summary: '今天先验证付费', items: ['检查支付流程'] })
   });
   try {
     assert.ok(session.client instanceof Client);
     const tools = await session.client.listTools();
     assert.deepEqual(tools.tools.map(tool => tool.name).sort(),
-      ['get_current_project', 'get_plugin_settings', 'list_projects']);
+      ['get_current_project', 'get_plugin_settings', 'get_today_review', 'list_projects']);
     assert.ok(tools.tools.every(tool => tool.annotations?.readOnlyHint === true && tool.inputSchema.type === 'object'));
     const project = await session.client.callTool({ name: 'get_current_project', arguments: {} });
     assert.deepEqual(JSON.parse(project.content[0].text), {
@@ -29,6 +30,8 @@ test('smart kernel read tools are discovered and called through standard MCP', a
       language: 'zh', cognitiveAgent: 'codex', cognitiveModel: 'gpt-test'
     });
     assert.doesNotMatch(JSON.stringify(settings), /secret/);
+    const today = await session.client.callTool({ name: 'get_today_review', arguments: {} });
+    assert.deepEqual(JSON.parse(today.content[0].text), { summary: '今天先验证付费', items: ['检查支付流程'] });
     const write = await session.client.callTool({ name: 'update_settings', arguments: {} });
     assert.equal(write.isError, true);
   } finally {
@@ -81,14 +84,33 @@ test('smart kernel chat answers a project question after reading current plugin 
   });
   selected = 'Beta';
   const reply = await engine.chat([{ role: 'user', content: '当前项目还要做什么？' }],
-    { selectedProject: 'Alpha', projects: ['Alpha'] }, session.client);
+    { selectedProject: '', projects: [] }, session.client);
   await session.close();
   assert.equal(reply, '当前项目 Beta 尚需验证付费。');
   assert.equal(prompts.length, 2);
   assert.match(prompts[1], /TOOLRESULT:/);
   assert.match(prompts[1], /Beta/);
   assert.match(prompts[1], /验证付费/);
+  assert.doesNotMatch(prompts[0], /Alpha/);
   assert.doesNotMatch(prompts[1], /\/beta/);
+});
+
+test('smart kernel does not treat a historical project as the current topic for a greeting', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  let prompt = '';
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      prompt = invocation.stdin;
+      return '你好，我可以帮你查询项目和插件信息。';
+    }
+  });
+  const answer = await engine.chat([
+    { role: 'assistant', content: 'SZLKlaws 的路线图已更新。' },
+    { role: 'user', content: '你好' }
+  ], { selectedProject: '', projects: [] });
+  assert.match(prompt, /历史回答里出现的项目名称不代表当前项目/);
+  assert.match(prompt, /泛问候、能力介绍和无关话题不要主动带入项目/);
+  assert.equal(answer, '你好，我可以帮你查询项目和插件信息。');
 });
 
 test('Telegram replies continue in the sidebar Pi conversation and can use read-only MCP', async t => {

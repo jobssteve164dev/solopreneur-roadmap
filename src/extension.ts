@@ -624,9 +624,6 @@ export async function activate(context: vscode.ExtensionContext) {
         syncCognitiveRuntimeConfig(getPersistedSettings(context));
         const config = readCognitiveRuntimeConfig(globalDataPath);
         if (config.mode !== 'agent_cli') throw new Error('Choose an Agent in SoloMap settings to start a conversation.');
-        const projects = getProjects(context);
-        const selectedProjectPath = getSelectedProjectPath(context);
-        const todayReview = readTodayReview(globalDataPath, projects);
         const getIntelligenceProjects = () => getProjectsSnapshotFromRegistry({
           globalDataPath: getPersistedSettings(context).globalDataPath,
           projectRegistryFileName,
@@ -656,22 +653,14 @@ export async function activate(context: vscode.ExtensionContext) {
               cognitiveAgent: currentConfig.agentCli,
               cognitiveModel: currentConfig.model
             };
+          },
+          getTodayReview: () => {
+            const review = readTodayReview(globalDataPath, getProjects(context));
+            return review ? { summary: review.summary, items: review.todos.map(item => item.title) } : null;
           }
         });
         try {
-          return await engine.chat(messages, {
-            selectedProject: projects.find(project => project.path === selectedProjectPath)?.name || '',
-            projects: projects.map(project => ({
-              name: project.name,
-              ...(project.priority ? { priority: project.priority } : {}),
-              ...(project.description ? { description: project.description.slice(0, 500) } : {})
-            })),
-            ...(todayReview ? { today: {
-              summary: todayReview.summary,
-              items: todayReview.todos.map(item => item.title)
-            } } : {}),
-            ...(syncEngine && activeProjectRoot === selectedProjectPath ? { currentSteps: syncEngine.getNodes().map(node => ({ title: node.title, status: node.status })) } : {})
-          }, mcp.client);
+          return await engine.chat(messages, { selectedProject: '', projects: [] }, mcp.client);
         } finally {
           await mcp.close();
         }

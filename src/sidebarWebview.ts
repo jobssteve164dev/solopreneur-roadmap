@@ -4642,8 +4642,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-comment-discussion"></span><span id="settings-section-telegram">Telegram</span></div>
       <div class="settings-field">
-        <label class="settings-lbl-title" for="setting-telegram-enabled" id="label-telegram-enabled">在 Telegram 中聊天</label>
-        <input type="checkbox" id="setting-telegram-enabled">
+        <label class="settings-lbl-title" id="label-telegram-enabled">在 Telegram 中聊天</label>
+        <div class="solo-select settings-select" id="setting-telegram-enabled" data-solo-select data-value="off">
+          <button type="button" class="solo-select-trigger" data-solo-trigger aria-haspopup="listbox" aria-expanded="false" aria-labelledby="label-telegram-enabled">
+            <span class="solo-select-trigger-label" data-solo-label>关闭</span>
+            <span class="codicon codicon-chevron-down solo-select-caret"></span>
+          </button>
+          <div class="solo-select-menu" data-solo-menu role="listbox">
+            <button type="button" class="solo-select-option" data-solo-option-value="on" aria-selected="false" id="option-telegram-on">开启</button>
+            <button type="button" class="solo-select-option" data-solo-option-value="off" aria-selected="true" id="option-telegram-off">关闭</button>
+          </div>
+        </div>
       </div>
       <div class="settings-field">
         <label class="settings-lbl-title" for="setting-telegram-token" id="label-telegram-token">Bot Token</label>
@@ -5719,6 +5728,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionAutomation: '自动化任务',
         settingsSectionTelegram: 'Telegram 聊天',
         telegramEnabled: '在 Telegram 中聊天',
+        telegramOn: '开启',
+        telegramOffOption: '关闭',
         telegramToken: 'Bot Token',
         telegramTokenPlaceholder: '粘贴 Bot Token',
         telegramTokenSaved: 'Bot Token 已保存；留空则保持原设置',
@@ -6211,6 +6222,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         settingsSectionAutomation: 'Automation Tasks',
         settingsSectionTelegram: 'Telegram chat',
         telegramEnabled: 'Chat in Telegram',
+        telegramOn: 'On',
+        telegramOffOption: 'Off',
         telegramToken: 'Bot Token',
         telegramTokenPlaceholder: 'Paste Bot Token',
         telegramTokenSaved: 'Bot Token saved; leave blank to keep it',
@@ -6798,6 +6811,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('settings-section-automation', t('settingsSectionAutomation'));
       setText('settings-section-telegram', t('settingsSectionTelegram'));
       setText('label-telegram-enabled', t('telegramEnabled'));
+      setText('option-telegram-on', t('telegramOn'));
+      setText('option-telegram-off', t('telegramOffOption'));
+      if (settingTelegramEnabled) setSoloSelectValue(settingTelegramEnabled, getSoloSelectValue(settingTelegramEnabled) || 'off');
       setText('label-telegram-token', t('telegramToken'));
       setText('text-telegram-unbind', t('telegramUnbind'));
       if (settingTelegramToken) settingTelegramToken.placeholder = currentSettings && currentSettings.telegramBotTokenConfigured ? t('telegramTokenSaved') : t('telegramTokenPlaceholder');
@@ -7196,6 +7212,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       agentModelPreferenceMap[family] = value || 'auto';
     });
     bindSoloSelect(settingCognitiveEngineAgent, () => {});
+    bindSoloSelect(settingTelegramEnabled, () => {});
     bindSoloSelect(settingOpenCodeProvider, (value) => {
       currentSettings.openCodeProvider = value || '';
       currentSettings.openCodeApiKeyConfigured = false;
@@ -8300,7 +8317,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             break;
           }
           currentSettings = message.settings || {};
-          if (settingTelegramEnabled) settingTelegramEnabled.checked = !!currentSettings.telegramEnabled;
+          if (settingTelegramEnabled) setSoloSelectValue(settingTelegramEnabled, currentSettings.telegramEnabled ? 'on' : 'off');
           if (settingTelegramToken) settingTelegramToken.value = '';
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
           Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
@@ -8808,13 +8825,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     // Save Settings
     btnSaveSettings.addEventListener('click', () => {
-      if (settingTelegramEnabled && settingTelegramEnabled.checked && !settingTelegramToken.value.trim() && !(currentSettings && currentSettings.telegramBotTokenConfigured)) {
+      if (settingTelegramEnabled && getSoloSelectValue(settingTelegramEnabled) === 'on' && !settingTelegramToken.value.trim() && !(currentSettings && currentSettings.telegramBotTokenConfigured)) {
         telegramBindingStatus.textContent = t('telegramTokenRequired');
         settingTelegramToken.focus();
         return;
       }
       const payload = buildSettingsUpdatePayload(collectAutomationSettings());
-      payload.telegramEnabled = !!settingTelegramEnabled.checked;
+      payload.telegramEnabled = getSoloSelectValue(settingTelegramEnabled) === 'on';
       if (settingTelegramToken.value.trim()) payload.telegramBotToken = settingTelegramToken.value.trim();
       payload.requestId = 'sidebar-settings-save-' + (++settingsRequestSeq);
       settingsSavePending = true;
