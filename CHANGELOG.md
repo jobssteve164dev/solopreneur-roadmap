@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.496 - 2026-09-30
+
+### Fixed
+- unify health checks and safe handoff (a4f3700)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.495 - 2026-09-30
 
 ### Changed
