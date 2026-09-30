@@ -62,7 +62,7 @@ export const mockTelegramApiFailures = { sendMessage: 0 };
 /**
  * Sends a raw API request to Telegram Bot API.
  */
-async function callTelegramApi(token: string, method: string, payload: any): Promise<any> {
+export async function callTelegramApi(token: string, method: string, payload: any, deadlineMs?: number): Promise<any> {
   if (process.env.SOLOMAP_MOCK_TELEGRAM === 'true') {
     if (method === 'sendMessage') {
       if (mockTelegramApiFailures.sendMessage > 0) {
@@ -80,6 +80,7 @@ async function callTelegramApi(token: string, method: string, payload: any): Pro
     throw new Error('Telegram Bot Token is empty');
   }
 
+  const timeoutMs = deadlineMs ?? (method === 'getUpdates' ? 40_000 : method === 'sendChatAction' ? 5_000 : 35_000);
   const postData = JSON.stringify(payload);
   const options = {
     hostname: 'api.telegram.org',
@@ -90,38 +91,52 @@ async function callTelegramApi(token: string, method: string, payload: any): Pro
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(postData)
     },
-    timeout: 35000 // 35 seconds timeout
+    timeout: timeoutMs
   };
 
   return new Promise((resolve, reject) => {
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+    const finish = (error?: Error, value?: any) => {
+      if (settled) return;
+      settled = true;
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (error) reject(error);
+      else resolve(value);
+    };
     const req = https.request(options, (res) => {
       let data = '';
       res.on('data', (chunk) => {
         data += chunk;
       });
+      res.on('error', (error) => finish(error));
       res.on('end', () => {
         try {
           const parsed = JSON.parse(data);
           if (parsed.ok) {
-            resolve(parsed);
+            finish(undefined, parsed);
           } else {
-            reject(new Error(`Telegram ${method} HTTP ${res.statusCode || 'unknown'}: ${parsed.description || 'API returned error'}`));
+            finish(new Error(`Telegram ${method} HTTP ${res.statusCode || 'unknown'}: ${parsed.description || 'API returned error'}`));
           }
         } catch (e) {
-          reject(new Error(`Telegram ${method} returned an invalid response (HTTP ${res.statusCode || 'unknown'}, ${Buffer.byteLength(data)} bytes).`));
+          finish(new Error(`Telegram ${method} returned an invalid response (HTTP ${res.statusCode || 'unknown'}, ${Buffer.byteLength(data)} bytes).`));
         }
       });
     });
 
     req.on('error', (err) => {
-      reject(err);
+      finish(err);
     });
 
     req.on('timeout', () => {
+      finish(new Error('Telegram API request timed out'));
       req.destroy();
-      reject(new Error('Telegram API request timed out'));
     });
 
+    deadlineTimer = setTimeout(() => {
+      finish(new Error('Telegram API request timed out'));
+      req.destroy();
+    }, timeoutMs);
     req.write(postData);
     req.end();
   });
@@ -226,6 +241,7 @@ async function pollUpdates(context: vscode.ExtensionContext, generation: number)
     return;
   }
 
+  const pollStartedAt = Date.now();
   try {
     const payload: any = {
       timeout: 30,
@@ -235,7 +251,6 @@ async function pollUpdates(context: vscode.ExtensionContext, generation: number)
       payload.offset = currentOffset;
     }
 
-    const pollStartedAt = Date.now();
     const response = await callTelegramApi(currentToken, 'getUpdates', payload);
     if (generation !== pollingGeneration) return;
     if (response && response.result && Array.isArray(response.result)) {
@@ -254,11 +269,11 @@ async function pollUpdates(context: vscode.ExtensionContext, generation: number)
     console.warn('Error in Telegram polling loop:', error);
     if (currentDiagnosticDataPath) {
       recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.poll', classifyDiagnosticFailure(error));
-      createLocalDiagnosticTrace(currentDiagnosticDataPath, 'telegram.poll').record('telegram.poll', 'error', 0, error);
+      createLocalDiagnosticTrace(currentDiagnosticDataPath, 'telegram.poll').record('telegram.poll', 'error', Date.now() - pollStartedAt, error);
     }
     // Wait longer if error occurred to prevent high frequency crash
     if (isPolling && generation === pollingGeneration) {
-      pollingTimeout = setTimeout(() => pollUpdates(context, generation), 5000);
+      pollingTimeout = setTimeout(() => pollUpdates(context, generation), classifyDiagnosticFailure(error) === 'timeout' ? 1_000 : 5_000);
     }
   }
 }
@@ -373,14 +388,20 @@ async function dispatchTelegramCommand(context: vscode.ExtensionContext, chatId:
         trace?.record('telegram.queue', 'ok', Date.now() - startedAt);
         const canReply = () => isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId;
         let typingObserved = false;
+        let typingInFlight = false;
         const showTyping = () => {
-          if (canReply()) void callTelegramApi(token, 'sendChatAction', { chat_id: chatId, action: 'typing' }).then(() => {
-            if (!typingObserved) trace?.record('telegram.typing', 'ok');
-            typingObserved = true;
-          }).catch(error => {
-            if (!typingObserved) trace?.record('telegram.typing', 'error', 0, error);
-            typingObserved = true;
-          });
+          if (canReply() && !typingInFlight) {
+            typingInFlight = true;
+            void callTelegramApi(token, 'sendChatAction', { chat_id: chatId, action: 'typing' }).then(() => {
+              if (!typingObserved) trace?.record('telegram.typing', 'ok');
+              typingObserved = true;
+            }).catch(error => {
+              if (!typingObserved) trace?.record('telegram.typing', 'error', 0, error);
+              typingObserved = true;
+            }).finally(() => {
+              typingInFlight = false;
+            });
+          }
         };
         const typingTimer = setTimeout(showTyping, 250);
         const typingInterval = setInterval(showTyping, 4_000);

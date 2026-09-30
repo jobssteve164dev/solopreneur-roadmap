@@ -189,9 +189,16 @@ export function runRuntimeServiceCommand(command: string, args: string[]): Promi
 
 export async function isRuntimeServiceManagerAvailable(
   platform: NodeJS.Platform = process.platform,
-  runCommand: (command: string, args: string[]) => void | Promise<void> = runRuntimeServiceCommand
+  runCommand: (command: string, args: string[]) => void | Promise<void> = (command, args) => new Promise((resolve, reject) => {
+    childProcess.execFile(command, args, { timeout: 3_000, windowsHide: true }, error => error ? reject(error) : resolve());
+  }),
+  hasUserManagerSocket: () => boolean = () => {
+    const runtimeDir = process.env.XDG_RUNTIME_DIR || (process.getuid ? `/run/user/${process.getuid()}` : '');
+    return Boolean(runtimeDir && fs.existsSync(path.join(runtimeDir, 'systemd', 'private')));
+  }
 ): Promise<boolean> {
   if (platform !== 'linux') return true;
+  if (!hasUserManagerSocket()) return false;
   try {
     await runCommand('systemctl', ['--user', 'show-environment']);
     return true;

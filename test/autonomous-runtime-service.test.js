@@ -199,9 +199,18 @@ test('Linux service manager is skipped when the user manager is unavailable', as
   assert.equal(await service.isRuntimeServiceManagerAvailable('linux', async (command, args) => {
     calls.push([command, args]);
     throw new Error('Failed to connect to user scope bus');
-  }), false);
+  }, () => true), false);
   assert.deepEqual(calls, [['systemctl', ['--user', 'show-environment']]]);
   assert.equal(await service.isRuntimeServiceManagerAvailable('darwin', async () => { throw new Error('should not probe Linux manager'); }), true);
+});
+
+test('Linux service manager skips the probe when its socket is missing', async () => {
+  let probes = 0;
+  const available = await service.isRuntimeServiceManagerAvailable('linux', () => {
+    probes++;
+  }, () => false);
+  assert.equal(available, false);
+  assert.equal(probes, 0);
 });
 
 test('a disabled runtime stays disabled until resume clears its marker', t => {
