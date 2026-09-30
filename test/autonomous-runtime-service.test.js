@@ -39,6 +39,8 @@ test('fallback runtime health requires a matching live control response', async 
   assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => { throw new Error('connection refused'); }), { healthy: false, reason: 'control_unavailable' });
   assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => ({ ok: true, runtimeId: 'other', status: 'running' })), { healthy: false, reason: 'different_runtime' });
   assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live), { healthy: true, reason: 'running' });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'test', pid: process.pid, status: 'paused', heartbeatAt: new Date().toISOString() }));
+  assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => ({ ok: true, runtimeId: 'test', status: 'paused' })), { healthy: true, reason: 'paused' });
 });
 
 test('linux runtime service starts at login and restarts after crashes', () => {

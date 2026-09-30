@@ -43,18 +43,18 @@ export async function inspectAutonomousRuntimeHealth(
   const state = readRuntimeState(globalDataPath);
   if (!state) return { healthy: false, reason: 'missing_state' };
   if (state.pid !== pid) return { healthy: false, reason: 'different_process' };
-  if (state.status !== 'running') return { healthy: false, reason: 'not_running' };
+  if (state.status !== 'running' && state.status !== 'paused') return { healthy: false, reason: 'not_running' };
   const heartbeatAge = now - Date.parse(state.heartbeatAt);
   if (!Number.isFinite(heartbeatAge) || heartbeatAge > 90_000) return { healthy: false, reason: 'stale_heartbeat' };
   if (!defaultIsProcessAlive(pid)) return { healthy: false, reason: 'process_exited' };
   try {
     const response = await sendHealth(globalDataPath);
     if (response.runtimeId !== state.runtimeId) return { healthy: false, reason: 'different_runtime' };
-    if (!response.ok || response.status !== 'running') return { healthy: false, reason: 'control_not_running' };
+    if (!response.ok || response.status !== state.status) return { healthy: false, reason: 'control_not_running' };
   } catch {
     return { healthy: false, reason: 'control_unavailable' };
   }
-  return { healthy: true, reason: 'running' };
+  return { healthy: true, reason: state.status };
 }
 
 export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started: boolean; pid: number; runtimeId: string } {
