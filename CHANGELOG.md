@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.498 - 2026-09-30
+
+### Changed
+- record transport phase on request stalls (c9bce24)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.497 - 2026-09-30
 
 ### Fixed
