@@ -97,6 +97,9 @@ export async function callTelegramApi(token: string, method: string, payload: an
   return new Promise((resolve, reject) => {
     let deadlineTimer: NodeJS.Timeout | undefined;
     let settled = false;
+    let phase = 'while awaiting socket';
+    let socketAssigned = false;
+    const timeoutError = () => new Error(`Telegram ${method} timed out ${phase} (${socketAssigned ? (req.reusedSocket ? 'reused' : 'new') : 'unassigned'} socket)`);
     const finish = (error?: Error, value?: any) => {
       if (settled) return;
       settled = true;
@@ -105,6 +108,7 @@ export async function callTelegramApi(token: string, method: string, payload: an
       else resolve(value);
     };
     const req = https.request(options, (res) => {
+      phase = 'while receiving response';
       let data = '';
       res.on('data', (chunk) => {
         data += chunk;
@@ -128,13 +132,19 @@ export async function callTelegramApi(token: string, method: string, payload: an
       finish(err);
     });
 
+    req.on('socket', () => {
+      socketAssigned = true;
+      phase = 'before request write completed';
+    });
+    req.on('finish', () => { if (phase !== 'while receiving response') phase = 'while awaiting response'; });
+
     req.on('timeout', () => {
-      finish(new Error('Telegram API request timed out'));
+      finish(timeoutError());
       req.destroy();
     });
 
     deadlineTimer = setTimeout(() => {
-      finish(new Error('Telegram API request timed out'));
+      finish(timeoutError());
       req.destroy();
     }, timeoutMs);
     req.write(postData);
@@ -268,7 +278,7 @@ async function pollUpdates(context: vscode.ExtensionContext, generation: number)
   } catch (error) {
     console.warn('Error in Telegram polling loop:', error);
     if (currentDiagnosticDataPath) {
-      recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.poll', classifyDiagnosticFailure(error));
+      recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.poll', error);
       createLocalDiagnosticTrace(currentDiagnosticDataPath, 'telegram.poll').record('telegram.poll', 'error', Date.now() - pollStartedAt, error);
     }
     // Wait longer if error occurred to prevent high frequency crash
@@ -397,6 +407,7 @@ async function dispatchTelegramCommand(context: vscode.ExtensionContext, chatId:
               typingObserved = true;
             }).catch(error => {
               if (!typingObserved) trace?.record('telegram.typing', 'error', 0, error);
+              if (!typingObserved && diagnosticDataPath) recordLocalDiagnosticError(diagnosticDataPath, 'telegram.typing', error);
               typingObserved = true;
             }).finally(() => {
               typingInFlight = false;
