@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.493 - 2026-09-30
+
+### Fixed
+- isolate project card refreshes and show Telegram reply status (76657bb)
+- restore Telegram Pi chat and remove stale project context (6dc17d8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.492 - 2026-09-30
 
 ### Added
