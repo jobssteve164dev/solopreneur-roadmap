@@ -1112,6 +1112,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /nextFocusReminderAt/);
   assert.match(script, /scheduledTasks/);
   assert.match(html, /id="btn-toggle-intelligence"/);
+  assert.match(html, /id="setting-telegram-enabled"/);
+  assert.match(html, /id="setting-telegram-token"/);
+  assert.match(html, /id="telegram-binding-status"/);
+  assert.match(html, /id="btn-telegram-unbind"/);
   assert.match(html, /id="feedback-panel"/);
   assert.match(html, /id="btn-open-strategy-pyramid"/);
   assert.doesNotMatch(html, /id="btn-open-full"/);
@@ -1280,6 +1284,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'opencode-api-key-status',
     'setting-global-prompt',
     'setting-global-data-path',
+    'setting-telegram-enabled',
+    'setting-telegram-token',
+    'telegram-binding-status',
+    'btn-telegram-unbind',
     'pro-account-panel',
     'btn-open-pro-authorization',
     'btn-account-logout',
@@ -1563,6 +1571,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     stopPropagation() {}
   });
   elements['setting-global-data-path'].value = '/workspace/.solomap-global';
+  elements['setting-telegram-enabled'].checked = true;
+  elements['setting-telegram-token'].value = 'new-bot-token';
   elements['setting-cognitive-engine-agent'].listeners.click({
     target: elements['setting-cognitive-engine-agent'].__options.find(option => option.getAttribute('data-solo-option-value') === 'codex'),
     stopPropagation() {}
@@ -1586,6 +1596,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.language === 'en' && message.globalDataPath === '/workspace/.solomap-global' && !Object.prototype.hasOwnProperty.call(message, 'taskPermissionMode')));
   const savedSettingsRequest = postedMessages.find(message => message.command === 'settings.update');
   assert.equal(savedSettingsRequest.cognitiveEngineAgent, 'codex');
+  assert.equal(savedSettingsRequest.telegramEnabled, true);
+  assert.equal(savedSettingsRequest.telegramBotToken, 'new-bot-token');
   dispatchMessage({ command: 'settingsSaved', requestId: savedSettingsRequest.requestId, settings: savedSettingsRequest });
   postedMessages.length = 0;
   elements['btn-toggle-collaboration'].listeners.click();
@@ -13634,6 +13646,7 @@ test('partial settings updates preserve existing user settings after extension u
     [
       'module.exports.__updatePersistedSettings = updatePersistedSettings;',
       'module.exports.__getPersistedSettings = getPersistedSettings;',
+      'module.exports.__getSettingsWithRuntimeState = getSettingsWithRuntimeState;',
       'module.exports.__isSoloMapLanguageZh = isSoloMapLanguageZh;',
       'module.exports.__getRoadmapPanelTitle = getRoadmapPanelTitle;',
       'module.exports.__getStrategyPyramidPanelTitle = getStrategyPyramidPanelTitle;',
@@ -13648,6 +13661,9 @@ test('partial settings updates preserve existing user settings after extension u
     agentModelPreferences: { codex: 'gpt-5' },
     language: 'en',
     globalPrompt: 'Keep my durable instruction.',
+    telegramEnabled: true,
+    telegramBotToken: 'private-bot-token',
+    telegramChatId: '123456',
     globalDataPath: globalRoot,
     reviewerCliPath: 'agy',
     collaborationReviewMode: 'off',
@@ -13700,6 +13716,11 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(persisted.cliPath, 'codex');
   assert.equal(persisted.language, 'en');
   assert.equal(persisted.globalPrompt, 'Keep my durable instruction.');
+  assert.equal(persisted.telegramBotToken, 'private-bot-token');
+  assert.equal(persisted.telegramChatId, '123456');
+  const settingsForWebview = extensionModule.__getSettingsWithRuntimeState(context);
+  assert.equal(settingsForWebview.telegramBotToken, '');
+  assert.equal(settingsForWebview.telegramBotTokenConfigured, true);
   assert.equal(persisted.globalDataPath, globalRoot);
   assert.equal(persisted.reviewerCliPath, 'agy');
   assert.equal(persisted.collaborationReviewMode, 'off');

@@ -19,6 +19,9 @@ let pollingTimeout: NodeJS.Timeout | null = null;
 let currentOffset = 0;
 let currentToken = '';
 let currentChatId = '';
+let pollingGeneration = 0;
+let currentChatReply: ((chatId: string, text: string) => Promise<string>) | undefined;
+const pendingChatReplies = new Map<string, Promise<void>>();
 const pendingAuthRequests = new Map<string, number>(); // chat_id -> date
 
 export interface TelegramUpdate {
@@ -45,6 +48,7 @@ export interface TelegramUpdate {
 // Mock system for offline automation tests
 export const mockTelegramUpdates: TelegramUpdate[] = [];
 export const mockTelegramSentMessages: { chatId: string; text: string }[] = [];
+export const mockTelegramApiFailures = { sendMessage: 0 };
 
 /**
  * Sends a raw API request to Telegram Bot API.
@@ -52,6 +56,10 @@ export const mockTelegramSentMessages: { chatId: string; text: string }[] = [];
 async function callTelegramApi(token: string, method: string, payload: any): Promise<any> {
   if (process.env.SOLOMAP_MOCK_TELEGRAM === 'true') {
     if (method === 'sendMessage') {
+      if (mockTelegramApiFailures.sendMessage > 0) {
+        mockTelegramApiFailures.sendMessage--;
+        throw new Error('Mock Telegram send failed');
+      }
       mockTelegramSentMessages.push({ chatId: String(payload.chat_id), text: payload.text });
     }
     return { ok: true, result: {} };
@@ -130,7 +138,7 @@ export async function sendTelegramNotification(context: vscode.ExtensionContext,
 /**
  * Starts long polling for Telegram updates.
  */
-export function startTelegramRemoteService(context: vscode.ExtensionContext): void {
+export function startTelegramRemoteService(context: vscode.ExtensionContext, chatReply?: (chatId: string, text: string) => Promise<string>): void {
   const settings = getSettings(context);
   if (!settings.telegramEnabled || !settings.telegramBotToken) {
     stopTelegramRemoteService();
@@ -138,27 +146,36 @@ export function startTelegramRemoteService(context: vscode.ExtensionContext): vo
   }
 
   if (isPolling && currentToken === settings.telegramBotToken && currentChatId === settings.telegramChatId) {
+    currentChatReply = chatReply;
     return;
   }
 
+  const previousToken = currentToken;
+  const previousOffset = currentOffset;
   stopTelegramRemoteService();
 
   isPolling = true;
   currentToken = settings.telegramBotToken;
   currentChatId = settings.telegramChatId;
-  currentOffset = 0;
+  currentOffset = previousToken === currentToken ? previousOffset : 0;
+  currentChatReply = chatReply;
+  const generation = ++pollingGeneration;
 
   console.log('Telegram Remote Control Service started.');
-  void pollUpdates(context);
+  void pollUpdates(context, generation);
 }
 
 /**
  * Stops the Telegram updates service.
  */
 export function stopTelegramRemoteService(): void {
+  pollingGeneration++;
+  pendingChatReplies.clear();
+  pendingAuthRequests.clear();
   isPolling = false;
   currentToken = '';
   currentChatId = '';
+  currentChatReply = undefined;
   if (pollingTimeout) {
     clearTimeout(pollingTimeout);
     pollingTimeout = null;
@@ -168,16 +185,15 @@ export function stopTelegramRemoteService(): void {
 /**
  * Restarts Telegram service.
  */
-export function restartTelegramRemoteService(context: vscode.ExtensionContext): void {
-  stopTelegramRemoteService();
-  startTelegramRemoteService(context);
+export function restartTelegramRemoteService(context: vscode.ExtensionContext, chatReply?: (chatId: string, text: string) => Promise<string>): void {
+  startTelegramRemoteService(context, chatReply);
 }
 
 /**
  * Long Polling loop for updates.
  */
-async function pollUpdates(context: vscode.ExtensionContext): Promise<void> {
-  if (!isPolling) {
+async function pollUpdates(context: vscode.ExtensionContext, generation: number): Promise<void> {
+  if (!isPolling || generation !== pollingGeneration) {
     return;
   }
 
@@ -187,10 +203,11 @@ async function pollUpdates(context: vscode.ExtensionContext): Promise<void> {
       const updatesToProcess = [...mockTelegramUpdates];
       mockTelegramUpdates.length = 0;
       for (const update of updatesToProcess) {
+        if (generation !== pollingGeneration) return;
         await handleTelegramUpdate(context, update);
       }
     }
-    pollingTimeout = setTimeout(() => pollUpdates(context), 50);
+    if (generation === pollingGeneration) pollingTimeout = setTimeout(() => pollUpdates(context, generation), 50);
     return;
   }
 
@@ -204,22 +221,24 @@ async function pollUpdates(context: vscode.ExtensionContext): Promise<void> {
     }
 
     const response = await callTelegramApi(currentToken, 'getUpdates', payload);
+    if (generation !== pollingGeneration) return;
     if (response && response.result && Array.isArray(response.result)) {
       for (const update of response.result) {
+        if (generation !== pollingGeneration) return;
         currentOffset = Math.max(currentOffset, update.update_id + 1);
         await handleTelegramUpdate(context, update);
       }
     }
     
     // Normal loop continuation
-    if (isPolling) {
-      pollingTimeout = setTimeout(() => pollUpdates(context), 100);
+    if (isPolling && generation === pollingGeneration) {
+      pollingTimeout = setTimeout(() => pollUpdates(context, generation), 100);
     }
   } catch (error) {
     console.warn('Error in Telegram polling loop:', error);
     // Wait longer if error occurred to prevent high frequency crash
-    if (isPolling) {
-      pollingTimeout = setTimeout(() => pollUpdates(context), 5000);
+    if (isPolling && generation === pollingGeneration) {
+      pollingTimeout = setTimeout(() => pollUpdates(context, generation), 5000);
     }
   }
 }
@@ -234,6 +253,7 @@ async function handleTelegramUpdate(context: vscode.ExtensionContext, update: Te
   }
 
   const senderChatId = String(message.chat.id);
+  const generation = pollingGeneration;
   const text = message.text.trim();
   const settings = getSettings(context);
 
@@ -242,7 +262,7 @@ async function handleTelegramUpdate(context: vscode.ExtensionContext, update: Te
     if (pendingAuthRequests.has(senderChatId)) {
       return; // Already waiting for user response
     }
-    pendingAuthRequests.set(senderChatId, Date.now());
+    pendingAuthRequests.set(senderChatId, generation);
     const username = message.from.username ? `@${message.from.username}` : message.from.first_name || 'Unknown User';
     
     const approve = 'Approve / 授权';
@@ -254,6 +274,7 @@ async function handleTelegramUpdate(context: vscode.ExtensionContext, update: Te
       deny
     );
 
+    if (generation !== pollingGeneration || pendingAuthRequests.get(senderChatId) !== generation) return;
     pendingAuthRequests.delete(senderChatId);
 
     if (choice === approve) {
@@ -271,7 +292,7 @@ async function handleTelegramUpdate(context: vscode.ExtensionContext, update: Te
       // Reply to TG user
       await callTelegramApi(currentToken, 'sendMessage', {
         chat_id: senderChatId,
-        text: '🎉 <b>授权成功！</b>\n您的设备已成功绑定，可通过命令远程控制本地 CLI 智能体执行。输入 /help 查看可用指令。',
+        text: '🎉 <b>绑定成功！</b>\n现在可以直接发消息询问智能内核。输入 /help 查看其他指令。',
         parse_mode: 'HTML'
       });
     } else {
@@ -312,11 +333,42 @@ async function handleTelegramUpdate(context: vscode.ExtensionContext, update: Te
  */
 async function dispatchTelegramCommand(context: vscode.ExtensionContext, chatId: string, text: string): Promise<void> {
   const lowercase = text.toLowerCase();
+  if (!text.startsWith('/') && lowercase !== 'approve' && lowercase !== 'deny' && currentChatReply) {
+    const reply = currentChatReply;
+    const token = currentToken;
+    const generation = pollingGeneration;
+    const previous = pendingChatReplies.get(chatId) || Promise.resolve();
+    const task = previous.catch(() => undefined).then(async () => {
+      try {
+        const answer = await reply(chatId, text);
+        if (isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId) {
+          await callTelegramApi(token, 'sendMessage', { chat_id: chatId, text: answer });
+        }
+      } catch (error) {
+        if (isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId) {
+          try {
+            await callTelegramApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: `智能内核暂时无法回答：${error instanceof Error ? error.message : String(error)}`
+            });
+          } catch (sendError) {
+            console.warn('Failed to send Telegram intelligence reply:', sendError);
+          }
+        }
+      }
+    });
+    pendingChatReplies.set(chatId, task);
+    void task.finally(() => {
+      if (pendingChatReplies.get(chatId) === task) pendingChatReplies.delete(chatId);
+    }).catch(error => console.warn('Telegram intelligence reply failed:', error));
+    return;
+  }
   
   if (lowercase === '/start' || lowercase === '/help') {
     const welcome = `🤖 <b>SoloMap 远程智能体驾驶舱</b>
 
 可用远程指令：
+• 💬 直接发送消息 - 询问智能内核
 • 📊 <code>/status</code> - 查询当前项目状态与路线图进度
 • 🚀 <code>/run &lt;环节ID&gt;</code> - 远程触发执行指定的路线图环节 (例如: <code>/run 12</code>)
 • 🛑 <code>/stop</code> - 强制终止当前正在运行的 Agent 任务终端

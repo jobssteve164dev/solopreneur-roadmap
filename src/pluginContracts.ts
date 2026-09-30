@@ -36,6 +36,7 @@ export interface SolopreneurSettings {
   connectors?: any[];
   telegramEnabled?: boolean;
   telegramBotToken?: string;
+  telegramBotTokenConfigured?: boolean;
   telegramChatId?: string;
 }
 

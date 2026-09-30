@@ -91,6 +91,84 @@ test('smart kernel chat answers a project question after reading current plugin 
   assert.doesNotMatch(prompts[1], /\/beta/);
 });
 
+test('Telegram replies continue in the sidebar Pi conversation and can use read-only MCP', async t => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const { createTelegramIntelligenceReply } = require('../out/telegramIntelligenceChat.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-pi-'));
+  t.after(() => {
+    const globalRoot = path.join(root, '.solomap-global');
+    const directory = path.join(globalRoot, 'intelligence-conversations');
+    if (fs.existsSync(directory)) {
+      for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
+      fs.rmdirSync(directory);
+      fs.rmdirSync(globalRoot);
+    }
+    fs.rmdirSync(root);
+  });
+  const prompts = [];
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      prompts.push(invocation.stdin);
+      if (prompts.length === 1) return '{"toolCall":{"name":"get_current_project"}}';
+      return prompts.length === 2 ? '当前项目 Beta 尚需验证付费。' : '先验证付费流程。';
+    }
+  });
+  const store = new IntelligenceConversationStore(root, async messages => {
+    const session = await createIntelligenceMcpSession({
+      getProjects: () => [{ name: 'Beta', path: '/private/beta' }],
+      getSelectedProjectPath: () => '/private/beta',
+      getCurrentSteps: () => [{ title: '验证付费', status: 'Pending' }],
+      getSettings: () => ({ language: 'zh' })
+    });
+    try {
+      return await engine.chat(messages, { selectedProject: 'Beta', projects: ['Beta'] }, session.client);
+    } finally {
+      await session.close();
+    }
+  });
+  let savedIds = {};
+  const reply = createTelegramIntelligenceReply(() => store, () => savedIds, async ids => { savedIds = ids; }, () => 0);
+  assert.equal(await reply('123456', '当前项目还要做什么？'), '当前项目 Beta 尚需验证付费。');
+  assert.equal(await reply('123456', '先做哪一步？'), '先验证付费流程。');
+  assert.equal(store.list().length, 1);
+  assert.equal(store.get(savedIds['123456']).messages.length, 4);
+  assert.match(prompts[1], /TOOLRESULT:/);
+  assert.match(prompts[1], /验证付费/);
+  assert.match(prompts[2], /当前项目 Beta 尚需验证付费/);
+  assert.doesNotMatch(prompts.join('\n'), /\/private\/beta/);
+});
+
+test('unlinking Telegram during a Pi answer cannot restore its old conversation', async t => {
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const { createTelegramIntelligenceReply } = require('../out/telegramIntelligenceChat.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-unlink-'));
+  t.after(() => {
+    const globalRoot = path.join(root, '.solomap-global');
+    const directory = path.join(globalRoot, 'intelligence-conversations');
+    if (fs.existsSync(directory)) {
+      for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
+      fs.rmdirSync(directory);
+      fs.rmdirSync(globalRoot);
+    }
+    fs.rmdirSync(root);
+  });
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const store = new IntelligenceConversationStore(root, async () => { await waiting; return '旧答案'; });
+  let savedIds = {};
+  let generation = 0;
+  const reply = createTelegramIntelligenceReply(() => store, () => savedIds,
+    async ids => { savedIds = ids; }, () => generation);
+  const pending = reply('123456', '旧问题');
+  generation++;
+  savedIds = {};
+  release();
+  assert.equal(await pending, '旧答案');
+  assert.deepEqual(savedIds, {});
+});
+
 test('smart kernel read tools expose current language without secrets or write methods', async () => {
   const { createIntelligenceReadTools } = require('../out/intelligenceReadTools.js');
   const tools = createIntelligenceReadTools({

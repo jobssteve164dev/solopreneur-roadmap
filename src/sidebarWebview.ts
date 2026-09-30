@@ -4640,6 +4640,22 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     </div>
 
     <div class="settings-card">
+      <div class="settings-card-title"><span class="codicon codicon-comment-discussion"></span><span id="settings-section-telegram">Telegram</span></div>
+      <div class="settings-field">
+        <label class="settings-lbl-title" for="setting-telegram-enabled" id="label-telegram-enabled">在 Telegram 中聊天</label>
+        <input type="checkbox" id="setting-telegram-enabled">
+      </div>
+      <div class="settings-field">
+        <label class="settings-lbl-title" for="setting-telegram-token" id="label-telegram-token">Bot Token</label>
+        <input type="password" class="settings-input" id="setting-telegram-token" autocomplete="off" placeholder="粘贴 Bot Token">
+      </div>
+      <div class="settings-field">
+        <div id="telegram-binding-status" role="status"></div>
+        <button type="button" class="dependency-action-btn" id="btn-telegram-unbind" style="display:none;"><span id="text-telegram-unbind">解除绑定</span></button>
+      </div>
+    </div>
+
+    <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-checklist"></span><span id="settings-section-readiness">Readiness</span></div>
     <div class="settings-field">
       <label class="settings-lbl-title" id="label-dependencies">Local readiness</label>
@@ -4815,6 +4831,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const btnOpenFeedback = document.getElementById('btn-open-feedback');
     const btnTestCli = document.getElementById('btn-test-cli');
     const btnSaveSettings = document.getElementById('btn-save-settings');
+    const settingTelegramEnabled = document.getElementById('setting-telegram-enabled');
+    const settingTelegramToken = document.getElementById('setting-telegram-token');
+    const telegramBindingStatus = document.getElementById('telegram-binding-status');
+    const btnTelegramUnbind = document.getElementById('btn-telegram-unbind');
     const btnReviewGlobalPrompt = document.getElementById('btn-review-global-prompt');
     const cliTestBadge = document.getElementById('cli-test-badge');
     const btnRefreshAgentImpact = document.getElementById('btn-refresh-agent-impact');
@@ -5697,6 +5717,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         upgradeAgentClis: '升级全部 Agent CLI',
         upgradingAgentClis: 'Agent 正在升级已安装的 Agent CLI...',
         settingsSectionAutomation: '自动化任务',
+        settingsSectionTelegram: 'Telegram 聊天',
+        telegramEnabled: '在 Telegram 中聊天',
+        telegramToken: 'Bot Token',
+        telegramTokenPlaceholder: '粘贴 Bot Token',
+        telegramTokenSaved: 'Bot Token 已保存；留空则保持原设置',
+        telegramBound: '已绑定，直接向 Bot 发消息即可聊天',
+        telegramWaiting: '等待绑定：保存后向 Bot 发消息，并在 VS Code 中确认',
+        telegramOff: '尚未开启 Telegram 聊天',
+        telegramUnbind: '解除绑定',
+        telegramTokenRequired: '请先填写 Bot Token',
         focusTimerTitle: '时间安排',
         focusSectionTitle: '专注时间',
         closeTimePlan: '关闭时间安排',
@@ -6179,6 +6209,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         upgradeAgentClis: 'Upgrade all Agent CLIs',
         upgradingAgentClis: 'Agent is upgrading installed Agent CLIs...',
         settingsSectionAutomation: 'Automation Tasks',
+        settingsSectionTelegram: 'Telegram chat',
+        telegramEnabled: 'Chat in Telegram',
+        telegramToken: 'Bot Token',
+        telegramTokenPlaceholder: 'Paste Bot Token',
+        telegramTokenSaved: 'Bot Token saved; leave blank to keep it',
+        telegramBound: 'Connected. Send a message to your bot to chat.',
+        telegramWaiting: 'Send a message to your bot, then approve the connection in VS Code.',
+        telegramOff: 'Telegram chat is off',
+        telegramUnbind: 'Disconnect',
+        telegramTokenRequired: 'Enter a Bot Token first',
         focusTimerTitle: 'Time plan',
         focusSectionTitle: 'Focus time',
         closeTimePlan: 'Close time plan',
@@ -6756,6 +6796,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('settings-section-abilities', t('settingsSectionAbilities'));
       setText('settings-section-readiness', t('settingsSectionReadiness'));
       setText('settings-section-automation', t('settingsSectionAutomation'));
+      setText('settings-section-telegram', t('settingsSectionTelegram'));
+      setText('label-telegram-enabled', t('telegramEnabled'));
+      setText('label-telegram-token', t('telegramToken'));
+      setText('text-telegram-unbind', t('telegramUnbind'));
+      if (settingTelegramToken) settingTelegramToken.placeholder = currentSettings && currentSettings.telegramBotTokenConfigured ? t('telegramTokenSaved') : t('telegramTokenPlaceholder');
+      renderTelegramSettingsStatus();
       setText('label-automation-task', t('automationTask'));
       setText('label-automation-focus-minutes', t('automationFocusMinutes'));
       setText('label-automation-time', t('automationTime'));
@@ -8095,6 +8141,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return payload;
     }
 
+    function renderTelegramSettingsStatus() {
+      if (!telegramBindingStatus) return;
+      telegramBindingStatus.textContent = !currentSettings || !currentSettings.telegramEnabled ? t('telegramOff')
+        : currentSettings.telegramChatId ? t('telegramBound') : t('telegramWaiting');
+      if (btnTelegramUnbind) btnTelegramUnbind.style.display = currentSettings && currentSettings.telegramChatId ? '' : 'none';
+    }
+
     function setFocusTimerEnabled(enabled) {
       const automation = normalizeAutomationSettings({ automationTasks: automationDraftSettings || (currentSettings && currentSettings.automationTasks) || {} });
       const minutes = Math.max(1, Math.min(240, Number(focusTimerMinutesInput ? focusTimerMinutesInput.value : automation.focusMinutes || 25) || 25));
@@ -8241,11 +8294,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (message.requestId && message.requestId !== latestSettingsRequestId) break;
           if (settingsSavePending || settingsFormDirty) {
             currentSettings = { ...currentSettings, ...(message.settings || {}) };
+            renderTelegramSettingsStatus();
             renderProAccount(currentSettings);
             renderAbilitiesAndEnhancements(currentSettings);
             break;
           }
           currentSettings = message.settings || {};
+          if (settingTelegramEnabled) settingTelegramEnabled.checked = !!currentSettings.telegramEnabled;
+          if (settingTelegramToken) settingTelegramToken.value = '';
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
           Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
           applySettingCliPath(message.settings.cliPath || 'agy');
@@ -8278,6 +8334,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           latestSettingsRequestId = '';
           if (settingsFormDirty) break;
           currentSettings = message.settings || currentSettings;
+          if (settingTelegramToken) settingTelegramToken.value = '';
+          if (settingTelegramToken) settingTelegramToken.placeholder = currentSettings.telegramBotTokenConfigured ? t('telegramTokenSaved') : t('telegramTokenPlaceholder');
+          renderTelegramSettingsStatus();
           openCodeApiKeyRemovalRequested = false;
           if (settingOpenCodeApiKey) {
             settingOpenCodeApiKey.value = '';
@@ -8749,13 +8808,23 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     // Save Settings
     btnSaveSettings.addEventListener('click', () => {
+      if (settingTelegramEnabled && settingTelegramEnabled.checked && !settingTelegramToken.value.trim() && !(currentSettings && currentSettings.telegramBotTokenConfigured)) {
+        telegramBindingStatus.textContent = t('telegramTokenRequired');
+        settingTelegramToken.focus();
+        return;
+      }
       const payload = buildSettingsUpdatePayload(collectAutomationSettings());
+      payload.telegramEnabled = !!settingTelegramEnabled.checked;
+      if (settingTelegramToken.value.trim()) payload.telegramBotToken = settingTelegramToken.value.trim();
       payload.requestId = 'sidebar-settings-save-' + (++settingsRequestSeq);
       settingsSavePending = true;
       pendingSettingsSave = { requestId: payload.requestId, revision: settingsEditRevision };
       vscode.postMessage(payload);
       settingsPanel.style.display = 'none';
       cliTestBadge.style.display = 'none';
+    });
+    if (btnTelegramUnbind) btnTelegramUnbind.addEventListener('click', () => {
+      vscode.postMessage({ command: 'telegram.unbind' });
     });
 
     if (btnReviewGlobalPrompt) {

@@ -60,6 +60,7 @@ import {
 } from './strategyPyramid';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
+import { createTelegramIntelligenceReply } from './telegramIntelligenceChat';
 import { createIntelligenceMcpSession, getIntelligenceMcpConnector } from './intelligenceMcp';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -282,6 +283,9 @@ import {
 import { locateCodexSessionByBindingNonce, readCodexTurnCompletionSince } from './codexSessionIdentity';
 
 let syncEngine: SyncEngine | null = null;
+let telegramChatReply: (chatId: string, text: string) => Promise<string>;
+let telegramBindingGeneration = 0;
+let telegramConversationWriteQueue: Promise<void> = Promise.resolve();
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 const strategyPyramidRequestGate = createStrategyPyramidRequestGate();
@@ -503,7 +507,7 @@ export async function activate(context: vscode.ExtensionContext) {
       if (activeStrategyPyramidPanel) {
         activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
       }
-      restartTelegramRemoteService(context);
+      restartTelegramRemoteService(context, telegramChatReply);
     }
   );
   context.subscriptions.push(settingsSavedDisposable);
@@ -676,6 +680,18 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     return store;
   };
+  telegramChatReply = createTelegramIntelligenceReply(
+    getIntelligenceConversationStore,
+    () => context.globalState.get<Record<string, string>>('solopreneur.telegramIntelligenceConversations') || {},
+    ids => {
+      const write = telegramConversationWriteQueue.catch(() => undefined).then(() =>
+        Promise.resolve(context.globalState.update('solopreneur.telegramIntelligenceConversations', ids))
+      );
+      telegramConversationWriteQueue = write;
+      return write;
+    },
+    () => telegramBindingGeneration
+  );
 
   // Register Sidebar Webview View Provider
   sidebarProvider = new SolopreneurSidebarProvider(
@@ -728,7 +744,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     migrateLegacyActiveConversations(context);
     ensureActiveConversationPoller(context);
-    startTelegramRemoteService(context);
+    startTelegramRemoteService(context, telegramChatReply);
     scheduleFocusReminder(context);
     scheduleTimedAutomationTask(context);
   }, 15_000);
@@ -1382,14 +1398,29 @@ async function handleSharedWebviewAction(
         globalDataPath: request.globalDataPath,
         reviewerCliPath: request.reviewerCliPath,
         collaborationReviewMode: request.collaborationReviewMode,
-        automationTasks: request.automationTasks
+        automationTasks: request.automationTasks,
+        ...(typeof request.telegramEnabled === 'boolean' ? { telegramEnabled: request.telegramEnabled } : {}),
+        ...(typeof request.telegramBotToken === 'string' && request.telegramBotToken.trim()
+          ? { telegramBotToken: request.telegramBotToken.trim() } : {})
       });
+      if (typeof request.telegramEnabled === 'boolean' || (typeof request.telegramBotToken === 'string' && request.telegramBotToken.trim())) {
+        restartTelegramRemoteService(context, telegramChatReply);
+      }
       await respond({
         command: 'settingsSaved',
         settings: await getSettingsWithOpenCodeSecretState(context),
         requestId: String(request.requestId || '')
       });
       vscode.window.showInformationMessage('SoloMap settings saved successfully!');
+      await broadcastSettings(context);
+    },
+    'telegram.unbind': async () => {
+      telegramBindingGeneration++;
+      stopTelegramRemoteService();
+      await updatePersistedSettings(context, { telegramChatId: '' });
+      await telegramConversationWriteQueue.catch(() => undefined);
+      await context.globalState.update('solopreneur.telegramIntelligenceConversations', {});
+      restartTelegramRemoteService(context, telegramChatReply);
       await broadcastSettings(context);
     },
     'settings.reviewGlobalPrompt': async (request) => {
@@ -2271,6 +2302,8 @@ function getSettingsWithRuntimeState(context: vscode.ExtensionContext): Solopren
   const automationTasks = normalizeAutomationSettings(settings.automationTasks || {});
   return {
     ...settings,
+    telegramBotToken: '',
+    telegramBotTokenConfigured: Boolean(settings.telegramBotToken),
     automationTasks: {
       ...automationTasks,
       nextFocusReminderAt: focusReminderNextAt,

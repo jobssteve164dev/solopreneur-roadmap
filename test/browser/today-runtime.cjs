@@ -75,11 +75,15 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     await page.locator('#setting-cognitive-engine-agent [data-solo-option-value="codex"]').click();
     assert.equal(await page.locator('#setting-cognitive-engine-agent').getAttribute('data-value'), 'codex');
     assert.match(await page.locator('#help-cognitive-engine-agent').textContent(), /不会打开终端窗口/);
+    await page.locator('#setting-telegram-enabled').check();
+    await page.locator('#setting-telegram-token').fill('mock-bot-token');
+    assert.equal(await page.locator('#setting-telegram-token').getAttribute('type'), 'password');
     if (process.env.SOLOMAP_BROWSER_SCREENSHOT) {
       await page.screenshot({ path: process.env.SOLOMAP_BROWSER_SCREENSHOT, fullPage: true });
     }
     await page.locator('#btn-save-settings').click();
     assert.ok(messages.some(message => message.command === 'settings.update' && message.cognitiveEngineAgent === 'codex'));
+    assert.ok(messages.some(message => message.command === 'settings.update' && message.telegramEnabled === true && message.telegramBotToken === 'mock-bot-token'));
     assert.deepEqual(errors, []);
     console.log(JSON.stringify({ names: names.slice(0, 2), feedback: 'accepted', cognitiveEngineAgent: 'codex', pageErrors: errors.length }));
   } finally {
