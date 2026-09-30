@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.497 - 2026-09-30
+
+### Fixed
+- bound polling stalls and startup probe (3027455)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.496 - 2026-09-30
 
 ### Fixed
