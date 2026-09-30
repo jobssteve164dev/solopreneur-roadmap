@@ -48,6 +48,7 @@ export interface TelegramUpdate {
 // Mock system for offline automation tests
 export const mockTelegramUpdates: TelegramUpdate[] = [];
 export const mockTelegramSentMessages: { chatId: string; text: string }[] = [];
+export const mockTelegramChatActions: { chatId: string; action: string }[] = [];
 export const mockTelegramApiFailures = { sendMessage: 0 };
 
 /**
@@ -61,6 +62,8 @@ async function callTelegramApi(token: string, method: string, payload: any): Pro
         throw new Error('Mock Telegram send failed');
       }
       mockTelegramSentMessages.push({ chatId: String(payload.chat_id), text: payload.text });
+    } else if (method === 'sendChatAction') {
+      mockTelegramChatActions.push({ chatId: String(payload.chat_id), action: String(payload.action) });
     }
     return { ok: true, result: {} };
   }
@@ -339,13 +342,21 @@ async function dispatchTelegramCommand(context: vscode.ExtensionContext, chatId:
     const generation = pollingGeneration;
     const previous = pendingChatReplies.get(chatId) || Promise.resolve();
     const task = previous.catch(() => undefined).then(async () => {
+      const canReply = () => isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId;
+      const showTyping = () => {
+        if (canReply()) void callTelegramApi(token, 'sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => undefined);
+      };
+      const typingTimer = setTimeout(showTyping, 250);
+      const typingInterval = setInterval(showTyping, 4_000);
+      typingTimer.unref();
+      typingInterval.unref();
       try {
         const answer = await reply(chatId, text);
-        if (isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId) {
+        if (canReply()) {
           await callTelegramApi(token, 'sendMessage', { chat_id: chatId, text: answer });
         }
       } catch (error) {
-        if (isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId) {
+        if (canReply()) {
           try {
             await callTelegramApi(token, 'sendMessage', {
               chat_id: chatId,
@@ -355,6 +366,9 @@ async function dispatchTelegramCommand(context: vscode.ExtensionContext, chatId:
             console.warn('Failed to send Telegram intelligence reply:', sendError);
           }
         }
+      } finally {
+        clearTimeout(typingTimer);
+        clearInterval(typingInterval);
       }
     });
     pendingChatReplies.set(chatId, task);

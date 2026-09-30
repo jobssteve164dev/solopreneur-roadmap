@@ -5532,13 +5532,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return Boolean(active && active.closest && active.closest('[data-project-continue-composer], [data-roadmap-revision-input]'));
     }
 
-    function renderPortfolioFromAsyncUpdate(portfolio, selectedProjectPath) {
+    function renderPortfolioFromAsyncUpdate(portfolio, selectedProjectPath, updatedProjectPath = '') {
       if (isConversationCardInteractionActive() || isProjectComposerInteractionActive()) {
-        pendingAsyncPortfolioRender = { portfolio, selectedProjectPath };
+        const previousPath = pendingAsyncPortfolioRender && pendingAsyncPortfolioRender.updatedProjectPath;
+        pendingAsyncPortfolioRender = {
+          portfolio,
+          selectedProjectPath,
+          updatedProjectPath: pendingAsyncPortfolioRender && previousPath !== updatedProjectPath ? '' : updatedProjectPath
+        };
         return;
       }
       pendingAsyncPortfolioRender = null;
-      renderPortfolio(portfolio, selectedProjectPath);
+      renderPortfolio(portfolio, selectedProjectPath, true, updatedProjectPath);
     }
 
     function renderPortfolioAfterAttachmentUpdate(portfolio, selectedProjectPath) {
@@ -5550,7 +5555,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (isConversationCardInteractionActive() || isProjectComposerInteractionActive() || !pendingAsyncPortfolioRender) return;
       const pending = pendingAsyncPortfolioRender;
       pendingAsyncPortfolioRender = null;
-      renderPortfolio(pending.portfolio, pending.selectedProjectPath);
+      renderPortfolio(pending.portfolio, pending.selectedProjectPath, true, pending.updatedProjectPath);
     }
 
     if (portfolioList) {
@@ -8409,6 +8414,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'projectsLoaded':
           projectDataLoaded = true;
+          const previousSelectedProjectPath = currentProjects.selectedProjectPath;
           const incomingSelectedProjectPath = message.projects.selectedProjectPath || '';
           const selectedProjectPath = activeProjectPath && incomingSelectedProjectPath && incomingSelectedProjectPath !== activeProjectPath
             ? activeProjectPath
@@ -8446,7 +8452,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderProjects(message.projects.projects, currentProjects.selectedProjectPath);
           updateScheduledTasksTarget();
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath || '');
+          if (!(previousSelectedProjectPath === currentProjects.selectedProjectPath
+            && Array.isArray(message.projects.updatedProjectPaths)
+            && message.projects.updatedProjectPaths.length === 0)) {
+            renderPortfolioFromAsyncUpdate(
+              currentProjects.portfolio,
+              currentProjects.selectedProjectPath || '',
+              previousSelectedProjectPath === currentProjects.selectedProjectPath && message.projects.updatedProjectPaths?.length === 1
+                ? message.projects.updatedProjectPaths[0] : ''
+            );
+          }
           if (!initialDataReadyReported) {
             initialDataReadyReported = true;
             let reported = false;
@@ -8468,7 +8483,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             project.path === message.projectPath ? normalizeProjectDerivedSignals({ ...project, issues: message.issues }) : project
           ));
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
 
         case 'projectPullRequestsLoaded':
@@ -8479,7 +8494,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             deliveryActionMessage = '';
           }
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
 
         case 'projectDeliveryLoaded':
@@ -8490,7 +8505,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             deliveryActionMessage = '';
           }
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
 
         case 'projectSecurityLoaded':
@@ -8501,7 +8516,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             deliveryActionMessage = '';
           }
           renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
 
         case 'projectRefreshCompleted':
@@ -8509,7 +8524,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (message.projectPath === currentProjects.selectedProjectPath) {
             deliveryActionMessage = message.success ? t('refreshProjectDataDone') : (message.message || '');
           }
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
 
         case 'cliTestResult':
@@ -8812,13 +8827,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             expandedIssueNumber = 0;
             issueDetails = null;
           }
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
 
         case 'pullRequestActionCompleted':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           deliveryActionMessage = message.success ? (message.message || t('pullRequestActionClosed')) : (message.message || '');
-          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
       }
     });
@@ -11081,8 +11096,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       \`;
     }
 
-    function renderPortfolio(portfolio, selectedProjectPath, preserveComposerInput = true) {
+    function renderPortfolio(portfolio, selectedProjectPath, preserveComposerInput = true, updatedProjectPath = '') {
       const preservedComposerState = captureProjectConversationInputState();
+      const unchangedCards = new Map();
+      const previouslyFocused = document.activeElement;
+      if (updatedProjectPath) {
+        portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
+          const projectPath = card.getAttribute('data-select-project-path');
+          if (projectPath && projectPath !== updatedProjectPath) unchangedCards.set(projectPath, card);
+        });
+      }
       hoveredConversationCard = null;
       focusedConversationCard = null;
       if (!portfolio || portfolio.length === 0) {
@@ -11259,7 +11282,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (!projectPath || projectRefreshPaths.has(projectPath)) return;
           projectRefreshPaths.add(projectPath);
           deliveryActionMessage = '';
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath, true, projectPath);
           vscode.postMessage({
             command: 'project.refreshExternalData',
             projectPath
@@ -11305,7 +11328,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (!projectPath || projectRefreshPaths.has(projectPath)) return;
           projectRefreshPaths.add(projectPath);
           deliveryActionMessage = '';
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath, true, projectPath);
           vscode.postMessage({ command: 'project.refreshExternalData', projectPath });
           requestSidebarProjectConversationSnapshot(projectPath, true);
         });
@@ -11612,6 +11635,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
       bindProjectContinueComposer(portfolioList);
       if (preserveComposerInput) restoreProjectConversationInputState(preservedComposerState);
+      if (updatedProjectPath) {
+        portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
+          const previous = unchangedCards.get(card.getAttribute('data-select-project-path'));
+          if (previous) card.replaceWith(previous);
+        });
+        if (previouslyFocused && previouslyFocused.isConnected && previouslyFocused !== document.activeElement) {
+          previouslyFocused.focus();
+        }
+      }
     }
 
     function activateProjectInSidebar(projectPath, preservePortfolioFilter = false) {

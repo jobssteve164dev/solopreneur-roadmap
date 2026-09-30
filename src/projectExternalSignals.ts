@@ -1058,7 +1058,7 @@ export function readProjectIssueSummary(projectPath: string): ProjectIssueSummar
   return summarizeIssueItems(repo, items, cache.syncedAt, false);
 }
 
-async function readProjectDeliverySummaryAsync(projectPath: string): Promise<ProjectDeliverySummary> {
+async function readProjectDeliverySummaryAsync(projectPath: string, isCurrent: () => boolean): Promise<ProjectDeliverySummary> {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
     return createEmptyDeliverySummary('No GitHub remote');
@@ -1128,7 +1128,7 @@ async function readProjectDeliverySummaryAsync(projectPath: string): Promise<Pro
     workflowRuns
   };
   try {
-    writeDeliveryCache(projectPath, cache);
+    if (isCurrent()) writeDeliveryCache(projectPath, cache);
   } catch {}
   return summarizeDeliveryCache(repo, cache, false);
 }
@@ -1157,7 +1157,7 @@ function parseCodeScanningAlert(raw: any): ProjectSecurityAlert {
   };
 }
 
-async function readProjectSecuritySummaryAsync(projectPath: string): Promise<ProjectSecuritySummary> {
+async function readProjectSecuritySummaryAsync(projectPath: string, isCurrent: () => boolean): Promise<ProjectSecuritySummary> {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
     return createEmptySecuritySummary('No GitHub remote');
@@ -1207,12 +1207,12 @@ async function readProjectSecuritySummaryAsync(projectPath: string): Promise<Pro
     message: messages.filter(Boolean).join(' / ')
   };
   try {
-    writeSecurityCache(projectPath, cache);
+    if (isCurrent()) writeSecurityCache(projectPath, cache);
   } catch {}
   return summarizeSecurityCache(repo, cache, false);
 }
 
-async function readProjectIssueSummaryAsync(projectPath: string): Promise<ProjectIssueSummary> {
+async function readProjectIssueSummaryAsync(projectPath: string, isCurrent: () => boolean): Promise<ProjectIssueSummary> {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
     return createEmptyIssueSummary('No GitHub remote');
@@ -1251,14 +1251,14 @@ async function readProjectIssueSummaryAsync(projectPath: string): Promise<Projec
   const existing = readIssueCache(projectPath, repo);
   const cache = createIssueCache(repo, items, existing?.details || {});
   try {
-    writeIssueCache(projectPath, cache);
+    if (isCurrent()) writeIssueCache(projectPath, cache);
   } catch {
     return summarizeIssueItems(repo, items, cache.syncedAt, false);
   }
   return summarizeIssueItems(repo, items, cache.syncedAt, false);
 }
 
-async function readProjectPullRequestSummaryAsync(projectPath: string): Promise<ProjectPullRequestSummary> {
+async function readProjectPullRequestSummaryAsync(projectPath: string, isCurrent: () => boolean): Promise<ProjectPullRequestSummary> {
   const repo = getGithubRepoSlug(projectPath);
   if (!repo) {
     return createEmptyPullRequestSummary('No GitHub remote');
@@ -1301,7 +1301,7 @@ async function readProjectPullRequestSummaryAsync(projectPath: string): Promise<
     pullRequests
   };
   try {
-    writePullRequestCache(projectPath, cache);
+    if (isCurrent()) writePullRequestCache(projectPath, cache);
   } catch {
     return summarizePullRequestItems(repo, pullRequests, cache.syncedAt, false);
   }
@@ -1312,7 +1312,7 @@ export function loadExternalIssueSummary(projectPath: string, options: ExternalD
   return loadExternalData(
     'github-issues',
     projectPath,
-    () => readProjectIssueSummaryAsync(projectPath),
+    (isCurrent) => readProjectIssueSummaryAsync(projectPath, isCurrent),
     options
   );
 }
@@ -1321,7 +1321,7 @@ export function loadExternalPullRequestSummary(projectPath: string, options: Ext
   return loadExternalData(
     'github-pull-requests',
     projectPath,
-    () => readProjectPullRequestSummaryAsync(projectPath),
+    (isCurrent) => readProjectPullRequestSummaryAsync(projectPath, isCurrent),
     options
   );
 }
@@ -1330,7 +1330,7 @@ export function loadExternalDeliverySummary(projectPath: string, options: Extern
   return loadExternalData(
     'github-delivery',
     projectPath,
-    () => readProjectDeliverySummaryAsync(projectPath),
+    (isCurrent) => readProjectDeliverySummaryAsync(projectPath, isCurrent),
     options
   );
 }
@@ -1339,7 +1339,7 @@ export function loadExternalSecuritySummary(projectPath: string, options: Extern
   return loadExternalData(
     'github-security',
     projectPath,
-    () => readProjectSecuritySummaryAsync(projectPath),
+    (isCurrent) => readProjectSecuritySummaryAsync(projectPath, isCurrent),
     options
   );
 }
@@ -1410,7 +1410,6 @@ export function createProjectIssue(projectPath: string, title: string, body: str
       labels.forEach((label) => ensureGithubIssueLabel(projectPath, label));
       runGhIssueCommand(projectPath, ['issue', 'edit', String(issueNumber), '--add-label', labels.join(',')], 8000);
     }
-    readProjectIssueSummary(projectPath);
   }
   return {
     ok: result.ok,
@@ -1422,7 +1421,6 @@ export function closeProjectIssue(projectPath: string, issueNumber: number): { o
   const result = runGhIssueCommand(projectPath, ['issue', 'close', String(issueNumber)], 8000);
   if (result.ok) {
     invalidateExternalIssueSummary(projectPath);
-    readProjectIssueSummary(projectPath);
   }
   return {
     ok: result.ok,

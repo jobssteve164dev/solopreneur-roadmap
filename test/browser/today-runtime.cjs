@@ -52,6 +52,42 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     }, '*'));
     const names = await page.locator('.global-focus-name').allTextContents();
     assert.deepEqual(names.slice(0, 2), ['Beta', 'Alpha']);
+    await page.evaluate(() => {
+      window.__unchangedProjectCard = document.querySelector('[data-select-project-path="/workspace/alpha"]');
+      window.postMessage({ command: 'projectIssuesLoaded', projectPath: '/workspace/beta', issues: { openCount: 1, issues: [], syncedAt: new Date().toISOString() } }, '*');
+    });
+    assert.equal(await page.evaluate(() => window.__unchangedProjectCard === document.querySelector('[data-select-project-path="/workspace/alpha"]')), true);
+    await page.evaluate(() => window.postMessage({ command: 'projectsLoaded', projects: {
+      projects: [{ name: 'Alpha', path: '/workspace/alpha' }, { name: 'Beta', path: '/workspace/beta' }],
+      selectedProjectPath: '/workspace/alpha', portfolio: [], updatedProjectPaths: [], globalStore: { portfolio: [] }
+    } }, '*'));
+    assert.equal(await page.evaluate(() => window.__unchangedProjectCard === document.querySelector('[data-select-project-path="/workspace/alpha"]')), true);
+    await page.evaluate(data => window.postMessage({ command: 'projectsLoaded', projects: {
+      projects: data.map(({ name, path }) => ({ name, path })),
+      selectedProjectPath: '/workspace/alpha',
+      portfolio: [{ ...data[1], issuePressure: '1' }],
+      updatedProjectPaths: ['/workspace/beta']
+    } }, '*'), portfolio);
+    assert.equal(await page.evaluate(() => window.__unchangedProjectCard === document.querySelector('[data-select-project-path="/workspace/alpha"]')), true);
+    await page.locator('[data-refresh-project-path="/workspace/beta"]').click();
+    assert.equal(await page.evaluate(() => window.__unchangedProjectCard === document.querySelector('[data-select-project-path="/workspace/alpha"]')), true);
+    assert.ok(messages.some(message => message.command === 'project.refreshExternalData' && message.projectPath === '/workspace/beta'));
+    await page.locator('[data-project-conversation-input]').focus();
+    await page.evaluate(() => {
+      window.__beforeAlphaIssue = document.querySelector('[data-select-project-path="/workspace/alpha"]');
+      window.__beforeBetaIssue = document.querySelector('[data-select-project-path="/workspace/beta"]');
+      window.postMessage({ command: 'projectIssuesLoaded', projectPath: '/workspace/alpha', issues: { openCount: 2, issues: [], syncedAt: new Date().toISOString() } }, '*');
+      window.postMessage({ command: 'projectIssuesLoaded', projectPath: '/workspace/beta', issues: { openCount: 3, issues: [], syncedAt: new Date().toISOString() } }, '*');
+    });
+    await page.locator('body').click({ position: { x: 380, y: 880 } });
+    await page.waitForFunction(() =>
+      window.__beforeAlphaIssue !== document.querySelector('[data-select-project-path="/workspace/alpha"]')
+      && window.__beforeBetaIssue !== document.querySelector('[data-select-project-path="/workspace/beta"]')
+    );
+    assert.deepEqual(await page.evaluate(() => [
+      window.__beforeAlphaIssue !== document.querySelector('[data-select-project-path="/workspace/alpha"]'),
+      window.__beforeBetaIssue !== document.querySelector('[data-select-project-path="/workspace/beta"]')
+    ]), [true, true]);
     await page.evaluate(() => window.postMessage({
       command: 'dailyReviewLoaded',
       review: {

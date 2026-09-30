@@ -446,7 +446,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
     if (this._localRefreshTimer) return;
     this._corePortfolioRequest += 1;
-    this._projectLoader.cancelExternalLoads();
+    if (!projectPath) this._projectLoader.cancelExternalLoads();
     this._localRefreshTimer = setTimeout(() => {
       this._localRefreshTimer = null;
       try {
@@ -473,6 +473,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         console.error('SoloMap sidebar failed to send local projects:', error);
       }
     }, 20);
+  }
+
+  public invalidateProjectSignals(projectPath: string, kinds: Array<'issues' | 'pullRequests' | 'delivery' | 'security'>): void {
+    this._projectLoader.invalidateProjectSignals(projectPath, kinds);
   }
 
   private postCorePortfolio(

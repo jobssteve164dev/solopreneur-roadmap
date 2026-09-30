@@ -29,6 +29,7 @@ import { buildAgentCliUpgradePrompt } from './agentCliUpgrade';
 import { auditDocumentationAfterRun, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
 import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
+import { ExternalSignalResponseVersions } from './externalDataLoader';
 import { createPreSessionGitCommit } from './preSessionGit';
 import { buildTaskReportInstructions, registerLearningTask, recordTaskReport, readLearningJson } from './taskReport.js';
 import { reviewHash, collectGithubEvidence, projectGithubRepository } from './learningReview.js';
@@ -289,6 +290,7 @@ let telegramConversationWriteQueue: Promise<void> = Promise.resolve();
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 const strategyPyramidRequestGate = createStrategyPyramidRequestGate();
+const externalSignalResponseVersions = new ExternalSignalResponseVersions();
 let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPath = '';
 let projectGrowthLoadSequence = 0;
@@ -1547,6 +1549,8 @@ async function handleSharedWebviewAction(
         String(request.category || 'discussion'),
         String(request.priority || '')
       );
+      const issueVersion = result.ok ? externalSignalResponseVersions.next(projectPath, ['issues']).issues : 0;
+      if (result.ok) sidebarProvider?.invalidateProjectSignals(projectPath, ['issues']);
       await respond({
         command: 'issueActionCompleted',
         projectPath,
@@ -1554,24 +1558,41 @@ async function handleSharedWebviewAction(
         message: result.message,
         sourceMessageId: String(request.sourceMessageId || '')
       });
-      sendProjectsToWebviews(context);
+      if (result.ok) {
+        const issues = await loadExternalIssueSummary(projectPath, { force: true }).catch(() => null);
+        if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', issueVersion)) {
+          await respond({ command: 'projectIssuesLoaded', projectPath, issues });
+        }
+      }
     },
     'issue.close': async (request) => {
       const projectPath = String(request.projectPath || '');
       const result = closeProjectIssue(projectPath, Number(request.issueNumber || 0));
+      const issueVersion = result.ok ? externalSignalResponseVersions.next(projectPath, ['issues']).issues : 0;
+      if (result.ok) sidebarProvider?.invalidateProjectSignals(projectPath, ['issues']);
       await respond({ command: 'issueActionCompleted', projectPath, success: result.ok, message: result.message });
-      sendProjectsToWebviews(context);
+      if (result.ok) {
+        const issues = await loadExternalIssueSummary(projectPath, { force: true }).catch(() => null);
+        if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', issueVersion)) {
+          await respond({ command: 'projectIssuesLoaded', projectPath, issues });
+        }
+      }
     },
     'pullRequest.close': async (request) => {
       const projectPath = String(request.projectPath || '');
       const result = closeProjectPullRequest(projectPath, Number(request.pullRequestNumber || 0));
+      const pullRequestVersion = result.ok ? externalSignalResponseVersions.next(projectPath, ['pullRequests']).pullRequests : 0;
+      if (result.ok) sidebarProvider?.invalidateProjectSignals(projectPath, ['pullRequests']);
       await respond({ command: 'pullRequestActionCompleted', projectPath, success: result.ok, message: result.message });
       const pullRequests = await loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null);
-      if (pullRequests) await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
-      sendProjectsToWebviews(context);
+      if (pullRequests && externalSignalResponseVersions.isCurrent(projectPath, 'pullRequests', pullRequestVersion)) {
+        await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
+      }
     },
     'project.refreshExternalData': async (request) => {
       const projectPath = String(request.projectPath || '');
+      const responseVersions = externalSignalResponseVersions.next(projectPath, ['issues', 'pullRequests', 'delivery', 'security']);
+      sidebarProvider?.invalidateProjectSignals(projectPath, ['issues', 'pullRequests', 'delivery', 'security']);
       const [issues, pullRequests, delivery, security, runIndexHealth, growthView] = await Promise.all([
         loadExternalIssueSummary(projectPath, { force: true }).catch(() => null),
         loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null),
@@ -1591,12 +1612,20 @@ async function handleSharedWebviewAction(
           return null;
         })
       ]);
-      if (issues) await respond({ command: 'projectIssuesLoaded', projectPath, issues });
-      if (pullRequests) await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
-      if (delivery) await respond({ command: 'projectDeliveryLoaded', projectPath, delivery });
-      if (security) await respond({ command: 'projectSecurityLoaded', projectPath, security });
+      if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', responseVersions.issues)) {
+        await respond({ command: 'projectIssuesLoaded', projectPath, issues });
+      }
+      if (pullRequests && externalSignalResponseVersions.isCurrent(projectPath, 'pullRequests', responseVersions.pullRequests)) {
+        await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
+      }
+      if (delivery && externalSignalResponseVersions.isCurrent(projectPath, 'delivery', responseVersions.delivery)) {
+        await respond({ command: 'projectDeliveryLoaded', projectPath, delivery });
+      }
+      if (security && externalSignalResponseVersions.isCurrent(projectPath, 'security', responseVersions.security)) {
+        await respond({ command: 'projectSecurityLoaded', projectPath, security });
+      }
       if (runIndexHealth?.backfilledCount) {
-        sendLocalProjectsToWebviews(context);
+        sendLocalProjectsToWebviews(context, projectPath);
       }
       if (growthView) {
         await respond({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
@@ -3234,13 +3263,13 @@ function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
   }
 }
 
-function sendLocalProjectsToWebviews(context: vscode.ExtensionContext): void {
+function sendLocalProjectsToWebviews(context: vscode.ExtensionContext, projectPath = ''): void {
   const projects = getProjectState(context);
   if (activePanel) {
     postProjectsLoaded(activePanel.webview, projects);
   }
   if (sidebarProvider) {
-    sidebarProvider.sendLocalProjects();
+    sidebarProvider.sendLocalProjects(projectPath);
   }
 }
 

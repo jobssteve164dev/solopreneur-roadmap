@@ -3344,11 +3344,11 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?rememberProjectConversationInput\(input, false\)[\s\S]*?document\.activeElement === input/);
   assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
   assert.match(html, /function sameConversations\(left,\s*right\)/);
-  assert.match(html, /function renderPortfolioFromAsyncUpdate\(portfolio, selectedProjectPath\)/);
+  assert.match(html, /function renderPortfolioFromAsyncUpdate\(portfolio, selectedProjectPath, updatedProjectPath = ''\)/);
   assert.match(html, /isConversationCardInteractionActive\(\)[\s\S]*?pendingAsyncPortfolioRender/);
   assert.match(html, /portfolioList\.addEventListener\('pointerover'[\s\S]*?hoveredConversationCard/);
   assert.match(html, /portfolioList\.addEventListener\('focusin'[\s\S]*?focusedConversationCard/);
-  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
+  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true, updatedProjectPath = ''\) \{[\s\S]*?hoveredConversationCard = null;[\s\S]*?focusedConversationCard = null;/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.soloConversations[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(html, /case 'sidebarProjectConversationSnapshotLoaded':[\s\S]*?message\.flowConversations/);
@@ -3365,7 +3365,7 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function renderSidebarStepHistoryContent[\s\S]*?sidebarFlowConversations\[key\]/);
   assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
-  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
+  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true, updatedProjectPath = ''\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?sameConversations\(sidebarProjectConversations\[message\.projectPath\], message\.conversations \|\| \[\]\)/);
   assert.match(html, /function pruneSidebarConversationExpansionState\(conversations\)/);
   assert.match(html, /class="delivery-toggle-btn" data-conversation-expand-id/);
@@ -3834,8 +3834,27 @@ test('local project actions use local refresh instead of external portfolio refr
     assert.match(body, /sendLocalProjectsToWebviews\(context\)/);
     assert.doesNotMatch(body, /sendProjectsToWebviews\(context\)/);
   });
-  assert.match(source, /sidebarProvider\.sendLocalProjects\(\)/);
+  assert.match(source, /sidebarProvider\.sendLocalProjects\(projectPath\)/);
   assert.doesNotMatch(source, /sidebarProvider\.sendProjects\(\);\n\s*}\n\s*return true;\n\s*} catch \(error\) \{/);
+});
+
+test('closing an issue refreshes only that project issue data', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const action = source.match(/'issue\.close': async \(request\) => \{([\s\S]*?)\n    \},/);
+  assert.ok(action);
+  assert.match(action[1], /invalidateProjectSignals\(projectPath, \['issues'\]\)/);
+  assert.match(action[1], /loadExternalIssueSummary\(projectPath, \{ force: true \}\)/);
+  assert.match(action[1], /projectIssuesLoaded/);
+  assert.doesNotMatch(action[1], /sendProjectsToWebviews\(context\)/);
+});
+
+test('a project-local refresh keeps other projects remote loads in flight', () => {
+  const provider = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8');
+  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const localRefresh = provider.match(/public sendLocalProjects\(projectPath = ''\) \{([\s\S]*?)\n  \}/);
+  assert.ok(localRefresh);
+  assert.match(localRefresh[1], /if \(!projectPath\) this\._projectLoader\.cancelExternalLoads\(\)/);
+  assert.match(extension, /if \(runIndexHealth\?\.backfilledCount\) \{\s*sendLocalProjectsToWebviews\(context, projectPath\)/);
 });
 
 test('closing the roadmap panel keeps the project sentinel alive for sidebar status refreshes', () => {
@@ -3937,7 +3956,7 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
   await Promise.race([portfolioBatchDone, new Promise((resolve) => setTimeout(resolve, 200))]);
 
   assert.equal(portfolioEnrichments, 1);
-  assert.equal(externalLoads, 1);
+  assert.equal(externalLoads, 0);
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].command, 'projectsLoaded');
   assert.equal(postedMessages[0].projects.portfolio.length, 2);
@@ -6252,6 +6271,52 @@ test('external data loader deduplicates in-flight loads and reuses fresh results
   assert.equal(second.calls, 1);
   assert.equal(cached.calls, 1);
   assert.equal(forced.calls, 2);
+});
+
+test('forced external refresh starts a new load while an older request is pending', async () => {
+  const { ExternalDataLoadCoordinator } = require(path.join(projectRoot, 'out/externalDataLoader.js'));
+  const coordinator = new ExternalDataLoadCoordinator();
+  let finishOld;
+  const old = coordinator.load('issue::alpha', () => new Promise(resolve => { finishOld = resolve; }));
+  await new Promise(resolve => setImmediate(resolve));
+  const fresh = await coordinator.load('issue::alpha', async () => 'fresh', { force: true });
+  finishOld('old');
+  assert.equal(await old, 'old');
+  assert.equal(fresh, 'fresh');
+  assert.equal(await coordinator.load('issue::alpha', async () => 'unexpected'), 'fresh');
+});
+
+test('superseded external load cannot overwrite a newer cached result', async () => {
+  const { ExternalDataLoadCoordinator } = require(path.join(projectRoot, 'out/externalDataLoader.js'));
+  const coordinator = new ExternalDataLoadCoordinator();
+  let finishOld;
+  let diskValue = '';
+  const old = coordinator.load('issue::alpha', async isCurrent => {
+    await new Promise(resolve => { finishOld = resolve; });
+    if (isCurrent()) diskValue = 'old';
+    return 'old';
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const fresh = await coordinator.load('issue::alpha', async isCurrent => {
+    if (isCurrent()) diskValue = 'fresh';
+    return 'fresh';
+  }, { force: true });
+  finishOld();
+  assert.equal(await old, 'old');
+  assert.equal(fresh, 'fresh');
+  assert.equal(diskValue, 'fresh');
+});
+
+test('one project signal response cannot replace a newer response for the same project', () => {
+  const { ExternalSignalResponseVersions } = require(path.join(projectRoot, 'out/externalDataLoader.js'));
+  const versions = new ExternalSignalResponseVersions();
+  const oldAlpha = versions.next('/alpha', ['issues', 'pullRequests']);
+  const beta = versions.next('/beta', ['issues']);
+  const newAlpha = versions.next('/alpha', ['issues']);
+  assert.equal(versions.isCurrent('/alpha', 'issues', oldAlpha.issues), false);
+  assert.equal(versions.isCurrent('/alpha', 'issues', newAlpha.issues), true);
+  assert.equal(versions.isCurrent('/alpha', 'pullRequests', oldAlpha.pullRequests), true);
+  assert.equal(versions.isCurrent('/beta', 'issues', beta.issues), true);
 });
 
 test('external data loader exposes one shared loading boundary', async () => {

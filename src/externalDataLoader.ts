@@ -18,8 +18,11 @@ export class ExternalDataLoadCoordinator {
     this.defaultMinIntervalMs = Math.max(0, Number(options.defaultMinIntervalMs || 60_000));
   }
 
-  load<T>(key: string, load: () => Promise<T>, options: ExternalDataLoadOptions = {}): Promise<T> {
+  load<T>(key: string, load: (isCurrent: () => boolean) => Promise<T>, options: ExternalDataLoadOptions = {}): Promise<T> {
     const normalizedKey = String(key || '').trim();
+    if (options.force) {
+      this.entries.delete(normalizedKey);
+    }
     const entry = this.getEntry<T>(normalizedKey);
     if (entry.inFlight) {
       return entry.inFlight as Promise<T>;
@@ -32,7 +35,7 @@ export class ExternalDataLoadCoordinator {
     }
 
     const promise = Promise.resolve()
-      .then(load)
+      .then(() => load(() => this.entries.get(normalizedKey) === entry))
       .then((value) => {
         entry.value = value;
         entry.hasValue = true;
@@ -77,6 +80,25 @@ export function buildExternalDataKey(scope: string, projectPath = ''): string {
   return `${String(scope || '').trim()}::${String(projectPath || '').trim()}`;
 }
 
+export class ExternalSignalResponseVersions {
+  private readonly versions = new Map<string, number>();
+
+  next(projectPath: string, kinds: string[]): Record<string, number> {
+    const current: Record<string, number> = {};
+    for (const kind of kinds) {
+      const key = buildExternalDataKey(kind, projectPath);
+      const version = (this.versions.get(key) || 0) + 1;
+      this.versions.set(key, version);
+      current[kind] = version;
+    }
+    return current;
+  }
+
+  isCurrent(projectPath: string, kind: string, version: number): boolean {
+    return this.versions.get(buildExternalDataKey(kind, projectPath)) === version;
+  }
+}
+
 const sharedExternalDataCoordinator = new ExternalDataLoadCoordinator({ defaultMinIntervalMs: 90_000 });
 
 export function getSharedExternalDataCoordinator(): ExternalDataLoadCoordinator {
@@ -86,7 +108,7 @@ export function getSharedExternalDataCoordinator(): ExternalDataLoadCoordinator 
 export function loadExternalData<T>(
   scope: string,
   projectPath: string,
-  load: () => Promise<T>,
+  load: (isCurrent: () => boolean) => Promise<T>,
   options: ExternalDataLoadOptions = {}
 ): Promise<T> {
   return sharedExternalDataCoordinator.load(buildExternalDataKey(scope, projectPath), load, options);

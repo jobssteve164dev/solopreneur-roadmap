@@ -299,6 +299,28 @@ test('bound Telegram text reaches the intelligence reply while remote commands k
   stopTelegramRemoteService();
 });
 
+test('Telegram shows a reply status while the intelligence answer is pending', async t => {
+  t.after(stopTelegramRemoteService);
+  const { mockTelegramChatActions } = require('../out/telegramRemote.js');
+  const contextMock = { globalState: { get() { return {}; }, update() { return Promise.resolve(); } } };
+  mockTelegramChatActions.length = 0;
+  mockTelegramSentMessages.length = 0;
+  mockTelegramUpdates.length = 0;
+  let release;
+  startTelegramRemoteService(contextMock, () => new Promise(resolve => { release = resolve; }));
+  mockTelegramUpdates.push({
+    update_id: 350,
+    message: { message_id: 12, from: { id: 123456, is_bot: false, first_name: 'Steve' },
+      chat: { id: 123456, type: 'private' }, date: Date.now(), text: '帮我查项目' }
+  });
+  await wait(400);
+  assert.deepEqual(mockTelegramChatActions, [{ chatId: '123456', action: 'typing' }]);
+  assert.deepEqual(mockTelegramSentMessages, []);
+  release('项目查询完成');
+  await wait(100);
+  assert.equal(mockTelegramSentMessages.at(-1)?.text, '项目查询完成');
+});
+
 test('Telegram reply transport failure does not stop later questions', async t => {
   t.after(() => { mockTelegramApiFailures.sendMessage = 0; stopTelegramRemoteService(); });
   const contextMock = { globalState: { get() { return {}; }, update() { return Promise.resolve(); } } };
