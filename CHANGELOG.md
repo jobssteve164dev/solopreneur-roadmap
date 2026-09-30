@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.492 - 2026-09-30
+
+### Added
+- connect Telegram chat to embedded Pi intelligence (a55b362)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.491 - 2026-09-30
 
 ### Changed
