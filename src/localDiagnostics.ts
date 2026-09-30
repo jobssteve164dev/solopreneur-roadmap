@@ -77,7 +77,7 @@ export function sanitizeDiagnosticText(value: unknown): string {
 
 export function classifyDiagnosticFailure(error: unknown): string {
   const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
-  if (/^(?:missing_state|different_process|not_running|stale_heartbeat|process_exited|control_unavailable|different_runtime|control_not_running)$/.test(message)) return message;
+  if (/^(?:missing_state|different_process|not_running|stale_heartbeat|process_exited|control_unavailable|different_runtime|different_runtime_build|different_runtime_owner|control_not_running|runtime_drain_timeout|runtime_service_rollback|runtime_service_upgrade_failed|runtime_service_cleanup_failed)$/.test(message)) return message;
   if (/failed to connect to (?:user scope )?bus|user bus.*(?:unavailable|not found)/.test(message)) return 'user_systemd_bus_unavailable';
   const httpStatus = message.match(/telegram[^\n]*?http\s*(\d{3})/);
   if (httpStatus) return `telegram_http_${httpStatus[1]}`;

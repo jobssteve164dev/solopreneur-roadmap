@@ -28,6 +28,8 @@ test('runtime control authenticates local health, pause and resume commands', as
     server = await control.startRuntimeControlServer({
       globalDataPath: globalRoot,
       runtimeId: 'runtime-control-test',
+      entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js',
+      buildId: 'build-a',
       onCommand(command) {
         calls.push(command);
         return { status: command === 'pause' ? 'paused' : 'running' };
@@ -37,9 +39,12 @@ test('runtime control authenticates local health, pause and resume commands', as
     const health = await control.sendRuntimeControlCommand(globalRoot, 'health');
     const paused = await control.sendRuntimeControlCommand(globalRoot, 'pause');
     const resumed = await control.sendRuntimeControlCommand(globalRoot, 'resume');
+    await assert.rejects(control.sendRuntimeControlCommand(globalRoot, 'drain', { expectedRuntimeId: 'replaced-runtime' }), /different_runtime/);
 
     assert.equal(health.ok, true);
     assert.equal(health.runtimeId, 'runtime-control-test');
+    assert.equal(health.entryPath, '/opt/solomap/out/autonomousRuntimeProcess.js');
+    assert.equal(health.buildId, 'build-a');
     assert.equal(paused.status, 'paused');
     assert.equal(resumed.status, 'running');
     assert.deepEqual(calls, ['health', 'pause', 'resume']);
@@ -139,6 +144,7 @@ test('standalone runtime stays paused and resumes through its authenticated cont
   ], { stdio: 'ignore' });
   try {
     await waitFor(() => fs.existsSync(path.join(runtimeRoot, 'control.json')));
+    assert.equal((await control.sendRuntimeControlCommand(globalRoot, 'health')).owner, 'fallback');
     await control.sendRuntimeControlCommand(globalRoot, 'pause');
     assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'state.json'), 'utf8')).status, 'paused');
     await control.sendRuntimeControlCommand(globalRoot, 'resume');

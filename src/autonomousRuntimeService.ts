@@ -4,11 +4,13 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { sendRuntimeControlCommand, RuntimeControlCommand } from './autonomousRuntimeControl';
-import { readRuntimeState } from './autonomousRuntime';
+import { inspectAutonomousRuntimeHealth, waitForAutonomousRuntimeHealth } from './autonomousRuntimeHost';
+import { readRuntimeState, RuntimeState } from './autonomousRuntime';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { cognitiveCliEnvironment } from './localAgentCliEngine';
 import { revokeAllProjectAutonomyAuthorizations } from './projectAutonomyAuthorization';
 import { sanitizeDiagnosticText } from './localDiagnostics';
+import { runtimeBuildId } from './runtimeBuildIdentity';
 
 type SupportedPlatform = 'linux' | 'darwin' | 'win32';
 type Command = [string, string[]];
@@ -32,9 +34,12 @@ interface RuntimeServiceOptions {
   execPath?: string;
   environment?: NodeJS.ProcessEnv;
   runCommand?: (command: string, args: string[]) => void | Promise<void>;
-  sendControl?: (command: RuntimeControlCommand) => Promise<unknown>;
-  waitForDrain?: () => Promise<void>;
+  sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string) => Promise<unknown>;
+  waitForDrain?: (pid: number, runtimeId: string) => Promise<void>;
   waitForHealth?: () => Promise<void>;
+  waitForRollbackHealth?: (excludedRuntimeId?: string) => Promise<void>;
+  waitForServiceStop?: (pid: number) => Promise<void>;
+  waitForTaskStopped?: () => Promise<void>;
   ignoreDisabled?: boolean;
 }
 
@@ -57,6 +62,15 @@ function serviceDisabledPath(globalDataPath: string): string {
   return path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'runtime', 'service-disabled');
 }
 
+export function isAutonomousRuntimeDisabled(globalDataPath: string): boolean {
+  return fs.existsSync(serviceDisabledPath(globalDataPath));
+}
+
+export function enableAutonomousRuntime(globalDataPath: string): void {
+  const disabledPath = serviceDisabledPath(globalDataPath);
+  if (fs.existsSync(disabledPath)) fs.unlinkSync(disabledPath);
+}
+
 function xmlEscape(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -66,7 +80,7 @@ function powerShellLiteral(value: string): string {
 }
 
 function runtimeArguments(extensionPath: string, globalDataPath: string): string[] {
-  return [path.join(extensionPath, 'out', 'autonomousRuntimeProcess.js'), '--global-data-path', globalDataPath];
+  return [path.join(extensionPath, 'out', 'autonomousRuntimeProcess.js'), '--global-data-path', globalDataPath, '--runtime-owner', 'service'];
 }
 
 export function buildRuntimeServicePlan(options: RuntimeServiceOptions): RuntimeServicePlan {
@@ -152,6 +166,7 @@ export function buildRuntimeServicePlan(options: RuntimeServiceOptions): Runtime
       '</Task>',
       ''
     ].join('\n'),
+    prepareUpgradeCommand: ['schtasks.exe', ['/End', '/TN', 'SoloMap Runtime']],
     installCommand: ['schtasks.exe', ['/Create', '/TN', 'SoloMap Runtime', '/XML', definitionPath, '/F']],
     restartCommand: ['schtasks.exe', ['/Run', '/TN', 'SoloMap Runtime']],
     uninstallCommand: ['schtasks.exe', ['/Delete', '/TN', 'SoloMap Runtime', '/F']]
@@ -170,6 +185,19 @@ export function runRuntimeServiceCommand(command: string, args: string[]): Promi
       else reject(new Error(`${command} exited with status ${code ?? 'unknown'}${stderr.trim() ? `: ${sanitizeDiagnosticText(stderr)}` : '.'}`));
     });
   });
+}
+
+export async function isRuntimeServiceManagerAvailable(
+  platform: NodeJS.Platform = process.platform,
+  runCommand: (command: string, args: string[]) => void | Promise<void> = runRuntimeServiceCommand
+): Promise<boolean> {
+  if (platform !== 'linux') return true;
+  try {
+    await runCommand('systemctl', ['--user', 'show-environment']);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function writeDefinition(filePath: string, contents: string): void {
@@ -214,38 +242,48 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
   const platform = (options.platform || process.platform) as SupportedPlatform;
   const homeDir = options.homeDir || os.homedir();
   const environment = options.environment || cognitiveCliEnvironment();
-  const disabledPath = serviceDisabledPath(options.globalDataPath);
-  if (fs.existsSync(disabledPath) && !options.ignoreDisabled) {
+  if (isAutonomousRuntimeDisabled(options.globalDataPath) && !options.ignoreDisabled) {
     return { installed: false, definitionPath: plan.definitionPath, changed: false };
   }
-  if (options.ignoreDisabled && fs.existsSync(disabledPath)) fs.unlinkSync(disabledPath);
+  if (options.ignoreDisabled) enableAutonomousRuntime(options.globalDataPath);
   const previous = fs.existsSync(plan.definitionPath) ? fs.readFileSync(plan.definitionPath, 'utf8') : null;
   const changed = previous !== plan.definition;
   const runCommand = options.runCommand || runRuntimeServiceCommand;
-  const sendControl = options.sendControl || ((command: RuntimeControlCommand) => sendRuntimeControlCommand(options.globalDataPath, command));
-  const drainingPid = Number(readRuntimeState(options.globalDataPath)?.pid || 0);
-  const waitForDrain = options.waitForDrain || (() => waitUntil(
-    () => readRuntimeState(options.globalDataPath)?.status === 'stopped' && !isProcessAlive(drainingPid),
+  const sendControl = options.sendControl || ((command: RuntimeControlCommand, expectedRuntimeId?: string) => sendRuntimeControlCommand(options.globalDataPath, command, { expectedRuntimeId }));
+  const waitForDrain = options.waitForDrain || ((pid: number, runtimeId: string) => waitUntil(
+    () => {
+      const state = readRuntimeState(options.globalDataPath);
+      return !isProcessAlive(pid) && (!state || state.runtimeId !== runtimeId || state.status === 'stopped');
+    },
     'SoloMap Runtime did not finish draining before service upgrade.'
   ));
-  const waitForHealth = options.waitForHealth || (() => waitUntil(async () => {
-    try {
-      const response = await sendRuntimeControlCommand(options.globalDataPath, 'health', { timeoutMs: 500 });
-      return response.ok;
-    } catch {
-      return false;
-    }
-  }, 'SoloMap Runtime service did not become healthy after activation.'));
+  const waitForHealth = options.waitForHealth || (() => waitForAutonomousRuntimeHealth(
+    options.globalDataPath, 30_000, undefined, runtimeArguments(options.extensionPath, options.globalDataPath)[0], runtimeBuildId(options.extensionPath), 'service', undefined, undefined, false, undefined, true));
+  const waitForExistingHealth = options.waitForHealth || (() => waitForAutonomousRuntimeHealth(
+    options.globalDataPath, 30_000, undefined, runtimeArguments(options.extensionPath, options.globalDataPath)[0], runtimeBuildId(options.extensionPath), 'service'));
+  const waitForRollbackHealth = options.waitForRollbackHealth || ((excludedRuntimeId?: string) => waitForAutonomousRuntimeHealth(
+    options.globalDataPath, 30_000, undefined, undefined, undefined, 'service', undefined, undefined, true, excludedRuntimeId, true));
   writeServiceRegistration(options, platform, homeDir, environment);
-  let drained = false;
-  if (changed) {
+  const drainTarget = async (current: RuntimeState): Promise<void> => {
+    const latest = readRuntimeState(options.globalDataPath);
+    if (!latest || latest.runtimeId !== current.runtimeId || latest.pid !== current.pid) throw new Error('different_runtime');
+    if (latest.status === 'stopped' || !isProcessAlive(latest.pid)) return;
     try {
-      await sendControl('drain');
-      drained = true;
-    } catch {
-      // First install and stale endpoints have no live Runtime to drain.
+      await sendControl('drain', current.runtimeId);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'different_runtime') throw error;
+      throw new Error('control_unavailable');
     }
-    if (drained) await waitForDrain();
+    await waitForDrain(current.pid, current.runtimeId);
+  };
+  const drainExisting = async (): Promise<boolean> => {
+    const current = readRuntimeState(options.globalDataPath);
+    if (!current || current.status === 'stopped' || !isProcessAlive(current.pid)) return false;
+    await drainTarget(current);
+    return true;
+  };
+  if (changed) {
+    await drainExisting();
     if (previous !== null && plan.prepareUpgradeCommand) {
       try {
         await runCommand(...plan.prepareUpgradeCommand);
@@ -256,6 +294,21 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
     writeDefinition(plan.definitionPath, plan.definition);
   }
   try {
+    if (!changed && !plan.statusCommand) {
+      const current = readRuntimeState(options.globalDataPath);
+      if (current) {
+        const health = await inspectAutonomousRuntimeHealth(options.globalDataPath, current.pid, Date.now(), undefined,
+          runtimeArguments(options.extensionPath, options.globalDataPath)[0], runtimeBuildId(options.extensionPath), 'service');
+        if (health.healthy) {
+          try {
+            await runCommand('schtasks.exe', ['/Query', '/TN', 'SoloMap Runtime']);
+          } catch {
+            await runCommand(...plan.installCommand);
+          }
+          return { installed: true, definitionPath: plan.definitionPath, changed };
+        }
+      }
+    }
     if (!changed && plan.statusCommand) {
       let loaded = false;
       try {
@@ -265,37 +318,102 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
         // The definition exists but is not currently loaded.
       }
       if (loaded) {
-        await waitForHealth();
+        try {
+          await waitForExistingHealth();
+        } catch (error) {
+          if (!plan.restartCommand) throw error;
+          await drainExisting();
+          await runCommand(...plan.restartCommand);
+          await waitForHealth();
+        }
         return { installed: true, definitionPath: plan.definitionPath, changed };
       }
     }
+    if (!changed) await drainExisting();
     if (plan.reloadCommand) await runCommand(...plan.reloadCommand);
     await runCommand(...plan.installCommand);
-    if (changed && plan.restartCommand) await runCommand(...plan.restartCommand);
+    if ((changed || platform === 'win32') && plan.restartCommand) await runCommand(...plan.restartCommand);
     await waitForHealth();
     return { installed: true, definitionPath: plan.definitionPath, changed };
   } catch (error) {
+    let rollbackRestored = false;
     if (changed) {
       if (previous === null) {
-        try { await sendControl('stop'); } catch { /* The failed service may not have opened IPC. */ }
+        let observedPid = 0;
+        const current = readRuntimeState(options.globalDataPath);
+        if (current && isProcessAlive(current.pid)) {
+          observedPid = current.pid;
+          const health = await inspectAutonomousRuntimeHealth(options.globalDataPath, current.pid, Date.now(), undefined,
+            undefined, undefined, 'service');
+          if (health.healthy) {
+            try { await drainTarget(current); } catch { /* The task stop below still targets only this service. */ }
+          } else {
+            const fallback = await inspectAutonomousRuntimeHealth(options.globalDataPath, current.pid, Date.now(), undefined,
+              undefined, undefined, 'fallback');
+            if (fallback.healthy) observedPid = 0;
+          }
+        }
+        if (platform === 'win32' && plan.prepareUpgradeCommand) {
+          try { await runCommand(...plan.prepareUpgradeCommand); } catch { /* The failed task may already have ended. */ }
+        }
+        let cleanupFailed = false;
+        if (platform === 'win32') {
+          try {
+            await (options.waitForTaskStopped || (() => waitUntil(async () => {
+              try {
+                await runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+                  "$task = Get-ScheduledTask -TaskName 'SoloMap Runtime' -ErrorAction SilentlyContinue; if ($task -and $task.State -eq 'Running') { exit 1 }"]);
+                return true;
+              } catch {
+                return false;
+              }
+            }, 'SoloMap Runtime task is still running after failed activation.')))();
+          } catch {
+            cleanupFailed = true;
+          }
+        }
+        if (observedPid && platform === 'win32') {
+          try {
+            await (options.waitForServiceStop || ((pid: number) => waitUntil(
+              () => !isProcessAlive(pid), 'SoloMap Runtime task did not stop after failed activation.'
+            )))(observedPid);
+          } catch {
+            cleanupFailed = true;
+          }
+        }
+        if (cleanupFailed) throw new Error('runtime_service_cleanup_failed');
         try { await runCommand(...plan.uninstallCommand); } catch { /* Service activation may have failed before registration. */ }
         if (fs.existsSync(plan.definitionPath)) fs.unlinkSync(plan.definitionPath);
       } else {
+        const failedRuntimeId = readRuntimeState(options.globalDataPath)?.runtimeId;
+        let canRestore = true;
         try {
-          if (plan.prepareUpgradeCommand) await runCommand(...plan.prepareUpgradeCommand);
+          await drainExisting();
+        } catch {
+          canRestore = false;
+        }
+        try {
+          if (canRestore && plan.prepareUpgradeCommand) await runCommand(...plan.prepareUpgradeCommand);
         } catch {
           // The failed replacement may already be unloaded.
         }
         writeDefinition(plan.definitionPath, previous);
         try {
+          if (!canRestore) throw new Error('runtime_drain_timeout');
           if (plan.reloadCommand) await runCommand(...plan.reloadCommand);
           await runCommand(...plan.installCommand);
           if (plan.restartCommand) await runCommand(...plan.restartCommand);
-          await waitForHealth();
+          await waitForRollbackHealth(failedRuntimeId);
+          rollbackRestored = true;
         } catch {
           // Preserve the original upgrade error while leaving the old definition on disk.
         }
       }
+    }
+    if (changed && previous !== null) {
+      const failure = new Error(rollbackRestored ? 'runtime_service_rollback' : 'runtime_service_upgrade_failed');
+      (failure as Error & { cause?: unknown }).cause = error;
+      throw failure;
     }
     throw error;
   }

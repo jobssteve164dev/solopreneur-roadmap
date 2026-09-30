@@ -203,9 +203,10 @@ import {
   recordLocalDiagnosticError,
   withLocalDiagnosticTrace
 } from './localDiagnostics';
-import { ensureAutonomousRuntime, inspectAutonomousRuntimeHealth } from './autonomousRuntimeHost';
+import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
+import { readRuntimeState } from './autonomousRuntime';
 import { sendRuntimeControlCommand } from './autonomousRuntimeControl';
-import { disableAutonomousRuntimeService, ensureAutonomousRuntimeService } from './autonomousRuntimeService';
+import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { readTodayReview } from './dailyReview';
 import { writeCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
@@ -412,14 +413,11 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.resumeAutonomousRuntime', async () => {
     const settings = getPersistedSettings(context);
-    try {
-      await sendRuntimeControlCommand(settings.globalDataPath, 'resume');
-    } catch {
-      await ensureAutonomousRuntimeService({
-        extensionPath: context.extensionPath,
-        globalDataPath: normalizeGlobalDataPathForExtension(settings.globalDataPath),
-        ignoreDisabled: true
-      });
+    const globalDataPath = normalizeGlobalDataPathForExtension(settings.globalDataPath);
+    await activateObservedBackgroundRuntime(context.extensionPath, globalDataPath, true);
+    const runtime = readRuntimeState(globalDataPath);
+    if (runtime?.status === 'paused') {
+      await sendRuntimeControlCommand(globalDataPath, 'resume', { expectedRuntimeId: runtime.runtimeId });
     }
     vscode.window.showInformationMessage(settings.language === 'en' ? 'SoloMap background intelligence resumed.' : 'SoloMap 后台智能已恢复。');
   }));
@@ -760,37 +758,36 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
   }
 }
 
-async function activateObservedBackgroundRuntime(extensionPath: string, globalDataPath: string): Promise<void> {
+async function activateObservedBackgroundRuntime(extensionPath: string, globalDataPath: string, resume = false): Promise<void> {
   const trace = createLocalDiagnosticTrace(globalDataPath, 'runtime.reconcile');
   const startedAt = Date.now();
   await withLocalDiagnosticTrace(trace, async () => {
     try {
-      try {
-        await observeLocalDiagnosticStage('runtime.service', () => ensureAutonomousRuntimeService({ extensionPath, globalDataPath }));
-      } catch (serviceError) {
-        recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.service', classifyDiagnosticFailure(serviceError));
-        const fallback = await observeLocalDiagnosticStage('runtime.fallback', async () =>
-          ensureAutonomousRuntime({ extensionPath, globalDataPath }));
-        trace.record(fallback.started ? 'runtime.fallback.started' : 'runtime.fallback.reused', 'ok');
-        const checkFallbackHealth = async () => {
-          const health = await inspectAutonomousRuntimeHealth(globalDataPath, fallback.pid);
-          trace.record('runtime.fallback.health', health.healthy ? 'ok' : 'error', Date.now() - startedAt,
-            health.healthy ? undefined : health.reason);
-          if (health.healthy) {
-            trace.record('runtime.reconcile', 'ok', Date.now() - startedAt);
-          } else {
-            trace.record('runtime.reconcile', 'error', Date.now() - startedAt, health.reason);
-            recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.fallback.health', health.reason);
-          }
-        };
-        if (fallback.started) {
-          const healthTimer = setTimeout(() => { void checkFallbackHealth(); }, 15_000);
-          healthTimer.unref();
-        } else {
-          await checkFallbackHealth();
+      if (isAutonomousRuntimeDisabled(globalDataPath)) {
+        if (!resume) {
+          trace.record('runtime.disabled', 'ok');
+          return;
         }
-        return;
+        enableAutonomousRuntime(globalDataPath);
       }
+      const serviceAvailable = await observeLocalDiagnosticStage('runtime.manager', () => isRuntimeServiceManagerAvailable());
+      if (serviceAvailable) {
+        try {
+          await observeLocalDiagnosticStage('runtime.service', () => ensureAutonomousRuntimeService({ extensionPath, globalDataPath }));
+          trace.record('runtime.reconcile', 'ok', Date.now() - startedAt);
+          return;
+        } catch (serviceError) {
+          recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.service', classifyDiagnosticFailure(serviceError));
+          const upgradeCause = serviceError instanceof Error ? (serviceError as Error & { cause?: unknown }).cause : undefined;
+          if (upgradeCause) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.service.upgrade', upgradeCause);
+          if (serviceError instanceof Error && /^runtime_service_(?:rollback|upgrade_failed|cleanup_failed)$/.test(serviceError.message)) throw serviceError;
+        }
+      } else {
+        trace.record('runtime.manager.unavailable', 'ok');
+      }
+      const fallback = await observeLocalDiagnosticStage('runtime.fallback', () =>
+        ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath }));
+      trace.record(fallback.started ? 'runtime.fallback.started' : 'runtime.fallback.reused', 'ok');
       trace.record('runtime.reconcile', 'ok', Date.now() - startedAt);
     } catch (error) {
       trace.record('runtime.reconcile', 'error', Date.now() - startedAt, error);

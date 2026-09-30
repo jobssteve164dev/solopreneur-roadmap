@@ -11,6 +11,9 @@ export interface RuntimeControlResponse {
   ok: boolean;
   runtimeId: string;
   status: string;
+  entryPath?: string;
+  buildId?: string;
+  owner?: string;
   error?: string;
 }
 
@@ -25,6 +28,9 @@ interface RuntimeControlEndpoint {
 interface RuntimeControlServerOptions {
   globalDataPath: string;
   runtimeId: string;
+  entryPath?: string;
+  buildId?: string;
+  owner?: string;
   onCommand(command: RuntimeControlCommand): RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'> | Promise<RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'>>;
 }
 
@@ -64,7 +70,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
       if (frameEnd < 0) return;
       handled = true;
       try {
-        const parsed = JSON.parse(request.slice(0, frameEnd)) as { token?: string; command?: RuntimeControlCommand };
+        const parsed = JSON.parse(request.slice(0, frameEnd)) as { token?: string; command?: RuntimeControlCommand; expectedRuntimeId?: string };
         const providedToken = Buffer.from(String(parsed.token || ''));
         const expectedToken = Buffer.from(token);
         if (providedToken.length !== expectedToken.length || !crypto.timingSafeEqual(providedToken, expectedToken)) {
@@ -76,8 +82,12 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Unknown Runtime control command.' }) + '\n');
           return;
         }
+        if (parsed.expectedRuntimeId && parsed.expectedRuntimeId !== options.runtimeId) {
+          socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'different_runtime' }) + '\n');
+          return;
+        }
         const result = await options.onCommand(command);
-        socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, ...result }) + '\n');
+        socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, ...result, entryPath: options.entryPath, buildId: options.buildId, owner: options.owner }) + '\n');
       } catch (error) {
         socket.end(JSON.stringify({
           ok: false,
@@ -124,20 +134,25 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
 export function sendRuntimeControlCommand(
   globalDataPath: string,
   command: RuntimeControlCommand,
-  overrides: { token?: string; timeoutMs?: number } = {}
+  overrides: { token?: string; timeoutMs?: number; expectedRuntimeId?: string } = {}
 ): Promise<RuntimeControlResponse> {
   const endpoint = JSON.parse(fs.readFileSync(endpointPath(globalDataPath), 'utf8')) as RuntimeControlEndpoint;
+  if (overrides.expectedRuntimeId && endpoint.runtimeId !== overrides.expectedRuntimeId) return Promise.reject(new Error('different_runtime'));
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
     let response = '';
     socket.setEncoding('utf8');
     socket.setTimeout(overrides.timeoutMs || 3_000, () => socket.destroy(new Error('Runtime control request timed out.')));
-    socket.once('connect', () => socket.write(JSON.stringify({ token: overrides.token || endpoint.token, command }) + '\n'));
+    socket.once('connect', () => socket.write(JSON.stringify({ token: overrides.token || endpoint.token, command, expectedRuntimeId: overrides.expectedRuntimeId }) + '\n'));
     socket.on('data', chunk => { response += chunk; });
     socket.once('error', reject);
     socket.once('end', () => {
       try {
         const parsed = JSON.parse(response) as RuntimeControlResponse;
+        if (overrides.expectedRuntimeId && parsed.runtimeId !== overrides.expectedRuntimeId) {
+          reject(new Error('different_runtime'));
+          return;
+        }
         if (!parsed.ok) {
           reject(new Error(parsed.error || 'Runtime control request failed.'));
           return;

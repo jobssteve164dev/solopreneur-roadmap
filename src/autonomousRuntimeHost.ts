@@ -4,9 +4,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { claimRuntimeLease, readRuntimeState } from './autonomousRuntime';
-import { RuntimeControlResponse, sendRuntimeControlCommand } from './autonomousRuntimeControl';
+import { RuntimeControlCommand, RuntimeControlResponse, sendRuntimeControlCommand } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
+import { runtimeBuildId } from './runtimeBuildIdentity';
 
 interface RuntimeChild {
   pid?: number;
@@ -21,6 +22,9 @@ interface RuntimeHostOptions {
   now?: Date;
   isProcessAlive?: (pid: number) => boolean;
   spawnProcess?: (command: string, args: string[], options: childProcess.SpawnOptions) => RuntimeChild;
+  sendHealth?: (dataPath: string) => Promise<RuntimeControlResponse>;
+  sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string) => Promise<unknown>;
+  buildId?: string;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -38,7 +42,11 @@ export async function inspectAutonomousRuntimeHealth(
   pid: number,
   now = Date.now(),
   sendHealth: (dataPath: string) => Promise<RuntimeControlResponse> =
-    dataPath => sendRuntimeControlCommand(dataPath, 'health', { timeoutMs: 1_000 })
+    dataPath => sendRuntimeControlCommand(dataPath, 'health', { timeoutMs: 1_000 }),
+  expectedEntryPath?: string,
+  expectedBuildId?: string,
+  expectedOwner?: string,
+  allowMissingOwner = false
 ): Promise<{ healthy: boolean; reason: string }> {
   const state = readRuntimeState(globalDataPath);
   if (!state) return { healthy: false, reason: 'missing_state' };
@@ -51,10 +59,83 @@ export async function inspectAutonomousRuntimeHealth(
     const response = await sendHealth(globalDataPath);
     if (response.runtimeId !== state.runtimeId) return { healthy: false, reason: 'different_runtime' };
     if (!response.ok || response.status !== state.status) return { healthy: false, reason: 'control_not_running' };
+    if (expectedEntryPath && path.resolve(response.entryPath || '') !== path.resolve(expectedEntryPath)) {
+      return { healthy: false, reason: 'different_runtime_build' };
+    }
+    if (expectedBuildId && response.buildId !== expectedBuildId) return { healthy: false, reason: 'different_runtime_build' };
+    if (expectedOwner && response.owner !== expectedOwner && !(allowMissingOwner && !response.owner)) {
+      return { healthy: false, reason: 'different_runtime_owner' };
+    }
   } catch {
     return { healthy: false, reason: 'control_unavailable' };
   }
   return { healthy: true, reason: state.status };
+}
+
+export async function waitForAutonomousRuntimeHealth(
+  globalDataPath: string,
+  timeoutMs = 30_000,
+  sendHealth?: (dataPath: string) => Promise<RuntimeControlResponse>,
+  expectedEntryPath?: string,
+  expectedBuildId?: string,
+  expectedOwner?: string,
+  expectedRuntimeId?: string,
+  expectedPid?: number,
+  allowMissingOwner = false,
+  excludedRuntimeId?: string,
+  retryIdentityMismatch = false
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let reason = 'missing_state';
+  do {
+    const state = readRuntimeState(globalDataPath);
+    const result = state && excludedRuntimeId && state.runtimeId === excludedRuntimeId
+      ? { healthy: false, reason: 'same_runtime' }
+      : state && expectedRuntimeId && state.runtimeId !== expectedRuntimeId
+      ? { healthy: false, reason: 'different_runtime' }
+      : state && expectedPid && state.pid !== expectedPid
+      ? { healthy: false, reason: 'different_process' }
+      : state
+      ? await inspectAutonomousRuntimeHealth(globalDataPath, state.pid, Date.now(), sendHealth, expectedEntryPath, expectedBuildId, expectedOwner, allowMissingOwner)
+      : { healthy: false, reason: 'missing_state' };
+    if (result.healthy) return;
+    reason = result.reason;
+    if ((reason === 'different_runtime_build' || reason === 'different_runtime_owner' || reason === 'different_runtime')
+      && (!retryIdentityMismatch || (expectedRuntimeId && state?.runtimeId !== expectedRuntimeId))) break;
+    if (expectedPid && reason === 'different_process') break;
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  } while (true);
+  throw new Error(reason);
+}
+
+export async function ensureHealthyAutonomousRuntime(options: RuntimeHostOptions): Promise<{ started: boolean; pid: number; runtimeId: string }> {
+  const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
+  const entryPath = path.join(options.extensionPath, 'out', 'autonomousRuntimeProcess.js');
+  const buildId = options.buildId || runtimeBuildId(options.extensionPath);
+  const current = readRuntimeState(globalDataPath);
+  const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
+  if (current && current.status !== 'stopped' && isProcessAlive(current.pid)) {
+    const health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
+    if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+    if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
+    try {
+      await (options.sendControl || ((command, expectedRuntimeId) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId })))('drain', current.runtimeId);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'different_runtime') throw error;
+      throw new Error('control_unavailable');
+    }
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const state = readRuntimeState(globalDataPath);
+      if ((!state || state.runtimeId !== current.runtimeId || state.status === 'stopped') && !isProcessAlive(current.pid)) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (isProcessAlive(current.pid)) throw new Error('runtime_drain_timeout');
+  }
+  const result = ensureAutonomousRuntime(options);
+  await waitForAutonomousRuntimeHealth(globalDataPath, 30_000, options.sendHealth, entryPath, buildId, undefined, result.runtimeId, result.pid, false, undefined, true);
+  return result;
 }
 
 export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started: boolean; pid: number; runtimeId: string } {
@@ -87,8 +168,9 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
   });
   const pid = Number(child.pid || 0);
   if (!pid) throw new Error('SoloMap Runtime process did not return a process ID.');
-  claimRuntimeLease(globalDataPath, { runtimeId, pid, now, isProcessAlive: () => false });
+  const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid, now, isProcessAlive });
   child.unref();
+  if (!lease.acquired) return { started: false, pid: lease.owner.pid, runtimeId: lease.owner.runtimeId };
   return { started: true, pid, runtimeId };
 }
 

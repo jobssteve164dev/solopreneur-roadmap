@@ -4,6 +4,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+
+test('runtime handoff failures retain their diagnostic categories', () => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  assert.equal(diagnostics.classifyDiagnosticFailure(new Error('different_runtime_build')), 'different_runtime_build');
+  assert.equal(diagnostics.classifyDiagnosticFailure(new Error('runtime_drain_timeout')), 'runtime_drain_timeout');
+});
 function operationFile(globalRoot) {
   const directory = path.join(globalRoot, 'diagnostics', new Date().toISOString().slice(0, 10));
   return path.join(directory, fs.readdirSync(directory).find(name => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(name)));

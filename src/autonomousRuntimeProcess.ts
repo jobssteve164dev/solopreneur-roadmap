@@ -13,6 +13,7 @@ import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './co
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { initializeAutonomousExecutionRuntime } from './autonomousExecutionRuntime';
 import { startRuntimeControlServer } from './autonomousRuntimeControl';
+import { runtimeBuildId } from './runtimeBuildIdentity';
 import { classifyDiagnosticFailure, recordLocalDiagnosticError } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 
@@ -68,6 +69,9 @@ async function main(): Promise<void> {
   controlServer = await startRuntimeControlServer({
     globalDataPath,
     runtimeId,
+    entryPath: path.resolve(process.argv[1]),
+    buildId: runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1])))),
+    owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
     onCommand(command) {
       if (command === 'pause' || command === 'drain') {
         paused = true;
