@@ -85,6 +85,7 @@ test('smart kernel chat answers a project question after reading current plugin 
   await session.close();
   assert.equal(reply, '当前项目 Beta 尚需验证付费。');
   assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /TOOLRESULT:/);
   assert.match(prompts[1], /Beta/);
   assert.match(prompts[1], /验证付费/);
   assert.doesNotMatch(prompts[1], /\/beta/);
@@ -226,6 +227,22 @@ test('smart kernel chat does not show a malformed tool request as a reply', asyn
   });
   await assert.rejects(() => engine.chat([{ role: 'user', content: '查当前项目' }],
     { selectedProject: '', projects: [] }, { listTools: async () => ({ tools: [] }) }), /invalid read tool request/i);
+});
+
+test('smart kernel chat reports an MCP transport failure instead of answering from an error result', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  let calls = 0;
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async () => ++calls === 1
+      ? '{"toolCall":{"name":"get_current_project"}}'
+      : '当前项目正常。'
+  });
+  const readTools = {
+    listTools: async () => ({ tools: [{ name: 'get_current_project', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true, destructiveHint: false } }] }),
+    callTool: async () => { throw new Error('MCP transport disconnected'); }
+  };
+  await assert.rejects(() => engine.chat([{ role: 'user', content: '当前项目状态？' }],
+    { selectedProject: '', projects: [] }, readTools), /MCP transport disconnected/);
 });
 
 test('smart kernel chat saves a separate durable conversation and resumes its history', async t => {
