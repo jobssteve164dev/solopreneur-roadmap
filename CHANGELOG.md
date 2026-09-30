@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.491 - 2026-09-30
+
+### Changed
+- Route intelligence chat through Pi Agent (f11a1d9)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.490 - 2026-09-29
 
 ### Added
