@@ -4,6 +4,18 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+function removeDiagnosticTrace(globalRoot) {
+  const directory = path.join(globalRoot, 'diagnostics', new Date().toISOString().slice(0, 10));
+  const name = fs.existsSync(directory) && fs.readdirSync(directory).find(item => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(item));
+  if (name) fs.unlinkSync(path.join(directory, name));
+  if (fs.existsSync(directory)) fs.rmdirSync(directory);
+  if (fs.existsSync(path.join(globalRoot, 'diagnostics'))) fs.rmdirSync(path.join(globalRoot, 'diagnostics'));
+}
+function operationFile(globalRoot) {
+  const directory = path.join(globalRoot, 'diagnostics', new Date().toISOString().slice(0, 10));
+  return path.join(directory, fs.readdirSync(directory).find(name => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(name)));
+}
+
 test('smart kernel read tools are discovered and called through standard MCP', async () => {
   const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
   const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
@@ -62,9 +74,17 @@ test('smart kernel chat uses the selected read-only model pipe with conversation
   assert.match(invocations[0].args.join(' '), /--sandbox read-only/);
 });
 
-test('smart kernel chat answers a project question after reading current plugin data', async () => {
+test('smart kernel chat answers a project question after reading current plugin data', async t => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const diagnostics = require('../out/localDiagnostics.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-trace-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  t.after(() => {
+    removeDiagnosticTrace(globalRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  });
   let selected = 'Alpha';
   const prompts = [];
   const session = await createIntelligenceMcpSession({
@@ -83,8 +103,9 @@ test('smart kernel chat answers a project question after reading current plugin 
     }
   });
   selected = 'Beta';
-  const reply = await engine.chat([{ role: 'user', content: '当前项目还要做什么？' }],
-    { selectedProject: '', projects: [] }, session.client);
+  const trace = diagnostics.createLocalDiagnosticTrace(globalRoot, 'sidebar.chat');
+  const reply = await diagnostics.withLocalDiagnosticTrace(trace, () => engine.chat([{ role: 'user', content: '当前项目还要做什么？' }],
+    { selectedProject: '', projects: [] }, session.client));
   await session.close();
   assert.equal(reply, '当前项目 Beta 尚需验证付费。');
   assert.equal(prompts.length, 2);
@@ -93,6 +114,11 @@ test('smart kernel chat answers a project question after reading current plugin 
   assert.match(prompts[1], /验证付费/);
   assert.doesNotMatch(prompts[0], /Alpha/);
   assert.doesNotMatch(prompts[1], /\/beta/);
+  const events = JSON.parse(fs.readFileSync(operationFile(globalRoot), 'utf8')).entries;
+  assert.equal(events.filter(event => event.stage === 'model.cli' && event.status === 'ok').length, 2);
+  assert.ok(events.some(event => event.stage === 'mcp.list' && event.status === 'ok'));
+  assert.ok(events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'ok'));
+  assert.doesNotMatch(JSON.stringify(events), /完成登录|验证付费|\/beta/);
 });
 
 test('smart kernel does not treat a historical project as the current topic for a greeting', async () => {
@@ -125,6 +151,7 @@ test('Telegram replies continue in the sidebar Pi conversation and can use read-
     if (fs.existsSync(directory)) {
       for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
       fs.rmdirSync(directory);
+      removeDiagnosticTrace(globalRoot);
       fs.rmdirSync(globalRoot);
     }
     fs.rmdirSync(root);
@@ -172,6 +199,7 @@ test('unlinking Telegram during a Pi answer cannot restore its old conversation'
     if (fs.existsSync(directory)) {
       for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
       fs.rmdirSync(directory);
+      removeDiagnosticTrace(globalRoot);
       fs.rmdirSync(globalRoot);
     }
     fs.rmdirSync(root);
@@ -345,6 +373,33 @@ test('smart kernel chat reports an MCP transport failure instead of answering fr
     { selectedProject: '', projects: [] }, readTools), /MCP transport disconnected/);
 });
 
+test('MCP tool error is recorded on the tool stage', async t => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const diagnostics = require('../out/localDiagnostics.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-error-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  t.after(() => {
+    removeDiagnosticTrace(globalRoot);
+    fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  });
+  let modelCalls = 0;
+  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => ++modelCalls === 1
+    ? '{"toolCall":{"name":"get_current_project"}}'
+    : '无法读取当前项目。' });
+  const tools = {
+    listTools: async () => ({ tools: [{ name: 'get_current_project', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true, destructiveHint: false } }] }),
+    callTool: async () => ({ isError: true, content: [{ type: 'text', text: 'private project detail' }] })
+  };
+  const trace = diagnostics.createLocalDiagnosticTrace(globalRoot, 'sidebar.chat');
+  await assert.rejects(() => diagnostics.withLocalDiagnosticTrace(trace, () => engine.chat([{ role: 'user', content: '查项目' }],
+    { selectedProject: '', projects: [] }, tools)), /Intelligence read tool failed/);
+  const events = JSON.parse(fs.readFileSync(operationFile(globalRoot), 'utf8')).entries;
+  assert.ok(events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'error' && event.message === 'mcp_tool_error'));
+  assert.ok(!events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'ok'));
+  assert.doesNotMatch(JSON.stringify(events), /private project detail/);
+});
+
 test('smart kernel chat saves a separate durable conversation and resumes its history', async t => {
   const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-chat-'));
@@ -359,6 +414,7 @@ test('smart kernel chat saves a separate durable conversation and resumes its hi
     const folder = path.join(globalRoot, 'intelligence-conversations');
     if (conversationId) fs.unlinkSync(path.join(folder, `${conversationId}.json`));
     fs.rmdirSync(folder);
+    removeDiagnosticTrace(globalRoot);
     fs.rmdirSync(globalRoot);
     fs.rmdirSync(root);
   });
@@ -377,7 +433,12 @@ test('smart kernel chat saves a separate durable conversation and resumes its hi
 test('smart kernel chat keeps the draft available when generation fails', async t => {
   const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-chat-failure-'));
-  t.after(() => fs.rmdirSync(root));
+  t.after(() => {
+    const globalRoot = path.join(root, '.solomap-global');
+    removeDiagnosticTrace(globalRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  });
   const store = new IntelligenceConversationStore(root, async () => { throw new Error('model unavailable'); });
   await assert.rejects(() => store.send('继续这个问题'), /model unavailable/);
   assert.deepEqual(store.list(), []);

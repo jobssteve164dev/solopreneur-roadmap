@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 // Mock 'vscode' module
 const registeredCommands = new Map();
@@ -114,6 +117,72 @@ const {
 function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+test('Telegram chat records correlated receipt, model, and delivery stages without message content', async t => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const { createTelegramIntelligenceReply } = require('../out/telegramIntelligenceChat.js');
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const { observeLocalDiagnosticStage } = require('../out/localDiagnostics.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-trace-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  let savedIds = {};
+  let rounds = 0;
+  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () =>
+    ++rounds === 1 ? '{"toolCall":{"name":"get_current_project"}}' : 'private answer' });
+  const store = new IntelligenceConversationStore(globalRoot, async messages => {
+    const session = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession({
+      getProjects: () => [{ name: 'Alpha', path: '/private/alpha' }],
+      getSelectedProjectPath: () => '/private/alpha',
+      getCurrentSteps: () => [],
+      getSettings: () => ({ language: 'zh' })
+    }));
+    try {
+      return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, { selectedProject: '', projects: [] }, session.client));
+    } finally {
+      await observeLocalDiagnosticStage('mcp.close', () => session.close());
+    }
+  });
+  const reply = createTelegramIntelligenceReply(() => store, () => savedIds, async ids => { savedIds = ids; }, () => 0);
+  const contextMock = { globalState: { get(key) {
+    return key === 'solopreneur.settings'
+      ? { telegramEnabled: true, telegramBotToken: 'mock-token-12345', telegramChatId: '123456', globalDataPath: globalRoot }
+      : {};
+  } } };
+  t.after(() => {
+    stopTelegramRemoteService();
+    const conversationFile = path.join(globalRoot, 'intelligence-conversations', `${Object.values(savedIds)[0]}.json`);
+    if (fs.existsSync(conversationFile)) fs.unlinkSync(conversationFile);
+    if (fs.existsSync(path.dirname(conversationFile))) fs.rmdirSync(path.dirname(conversationFile));
+    const directory = path.join(globalRoot, 'diagnostics', new Date().toISOString().slice(0, 10));
+    const name = fs.existsSync(directory) && fs.readdirSync(directory).find(item => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(item));
+    if (name) fs.unlinkSync(path.join(directory, name));
+    if (fs.existsSync(directory)) fs.rmdirSync(directory);
+    if (fs.existsSync(path.join(globalRoot, 'diagnostics'))) fs.rmdirSync(path.join(globalRoot, 'diagnostics'));
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  });
+  stopTelegramRemoteService();
+  mockTelegramUpdates.length = 0;
+  mockTelegramSentMessages.length = 0;
+  startTelegramRemoteService(contextMock, reply, globalRoot);
+  mockTelegramUpdates.push({ update_id: 950, message: {
+    message_id: 1, from: { id: 123456, is_bot: false, first_name: 'Steve' },
+    chat: { id: 123456, type: 'private' }, date: Math.floor(Date.now() / 1000), text: 'private question'
+  } });
+  for (let attempt = 0; attempt < 20 && mockTelegramSentMessages.at(-1)?.text !== 'private answer'; attempt++) await wait(50);
+  assert.equal(mockTelegramSentMessages.at(-1).text, 'private answer');
+  const directory = path.join(globalRoot, 'diagnostics', new Date().toISOString().slice(0, 10));
+  const entries = JSON.parse(fs.readFileSync(path.join(directory, fs.readdirSync(directory).find(name => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(name))), 'utf8')).entries;
+  assert.ok([
+    'telegram.poll', 'telegram.receive', 'telegram.queue', 'telegram.model', 'conversation.reply',
+    'mcp.connect', 'mcp.list', 'mcp.get_current_project', 'mcp.close', 'pi.chat',
+    'model.cli', 'conversation.persist', 'telegram.send', 'telegram.chat'
+  ].every(stage => entries.some(entry => entry.stage === stage)), JSON.stringify(entries.map(entry => entry.stage)));
+  assert.equal(entries.filter(entry => entry.stage === 'model.cli' && entry.status === 'ok').length, 2);
+  assert.equal(new Set(entries.map(entry => entry.traceId)).size, 1);
+  assert.doesNotMatch(JSON.stringify(entries), /private question|private answer|private\/alpha|123456|mock-token/);
+});
 
 test('Telegram Remote Control Service handles start and polling', async () => {
   const contextMock = {

@@ -13,6 +13,7 @@ import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './co
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { initializeAutonomousExecutionRuntime } from './autonomousExecutionRuntime';
 import { startRuntimeControlServer } from './autonomousRuntimeControl';
+import { classifyDiagnosticFailure, recordLocalDiagnosticError } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 
 function argumentValue(name: string): string {
@@ -79,7 +80,7 @@ async function main(): Promise<void> {
         paused = false;
         updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
         if (running) rerunRequested = true;
-        else void runCycle();
+        else runCycleObserved();
         return { status: 'running' };
       }
       if (command === 'stop') {
@@ -89,6 +90,11 @@ async function main(): Promise<void> {
       return { status: paused ? 'paused' : 'running' };
     }
   });
+  function runCycleObserved(): void {
+    void runCycle().catch(error => {
+      recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle.fatal', classifyDiagnosticFailure(error));
+    });
+  }
   async function runCycle(): Promise<void> {
     if (stopping || running) return;
     if (paused) {
@@ -131,6 +137,7 @@ async function main(): Promise<void> {
         error: ''
       });
     } catch (error) {
+      recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle', classifyDiagnosticFailure(error));
       if (stopping) return;
       if (paused) {
         updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
@@ -151,17 +158,19 @@ async function main(): Promise<void> {
       running = false;
       if (rerunRequested && !paused && !stopping) {
         rerunRequested = false;
-        void runCycle();
+        runCycleObserved();
       }
     }
   }
   process.once('SIGTERM', stop);
   process.once('SIGINT', stop);
-  void runCycle();
-  timer = setInterval(() => void runCycle(), intervalValue());
+  runCycleObserved();
+  timer = setInterval(runCycleObserved, intervalValue());
 }
 
 void main().catch(error => {
+  const globalDataPath = argumentValue('--global-data-path');
+  if (globalDataPath) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.initialize', classifyDiagnosticFailure(error));
   process.stderr.write(`SoloMap Runtime could not initialize autonomous execution: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

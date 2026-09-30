@@ -6,6 +6,41 @@ const test = require('node:test');
 
 const service = require('../out/autonomousRuntimeService.js');
 
+test('runtime service command failure retains the service manager reason without command arguments', async () => {
+  const privateArgument = 'private-credential';
+  await assert.rejects(
+    service.runRuntimeServiceCommand(process.execPath, ['-e', `process.stderr.write('Failed to connect to bus: No such file or directory'); process.exit(1)`, privateArgument]),
+    error => {
+      assert.match(error.message, /Failed to connect to bus: No such file or directory/);
+      assert.doesNotMatch(error.message, /private-credential/);
+      return true;
+    }
+  );
+});
+
+test('fallback runtime health requires a matching live control response', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-health-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'state.json');
+  t.after(() => {
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  });
+  const live = async () => ({ ok: true, runtimeId: 'test', status: 'running' });
+  assert.equal((await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live)).reason, 'missing_state');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'test', pid: process.pid, status: 'running', heartbeatAt: '2020-01-01T00:00:00.000Z' }));
+  assert.equal((await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live)).reason, 'stale_heartbeat');
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'test', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => { throw new Error('connection refused'); }), { healthy: false, reason: 'control_unavailable' });
+  assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => ({ ok: true, runtimeId: 'other', status: 'running' })), { healthy: false, reason: 'different_runtime' });
+  assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live), { healthy: true, reason: 'running' });
+});
+
 test('linux runtime service starts at login and restarts after crashes', () => {
   const plan = service.buildRuntimeServicePlan({
     platform: 'linux',

@@ -196,8 +196,14 @@ import {
   LocalUsageStats,
   recordLocalUsageEvent as recordLocalUsageEventInStats
 } from './localUsageStats';
-import { recordLocalDiagnosticError } from './localDiagnostics';
-import { ensureAutonomousRuntime } from './autonomousRuntimeHost';
+import {
+  classifyDiagnosticFailure,
+  createLocalDiagnosticTrace,
+  observeLocalDiagnosticStage,
+  recordLocalDiagnosticError,
+  withLocalDiagnosticTrace
+} from './localDiagnostics';
+import { ensureAutonomousRuntime, inspectAutonomousRuntimeHealth } from './autonomousRuntimeHost';
 import { sendRuntimeControlCommand } from './autonomousRuntimeControl';
 import { disableAutonomousRuntimeService, ensureAutonomousRuntimeService } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
@@ -509,7 +515,7 @@ export async function activate(context: vscode.ExtensionContext) {
       if (activeStrategyPyramidPanel) {
         activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
       }
-      restartTelegramRemoteService(context, telegramChatReply);
+      restartTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
     }
   );
   context.subscriptions.push(settingsSavedDisposable);
@@ -642,7 +648,7 @@ export async function activate(context: vscode.ExtensionContext) {
           configRevision: config.revision,
           workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work')
         });
-        const mcp = await createIntelligenceMcpSession({
+        const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession({
           getProjects: getIntelligenceProjects,
           getSelectedProjectPath: getIntelligenceSelectedProjectPath,
           getCurrentSteps: () => syncEngine && activeProjectRoot === getIntelligenceSelectedProjectPath()
@@ -660,11 +666,11 @@ export async function activate(context: vscode.ExtensionContext) {
             const review = readTodayReview(globalDataPath, getProjects(context));
             return review ? { summary: review.summary, items: review.todos.map(item => item.title) } : null;
           }
-        });
+        }));
         try {
-          return await engine.chat(messages, { selectedProject: '', projects: [] }, mcp.client);
+          return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, { selectedProject: '', projects: [] }, mcp.client));
         } finally {
-          await mcp.close();
+          await observeLocalDiagnosticStage('mcp.close', () => mcp.close());
         }
       });
       intelligenceConversationStores.set(globalDataPath, store);
@@ -735,7 +741,7 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     migrateLegacyActiveConversations(context);
     ensureActiveConversationPoller(context);
-    startTelegramRemoteService(context, telegramChatReply);
+    startTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
     scheduleFocusReminder(context);
     scheduleTimedAutomationTask(context);
   }, 15_000);
@@ -746,17 +752,51 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
     const runtimeSettings = getPersistedSettings(context);
     syncCognitiveRuntimeConfig(runtimeSettings);
     const globalDataPath = normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath);
-    try {
-      await ensureAutonomousRuntimeService({ extensionPath: context.extensionPath, globalDataPath });
-    } catch (serviceError) {
-      recordLocalDiagnosticError(runtimeSettings.globalDataPath, 'autonomous-runtime.service', serviceError);
-      ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
-    }
+    await activateObservedBackgroundRuntime(context.extensionPath, globalDataPath);
     sidebarProvider?.sendDailyReview();
   } catch (error) {
     recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
     console.error('SoloMap autonomous runtime failed to start:', error);
   }
+}
+
+async function activateObservedBackgroundRuntime(extensionPath: string, globalDataPath: string): Promise<void> {
+  const trace = createLocalDiagnosticTrace(globalDataPath, 'runtime.reconcile');
+  const startedAt = Date.now();
+  await withLocalDiagnosticTrace(trace, async () => {
+    try {
+      try {
+        await observeLocalDiagnosticStage('runtime.service', () => ensureAutonomousRuntimeService({ extensionPath, globalDataPath }));
+      } catch (serviceError) {
+        recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.service', classifyDiagnosticFailure(serviceError));
+        const fallback = await observeLocalDiagnosticStage('runtime.fallback', async () =>
+          ensureAutonomousRuntime({ extensionPath, globalDataPath }));
+        trace.record(fallback.started ? 'runtime.fallback.started' : 'runtime.fallback.reused', 'ok');
+        const checkFallbackHealth = async () => {
+          const health = await inspectAutonomousRuntimeHealth(globalDataPath, fallback.pid);
+          trace.record('runtime.fallback.health', health.healthy ? 'ok' : 'error', Date.now() - startedAt,
+            health.healthy ? undefined : health.reason);
+          if (health.healthy) {
+            trace.record('runtime.reconcile', 'ok', Date.now() - startedAt);
+          } else {
+            trace.record('runtime.reconcile', 'error', Date.now() - startedAt, health.reason);
+            recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.fallback.health', health.reason);
+          }
+        };
+        if (fallback.started) {
+          const healthTimer = setTimeout(() => { void checkFallbackHealth(); }, 15_000);
+          healthTimer.unref();
+        } else {
+          await checkFallbackHealth();
+        }
+        return;
+      }
+      trace.record('runtime.reconcile', 'ok', Date.now() - startedAt);
+    } catch (error) {
+      trace.record('runtime.reconcile', 'error', Date.now() - startedAt, error);
+      throw error;
+    }
+  });
 }
 
 let projectActionLaunchQueue: Promise<void> = Promise.resolve();
@@ -1395,7 +1435,7 @@ async function handleSharedWebviewAction(
           ? { telegramBotToken: request.telegramBotToken.trim() } : {})
       });
       if (typeof request.telegramEnabled === 'boolean' || (typeof request.telegramBotToken === 'string' && request.telegramBotToken.trim())) {
-        restartTelegramRemoteService(context, telegramChatReply);
+        restartTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
       }
       await respond({
         command: 'settingsSaved',
@@ -1411,7 +1451,7 @@ async function handleSharedWebviewAction(
       await updatePersistedSettings(context, { telegramChatId: '' });
       await telegramConversationWriteQueue.catch(() => undefined);
       await context.globalState.update('solopreneur.telegramIntelligenceConversations', {});
-      restartTelegramRemoteService(context, telegramChatReply);
+      restartTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
       await broadcastSettings(context);
     },
     'settings.reviewGlobalPrompt': async (request) => {
@@ -2440,12 +2480,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   const nextRuntimeRoot = normalizeGlobalDataPathForExtension(nextSettings.globalDataPath);
   if (previousRuntimeRoot !== nextRuntimeRoot) {
     writeCognitiveRuntimeConfig(previousRuntimeRoot, { mode: 'local_only', agentCli: '', model: 'auto' });
-    try {
-      await ensureAutonomousRuntimeService({ extensionPath: context.extensionPath, globalDataPath: nextRuntimeRoot });
-    } catch (serviceError) {
-      recordLocalDiagnosticError(nextRuntimeRoot, 'autonomous-runtime.service', serviceError);
-      ensureAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: nextRuntimeRoot });
-    }
+    await activateObservedBackgroundRuntime(context.extensionPath, nextRuntimeRoot);
   }
 }
 

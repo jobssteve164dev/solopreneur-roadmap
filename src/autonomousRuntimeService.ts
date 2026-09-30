@@ -8,6 +8,7 @@ import { readRuntimeState } from './autonomousRuntime';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { cognitiveCliEnvironment } from './localAgentCliEngine';
 import { revokeAllProjectAutonomyAuthorizations } from './projectAutonomyAuthorization';
+import { sanitizeDiagnosticText } from './localDiagnostics';
 
 type SupportedPlatform = 'linux' | 'darwin' | 'win32';
 type Command = [string, string[]];
@@ -157,13 +158,16 @@ export function buildRuntimeServicePlan(options: RuntimeServiceOptions): Runtime
   };
 }
 
-function defaultRunCommand(command: string, args: string[]): Promise<void> {
+export function runRuntimeServiceCommand(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = childProcess.spawn(command, args, { stdio: 'ignore', windowsHide: true });
+    const child = childProcess.spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => { stderr += String(chunk).slice(0, 2048 - stderr.length); });
     child.once('error', reject);
     child.once('close', (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`${command} exited with status ${code ?? 'unknown'}.`));
+      else reject(new Error(`${command} exited with status ${code ?? 'unknown'}${stderr.trim() ? `: ${sanitizeDiagnosticText(stderr)}` : '.'}`));
     });
   });
 }
@@ -217,7 +221,7 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
   if (options.ignoreDisabled && fs.existsSync(disabledPath)) fs.unlinkSync(disabledPath);
   const previous = fs.existsSync(plan.definitionPath) ? fs.readFileSync(plan.definitionPath, 'utf8') : null;
   const changed = previous !== plan.definition;
-  const runCommand = options.runCommand || defaultRunCommand;
+  const runCommand = options.runCommand || runRuntimeServiceCommand;
   const sendControl = options.sendControl || ((command: RuntimeControlCommand) => sendRuntimeControlCommand(options.globalDataPath, command));
   const drainingPid = Number(readRuntimeState(options.globalDataPath)?.pid || 0);
   const waitForDrain = options.waitForDrain || (() => waitUntil(
@@ -299,7 +303,7 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
 
 export async function uninstallAutonomousRuntimeService(options: RuntimeServiceOptions): Promise<void> {
   const plan = buildRuntimeServicePlan(options);
-  const runCommand = options.runCommand || defaultRunCommand;
+  const runCommand = options.runCommand || runRuntimeServiceCommand;
   const sendControl = options.sendControl || ((command: RuntimeControlCommand) => sendRuntimeControlCommand(options.globalDataPath, command));
   try {
     await sendControl('stop');

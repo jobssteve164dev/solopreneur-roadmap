@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import { observeLocalDiagnosticStage } from './localDiagnostics';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -141,7 +142,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     this.cancelled = false;
     if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
     const allowedNames = new Set(getIntelligenceMcpConnector().permissions?.tools || []);
-    const availableTools = readTools ? (await readTools.listTools()).tools.filter(tool =>
+    const availableTools = readTools ? (await observeLocalDiagnosticStage('mcp.list', () => readTools.listTools())).tools.filter(tool =>
       allowedNames.has(tool.name) && tool.annotations?.readOnlyHint === true
       && tool.annotations?.destructiveHint !== true) : [];
     const toolNames = new Set(availableTools.map(tool => tool.name));
@@ -171,8 +172,11 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
           execute: async (_id: string, args: Record<string, unknown>) => {
             if (!readTools) throw new Error('Intelligence read tools are unavailable.');
             try {
-              const response = await readTools.callTool({ name: tool.name, arguments: args });
-              if (response.isError) throw new Error(`Intelligence read tool failed: ${tool.name}`);
+              const response = await observeLocalDiagnosticStage(`mcp.${tool.name}`, async () => {
+                const result = await readTools.callTool({ name: tool.name, arguments: args });
+                if (result.isError) throw new Error(`Intelligence read tool failed: ${tool.name}`);
+                return result;
+              });
               return { content: (Array.isArray(response.content) ? response.content : []).filter((part: unknown): part is { type: 'text'; text: string } =>
                 Boolean(part && typeof part === 'object' && (part as { type?: unknown }).type === 'text')), details: undefined };
             } catch (error) {
@@ -187,7 +191,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
         const partial = assistantMessage(this.model, '', 'pending');
         stream.push({ type: 'start', partial });
         const invocation = { ...buildCognitiveCliInvocation(this.agentCli, this.model, transcriptPrompt(context), this.workingDirectory), timeoutMs: 300_000 };
-        void this.runner(invocation).then(output => {
+        void observeLocalDiagnosticStage('model.cli', () => this.runner(invocation)).then(output => {
           if (this.cancelled) throw new Error('Intelligence chat was cancelled.');
           const answer = String(output).trim();
           if (!answer) throw new Error('Intelligence did not return an answer.');

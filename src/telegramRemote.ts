@@ -2,6 +2,13 @@ import * as vscode from 'vscode';
 import * as https from 'https';
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  classifyDiagnosticFailure,
+  createLocalDiagnosticTrace,
+  observeLocalDiagnosticStage,
+  recordLocalDiagnosticError,
+  withLocalDiagnosticTrace
+} from './localDiagnostics';
 
 // Import getPersistedSettings indirectly or using VS Code API to avoid circular dependency
 function getSettings(context: vscode.ExtensionContext) {
@@ -21,6 +28,7 @@ let currentToken = '';
 let currentChatId = '';
 let pollingGeneration = 0;
 let currentChatReply: ((chatId: string, text: string) => Promise<string>) | undefined;
+let currentDiagnosticDataPath = '';
 const pendingChatReplies = new Map<string, Promise<void>>();
 const pendingAuthRequests = new Map<string, number>(); // chat_id -> date
 
@@ -97,10 +105,10 @@ async function callTelegramApi(token: string, method: string, payload: any): Pro
           if (parsed.ok) {
             resolve(parsed);
           } else {
-            reject(new Error(parsed.description || 'Telegram API returned error'));
+            reject(new Error(`Telegram ${method} HTTP ${res.statusCode || 'unknown'}: ${parsed.description || 'API returned error'}`));
           }
         } catch (e) {
-          reject(new Error(`Failed to parse Telegram response: ${data}`));
+          reject(new Error(`Telegram ${method} returned an invalid response (HTTP ${res.statusCode || 'unknown'}, ${Buffer.byteLength(data)} bytes).`));
         }
       });
     });
@@ -135,13 +143,14 @@ export async function sendTelegramNotification(context: vscode.ExtensionContext,
     });
   } catch (error) {
     console.warn('Failed to send Telegram notification:', error);
+    if (currentDiagnosticDataPath) recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.notification', classifyDiagnosticFailure(error));
   }
 }
 
 /**
  * Starts long polling for Telegram updates.
  */
-export function startTelegramRemoteService(context: vscode.ExtensionContext, chatReply?: (chatId: string, text: string) => Promise<string>): void {
+export function startTelegramRemoteService(context: vscode.ExtensionContext, chatReply?: (chatId: string, text: string) => Promise<string>, diagnosticDataPath = ''): void {
   const settings = getSettings(context);
   if (!settings.telegramEnabled || !settings.telegramBotToken) {
     stopTelegramRemoteService();
@@ -150,6 +159,7 @@ export function startTelegramRemoteService(context: vscode.ExtensionContext, cha
 
   if (isPolling && currentToken === settings.telegramBotToken && currentChatId === settings.telegramChatId) {
     currentChatReply = chatReply;
+    currentDiagnosticDataPath = diagnosticDataPath;
     return;
   }
 
@@ -162,6 +172,7 @@ export function startTelegramRemoteService(context: vscode.ExtensionContext, cha
   currentChatId = settings.telegramChatId;
   currentOffset = previousToken === currentToken ? previousOffset : 0;
   currentChatReply = chatReply;
+  currentDiagnosticDataPath = diagnosticDataPath;
   const generation = ++pollingGeneration;
 
   console.log('Telegram Remote Control Service started.');
@@ -179,6 +190,7 @@ export function stopTelegramRemoteService(): void {
   currentToken = '';
   currentChatId = '';
   currentChatReply = undefined;
+  currentDiagnosticDataPath = '';
   if (pollingTimeout) {
     clearTimeout(pollingTimeout);
     pollingTimeout = null;
@@ -188,8 +200,8 @@ export function stopTelegramRemoteService(): void {
 /**
  * Restarts Telegram service.
  */
-export function restartTelegramRemoteService(context: vscode.ExtensionContext, chatReply?: (chatId: string, text: string) => Promise<string>): void {
-  startTelegramRemoteService(context, chatReply);
+export function restartTelegramRemoteService(context: vscode.ExtensionContext, chatReply?: (chatId: string, text: string) => Promise<string>, diagnosticDataPath = ''): void {
+  startTelegramRemoteService(context, chatReply, diagnosticDataPath);
 }
 
 /**
@@ -223,13 +235,14 @@ async function pollUpdates(context: vscode.ExtensionContext, generation: number)
       payload.offset = currentOffset;
     }
 
+    const pollStartedAt = Date.now();
     const response = await callTelegramApi(currentToken, 'getUpdates', payload);
     if (generation !== pollingGeneration) return;
     if (response && response.result && Array.isArray(response.result)) {
       for (const update of response.result) {
         if (generation !== pollingGeneration) return;
         currentOffset = Math.max(currentOffset, update.update_id + 1);
-        await handleTelegramUpdate(context, update);
+        await handleTelegramUpdate(context, update, Date.now() - pollStartedAt);
       }
     }
     
@@ -239,6 +252,10 @@ async function pollUpdates(context: vscode.ExtensionContext, generation: number)
     }
   } catch (error) {
     console.warn('Error in Telegram polling loop:', error);
+    if (currentDiagnosticDataPath) {
+      recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.poll', classifyDiagnosticFailure(error));
+      createLocalDiagnosticTrace(currentDiagnosticDataPath, 'telegram.poll').record('telegram.poll', 'error', 0, error);
+    }
     // Wait longer if error occurred to prevent high frequency crash
     if (isPolling && generation === pollingGeneration) {
       pollingTimeout = setTimeout(() => pollUpdates(context, generation), 5000);
@@ -249,7 +266,7 @@ async function pollUpdates(context: vscode.ExtensionContext, generation: number)
 /**
  * Processes a single Telegram message update.
  */
-async function handleTelegramUpdate(context: vscode.ExtensionContext, update: TelegramUpdate): Promise<void> {
+async function handleTelegramUpdate(context: vscode.ExtensionContext, update: TelegramUpdate, pollDurationMs = 0): Promise<void> {
   const message = update.message;
   if (!message || !message.text) {
     return;
@@ -320,9 +337,10 @@ async function handleTelegramUpdate(context: vscode.ExtensionContext, update: Te
 
   // Process authorized command
   try {
-    await dispatchTelegramCommand(context, senderChatId, text);
+    await dispatchTelegramCommand(context, senderChatId, text, message.date, pollDurationMs);
   } catch (err) {
     console.error('Failed to dispatch TG command:', err);
+    if (currentDiagnosticDataPath) recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.command', classifyDiagnosticFailure(err));
     await callTelegramApi(currentToken, 'sendMessage', {
       chat_id: senderChatId,
       text: `⚠️ 执行失败：${err instanceof Error ? err.message : String(err)}`,
@@ -334,42 +352,67 @@ async function handleTelegramUpdate(context: vscode.ExtensionContext, update: Te
 /**
  * Dispatches the received command.
  */
-async function dispatchTelegramCommand(context: vscode.ExtensionContext, chatId: string, text: string): Promise<void> {
+async function dispatchTelegramCommand(context: vscode.ExtensionContext, chatId: string, text: string, messageDate?: number, pollDurationMs = 0): Promise<void> {
   const lowercase = text.toLowerCase();
   if (!text.startsWith('/') && lowercase !== 'approve' && lowercase !== 'deny' && currentChatReply) {
     const reply = currentChatReply;
     const token = currentToken;
     const generation = pollingGeneration;
     const previous = pendingChatReplies.get(chatId) || Promise.resolve();
-    const task = previous.catch(() => undefined).then(async () => {
-      const canReply = () => isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId;
-      const showTyping = () => {
-        if (canReply()) void callTelegramApi(token, 'sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => undefined);
-      };
-      const typingTimer = setTimeout(showTyping, 250);
-      const typingInterval = setInterval(showTyping, 4_000);
-      typingTimer.unref();
-      typingInterval.unref();
-      try {
-        const answer = await reply(chatId, text);
-        if (canReply()) {
-          await callTelegramApi(token, 'sendMessage', { chat_id: chatId, text: answer });
-        }
-      } catch (error) {
-        if (canReply()) {
-          try {
-            await callTelegramApi(token, 'sendMessage', {
-              chat_id: chatId,
-              text: `智能内核暂时无法回答：${error instanceof Error ? error.message : String(error)}`
-            });
-          } catch (sendError) {
-            console.warn('Failed to send Telegram intelligence reply:', sendError);
+    const startedAt = Date.now();
+    const diagnosticDataPath = currentDiagnosticDataPath;
+    const trace = diagnosticDataPath ? createLocalDiagnosticTrace(diagnosticDataPath, 'telegram.chat') : null;
+    if (trace) {
+      trace.record('telegram.poll', 'ok', pollDurationMs);
+      const deliveredAt = Number(messageDate || 0) * 1000;
+      trace.record('telegram.receive', 'ok', deliveredAt > 0 && deliveredAt <= startedAt ? startedAt - deliveredAt : 0);
+      trace.record('telegram.queue', 'start');
+    }
+    const task = previous.catch(() => undefined).then(() => {
+      const execute = async () => {
+        trace?.record('telegram.queue', 'ok', Date.now() - startedAt);
+        const canReply = () => isPolling && pollingGeneration === generation && currentToken === token && getSettings(context).telegramChatId === chatId;
+        let typingObserved = false;
+        const showTyping = () => {
+          if (canReply()) void callTelegramApi(token, 'sendChatAction', { chat_id: chatId, action: 'typing' }).then(() => {
+            if (!typingObserved) trace?.record('telegram.typing', 'ok');
+            typingObserved = true;
+          }).catch(error => {
+            if (!typingObserved) trace?.record('telegram.typing', 'error', 0, error);
+            typingObserved = true;
+          });
+        };
+        const typingTimer = setTimeout(showTyping, 250);
+        const typingInterval = setInterval(showTyping, 4_000);
+        typingTimer.unref();
+        typingInterval.unref();
+        try {
+          const answer = await observeLocalDiagnosticStage('telegram.model', () => reply(chatId, text));
+          if (canReply()) {
+            await observeLocalDiagnosticStage('telegram.send', () => callTelegramApi(token, 'sendMessage', { chat_id: chatId, text: answer }));
+            trace?.record('telegram.chat', 'ok', Date.now() - startedAt);
+          } else {
+            trace?.record('telegram.chat', 'cancel', Date.now() - startedAt);
           }
+        } catch (error) {
+          trace?.record('telegram.chat', 'error', Date.now() - startedAt, error);
+          if (diagnosticDataPath) recordLocalDiagnosticError(diagnosticDataPath, 'telegram.chat', classifyDiagnosticFailure(error));
+          if (canReply()) {
+            try {
+              await observeLocalDiagnosticStage('telegram.send_failure', () => callTelegramApi(token, 'sendMessage', {
+                chat_id: chatId,
+                text: `智能内核暂时无法回答：${error instanceof Error ? error.message : String(error)}`
+              }));
+            } catch (sendError) {
+              console.warn('Failed to send Telegram intelligence reply:', sendError);
+            }
+          }
+        } finally {
+          clearTimeout(typingTimer);
+          clearInterval(typingInterval);
         }
-      } finally {
-        clearTimeout(typingTimer);
-        clearInterval(typingInterval);
-      }
+      };
+      return trace ? withLocalDiagnosticTrace(trace, execute) : execute();
     });
     pendingChatReplies.set(chatId, task);
     void task.finally(() => {
