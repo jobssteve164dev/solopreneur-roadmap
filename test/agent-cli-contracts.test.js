@@ -96,6 +96,53 @@ test('review launches use the same automatic Agent permission contract as normal
   }
 });
 
+test('agy interactive commands bind the prompt to its flag before shell execution', () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agy-argv-'));
+  const fakeAgy = path.join(fixtureRoot, 'agy');
+  const capturedArgsPath = path.join(fixtureRoot, 'args.json');
+  fs.writeFileSync(fakeAgy, `#!/usr/bin/env node
+require('node:fs').writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringify(process.argv.slice(2)));
+`, { mode: 0o755 });
+
+  const cases = [
+    {
+      command: agentCli.buildInteractiveAgentCommandForPromptFile(
+        fakeAgy,
+        promptFilePath,
+        workspaceRoot,
+        'never'
+      ),
+      expectedPrompt: `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.`,
+      expectedConversation: []
+    },
+    {
+      command: agentCli.buildInteractiveAgentContinuationCommandForPromptFile(
+        fakeAgy,
+        promptFilePath,
+        workspaceRoot,
+        'session-123',
+        'never'
+      ),
+      expectedPrompt: `Read the complete SoloMap continuation prompt from ${promptFilePath} and follow that file exactly. Continue the existing task in this interactive session.`,
+      expectedConversation: ['--conversation', 'session-123']
+    }
+  ];
+
+  for (const fixture of cases) {
+    const result = childProcess.spawnSync('/bin/sh', ['-c', fixture.command], {
+      encoding: 'utf8',
+      env: { ...process.env, SOLOMAP_CAPTURE_ARGS: capturedArgsPath }
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const args = JSON.parse(fs.readFileSync(capturedArgsPath, 'utf8'));
+    assert.deepEqual(args, [
+      ...fixture.expectedConversation,
+      `--add-dir=${workspaceRoot}`,
+      `--prompt-interactive=${fixture.expectedPrompt}`
+    ]);
+  }
+});
+
 test('Cursor installer verifies the official user-local binary before PATH is refreshed', () => {
   const fixtureHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cursor-install-'));
   const installedCli = path.join(fixtureHome, '.local', 'bin', 'cursor-agent');

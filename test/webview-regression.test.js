@@ -8496,7 +8496,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(agyBinding.headRevision, 1);
   assert.equal(agyBinding.revisions[0].method, 'provider_callback');
   assert.equal(agyBinding.revisions[0].state, 'preparing');
-  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /exec .*agy.*--prompt-interactive --dangerously-skip-permissions --add-dir/);
+  assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /exec .*agy.*--dangerously-skip-permissions --add-dir=.*--prompt-interactive=/);
   assert.match(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /Read the complete SoloMap task prompt from .*prompt\.txt/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$agent_prompt"/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$\(cat/);

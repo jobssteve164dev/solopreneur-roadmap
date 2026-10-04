@@ -505,7 +505,7 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${permissionSegment}${modelSegment} ${quotedInstruction})`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --prompt-interactive${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+    return `${quotedCli}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --prompt-interactive=${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli}${newSessionSegment}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
@@ -562,7 +562,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction})`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --prompt-interactive --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+    return `${quotedCli} --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --prompt-interactive=${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
