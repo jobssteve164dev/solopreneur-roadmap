@@ -435,7 +435,7 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
     return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} ${quotedPrompt} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return `${quotedCli} -p ${quotedPrompt} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
@@ -472,7 +472,7 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
     return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} ${quotedPromptFileInstruction} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return `${quotedCli} -p ${quotedPromptFileInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
@@ -508,7 +508,7 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
     return `${quotedCli}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --prompt-interactive=${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli}${newSessionSegment}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+    return `${quotedCli}${newSessionSegment}${permissionSegment}${modelSegment} ${quotedInstruction} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return `${quotedCli}${newSessionSegment} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
@@ -565,7 +565,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
     return `${quotedCli} --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --prompt-interactive=${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+    return `${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return `${quotedCli} --resume=${quotedSessionId} -i ${quotedInstruction} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment}`;
@@ -597,7 +597,7 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
     return `${quotedCli} -p --mode plan --sandbox enabled${modelSegment} --output-format text ${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --permission-mode plan${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+    return `${quotedCli} -p --permission-mode plan${modelSegment} ${quotedInstruction} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'grok') {
     return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)} --sandbox read-only --tools ${shellQuote('read_file,grep,list_dir')} --deny ${shellQuote('Bash')} --deny ${shellQuote('Edit')} --deny ${shellQuote('Write')} --deny ${shellQuote('MCPTool')} --always-approve${modelSegment} --output-format plain -p ${quotedInstruction}`;
@@ -626,7 +626,7 @@ export function buildAgentContinuationCommandForPromptFile(agentCli: string, pro
     return `${quotedCli} -p --resume ${quotedSessionId}${permissionSegment}${modelSegment} --output-format text ${quotedInstruction}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p --resume ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${quotedInstruction}`;
+    return `${quotedCli} -p --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return `${quotedCli} -p ${quotedInstruction} --resume=${quotedSessionId} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;
@@ -656,7 +656,7 @@ export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: s
     return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
-    return `${quotedCli} -p${permissionSegment}${modelSegment} --add-dir ${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli} -p${permissionSegment}${modelSegment} ${promptExpression} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'copilot' || executableName === 'copilot-cli') {
     return `${quotedCli} -p ${promptExpression} -C ${shellQuote(workspaceRoot)} --add-dir ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} --output-format text`;

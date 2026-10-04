@@ -143,6 +143,42 @@ require('node:fs').writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringif
   }
 });
 
+test('claude prompts precede the variadic add-dir option in every launch mode', () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-claude-argv-'));
+  const fakeClaude = path.join(fixtureRoot, 'claude');
+  const capturedArgsPath = path.join(fixtureRoot, 'args.json');
+  fs.writeFileSync(fakeClaude, `#!/usr/bin/env node
+require('node:fs').writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringify(process.argv.slice(2)));
+`, { mode: 0o755 });
+
+  const commands = [
+    agentCli.buildAgentCommand(fakeClaude, 'Direct prompt', workspaceRoot, '', 'never'),
+    agentCli.buildAgentCommandForPromptFile(fakeClaude, promptFilePath, workspaceRoot, 'never'),
+    agentCli.buildInteractiveAgentCommandForPromptFile(fakeClaude, promptFilePath, workspaceRoot, 'never'),
+    agentCli.buildInteractiveAgentContinuationCommandForPromptFile(fakeClaude, promptFilePath, workspaceRoot, 'session-123', 'never'),
+    agentCli.buildReadOnlyAgentCommandForPromptFile(fakeClaude, promptFilePath, workspaceRoot),
+    agentCli.buildAgentContinuationCommandForPromptFile(fakeClaude, promptFilePath, workspaceRoot, 'session-123', 'never'),
+    `agent_prompt='Shell variable prompt'; ${agentCli.buildAgentCommandFromShellVar(fakeClaude, 'agent_prompt', workspaceRoot, 'never')}`
+  ];
+
+  for (const command of commands) {
+    const result = childProcess.spawnSync('/bin/sh', ['-c', command], {
+      encoding: 'utf8',
+      env: { ...process.env, SOLOMAP_CAPTURE_ARGS: capturedArgsPath }
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const args = JSON.parse(fs.readFileSync(capturedArgsPath, 'utf8'));
+    const addDirIndex = args.indexOf('--add-dir');
+    assert.ok(addDirIndex > 0, `expected --add-dir in ${JSON.stringify(args)}`);
+    assert.equal(args[addDirIndex + 1], workspaceRoot);
+    assert.ok(
+      args.slice(0, addDirIndex).some((arg) => arg.includes('prompt') || arg.includes('Prompt')),
+      `expected the prompt before variadic --add-dir in ${JSON.stringify(args)}`
+    );
+    assert.equal(args.length, addDirIndex + 2, `--add-dir must be the final option in ${JSON.stringify(args)}`);
+  }
+});
+
 test('Cursor installer verifies the official user-local binary before PATH is refreshed', () => {
   const fixtureHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cursor-install-'));
   const installedCli = path.join(fixtureHome, '.local', 'bin', 'cursor-agent');

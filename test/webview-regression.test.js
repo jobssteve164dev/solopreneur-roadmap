@@ -7368,7 +7368,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommand('claude', 'Ship the MVP', '/workspace/app'),
-    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' 'Ship the MVP'"
+    "'claude' -p --dangerously-skip-permissions 'Ship the MVP' --add-dir '/workspace/app'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('copilot', 'Ship the MVP', '/workspace/app'),
@@ -7399,7 +7399,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('claude', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.'"
+    "'claude' -p --dangerously-skip-permissions 'Read the complete SoloMap task prompt from /workspace/app/.solopreneur/agent-runs/2/prompt.txt and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.' --add-dir '/workspace/app'"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('copilot', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
@@ -7569,7 +7569,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.notEqual(firstTerminalName, secondTerminalName);
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('claude', 'agent_prompt', '/workspace/app'),
-    "'claude' -p --dangerously-skip-permissions --add-dir '/workspace/app' \"$agent_prompt\""
+    "'claude' -p --dangerously-skip-permissions \"$agent_prompt\" --add-dir '/workspace/app'"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('opencode', 'agent_prompt', '/workspace/app'),
