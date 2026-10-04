@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.500 - 2026-10-04
+
+### Fixed
+- preserve Claude prompts after add-dir audit (3c1156a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.499 - 2026-10-04
 
 ### Fixed
