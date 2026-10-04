@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as vscode from 'vscode';
+import type * as vscode from 'vscode';
 import { buildAgentCommandForPromptFile, commandExists, getAgentCliCandidates, resolveAgentCli, shellQuote } from './agentCli';
 import { readLearningSummary } from './learningLedger';
 import { SolopreneurSettings } from './pluginContracts';
@@ -382,6 +382,7 @@ export function buildDailyReviewPrompt(options: {
 }
 
 export function startDailyReviewAgent(settings: SolopreneurSettings, projects: SolopreneurProject[], extensionUri?: vscode.Uri): DailyReviewArtifact {
+  const vscode = require('vscode') as typeof import('vscode');
   const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true, globalDataPath: settings.globalDataPath });
   const globalStore = ensureGlobalEngineeringStore(settings.globalDataPath, portfolio);
   const learningSummary = readLearningSummary(projects[0]?.path || process.cwd(), settings.globalDataPath);

@@ -16,6 +16,7 @@ import { startRuntimeControlServer } from './autonomousRuntimeControl';
 import { runtimeBuildId } from './runtimeBuildIdentity';
 import { classifyDiagnosticFailure, recordLocalDiagnosticError } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
+import { startTelegramBackgroundRuntime } from './telegramRuntime';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -57,10 +58,12 @@ async function main(): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   let activeEngine: EmbeddedPiAgentEngine | undefined;
   let controlServer: { close(): Promise<void> } | undefined;
+  const telegram = startTelegramBackgroundRuntime(globalDataPath);
   const stop = () => {
     if (stopping) return;
     stopping = true;
     if (timer) clearInterval(timer);
+    telegram.close();
     activeEngine?.cancel();
     updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
     void controlServer?.close();

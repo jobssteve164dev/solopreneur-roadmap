@@ -4,12 +4,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
-import {
-  startTelegramRemoteService,
-  stopTelegramRemoteService,
-  restartTelegramRemoteService,
-  sendTelegramNotification
-} from './telegramRemote';
+import { createVscodeTelegramHost } from './telegramRemote';
+import { queueTelegramBackgroundNotification } from './telegramRuntimeConfig';
+import { createTelegramBackgroundConnection } from './telegramBackgroundConnection';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { SqliteStore } from './db/sqliteStore';
@@ -61,7 +58,6 @@ import {
 } from './strategyPyramid';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
-import { createTelegramIntelligenceReply } from './telegramIntelligenceChat';
 import { createIntelligenceMcpSession, getIntelligenceMcpConnector } from './intelligenceMcp';
 import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
@@ -291,9 +287,7 @@ import {
 import { locateCodexSessionByBindingNonce, readCodexTurnCompletionSince } from './codexSessionIdentity';
 
 let syncEngine: SyncEngine | null = null;
-let telegramChatReply: (chatId: string, text: string) => Promise<string>;
-let telegramBindingGeneration = 0;
-let telegramConversationWriteQueue: Promise<void> = Promise.resolve();
+let telegramConnection: ReturnType<typeof createTelegramBackgroundConnection> | undefined;
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 const strategyPyramidRequestGate = createStrategyPyramidRequestGate();
@@ -513,7 +507,7 @@ export async function activate(context: vscode.ExtensionContext) {
       if (activeStrategyPyramidPanel) {
         activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
       }
-      restartTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
+      synchronizeTelegramChannel(context);
     }
   );
   context.subscriptions.push(settingsSavedDisposable);
@@ -675,18 +669,16 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     return store;
   };
-  telegramChatReply = createTelegramIntelligenceReply(
-    getIntelligenceConversationStore,
-    () => context.globalState.get<Record<string, string>>('solopreneur.telegramIntelligenceConversations') || {},
-    ids => {
-      const write = telegramConversationWriteQueue.catch(() => undefined).then(() =>
-        Promise.resolve(context.globalState.update('solopreneur.telegramIntelligenceConversations', ids))
-      );
-      telegramConversationWriteQueue = write;
-      return write;
+  telegramConnection = createTelegramBackgroundConnection({
+    host: createVscodeTelegramHost(context),
+    bindChat: async chatId => {
+      await updatePersistedSettings(context, { telegramChatId: chatId });
+      sidebarProvider?.sendSettings();
+      if (activePanel) postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
     },
-    () => telegramBindingGeneration
-  );
+    ensureRuntime: () => reconcileBackgroundIntelligenceService(context)
+  });
+  context.subscriptions.push(telegramConnection);
 
   // Register Sidebar Webview View Provider
   sidebarProvider = new SolopreneurSidebarProvider(
@@ -716,6 +708,7 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   // Initialize storage in the background after the UI provider is registered.
+  synchronizeTelegramChannel(context);
   void ensureSyncEngine(context);
   void refreshProAccountStatus(context).catch((error) => {
     console.warn('SoloMap account status refresh failed during activation:', error);
@@ -739,10 +732,19 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     migrateLegacyActiveConversations(context);
     ensureActiveConversationPoller(context);
-    startTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
+    synchronizeTelegramChannel(context);
     scheduleFocusReminder(context);
     scheduleTimedAutomationTask(context);
   }, 15_000);
+}
+
+function synchronizeTelegramChannel(context: vscode.ExtensionContext): void {
+  if (!telegramConnection) return;
+  const settings = getPersistedSettings(context);
+  void telegramConnection.sync(
+    normalizeGlobalDataPathForExtension(settings.globalDataPath), getSelectedProjectPath(context), settings.language,
+    context.globalState.get<Record<string, string>>('solopreneur.telegramIntelligenceConversations') || {}
+  ).catch(error => recordLocalDiagnosticError(settings.globalDataPath, 'telegram.configure', classifyDiagnosticFailure(error)));
 }
 
 async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionContext): Promise<void> {
@@ -1432,7 +1434,7 @@ async function handleSharedWebviewAction(
           ? { telegramBotToken: request.telegramBotToken.trim() } : {})
       });
       if (typeof request.telegramEnabled === 'boolean' || (typeof request.telegramBotToken === 'string' && request.telegramBotToken.trim())) {
-        restartTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
+        synchronizeTelegramChannel(context);
       }
       await respond({
         command: 'settingsSaved',
@@ -1443,12 +1445,9 @@ async function handleSharedWebviewAction(
       await broadcastSettings(context);
     },
     'telegram.unbind': async () => {
-      telegramBindingGeneration++;
-      stopTelegramRemoteService();
       await updatePersistedSettings(context, { telegramChatId: '' });
-      await telegramConversationWriteQueue.catch(() => undefined);
       await context.globalState.update('solopreneur.telegramIntelligenceConversations', {});
-      restartTelegramRemoteService(context, telegramChatReply, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
+      synchronizeTelegramChannel(context);
       await broadcastSettings(context);
     },
     'settings.reviewGlobalPrompt': async (request) => {
@@ -2473,6 +2472,7 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     }
   }
   syncCognitiveRuntimeConfig(nextSettings);
+  synchronizeTelegramChannel(context);
   const previousRuntimeRoot = normalizeGlobalDataPathForExtension(currentSettings.globalDataPath);
   const nextRuntimeRoot = normalizeGlobalDataPathForExtension(nextSettings.globalDataPath);
   if (previousRuntimeRoot !== nextRuntimeRoot) {
@@ -2608,6 +2608,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
 
   const selectionGeneration = ++projectSelectionGeneration;
   selectedProjectPathInMemory = projectPath;
+  synchronizeTelegramChannel(context);
   const persistSelection = context.globalState.update(selectedProjectKey, projectPath);
   syncEngine = null;
   activeProjectRoot = null;
@@ -3225,6 +3226,7 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
   await setProjectHidden(context, folder, false);
 
   await context.globalState.update(selectedProjectKey, folder);
+  synchronizeTelegramChannel(context);
   syncEngine = null;
   activeProjectRoot = null;
   syncEngineReady = false;
@@ -3268,6 +3270,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
 
   const nextSelectedProjectPath = nextProjects[0]?.path || '';
   await context.globalState.update(selectedProjectKey, nextSelectedProjectPath);
+  synchronizeTelegramChannel(context);
 
   syncEngine = null;
   activeProjectRoot = null;
@@ -11049,7 +11052,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           : `⚠️ <b>[${pName}] 环节 "${nodeTitle}" 处于推进中。</b>\n详情: ${completionReason || '等待下一步操作。'}\n系统已进入人在回路状态，可回复 <code>/approve</code> 批准完成，或回复 <code>/deny</code> 拒绝并终止。`;
       }
       if (notifyText) {
-        void sendTelegramNotification(extensionContextRef, notifyText);
+        queueTelegramBackgroundNotification(normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath), notifyText, 'HTML');
       }
     }
     if (extensionContextRef) {
@@ -11241,6 +11244,7 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
  * Formulates the premium glassmorphic Webview page bundle.
  */
 export function deactivate() {
+  telegramConnection?.dispose();
   if (watcher) {
     watcher.dispose();
   }
