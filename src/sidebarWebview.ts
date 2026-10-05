@@ -4698,7 +4698,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           <button class="dependency-action-btn" id="btn-open-agent-check"><span class="codicon codicon-terminal"></span><span id="text-open-agent-check">Agent</span></button>
           <button class="dependency-action-btn" id="btn-open-github-auth"><span class="codicon codicon-github"></span><span id="text-open-github-auth">GitHub</span></button>
         </div>
-        <div class="agent-readiness-panel" id="agent-readiness-panel"></div>
+        <div class="agent-readiness-panel" id="agent-readiness-panel" aria-live="polite"></div>
       </div>
     </div>
     </div>
@@ -6098,6 +6098,21 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         agentAutomationUnavailable: '需要手动确认',
         agentLoginTrialRequired: '登录状态将在试跑时确认',
         agentLoginAction: '登录 / 试跑',
+        agentAccountLoading: '正在读取账户与额度...',
+        agentAccountPlan: '套餐',
+        agentAccountSignedIn: '已登录',
+        agentAccountSignedOut: '登录后显示套餐与额度',
+        agentAccountInCli: '打开对应 Agent 查看实时额度',
+        agentAccountProviderManaged: '请在当前模型供应方账户中查看额度',
+        agentAccountUnavailable: '请在对应 Agent 中查看套餐与额度',
+        agentAccountError: '暂时无法读取，点击“诊断”重试',
+        agentQuotaRemaining: '剩余',
+        agentQuotaFiveHours: '5 小时',
+        agentQuotaWeek: '一周',
+        agentQuotaWindow: '额度窗口',
+        agentQuotaResets: '重置',
+        agentCreditsUnlimited: '积分不限量',
+        agentCreditsBalance: '积分余额',
         agentImpact: 'Agent 贡献',
         impactMinutes: '工作分钟',
         impactTokens: 'Token 消耗',
@@ -6592,6 +6607,21 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         agentAutomationUnavailable: 'Needs manual confirmation',
         agentLoginTrialRequired: 'Sign-in is confirmed on trial run',
         agentLoginAction: 'Sign in / test',
+        agentAccountLoading: 'Reading account and usage...',
+        agentAccountPlan: 'Plan',
+        agentAccountSignedIn: 'Signed in',
+        agentAccountSignedOut: 'Sign in to show plan and usage',
+        agentAccountInCli: 'Open the Agent to view live usage',
+        agentAccountProviderManaged: 'View usage in your current model provider account',
+        agentAccountUnavailable: 'View plan and usage in the Agent',
+        agentAccountError: 'Could not load usage. Select Diagnose to retry.',
+        agentQuotaRemaining: 'remaining',
+        agentQuotaFiveHours: '5 hours',
+        agentQuotaWeek: '1 week',
+        agentQuotaWindow: 'usage window',
+        agentQuotaResets: 'resets',
+        agentCreditsUnlimited: 'Unlimited credits',
+        agentCreditsBalance: 'Credit balance',
         agentImpact: 'Agent Impact',
         impactMinutes: 'Minutes',
         impactTokens: 'Tokens used',
@@ -7178,6 +7208,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
         settingsPanel.style.display = 'block';
         requestSettings();
+        requestDependencyCheck();
         requestAgentImpact();
       }
     });
@@ -7445,6 +7476,44 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return parts.join(' · ');
     }
 
+    function agentQuotaWindowLabel(minutes) {
+      if (Number(minutes) === 300) return t('agentQuotaFiveHours');
+      if (Number(minutes) === 10080) return t('agentQuotaWeek');
+      const hours = Math.max(1, Math.round(Number(minutes || 0) / 60));
+      return hours + (currentLanguage === 'zh' ? ' 小时' : 'h');
+    }
+
+    function agentAccountMeta(agent) {
+      if (!agent || !agent.installed) return [];
+      const account = agent.account;
+      if (!account) return [t('agentAccountLoading')];
+      if (account.state === 'signed_out') return [t('agentAccountSignedOut')];
+      if (account.state === 'in_cli') {
+        return [t('agentAccountInCli') + (account.usageHint ? ' · ' + account.usageHint : '')];
+      }
+      if (account.state === 'provider_managed') return [t('agentAccountProviderManaged')];
+      if (account.state === 'unavailable') return [t('agentAccountUnavailable')];
+      if (account.state === 'error') return [t('agentAccountError')];
+      const lines = [account.plan ? t('agentAccountPlan') + ': ' + account.plan : t('agentAccountSignedIn')];
+      const usage = Array.isArray(account.usage) ? account.usage : [];
+      if (usage.length) {
+        lines.push(usage.map(window => {
+          const remaining = Math.max(0, Math.min(100, Math.round(100 - Number(window.usedPercent || 0))));
+          const reset = Number(window.resetsAt || 0) > 0
+            ? ' · ' + t('agentQuotaResets') + ' ' + new Date(Number(window.resetsAt) * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            : '';
+          return agentQuotaWindowLabel(window.windowMinutes) + ' ' + remaining + '% ' + t('agentQuotaRemaining') + reset;
+        }).join(' · '));
+      }
+      if (account.credits && account.credits.unlimited) {
+        lines.push(t('agentCreditsUnlimited'));
+      } else if (account.credits && account.credits.hasCredits && account.credits.balance) {
+        lines.push(t('agentCreditsBalance') + ': ' + account.credits.balance);
+      }
+      if (account.usageHint) lines.push(t('agentAccountInCli') + ' · ' + account.usageHint);
+      return lines;
+    }
+
     function renderAgentReadinessRows(status, compact) {
       const agents = Array.isArray(status && status.supportedAgents) ? status.supportedAgents : [];
       if (!agents.length) {
@@ -7455,6 +7524,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const selected = Boolean(agent.selected);
         const ready = installed && Boolean(agent.automationPreconfigured);
         const command = String(agent.command || '');
+        const accountLines = agentAccountMeta(agent);
         const actions = [];
         if (installed && !selected) {
           actions.push('<button class="agent-readiness-action" data-agent-set-default="' + escapeHtml(command) + '">' + escapeHtml(t('agentUseDefault')) + '</button>');
@@ -7475,6 +7545,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           (selected ? ' · ' + escapeHtml(t('agentDefault')) : '') +
           '</div>' +
           '<div class="agent-readiness-meta">' + escapeHtml(agentReadinessMeta(agent)) + '</div>' +
+          accountLines.map(line => '<div class="agent-readiness-meta agent-account-meta">' + escapeHtml(line) + '</div>').join('') +
           (command && !compact ? '<div class="agent-readiness-meta">' + escapeHtml(command) + '</div>' : '') +
           '</div>' +
           '<div class="agent-readiness-actions">' +
@@ -8341,9 +8412,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
-          if (!lastDependencyStatus) {
-            requestDependencyCheck();
-          }
           restartFocusTimerTick();
           renderCollaborationPanel();
           break;

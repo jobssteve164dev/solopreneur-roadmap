@@ -44,6 +44,7 @@ import { ensureSolomapMaintenanceWorkspace } from './solomapGlobal';
 import { sendTextWhenTerminalReady } from './terminalCompatibility';
 import { recordShadowDecisionFeedback } from './autonomousRuntime';
 import { IntelligenceConversation, IntelligenceConversationStore } from './intelligenceChat';
+import { readAgentAccountStatuses } from './agentAccountStatus';
 
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
@@ -58,6 +59,7 @@ interface SidebarProviderDependencies {
   listIntelligenceConversations?: () => ReturnType<IntelligenceConversationStore['list']>;
   getIntelligenceConversation?: (id: string) => IntelligenceConversation | null;
   sendIntelligenceMessage?: (text: string, id?: string) => Promise<IntelligenceConversation>;
+  readAgentAccountStatuses?: typeof readAgentAccountStatuses;
 }
 
 export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
@@ -76,6 +78,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _listIntelligenceConversations?: SidebarProviderDependencies['listIntelligenceConversations'];
   private readonly _getIntelligenceConversation?: SidebarProviderDependencies['getIntelligenceConversation'];
   private readonly _sendIntelligenceMessage?: SidebarProviderDependencies['sendIntelligenceMessage'];
+  private readonly _readAgentAccountStatuses: typeof readAgentAccountStatuses;
   private _initialDataReady = false;
   private readonly _conversationSnapshotLoads = new Map<string, {
     promise: Promise<SidebarConversationSnapshot>;
@@ -90,6 +93,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private _localRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private _refreshAllLocalProjects = false;
   private readonly _pendingLocalProjectPaths = new Set<string>();
+  private _agentAccountStatusRequest = 0;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -120,6 +124,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     this._listIntelligenceConversations = dependencies.listIntelligenceConversations;
     this._getIntelligenceConversation = dependencies.getIntelligenceConversation;
     this._sendIntelligenceMessage = dependencies.sendIntelligenceMessage;
+    this._readAgentAccountStatuses = dependencies.readAgentAccountStatuses || readAgentAccountStatuses;
     this._projectLoader = new SidebarProjectLoader({
       isAvailable: () => Boolean(this._view),
       postMessage: (message) => { this._view?.webview.postMessage(message); },
@@ -132,6 +137,26 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
   public postMessage(message: Record<string, unknown>): void {
     this._view?.webview.postMessage(message);
+  }
+
+  private refreshDependencyStatus(webviewView: vscode.WebviewView, cliPath: string): void {
+    const dependencyStatus = getDependencyStatus(cliPath);
+    this._view?.webview.postMessage({ command: 'dependenciesChecked', status: dependencyStatus });
+    const accountRequest = ++this._agentAccountStatusRequest;
+    void this._readAgentAccountStatuses(dependencyStatus.supportedAgents).then((accounts) => {
+      if (accountRequest !== this._agentAccountStatusRequest || this._view !== webviewView) return;
+      const accountByFamily = new Map(accounts.map((account) => [account.family, account]));
+      this._view?.webview.postMessage({
+        command: 'dependenciesChecked',
+        status: {
+          ...dependencyStatus,
+          supportedAgents: dependencyStatus.supportedAgents.map((agent) => ({
+            ...agent,
+            account: accountByFamily.get(agent.family)
+          }))
+        }
+      });
+    });
   }
 
   public resolveWebviewView(
@@ -211,12 +236,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           case 'showFlowView':
             await vscode.commands.executeCommand('solopreneur.showFlow');
             break;
-          case 'checkDependencies':
-            this._view?.webview.postMessage({
-              command: 'dependenciesChecked',
-              status: getDependencyStatus(data.cliPath || this._getSettings().cliPath || 'agy')
-            });
+          case 'checkDependencies': {
+            this.refreshDependencyStatus(webviewView, data.cliPath || this._getSettings().cliPath || 'agy');
             break;
+          }
           case 'agent.setDefault': {
             const settings = this._getSettings();
             const cliPath = String(data.cliPath || '').trim();
@@ -229,10 +252,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               cliPath
             });
             this.sendSettings();
-            this._view?.webview.postMessage({
-              command: 'dependenciesChecked',
-              status: getDependencyStatus(cliPath)
-            });
+            this.refreshDependencyStatus(webviewView, cliPath);
             vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
             vscode.window.showInformationMessage(`Default Agent set to ${cliPath}.`);
             break;
@@ -250,10 +270,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               this.sendSettings();
               vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
             }
-            this._view?.webview.postMessage({
-              command: 'dependenciesChecked',
-              status: getDependencyStatus(prepared.wrapperPath || data.cliPath || settings.cliPath || 'agy')
-            });
+            this.refreshDependencyStatus(webviewView, prepared.wrapperPath || data.cliPath || settings.cliPath || 'agy');
             if (prepared.ok) {
               vscode.window.showInformationMessage(prepared.message);
             } else {

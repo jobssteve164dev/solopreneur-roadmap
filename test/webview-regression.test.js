@@ -388,6 +388,9 @@ function loadCompiledModule(relativePath, exportPatch) {
               return Promise.resolve(true);
             }
           },
+          commands: {
+            executeCommand() { return Promise.resolve(); }
+          },
           ConfigurationTarget: { Global: 1 },
           TerminalExitReason: { Unknown: 0, Shutdown: 1, Process: 2, User: 3, Extension: 4 },
           ViewColumn: { One: 1 },
@@ -585,6 +588,7 @@ function createElement(id) {
   return {
     id,
     attributes: {},
+    dataset: {},
     style: { display: '' },
     listeners: {},
     value: '',
@@ -619,6 +623,9 @@ function createElement(id) {
     },
     setAttribute(name, value) {
       this.attributes[name] = String(value);
+    },
+    removeAttribute(name) {
+      delete this.attributes[name];
     },
     getAttribute(name) {
       return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null;
@@ -1711,14 +1718,41 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
       githubAuthReady: false,
       githubMessage: 'GitHub authorization is needed.',
       supportedAgents: [
-        { family: 'codex', title: 'Codex', command: '/usr/local/bin/codex', installed: true, selected: true, automationReady: true, automationPreconfigured: true },
-        { family: 'claude', title: 'Claude', command: '/usr/local/bin/claude', installed: true, selected: false, automationReady: true, automationCanPrepare: true },
+        {
+          family: 'codex',
+          title: 'Codex',
+          command: '/usr/local/bin/codex',
+          installed: true,
+          selected: true,
+          automationReady: true,
+          automationPreconfigured: true,
+          account: {
+            state: 'ready',
+            plan: 'Pro',
+            usage: [{ usedPercent: 64, windowMinutes: 300, resetsAt: 1893456000 }],
+            credits: { hasCredits: true, unlimited: false, balance: '12.50' }
+          }
+        },
+        {
+          family: 'claude',
+          title: 'Claude',
+          command: '/usr/local/bin/claude',
+          installed: true,
+          selected: false,
+          automationReady: true,
+          automationCanPrepare: true,
+          account: { state: 'ready', usageHint: '/status' }
+        },
         { family: 'cursor', title: 'Cursor', command: '', installed: false, selected: false, automationReady: false }
       ]
     }
   });
   assert.match(elements['agent-readiness-panel'].innerHTML, /Codex/);
   assert.match(elements['agent-readiness-panel'].innerHTML, /Claude/);
+  assert.match(elements['agent-readiness-panel'].innerHTML, /Pro/);
+  assert.match(elements['agent-readiness-panel'].innerHTML, /36%/);
+  assert.match(elements['agent-readiness-panel'].innerHTML, /12\.50/);
+  assert.match(elements['agent-readiness-panel'].innerHTML, /\/status/);
   assert.match(elements['agent-readiness-panel'].innerHTML, /data-agent-set-default="\/usr\/local\/bin\/claude"/);
   assert.match(script, /data-agent-set-default/);
   assert.match(script, /command: 'agent\.setDefault'/);
@@ -2338,6 +2372,49 @@ test('sidebar resolve survives persisted state and startup data failures', async
   }
 });
 
+test('sidebar discards stale account reads and refreshes them after changing the default Agent', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const postedMessages = [];
+  const pendingReads = [];
+  let messageListener = null;
+  let settings = { cliPath: 'codex', language: 'zh', globalPrompt: '', globalDataPath: '' };
+  const webviewView = {
+    webview: {
+      options: {},
+      html: '',
+      asWebviewUri(uri) { return String(uri && (uri.fsPath || uri.path || uri)); },
+      postMessage(message) { postedMessages.push(message); return Promise.resolve(true); },
+      onDidReceiveMessage(listener) { messageListener = listener; }
+    }
+  };
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => settings,
+      updateSettings: async next => { settings = next; },
+      getProjects: () => ({ projects: [], selectedProjectPath: '' }),
+      readAgentAccountStatuses: agents => new Promise(resolve => pendingReads.push({ agents, resolve }))
+    }
+  );
+  provider.resolveWebviewView(webviewView, {}, {});
+
+  await messageListener({ command: 'checkDependencies', cliPath: 'codex' });
+  assert.equal(pendingReads.length, 1);
+  await messageListener({ command: 'agent.setDefault', cliPath: 'claude' });
+  assert.equal(pendingReads.length, 2);
+
+  pendingReads[0].resolve([{ family: 'codex', state: 'ready', plan: 'Stale plan' }]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(postedMessages).includes('Stale plan'), false);
+
+  pendingReads[1].resolve([{ family: 'claude', state: 'ready', plan: 'Max' }]);
+  await new Promise(resolve => setImmediate(resolve));
+  const finalStatus = postedMessages.filter(message => message.command === 'dependenciesChecked').at(-1).status;
+  assert.equal(finalStatus.supportedAgents.find(agent => agent.family === 'claude').selected, true);
+  assert.equal(finalStatus.supportedAgents.find(agent => agent.family === 'claude').account.plan, 'Max');
+});
+
 test('sidebar reports initial data ready after its first portfolio can paint', () => {
   const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
   const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
@@ -2368,6 +2445,29 @@ test('sidebar starts background work after rendering when the webview cannot pai
   dispatchMessage({ command: 'projectsLoaded', projects: { projects: [], selectedProjectPath: '', portfolio: [] } });
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(postedMessages.filter(message => message.command === 'sidebarInitialDataReady').length, 1);
+});
+
+test('sidebar defers agent account checks until settings opens', () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, ids);
+
+  postedMessages.length = 0;
+  dispatchMessage({
+    command: 'settingsLoaded',
+    settings: { cliPath: 'codex', language: 'zh', globalPrompt: '' }
+  });
+  assert.equal(
+    postedMessages.some(message => message.command === 'checkDependencies'),
+    false,
+    'loading settings during cold start must not launch CLI account probes'
+  );
+
+  elements['btn-toggle-settings'].listeners.click();
+  assert.equal(elements['settings-panel'].style.display, 'block');
+  assert.equal(postedMessages.filter(message => message.command === 'checkDependencies').length, 1);
 });
 
 test('sidebar starts background service reconciliation once after its ready signal', async () => {

@@ -12,6 +12,7 @@ import {
   shellQuote
 } from './agentCli';
 import { normalizeGlobalDataPath, SolopreneurProject } from './projectPortfolio';
+import { AgentAccountStatus } from './agentAccountStatus';
 
 export interface DependencyStatus {
   agentReady: boolean;
@@ -38,6 +39,7 @@ export interface SupportedAgentStatus {
   automationCanPrepare: boolean;
   loginState: 'trial_required' | 'not_installed';
   message: string;
+  account?: AgentAccountStatus;
 }
 
 const supportedAgentFamilies = [

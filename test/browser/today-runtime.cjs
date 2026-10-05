@@ -107,6 +107,30 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     await page.locator('[data-global-focus-project="/workspace/beta"]').click();
     assert.ok(messages.some(message => message.command === 'recordTodayShadowFeedback' && message.outcome === 'accepted'));
     await page.locator('#btn-toggle-settings').click();
+    assert.ok(messages.some(message => message.command === 'checkDependencies'));
+    await page.evaluate(() => window.postMessage({
+      command: 'dependenciesChecked',
+      status: {
+        agentReady: true,
+        agentMessage: 'codex is ready.',
+        agentAutomationReady: true,
+        agentAutomationMessage: 'codex can run tasks.',
+        githubAuthReady: true,
+        githubMessage: 'GitHub is ready.',
+        supportedAgents: [{
+          family: 'codex', title: 'Codex', command: 'codex', installed: true, selected: true,
+          automationReady: true, automationPreconfigured: true,
+          account: {
+            state: 'ready', plan: 'Pro',
+            usage: [{ usedPercent: 64, windowMinutes: 300, resetsAt: 1893456000 }],
+            credits: { hasCredits: true, unlimited: false, balance: '12.50' }
+          }
+        }]
+      }
+    }, '*'));
+    assert.match(await page.locator('#agent-readiness-panel').textContent(), /Pro/);
+    assert.match(await page.locator('#agent-readiness-panel').textContent(), /36%/);
+    assert.match(await page.locator('#agent-readiness-panel').textContent(), /12\.50/);
     await page.locator('#setting-cognitive-engine-agent [data-solo-trigger]').click();
     await page.locator('#setting-cognitive-engine-agent [data-solo-option-value="codex"]').click();
     assert.equal(await page.locator('#setting-cognitive-engine-agent').getAttribute('data-value'), 'codex');
