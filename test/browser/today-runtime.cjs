@@ -131,6 +131,19 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     assert.match(await page.locator('#agent-readiness-panel').textContent(), /Pro/);
     assert.match(await page.locator('#agent-readiness-panel').textContent(), /36%/);
     assert.match(await page.locator('#agent-readiness-panel').textContent(), /12\.50/);
+    await page.evaluate(() => window.postMessage({ command: 'dependenciesChecked', status: {
+      supportedAgents: [{ family: 'antigravity', title: 'Agy / Antigravity', command: 'agy', installed: true,
+        automationPreconfigured: true, account: { state: 'ready', plan: 'Google AI Pro', usage: [
+          { label: 'Gemini Models', usedPercent: 0, windowMinutes: 300, resetsAt: 1893456000 },
+          { label: 'Claude and GPT models', usedPercent: 20, windowMinutes: 10080, resetsAt: 1894060800 }
+        ] } }, { family: 'cursor', title: 'Cursor', command: 'cursor', installed: true, account: { state: 'signed_out' } },
+        { family: 'codex', title: 'Codex', command: 'codex', installed: true }]
+    } }, '*'));
+    const accountText = await page.locator('#agent-readiness-panel').textContent();
+    assert.match(accountText, /Google AI Pro/);
+    assert.match(accountText, /Gemini Models.*100%/);
+    assert.match(accountText, /Claude and GPT models.*80%/);
+    assert.match(accountText, /登录后显示套餐与额度/);
     await page.locator('#setting-cognitive-engine-agent [data-solo-trigger]').click();
     await page.locator('#setting-cognitive-engine-agent [data-solo-option-value="codex"]').click();
     assert.equal(await page.locator('#setting-cognitive-engine-agent').getAttribute('data-value'), 'codex');

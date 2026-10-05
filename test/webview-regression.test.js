@@ -2394,19 +2394,24 @@ test('sidebar discards stale account reads and refreshes them after changing the
       getSettings: () => settings,
       updateSettings: async next => { settings = next; },
       getProjects: () => ({ projects: [], selectedProjectPath: '' }),
-      readAgentAccountStatuses: agents => new Promise(resolve => pendingReads.push({ agents, resolve }))
+      readAgentAccountStatuses: (agents, options) => new Promise(resolve => pendingReads.push({ agents, options, resolve }))
     }
   );
   provider.resolveWebviewView(webviewView, {}, {});
 
   await messageListener({ command: 'checkDependencies', cliPath: 'codex' });
   assert.equal(pendingReads.length, 1);
+  pendingReads[0].options.onStatus({ family: 'codex', state: 'ready', plan: 'Pro' });
+  const partialStatus = postedMessages.filter(message => message.command === 'dependenciesChecked').at(-1).status;
+  assert.equal(partialStatus.supportedAgents.find(agent => agent.family === 'codex').account.plan, 'Pro');
   await messageListener({ command: 'agent.setDefault', cliPath: 'claude' });
   assert.equal(pendingReads.length, 2);
 
+  pendingReads[0].options.onStatus({ family: 'codex', state: 'ready', plan: 'Stale incremental plan' });
   pendingReads[0].resolve([{ family: 'codex', state: 'ready', plan: 'Stale plan' }]);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(JSON.stringify(postedMessages).includes('Stale plan'), false);
+  assert.equal(JSON.stringify(postedMessages).includes('Stale incremental plan'), false);
 
   pendingReads[1].resolve([{ family: 'claude', state: 'ready', plan: 'Max' }]);
   await new Promise(resolve => setImmediate(resolve));

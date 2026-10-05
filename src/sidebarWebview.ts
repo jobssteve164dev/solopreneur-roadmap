@@ -7472,7 +7472,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (!agent || !agent.installed) return t('agentNotInstalled');
       const parts = [t('agentInstalled')];
       parts.push(agent.automationPreconfigured ? t('agentAutomationReady') : (agent.automationReady ? t('agentAutomationAvailable') : t('agentAutomationUnavailable')));
-      parts.push(t('agentLoginTrialRequired'));
+      if (!agent.account || !['ready', 'signed_out'].includes(agent.account.state)) {
+        parts.push(t('agentLoginTrialRequired'));
+      }
       return parts.join(' · ');
     }
 
@@ -7502,7 +7504,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const reset = Number(window.resetsAt || 0) > 0
             ? ' · ' + t('agentQuotaResets') + ' ' + new Date(Number(window.resetsAt) * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
             : '';
-          return agentQuotaWindowLabel(window.windowMinutes) + ' ' + remaining + '% ' + t('agentQuotaRemaining') + reset;
+          const label = window.label === 'billing' ? (currentLanguage === 'zh' ? '本期' : 'This period')
+            : (window.label ? window.label + ' · ' : '') + agentQuotaWindowLabel(window.windowMinutes);
+          return label + ' ' + remaining + '% ' + t('agentQuotaRemaining') + reset;
         }).join(' · '));
       }
       if (account.credits && account.credits.unlimited) {
@@ -7511,6 +7515,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         lines.push(t('agentCreditsBalance') + ': ' + account.credits.balance);
       }
       if (account.usageHint) lines.push(t('agentAccountInCli') + ' · ' + account.usageHint);
+      if (account.usageState === 'error') lines.push(t('agentAccountError'));
       return lines;
     }
 

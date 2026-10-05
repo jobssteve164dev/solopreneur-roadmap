@@ -143,9 +143,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const dependencyStatus = getDependencyStatus(cliPath);
     this._view?.webview.postMessage({ command: 'dependenciesChecked', status: dependencyStatus });
     const accountRequest = ++this._agentAccountStatusRequest;
-    void this._readAgentAccountStatuses(dependencyStatus.supportedAgents).then((accounts) => {
+    const accountByFamily = new Map();
+    const publish = () => {
       if (accountRequest !== this._agentAccountStatusRequest || this._view !== webviewView) return;
-      const accountByFamily = new Map(accounts.map((account) => [account.family, account]));
       this._view?.webview.postMessage({
         command: 'dependenciesChecked',
         status: {
@@ -156,6 +156,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           }))
         }
       });
+    };
+    void this._readAgentAccountStatuses(dependencyStatus.supportedAgents, {
+      onStatus: (account) => {
+        accountByFamily.set(account.family, account);
+        publish();
+      }
+    }).then((accounts) => {
+      for (const account of accounts) accountByFamily.set(account.family, account);
+      publish();
     });
   }
 
