@@ -143,6 +143,8 @@ SQLite 使用真实磁盘连接和增量事务，禁止在线 `db.export()` 覆�
 
 默认 WAL 与持久事务，只有一位正式写连接拥有者。应用更新、审计事件、幂等回执、必要后续投递在同一事务提交。日志分块批量写，不按 token 整库保存；终态前提交已接收的日志和证据。高耗时网络、Agent 调用与文件生成不占用数据库事务。
 
+并发和即时是硬性验收条件：多项目、多窗口和多个 Agent 可以同时提交请求；写入回执只在持久事务提交后返回，收到成功回执后的新读取必须立即看见该版本。事务由唯一拥有者顺序提交，同版本竞争明确返回冲突，其他项目仍可独立读写。验收同时记录真实存量下的提交到回读延迟、查询耗时和宿主响应。
+
 ## 5. 数据模型总约定
 
 ### 5.1 身份、类型与共同字段
@@ -165,13 +167,14 @@ SQLite 使用真实磁盘连接和增量事务，禁止在线 `db.export()` 覆�
 | `database_meta` | `key PK, value`；仅系统初始化项 | 数据根 identity、schema/protocol version；不存业务对象 |
 | `objects` | `id PK, kind, project_id FK, revision, created_at, updated_at, archived_at` | 可引用业务对象统一身份；各领域实体以同一 id 扩展，跨域关系可用真实外键 |
 | `devices` | `id PK, name, environment, credential_ref, last_seen_at` | 本地设备身份，秘密只引用 |
-| `actors` | `id PK, kind, provider, identity_ref` | 用户、执行器、宿主、外部来源；记录声明来源，不替代授权 |
+| `actors` | `id PK, kind, provider, identity_ref, authority_id FK actors` | 用户、执行器、宿主、外部来源；连接单独记录来源，继承持久主体的授权，重连不能重置已撤销、过期或收窄的授权 |
 | `projects` | `id PK/FK objects, name, type, priority, description, hidden, pinned_at` | 项目登记；项目对象自身为全局对象，项目内对象引用它 |
 | `project_locations` | `id PK, project_id FK, device_id FK, root_path, status`；活动路径唯一 | 同项目多路径/设备与移动恢复；检测 clone identity 冲突，不能静默合并两次运行 |
-| `contents` | `id PK, sha256, mime_type, encoding, byte_length, data BLOB`；hash/length 校验 | 原始全文、补丁、JSON、附件与版本内容；内容去重，但读取仍核对所属对象权限 |
+| `contents` | `id PK, sha256, mime_type, encoding, byte_length, stored_byte_length, data BLOB, chunk_index_json`；hash/length 校验 | 原始全文、补丁、JSON、附件与版本内容；大正文分块压缩、逐块校验，分页只读取对应数据块；保留完整原字节长度及 hash，内容去重，读取核对所属对象权限 |
+| `content_chunks` | `(content_id FK, ordinal) PK, data BLOB`；单块最多 64 KiB | 大正文以独立数据行保存；分页通过主键读取对应块，避免 SQL 表达式先加载整份 BLOB |
 | `object_revisions` | `(object_id FK, revision) PK, content_id FK, actor_id FK, reason, created_at` | 规则、记忆、设置、提案等可追踪版本；日志流不逐块创建对象版本 |
 | `relations` | `source_id FK objects, relation, target_id FK objects`；三元组唯一 | 父子、来源、证据、依赖、采用、取代、反馈归属；枚举关系并校验两端 kind |
-| `migration_items` | `(source_identity, source_key) UNIQUE, source_hash, object_id FK, stage, error` | 文件/旧库来源、幂等导入、错误与核对状态 |
+| `migration_items` | `(source_identity, source_key) UNIQUE, source_hash, object_id FK nullable, imported_revision, source_content_id FK, source_capture_revision, source_capture_request_id FK, stage, error` | 文件/旧库来源、幂等导入、错误与核对状态；原始字节及捕获回执先入库，未确认项目归属者保留为 unmapped，不变成全局记忆；捕获内容 hash 与最后应用的 source_hash 分别核对，迟到旧来源不得覆盖较新的数据库修改 |
 
 `objects` 只统一身份、scope、revision 与跨域外键，不成为第二套领域状态。具体会话/任务/授权状态只在对应领域表定义。它的用途是避免每个功能各自实现文件引用、归属、版本和证据链接。
 
@@ -420,6 +423,14 @@ actor、权限与已观测来源由连接和宿主确认；请求中的 provenan
 
 ## 11. 本轮交付范围
 
-本轮产出为本设计文档，不含 schema 部署、运行代码改动、数据导入、文件移动或历史删除。文件清单是正式迁移的目标清单；数据库表是逻辑模型与约束合同，实施时据此生成并验证完整 DDL、驱动发行包和真实消费者，不把本文当成已运行的 SQL 制品。
+用户已授权按本蓝图实施，并明确要求支持并发和即时读写。当前工作区已实现磁盘 SQLite 驱动、领域事务、版本与回执、Runtime 数据入口、MCP stdio 桥接、内容分块、权限与在线备份；这些实现仍处于验证和迁移阶段，不代表生产消费者已全部切换。
+
+并发不是用进程内整库快照各自覆盖文件。不同项目和会话通过同一 Runtime 提交事务，已提交写入可立即回读；旧兼容数据库连接也使用真实磁盘事务。运行权不能仅因心跳过期转交给另一存活进程，相同 runtimeId 也必须核对 pid。旧进程退出前不启动第二个数据库宿主。
+
+记忆导入已接到 Runtime 的宿主操作，逐个来源提交后让出执行机会；普通 MCP 会话不能调用这项宿主迁移操作。未确定项目归属的原文进入迁移记录，不提升为全局记忆；可以在以后补齐归属后导入，重复读取相同来源不产生额外捕获事件，来源变化也不能覆盖数据库中较新的编辑。
+
+当前真实存量记忆验证采用隔离验证库，原目录保持不变：183 份原文全部通过字节核对，179 份导入有明确归属的记忆对象，4 份保留原文和待映射原因；重复导入未新增事件，外键检查和在线备份通过。该结果不包含生产迁移，也不表示原有 MD 写入入口已退役。
+
+完整历史导入、十类消费者切换、原生 CLI 正式接入、RSI 采用与评估，以及旧写入入口退役仍需完成第 9、10 节的验收。最终文件清单仍是迁移终态；当前不得宣称目录已整洁或迁移已闭环，不部署未完成的消费者切换，也不删除存量文件。
 
 设计依据：用户在本次会话明确的一数据库/少量必要文件/统一 MCP/数据 RSI 目标，以及第 2 节列出的当前源代码。SQLite 和 MCP 的外部协议事实采用上文直接链接的官方文档。

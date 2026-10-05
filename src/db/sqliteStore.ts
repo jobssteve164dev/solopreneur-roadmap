@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import initSqlJs from 'sql.js';
+import { DiskDatabase } from './diskDatabase';
 import {
   AgentConversation,
   GrowthEdgeRecord,
@@ -21,21 +21,8 @@ import {
 } from '../conversationLifecycle';
 import { extractConversationParentConversationId } from '../continuation';
 
-let sharedSqlJsRuntime: Promise<initSqlJs.SqlJsStatic> | null = null;
-
-function getSqlJsRuntime(): Promise<initSqlJs.SqlJsStatic> {
-  if (!sharedSqlJsRuntime) {
-    sharedSqlJsRuntime = initSqlJs().catch((error) => {
-      sharedSqlJsRuntime = null;
-      throw error;
-    });
-  }
-  return sharedSqlJsRuntime;
-}
-
 export class SqliteStore {
-  private db: initSqlJs.Database | null = null;
-  private SQL: initSqlJs.SqlJsStatic | null = null;
+  private db: DiskDatabase | null = null;
   private readonly projectRoot: string;
 
   constructor(
@@ -50,7 +37,7 @@ export class SqliteStore {
   }
 
   /**
-   * Initializes the SQLite WASM runtime and opens the database.
+   * Opens a live disk connection; committed writes are visible to other readers.
    */
   public async init(): Promise<void> {
     if (this.db) {
@@ -58,23 +45,14 @@ export class SqliteStore {
     }
 
     try {
-      // 在 Node.js 环境下，可以直接无需任何参数地初始化 sql.js
-      // 它会自动加载其同包目录下的 sql-wasm.wasm，避免绝对路径跨平台或解包导致定位失败的问题
-      this.SQL = await getSqlJsRuntime();
-
-      const existed = fs.existsSync(this.dbFilePath);
-      if (existed) {
-        const fileBuffer = await fs.promises.readFile(this.dbFilePath);
-        this.db = new this.SQL.Database(fileBuffer);
-      } else {
-        this.db = new this.SQL.Database();
-      }
-      const schemaChanged = this.createTables();
-      if (!existed || schemaChanged) {
-        this.save();
-      }
+      // The legacy schema allows Solo conversations without a roadmap node.
+      // Its node foreign key was not enforced by sql.js; unified entities use real scope FKs.
+      this.db = new DiskDatabase(this.dbFilePath, { foreignKeys: false, journalMode: 'DELETE' });
+      this.createTables();
     } catch (error) {
-      console.error('Failed to initialize SQLite WASM:', error);
+      this.db?.close();
+      this.db = null;
+      console.error('Failed to open SQLite database:', error);
       throw error;
     }
   }
@@ -370,21 +348,13 @@ export class SqliteStore {
   }
 
   /**
-   * Commits the in-memory SQLite state to the local database file.
+   * Kept for existing callers. Disk statements commit directly or within a transaction.
    */
   public save(): void {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
 
-    try {
-      const data = this.db.export();
-      const buffer = Buffer.from(data);
-      fs.writeFileSync(this.dbFilePath, buffer);
-    } catch (error) {
-      console.error('Failed to save SQLite database to file:', error);
-      throw error;
-    }
   }
 
   /**
@@ -400,7 +370,9 @@ export class SqliteStore {
       return;
     }
 
-    // Clear existing nodes
+    this.db.run('BEGIN IMMEDIATE');
+    try {
+    // Replace the accepted CSV batch atomically.
     this.db.run('DELETE FROM nodes');
 
     // Insert new nodes
@@ -409,7 +381,7 @@ export class SqliteStore {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    for (const node of nodes) {
+    try { for (const node of nodes) {
       stmt.run([
         node.id,
         node.title,
@@ -422,9 +394,9 @@ export class SqliteStore {
         node.createdAt,
         node.completedAt,
       ]);
-    }
-    stmt.free();
-    this.save();
+    } } finally { stmt.free(); }
+    this.db.run('COMMIT');
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
   }
 
   private nodesMatch(existing: RoadmapNode[], next: RoadmapNode[]): boolean {
@@ -611,6 +583,8 @@ export class SqliteStore {
     if (!executionLogId) {
       throw new Error('Cannot index a run without an executionLogId');
     }
+    this.db.run('BEGIN IMMEDIATE');
+    try {
     this.db.run(
       `INSERT OR REPLACE INTO run_records (
         executionLogId,
@@ -687,7 +661,8 @@ export class SqliteStore {
     } finally {
       signalStmt.free();
     }
-    this.save();
+    this.db.run('COMMIT');
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
   }
 
   public getRunIndexEntries(): RunIndexEntry[] {
@@ -1385,9 +1360,7 @@ export class SqliteStore {
    * Closes the database.
    */
   public reloadGrowthDatabase(): void {
-    if (path.basename(this.dbFilePath) !== 'project_growth.db' || !this.SQL || !fs.existsSync(this.dbFilePath)) return;
-    this.db?.close();
-    this.db = new this.SQL.Database(fs.readFileSync(this.dbFilePath));
+    // Disk connections already observe the latest committed snapshot on each query.
   }
 
   public getGrowthReportProjection(prefix: string): { key: string; value: any }[] {

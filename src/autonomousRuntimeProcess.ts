@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
+import * as fs from 'fs';
 
 import {
   claimRuntimeLease,
@@ -17,6 +18,9 @@ import { runtimeBuildId } from './runtimeBuildIdentity';
 import { classifyDiagnosticFailure, recordLocalDiagnosticError } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 import { startTelegramBackgroundRuntime } from './telegramRuntime';
+import { UnifiedDataStore } from './db/unifiedDataStore';
+import { createRuntimeDataOperations } from './runtimeDataOperations';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -50,6 +54,11 @@ async function main(): Promise<void> {
   const runtimeId = argumentValue('--runtime-id') || crypto.randomUUID();
   const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid: process.pid });
   if (!lease.acquired) return;
+  const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
+  const databaseId = argumentValue('--database-id');
+  // Existing installations continue their current path until the verified migration creates the authority.
+  const dataStore = databaseId || fs.existsSync(path.join(databaseRoot, 'solomap.db')) ? UnifiedDataStore.open(databaseRoot, databaseId || undefined) : undefined;
+  await dataStore?.recoverOutbox();
 
   let stopping = false;
   let paused = false;
@@ -66,15 +75,17 @@ async function main(): Promise<void> {
     telegram.close();
     activeEngine?.cancel();
     updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
-    void controlServer?.close();
+    if (controlServer) void controlServer.close().then(() => dataStore?.close());
+    else dataStore?.close();
     process.exitCode = 0;
   };
-  controlServer = await startRuntimeControlServer({
+  try { controlServer = await startRuntimeControlServer({
     globalDataPath,
     runtimeId,
     entryPath: path.resolve(process.argv[1]),
     buildId: runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1])))),
     owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
+    onData: dataStore ? createRuntimeDataOperations(dataStore) : undefined,
     onCommand(command) {
       if (command === 'pause' || command === 'drain') {
         paused = true;
@@ -96,7 +107,12 @@ async function main(): Promise<void> {
       }
       return { status: paused ? 'paused' : 'running' };
     }
-  });
+  }); } catch (error) {
+    telegram.close();
+    dataStore?.close();
+    updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+    throw error;
+  }
   function runCycleObserved(): void {
     void runCycle().catch(error => {
       recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle.fatal', classifyDiagnosticFailure(error));

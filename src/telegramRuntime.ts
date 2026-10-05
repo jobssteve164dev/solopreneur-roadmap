@@ -28,6 +28,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
     : { tokenHash: '', offset: 0, bindingGeneration: 0, conversationIds: {} };
   let signature = '';
   let synchronizing = false;
+  let serviceGeneration = 0;
   let closed = false;
   const engines = new Set<EmbeddedPiAgentEngine>();
   let sending: Promise<void> | undefined;
@@ -120,6 +121,8 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
       let config = readTelegramRuntimeConfig(globalDataPath);
       let nextSignature = JSON.stringify([config.enabled, config.botToken, config.chatId, config.bindingGeneration]);
       if (signature === nextSignature) return;
+      // Accepted work belongs to this service generation until its result is delivered.
+      serviceGeneration++;
       const drained = drainTelegramReplies();
       stopTelegramRemoteService();
       engines.forEach(engine => engine.cancel());
@@ -148,6 +151,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
         }
       }
       saveState();
+      const acceptedGeneration = serviceGeneration;
       const host: TelegramHost = {
         getSettings() {
           const current = readTelegramRuntimeConfig(globalDataPath);
@@ -185,7 +189,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
         },
         finishChatUpdate(update: TelegramUpdate) {
           // A service stop retains accepted work for the next owner of the same lease.
-          if (closed) return;
+          if (closed || acceptedGeneration !== serviceGeneration) return;
           const filePath = path.join(inboxDirectory, `${update.update_id}.json`);
           if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         },

@@ -287,14 +287,12 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
   const now = options.now || new Date();
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
   const current = readRuntimeState(globalDataPath);
-  const heartbeatAgeMs = current ? now.getTime() - new Date(current.heartbeatAt).getTime() : Number.POSITIVE_INFINITY;
   if (
     current
-    && current.status !== 'stopped'
-    && current.runtimeId !== options.runtimeId
-    && heartbeatAgeMs <= 90_000
+    && (current.runtimeId !== options.runtimeId || current.pid !== options.pid)
     && isProcessAlive(current.pid)
   ) {
+    // A delayed heartbeat or closing endpoint does not release a live owner's database.
     return { acquired: false, owner: current };
   }
   const owner: RuntimeState = {

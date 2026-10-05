@@ -136,6 +136,7 @@ test('standalone runtime stays paused and resumes through its authenticated cont
   const runtimeRoot = path.join(globalRoot, 'runtime');
   fs.mkdirSync(globalRoot);
   fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ schemaVersion: 1, projects: [], hiddenProjects: [] }));
+  new (require('../out/db/unifiedDataStore.js').UnifiedDataStore)(globalRoot).close();
   const child = childProcess.spawn(process.execPath, [
     path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'),
     '--global-data-path', globalRoot,
@@ -164,6 +165,10 @@ test('standalone runtime stays paused and resumes through its authenticated cont
     }
     if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
     fs.unlinkSync(path.join(globalRoot, 'projects.json'));
+    for (const name of ['solomap.db', 'solomap.db-wal', 'solomap.db-shm']) {
+      const file = path.join(globalRoot, name);
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
     fs.rmdirSync(globalRoot);
     fs.rmdirSync(root);
   }

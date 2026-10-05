@@ -282,6 +282,33 @@ test('a paused runtime keeps its single-writer lease until it resumes', () => {
   }
 });
 
+test('a live database owner cannot lose its lease to a stale heartbeat or reused runtime ID', () => {
+  const fixture = createFixture();
+  try {
+    const started = new Date('2026-09-22T08:00:00.000Z');
+    runtime.claimRuntimeLease(fixture.globalRoot, { runtimeId: 'owner', pid: process.pid, now: started });
+    for (const status of ['running', 'paused', 'stopped']) {
+      runtime.updateRuntimeState(fixture.globalRoot, 'owner', { status }, started);
+      for (const runtimeId of ['competitor', 'owner']) {
+        const result = runtime.claimRuntimeLease(fixture.globalRoot, {
+          runtimeId, pid: 424242, now: new Date('2026-09-22T09:00:00.000Z'),
+          isProcessAlive: pid => pid === process.pid
+        });
+        assert.equal(result.acquired, false, `${status}: a live process still owns its database connection`);
+        assert.equal(result.owner.pid, process.pid);
+      }
+    }
+    let spawns = 0;
+    const result = runtimeHost.ensureAutonomousRuntime({
+      extensionPath: '/opt/solomap', globalDataPath: fixture.globalRoot,
+      now: new Date('2026-09-22T09:00:00.000Z'), isProcessAlive: pid => pid === process.pid,
+      spawnProcess() { spawns++; throw new Error('a second database owner must not start'); }
+    });
+    assert.equal(spawns, 0);
+    assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'owner' });
+  } finally { removeFixture(fixture); }
+});
+
 test('standalone runtime entry can create a shadow decision without VS Code', () => {
   const fixture = createFixture();
   try {

@@ -4920,7 +4920,6 @@ test('local-first loading paints and launches before optional or durable work', 
     'the fresh conversation snapshot must reuse the selected project engine instead of opening the journal twice'
   );
   assert.match(extensionSource, /if \(!syncEngineReady && syncEngineInitPromise[\s\S]*?await syncEngineInitPromise/);
-  assert.match(sqliteStoreSource, /await fs\.promises\.readFile\(this\.dbFilePath\)/);
 
   const sidebarProviderSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
   const coreBatchBody = sidebarProviderSource.slice(
@@ -4943,8 +4942,6 @@ test('local-first loading paints and launches before optional or durable work', 
     syncBody.indexOf('sendNodesToWebview()') < syncBody.indexOf('await nextSyncEngine.initAndSync()'),
     'CSV roadmap nodes must paint before SQLite initialization'
   );
-  assert.match(sqliteStoreSource, /let sharedSqlJsRuntime: Promise<initSqlJs\.SqlJsStatic> \| null = null/);
-  assert.match(sqliteStoreSource, /this\.SQL = await getSqlJsRuntime\(\)/);
 
   const roadmapOpenBody = extensionSource.slice(
     extensionSource.indexOf('async function openRoadmapPanel'),

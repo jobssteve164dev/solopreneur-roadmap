@@ -115,7 +115,7 @@ export async function ensureHealthyAutonomousRuntime(options: RuntimeHostOptions
   const buildId = options.buildId || runtimeBuildId(options.extensionPath);
   const current = readRuntimeState(globalDataPath);
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
-  if (current && current.status !== 'stopped' && isProcessAlive(current.pid)) {
+  if (current && isProcessAlive(current.pid)) {
     const health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
     if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
     if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
@@ -145,8 +145,6 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
   const current = readRuntimeState(globalDataPath);
   if (
     current
-    && current.status !== 'stopped'
-    && now.getTime() - new Date(current.heartbeatAt).getTime() <= 90_000
     && isProcessAlive(current.pid)
   ) {
     return { started: false, pid: current.pid, runtimeId: current.runtimeId };
