@@ -927,17 +927,17 @@ async function handleSharedWebviewAction(
         ready: async root => { await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root }); },
         call: (root, operation, input) => sendRuntimeDataRequest(root, { operation, input }),
         confirm: async files => {
-          const confirm = language === 'en' ? 'Recycle these files' : '确认回收这些文件';
+          const confirm = language === 'en' ? 'Move to recycle bin' : '移到回收站';
           return await vscode.window.showWarningMessage(
-            language === 'en' ? `Recycle ${files.length} old files?` : `回收 ${files.length} 个旧文件？`,
-            { modal: true, detail: (language === 'en' ? 'These exact files are saved in the database and can be restored here.\n\n' : '以下文件已完整保存在数据库，可在此恢复。\n\n') + files.map(file => file.path).join('\n') },
+            language === 'en' ? `Move ${files.length} old files to the recycle bin?` : `将 ${files.length} 个旧文件移到回收站？`,
+            { modal: true, detail: (language === 'en' ? 'These files were imported safely and can be restored from Settings.\n\n' : '这些文件已安全导入，之后仍可在设置中恢复。\n\n') + files.map(file => file.path).join('\n') },
             confirm
           ) === confirm;
         },
         launchAgent: (kind, targetId) => launchMigrationMaintenanceAgent(context, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), kind, targetId)
       });
       const successMessage = result.cancelled ? undefined : result.agentStarted
-        ? (language === 'en' ? 'Agent started. You can keep using SoloMap.' : 'Agent 已开始处理，可继续使用 SoloMap。')
+        ? (language === 'en' ? 'Cleanup started in the background. You can keep using SoloMap.' : '已开始在后台整理，你可以继续使用 SoloMap。')
         : message.command === 'dataMigration.restore'
         ? (language === 'en' ? 'File restored.' : '文件已恢复。')
         : ['dataMigration.recycle', 'dataMigration.retryRecycling'].includes(String(message.command))
@@ -948,6 +948,11 @@ async function handleSharedWebviewAction(
       const detail = code === 'restore_target_exists' ? (language === 'en' ? 'A file already exists at the original location. It was kept.' : '原位置已有文件，已保留现有内容。')
         : code === 'data_location_changed' ? (language === 'en' ? 'The data location changed. Refresh before continuing.' : '数据位置已变更，请刷新后继续。')
           : code === 'recycling_source_changed' ? (language === 'en' ? 'The file changed. It was kept; refresh to review it.' : '文件内容已变化，已保留。请刷新后重新查看。')
+            : code === 'maintenance_agent_native_boundary_unsupported' ? (language === 'en' ? 'Automatic cleanup requires Claude Code. Select it in Agent settings, then try again.' : '自动整理需要使用 Claude Code。请先在 Agent 设置中选择，然后重试。')
+              : code === 'agent_cli_not_found' ? (language === 'en' ? 'The selected Agent is not available. Install it or update its path in Agent settings.' : '未找到当前选择的 Agent。请先安装，或在 Agent 设置中更新路径。')
+                : code === 'maintenance_task_in_use' ? (language === 'en' ? 'Cleanup is already running in another window. Update the status to see its progress.' : '另一窗口正在整理。请更新状态查看进度。')
+                  : code === 'agent_cli_start_failed' ? (language === 'en' ? 'Cleanup could not start. Check the selected Agent, then try again.' : '未能开始整理。请检查当前选择的 Agent，然后重试。')
+                    : code === 'maintenance_launch_denied' ? (language === 'en' ? 'The cleanup connection expired. Update the status, then continue.' : '整理连接已过期。请更新状态后继续。')
             : (language === 'en' ? 'This action did not finish. Your data is kept; refresh and retry.' : '本次操作未完成，数据已保留。请刷新后重试。');
       recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'data.migration.settings', error);
       await respond({ command: 'dataMigrationLoaded', requestId: String(message.requestId || ''), error: detail });
