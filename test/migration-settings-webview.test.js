@@ -13,6 +13,7 @@ test('both generated settings surfaces include the same accessible migration and
     assert.match(html, /data-migration-preview/);
     assert.match(html, /data-migration-confirm/);
     assert.match(html, /data-migration-status[^>]*role="status"/);
+    assert.ok(html.indexOf('id="migration-settings-card"') > html.lastIndexOf('<div class="settings-card"'), 'the temporary migration card must be the final settings card');
     for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(match[1]);
   }
   assert.match(getMigrationSettingsCardHtml(), /overflow-wrap:\s*anywhere/);
@@ -34,10 +35,12 @@ test('reviewing an exact file list pauses polling and stale responses cannot hid
   const card = { querySelector: element, querySelectorAll: () => [], setAttribute() {}, addEventListener: (name, listener) => listeners.set(name, listener) };
   const context = { currentLanguage: 'zh', vscode: { postMessage: value => messages.push(value) }, document: { getElementById: id => id === 'settings-panel' ? panel : card }, window: { addEventListener: (name, listener) => listeners.set('window-' + name, listener) }, MutationObserver: class { constructor(callback) { observe = callback; } observe() {} disconnect() {} }, setTimeout: callback => { timers.set(++timerId, callback); return timerId; }, clearTimeout: id => timers.delete(id) };
   vm.runInNewContext(getMigrationSettingsScript(), context);
+  assert.equal(card.hidden, true, 'the temporary card stays hidden when there is no work');
   observe();
   const first = messages.at(-1);
   const deliver = data => listeners.get('window-message')({ data: { command: 'dataMigrationLoaded', ...data } });
   deliver({ requestId: first.requestId, dataRoot: '/isolated', overview: { jobs: [{ jobId: 'job', status: 'running', args: {}, progress: {} }], capturedFiles: 1, migratedFiles: 1, recyclableFiles: 1, recyclableBytes: 42, recycling: [] } });
+  assert.equal(card.hidden, false);
   assert.equal(timers.size, 1);
   const target = { disabled: false, hasAttribute: name => name === 'data-migration-preview', closest() { return this; } };
   listeners.get('click')({ target });

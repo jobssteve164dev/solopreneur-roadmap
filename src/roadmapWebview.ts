@@ -2095,8 +2095,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
-    ${getMigrationSettingsCardHtml()}
-
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-folder"></span><span id="settings-section-basic">Project Profile</span></div>
       <div class="settings-field">
@@ -2154,6 +2152,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         </div>
       </div>
     </div>
+
+    ${getMigrationSettingsCardHtml()}
 
     <div class="settings-actions">
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>

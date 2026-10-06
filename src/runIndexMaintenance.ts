@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexFile, RunIndexRecord, RunIndexSignal } from './db/types';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { AgentTokenUsage, normalizeTokenUsage } from './tokenUsage';
 
 export interface RunIndexHealth {
@@ -109,23 +111,17 @@ function digestToRunIndex(digest: DigestRun): { record: RunIndexRecord; files: R
   };
 }
 
-export async function getRunIndexHealth(projectPath: string, extensionPath: string): Promise<RunIndexHealth> {
+export async function getRunIndexHealth(projectPath: string, extensionPath: string, globalDataPath = ''): Promise<RunIndexHealth> {
   const digests = readDigestObjects(projectPath);
-  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  if (!fs.existsSync(dbPath)) {
-    return {
-      digestCount: digests.length,
-      indexedCount: 0,
-      missingDigestCount: digests.length,
-      backfilledCount: 0,
-      ok: digests.length === 0,
-      error: ''
-    };
-  }
-  const store = new SqliteStore(dbPath, extensionPath);
   try {
-    await store.init();
-    const indexedIds = new Set(store.getRunIndexEntries().map((entry) => Number(entry.executionLogId || 0)).filter(Boolean));
+    let entries: any[];
+    if (globalDataPath) entries = await sendRuntimeDataRequest<any[]>(normalizeGlobalDataPathForExtension(globalDataPath, projectPath), { operation: 'read_project_run_indexes', input: { root: projectPath } });
+    else {
+      const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+      if (!fs.existsSync(dbPath)) entries = [];
+      else { const legacy = new SqliteStore(dbPath, extensionPath); await legacy.init(); try { entries = legacy.getRunIndexEntries(); } finally { legacy.close(); } }
+    }
+    const indexedIds = new Set(entries.map((entry) => Number(entry.executionLogId || 0)).filter(Boolean));
     const missingDigestCount = digests.filter((digest) => !indexedIds.has(digest.executionLogId)).length;
     return {
       digestCount: digests.length,
@@ -144,40 +140,40 @@ export async function getRunIndexHealth(projectPath: string, extensionPath: stri
       ok: false,
       error: error instanceof Error ? error.message : String(error)
     };
-  } finally {
-    store.close();
   }
 }
 
-export async function backfillRunIndexFromDigests(projectPath: string, extensionPath: string): Promise<RunIndexHealth> {
+export async function backfillRunIndexFromDigests(projectPath: string, extensionPath: string, globalDataPath = ''): Promise<RunIndexHealth> {
   const digests = readDigestObjects(projectPath);
   if (digests.length === 0) {
-    return getRunIndexHealth(projectPath, extensionPath);
+    return getRunIndexHealth(projectPath, extensionPath, globalDataPath);
   }
-  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  const store = new SqliteStore(dbPath, extensionPath);
   let backfilledCount = 0;
   try {
-    await store.init();
-    const indexedIds = new Set(store.getRunIndexEntries().map((entry) => Number(entry.executionLogId || 0)).filter(Boolean));
+    const root = globalDataPath ? normalizeGlobalDataPathForExtension(globalDataPath, projectPath) : '';
+    let legacy: SqliteStore | undefined;
+    const entries = root ? await sendRuntimeDataRequest<any[]>(root, { operation: 'read_project_run_indexes', input: { root: projectPath } }) : (() => [])();
+    if (!root) { legacy = new SqliteStore(path.join(projectPath, '.solopreneur', 'project_journal.db'), extensionPath); await legacy.init(); entries.push(...legacy.getRunIndexEntries()); }
+    const indexedIds = new Set(entries.map((entry) => Number(entry.executionLogId || 0)).filter(Boolean));
     for (const digest of digests) {
       if (indexedIds.has(digest.executionLogId)) {
         continue;
       }
       const next = digestToRunIndex(digest);
-      store.upsertRunIndex(next.record, next.files, next.signals);
+      if (root) await sendRuntimeDataRequest(root, { operation: 'upsert_project_run_index', input: { root: projectPath, record: next.record, files: next.files, signals: next.signals } });
+      else legacy!.upsertRunIndex(next.record, next.files, next.signals);
       indexedIds.add(digest.executionLogId);
       backfilledCount += 1;
     }
     const missingDigestCount = digests.filter((digest) => !indexedIds.has(digest.executionLogId)).length;
-    return {
+    const result = {
       digestCount: digests.length,
       indexedCount: indexedIds.size,
       missingDigestCount,
       backfilledCount,
       ok: missingDigestCount === 0,
       error: ''
-    };
+    }; legacy?.close(); return result;
   } catch (error) {
     return {
       digestCount: digests.length,
@@ -187,7 +183,5 @@ export async function backfillRunIndexFromDigests(projectPath: string, extension
       ok: false,
       error: error instanceof Error ? error.message : String(error)
     };
-  } finally {
-    store.close();
   }
 }

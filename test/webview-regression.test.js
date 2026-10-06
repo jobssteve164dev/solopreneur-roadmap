@@ -4881,7 +4881,7 @@ test('run index backfill is scoped to explicit project selection or manual refre
 
   assert.match(extensionSource, /function scheduleProjectRunIndexBackfill\(context: vscode\.ExtensionContext, projectPath: string\)/);
   assert.match(extensionSource, /async function selectProject[\s\S]*?scheduleProjectRunIndexBackfill\(context, projectPath\)/);
-  assert.match(extensionSource, /'project\.refreshExternalData': async[\s\S]*?backfillRunIndexFromDigests\(projectPath, context\.extensionPath\)/);
+  assert.match(extensionSource, /'project\.refreshExternalData': async[\s\S]*?backfillRunIndexFromDigests\(projectPath, context\.extensionPath,/);
   assert.doesNotMatch(sidebarLoaderSource, /backfillRunIndexFromDigests/);
   assert.doesNotMatch(analyticsSource, /backfillRunIndexFromDigests/);
   assert.doesNotMatch(impactSource, /backfillRunIndexFromDigests/);
@@ -7246,7 +7246,7 @@ test('agent launch path uses one terminal-first startup component', () => {
   ]) {
     const body = source.slice(source.indexOf(startMarker), source.indexOf(endMarker, source.indexOf(startMarker)));
     const ledgerOwner = name === 'step' ? 'projectSyncEngine' : 'syncEngine';
-    const ledgerWrite = body.indexOf(`const executionLogId = ${ledgerOwner}.logAgentExecution(`);
+    const ledgerWrite = body.indexOf(`const executionLogId = await ${ledgerOwner}.logAgentExecution(`);
     const ledgerPublish = body.indexOf(refreshCall, ledgerWrite);
     const preSessionGit = body.indexOf('await createPreSessionGitCommit(', ledgerWrite);
     assert.ok(ledgerWrite >= 0, `${name} launch must create its first ledger row`);
@@ -9321,7 +9321,8 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(dataReadme, /step-memory/);
   assert.match(dataReadme, /完成标准/);
   assert.match(dataReadme, /step-sessions/);
-  assert.match(dataReadme, /project_journal\.db/);
+  assert.doesNotMatch(dataReadme, /project_journal\.db/);
+  assert.match(dataReadme, /全局 SoloMap 数据库/);
   assert.match(dataReadme, /Git\/GitHub/);
   assert.match(bootstrapInstructions, /Bootstrap Roadmap Instructions/);
   assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
@@ -11638,7 +11639,7 @@ test('a long-waiting interactive session can still register a new turn before de
   assert.equal(runningStatus.executionLogId, 72);
 });
 
-test('growth continuation keeps roadmap state and registers the actual new execution in the stable task', () => {
+test('growth continuation keeps roadmap state and registers the actual new execution in the stable task', async () => {
   const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__ensureInteractiveTurnExecution = ensureInteractiveTurnExecution;');
   const { ensureTaskCheckpointRuntime } = require('../out/taskCheckpoint.js');
   const { registerLearningTask } = require('../out/taskReport.js');
@@ -11656,7 +11657,7 @@ test('growth continuation keeps roadmap state and registers the actual new execu
   assert.equal(started.status, 0, started.stderr);
   const status = JSON.parse(fs.readFileSync(statusFile));
   assert.equal(status.checkpointPreserveRoadmapState, true);
-  const result = extensionModule.__ensureInteractiveTurnExecution({
+  const result = await extensionModule.__ensureInteractiveTurnExecution({
     getAgentExecutions: () => [{ id: 1, status: 'Completed' }],
     logAgentExecution: () => 2,
     getNodes: () => [{ id: 'node', status: 'Pending' }],
@@ -12752,7 +12753,7 @@ test('continuation runs are recorded without task status judgment while preservi
   assert.ok(fs.existsSync(path.join(root, '.solopreneur', 'run-digests', '2-88.json')));
 });
 
-test('linking a Solo conversation records a reference without changing the step state', () => {
+test('linking a Solo conversation records a reference without changing the step state', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -12790,7 +12791,7 @@ test('linking a Solo conversation records a reference without changing the step 
     }
   });
 
-  extensionModule.__linkSoloConversationToNode(12, '2');
+  await extensionModule.__linkSoloConversationToNode(12, '2');
 
   assert.equal(linkedRecord.nodeId, '2');
   assert.equal(linkedRecord.status, 'Linked');
@@ -13714,7 +13715,7 @@ test('project-level execution history returns latest roadmap run across nodes', 
   assert.ok(Number(recent[0].id) > Number(recent[24].id));
   assert.match(extensionSource, /const sidebarProjectConversationHistoryLimit = 10/);
   assert.match(extensionSource, /getRecentProjectAgentExecutions\(sidebarConversationQueryLimit\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
-  assert.match(extensionSource, /getRecentExecutionLogs\(sidebarConversationQueryLimit\)[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
+  assert.match(extensionSource, /operation: 'read_project_journal'[\s\S]*?\.slice\(0, sidebarProjectConversationHistoryLimit\)/);
   store.close();
 });
 

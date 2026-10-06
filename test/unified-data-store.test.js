@@ -54,7 +54,7 @@ test('rollback, scope isolation, content integrity, backup and reopen preserve f
     try {
       assert.equal(backup.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
       assert.equal(backup.prepare('SELECT count(*) AS n FROM objects').get().n, 3);
-      assert.equal(backup.prepare('SELECT count(*) AS n FROM schema_migrations').get().n, 8);
+      assert.equal(backup.prepare('SELECT count(*) AS n FROM schema_migrations').get().n, 9);
     } finally { backup.close(); }
   } finally { store.close(); }
 });

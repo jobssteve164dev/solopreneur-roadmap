@@ -72,6 +72,15 @@ export class SqliteStore {
     }
   }
 
+  /** Opens a legacy project journal without creating or updating its schema. */
+  public async initJournalReadOnly(): Promise<void> {
+    if (this.db) return;
+    try {
+      this.db = new DiskDatabase(this.dbFilePath, { foreignKeys: false, readOnly: true });
+      if (!this.sqliteObjectExists('table', 'execution_logs')) throw new Error('legacy_journal_table_missing:execution_logs');
+    } catch (error) { this.db?.close(); this.db = null; throw error; }
+  }
+
   /**
    * Creates the schema tables for storing node history, logs, and state.
    */

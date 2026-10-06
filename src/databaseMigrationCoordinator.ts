@@ -1,6 +1,7 @@
 import { UnifiedDataStore, MigrationJob } from './db/unifiedDataStore';
 import { importMemoryDirectory, MemoryImportResult } from './memoryDatabaseMigration';
 import { importIntelligenceDirectory } from './intelligenceConversationData';
+import { importAgentRuns, importProjectGrowth, importProjectJournal } from './projectDataMigration';
 
 /** One background queue belongs to the existing Runtime database owner. */
 export class DatabaseMigrationCoordinator {
@@ -25,8 +26,13 @@ export class DatabaseMigrationCoordinator {
         this.store.updateMigrationJob(job.jobId, 'running', job.progress);
         let processed = 0;
         try {
-          const importer = job.args.collection === 'intelligence' ? importIntelligenceDirectory : importMemoryDirectory;
+          const importer: (store: UnifiedDataStore, source: string, options: any) => Promise<MemoryImportResult> = job.args.collection === 'intelligence' ? importIntelligenceDirectory
+            : job.args.collection === 'project-journal' ? importProjectJournal
+            : job.args.collection === 'agent-runs' ? importAgentRuns
+            : job.args.collection === 'project-growth' ? importProjectGrowth
+            : importMemoryDirectory;
           const result = await importer(this.store, String(job.args.sourceRoot), {
+            projectRoot: job.args.projectRoot,
             sourceIdentity: job.args.sourceIdentity as string | undefined,
             projectScopes: job.args.projectScopes as Record<string, string> | undefined,
             shouldContinue: () => !this.stopping,

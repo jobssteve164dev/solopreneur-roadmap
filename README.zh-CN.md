@@ -81,14 +81,16 @@ SoloMap 是直接嵌在 VS Code 里的**本地优先、Git 友好、高审美**�
 
 ## 🔒 本地数据结构
 
-SoloMap 会在每个项目根目录下自动创建 `.solopreneur/` 目录，数据与代码共存：
+SoloMap 会在每个项目根目录下保留少量必须随项目存在的文件，并把持久数据统一写入全局数据库：
 
 ```text
 .solopreneur/
   ├── roadmap.csv          <- Git 友好的路线图单一事实来源
-  ├── project_journal.db   <- 保存高频 Agent 执行记录的本地 SQLite 数据库
   ├── step-memory/         <- 各路线图环节的上下文与完成标准
-  └── agent-runs/          <- 有边界的提示词输入与输出摘要
+  └── agent-runs/          <- 任务续接与报告读取仍需要的少量文件
+
+.solomap-global/
+  └── solomap.db           <- 对话、运行索引、归档产物、生长数据和长期记忆
 ```
 
 ---

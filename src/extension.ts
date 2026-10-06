@@ -9,7 +9,6 @@ import { queueTelegramBackgroundNotification } from './telegramRuntimeConfig';
 import { createTelegramBackgroundConnection } from './telegramBackgroundConnection';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
-import { SqliteStore } from './db/sqliteStore';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
@@ -1349,7 +1348,7 @@ async function handleSharedWebviewAction(
       );
     },
     'conversation.linkToStep': async (request) => {
-      linkSoloConversationToNode(Number(request.conversationId || 0), String(request.nodeId || ''));
+      await linkSoloConversationToNode(Number(request.conversationId || 0), String(request.nodeId || ''));
     },
     'conversation.rollback': async (request) => {
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
@@ -1698,7 +1697,7 @@ async function handleSharedWebviewAction(
         loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null),
         loadExternalDeliverySummary(projectPath, { force: true }).catch(() => null),
         loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null),
-        backfillRunIndexFromDigests(projectPath, context.extensionPath).catch((error) => {
+        backfillRunIndexFromDigests(projectPath, context.extensionPath, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)).catch((error) => {
           recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'project.refresh.run_index', error);
           console.error('SoloMap run index backfill failed during project refresh:', error);
           return null;
@@ -2730,7 +2729,7 @@ function scheduleProjectRunIndexBackfill(context: vscode.ExtensionContext, proje
   setTimeout(() => {
     void (async () => {
       try {
-        const health = await backfillRunIndexFromDigests(projectPath, context.extensionPath);
+        const health = await backfillRunIndexFromDigests(projectPath, context.extensionPath, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
         if (health.backfilledCount > 0 && getSelectedProjectPath(context) === projectPath) {
           sendLocalProjectsToWebviews(context);
         }
@@ -2786,12 +2785,12 @@ function buildSolopreneurDirectoryReadme(): string {
   return [
     '# SoloMap Project Data',
     '',
-    '这个目录由 SoloMap 自动创建，用来保存当前项目的路线图、Agent 对话记录、执行日志和环节交接总结。',
+    '这个目录由 SoloMap 自动创建，用来保存当前项目必须随项目保留的路线图、恢复状态和环节交接信息。',
     '',
     '## 为什么数据放在项目里',
     '',
-    '- 项目数据跟随项目文件夹走，不依赖插件后端服务。',
-    '- 换一台机器、换一个 IDE、重新安装插件后，只要项目文件还在，SoloMap 就能重新加载这些数据。',
+    '- 路线图和任务恢复所需的小型文件跟随项目文件夹；对话、执行索引和项目生长数据进入全局 SoloMap 数据库。',
+    '- 重启插件后，SoloMap 会重新连接全局数据库，并结合项目内恢复状态接续任务。',
     '- 这个目录可以交给 Git/GitHub 管理，让路线图、交接总结和执行记录成为项目历史的一部分。',
     '',
     '## 主要文件',
@@ -2800,16 +2799,15 @@ function buildSolopreneurDirectoryReadme(): string {
     '- `step-memory/`：每个路线图环节的 JSON 完成标准和交接总结。下一轮 Agent 对话会读取这里的结构化上下文。',
     '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会把这些会话 ID 作为可选参考交给 Agent，而不是强制续接。',
     '- `documentation.json`：项目解释性文档的索引与审计状态。它由 SoloMap 维护，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
-    '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
-    '- 项目生长快照与生长分析轨迹保存在全局 SoloMap 数据库中，项目目录不再生成独立生长数据库。',
-    '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
+    '- Agent 对话、执行索引、归档产物和项目生长数据统一保存在全局 SoloMap 数据库中，项目目录不再生成独立日志或生长数据库。',
+    '- `agent-runs/`：仅保留任务运行、续聊恢复和报告读取仍需要的文件；已完整入库且不再使用的文件可在设置中回收。',
     '- `run-digests/`：每次 Agent 调用结束后的结构化执行摘要和跨 Agent 交接信号。下一轮相关任务会读取少量摘要来减少重复探索。',
     '- `execution-graph.json`：由 run digest 自动生成的轻量索引，按环节、Agent、文件、状态、失败和命令组织最近执行信号。',
     '- `.agent_status.json`：临时运行状态文件，通常会被插件自动清理。',
     '',
     '## 请不要随意删除',
     '',
-    '删除这个目录会导致 SoloMap 无法恢复该项目的路线图、状态、对话历史和环节交接总结。需要清理体积时，优先只清理 `agent-runs/` 中很旧的运行记录，并保留 `roadmap.csv` 和 `step-memory/`。',
+    '不要手动删除仍在使用的恢复文件。需要清理旧数据时，请在设置末尾使用“数据迁移与回收”；SoloMap 只会列出已经完整入库且可恢复的文件。',
     '',
     '## Git 建议',
     '',
@@ -3384,21 +3382,8 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
       syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs
     ), 1);
   }
-  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  if (!fs.existsSync(journalPath)) {
-    return [];
-  }
-  const store = new SqliteStore(journalPath, context.extensionPath);
-  await store.init();
-  try {
-    return selectLatestConversationRoots(buildConversationPresentations(
-      projectPath,
-      soloConversationId,
-      store.getExecutionLogPage(soloConversationId, sidebarConversationQueryLimit, 0).logs
-    ), 1);
-  } finally {
-    store.close();
-  }
+  const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, nodeId: soloConversationId, limit: sidebarConversationQueryLimit, offset: 0 } });
+  return selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, page.logs), 1);
 }
 
 async function getStepConversationHistoryForProject(context: vscode.ExtensionContext, projectPath: string, nodeId: string): Promise<AgentConversation[]> {
@@ -3412,21 +3397,8 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
       syncEngine.getAgentExecutionPage(nodeId, sidebarConversationQueryLimit, 0).logs
     ), 1);
   }
-  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  if (!fs.existsSync(journalPath)) {
-    return [];
-  }
-  const store = new SqliteStore(journalPath, context.extensionPath);
-  await store.init();
-  try {
-    return selectLatestConversationRoots(buildConversationPresentations(
-      projectPath,
-      nodeId,
-      store.getExecutionLogPage(nodeId, sidebarConversationQueryLimit, 0).logs
-    ), 1);
-  } finally {
-    store.close();
-  }
+  const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, nodeId, limit: sidebarConversationQueryLimit, offset: 0 } });
+  return selectLatestConversationRoots(buildConversationPresentations(projectPath, nodeId, page.logs), 1);
 }
 
 async function getProjectConversationHistoryForProject(context: vscode.ExtensionContext, projectPath: string): Promise<AgentConversation[]> {
@@ -3443,19 +3415,8 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
       .filter(isStepConversation)
       .slice(0, sidebarProjectConversationHistoryLimit);
   }
-  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  if (!fs.existsSync(journalPath)) {
-    return [];
-  }
-  const store = new SqliteStore(journalPath, context.extensionPath);
-  await store.init();
-  try {
-    return hydrateProjectConversationContinuations(projectPath, store.getRecentExecutionLogs(sidebarConversationQueryLimit))
-      .filter(isStepConversation)
-      .slice(0, sidebarProjectConversationHistoryLimit);
-  } finally {
-    store.close();
-  }
+  const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, limit: sidebarConversationQueryLimit, offset: 0 } });
+  return hydrateProjectConversationContinuations(projectPath, page.logs).filter(isStepConversation).slice(0, sidebarProjectConversationHistoryLimit);
 }
 
 async function getProjectConversationSnapshotForProject(
@@ -3501,21 +3462,13 @@ async function getProjectConversationSnapshotForProject(
       );
     }
   }
-  const journalPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  if (!fs.existsSync(journalPath)) {
-    return { solo: [], project: [], flow: [], revision: [] };
-  }
-  const store = new SqliteStore(journalPath, context.extensionPath);
-  await store.init();
-  try {
-    return buildSnapshot(
-      store.getExecutionLogPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
-      store.getRecentExecutionLogs(sidebarConversationQueryLimit),
-      store.getExecutionLogPage(roadmapRevisionId, sidebarConversationQueryLimit, 0).logs
-    );
-  } finally {
-    store.close();
-  }
+  const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const [solo, project, revision] = await Promise.all([
+    sendRuntimeDataRequest<{ logs: AgentConversation[] }>(root, { operation: 'read_project_journal', input: { root: projectPath, nodeId: soloConversationId, limit: sidebarConversationQueryLimit } }),
+    sendRuntimeDataRequest<{ logs: AgentConversation[] }>(root, { operation: 'read_project_journal', input: { root: projectPath, limit: sidebarConversationQueryLimit } }),
+    sendRuntimeDataRequest<{ logs: AgentConversation[] }>(root, { operation: 'read_project_journal', input: { root: projectPath, nodeId: roadmapRevisionId, limit: sidebarConversationQueryLimit } })
+  ]);
+  return buildSnapshot(solo.logs, project.logs, revision.logs);
 }
 
 function hydrateProjectConversationContinuations(projectPath: string, conversations: AgentConversation[]): AgentConversation[] {
@@ -3560,7 +3513,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
 
   const csvPath = path.join(solopreneurDir, 'roadmap.csv');
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
-  const nextSyncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath);
+  const nextSyncEngine = new SyncEngine(csvPath, dbPath, context.extensionPath, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
   const initGeneration = projectSelectionGeneration;
   syncEngine = nextSyncEngine;
   activeProjectRoot = projectRoot;
@@ -6236,7 +6189,7 @@ async function startAgentReviewRun(input: {
 
   const loggedCommand = buildReadOnlyAgentCommandForPromptFile(input.reviewerCli, promptFilePath, input.workspaceRoot);
   if (!loggedCommand) {
-    input.engine.logAgentExecution(
+    await input.engine.logAgentExecution(
       input.nodeId,
       input.reviewerCli,
       input.reviewerCli,
@@ -6251,7 +6204,7 @@ async function startAgentReviewRun(input: {
     return false;
   }
   fs.writeFileSync(commandFilePath, loggedCommand, 'utf8');
-  const executionLogId = input.engine.logAgentExecution(
+  const executionLogId = await input.engine.logAgentExecution(
     input.nodeId,
     input.reviewerCli,
     loggedCommand,
@@ -6356,7 +6309,7 @@ async function startAgentReviewRevisionRun(input: {
   completionCriteria: string[];
 }): Promise<boolean> {
   if (!commandExists(input.mainAgentCli)) {
-    input.engine.logAgentExecution(
+    await input.engine.logAgentExecution(
       input.nodeId,
       input.mainAgentCli,
       input.mainAgentCli,
@@ -6391,7 +6344,7 @@ async function startAgentReviewRevisionRun(input: {
       ? buildContinuationMetadataBlock(input.reviewOfExecutionLogId, input.mainNativeSessionId)
       : `Continuation parent conversation: ${input.reviewOfExecutionLogId}`
   ].filter(Boolean).join('\n\n');
-  const executionLogId = input.engine.logAgentExecution(
+  const executionLogId = await input.engine.logAgentExecution(
     input.nodeId,
     input.mainAgentCli,
     `${input.mainAgentCli} [preparing review revision]`,
@@ -6447,7 +6400,7 @@ async function startAgentReviewRevisionRun(input: {
       reviewCompletionCriteria: input.completionCriteria
     }
   );
-  input.engine.updateAgentExecution(executionLogId, input.mainAgentCli, directExecutionCommand, launchSummary, 'Running');
+  await input.engine.updateAgentExecution(executionLogId, input.mainAgentCli, directExecutionCommand, launchSummary, 'Running');
   await launchAgentConversationTerminal({
     workspaceRoot: input.workspaceRoot,
     label: `review-revision-${input.nodeId}-${executionLogId}`,
@@ -7848,7 +7801,7 @@ async function handleContinueConversationTurn(
     `User supplement:\n${request}`,
     attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
-  const executionLogId = syncEngine.logAgentExecution(
+  const executionLogId = await syncEngine.logAgentExecution(
     nodeId,
     agentCli,
     `${agentCli} [preparing interactive continuation]`,
@@ -7882,7 +7835,7 @@ async function handleContinueConversationTurn(
     selectedModel
   );
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
-  syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
+  await syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
 
   const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
@@ -8036,7 +7989,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     'User supplement:\n继续当前 Agent 对话',
     'Continuation mode: direct terminal with tracked sentinel recording.'
   ].filter(Boolean).join('\n\n');
-  const executionLogId = projectSyncEngine.logAgentExecution(
+  const executionLogId = await projectSyncEngine.logAgentExecution(
     nodeId,
     agentCli,
     `${agentCli} [preparing tracked continuation terminal]`,
@@ -8048,7 +8001,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   fs.mkdirSync(runDir, { recursive: true });
   const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, workspaceRoot);
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, workspaceRoot, sessionId);
-  projectSyncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
+  await projectSyncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
   const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
     '',
@@ -8215,7 +8168,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   if (!isContinuationRun && nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
     syncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
   }
-  syncEngine.updateAgentExecution(
+  await syncEngine.updateAgentExecution(
     conversationId,
     conversation.agentCli,
     conversation.command,
@@ -8272,7 +8225,7 @@ async function handleRoadmapRevision(
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
-    projectSyncEngine.logAgentExecution(
+    await projectSyncEngine.logAgentExecution(
       roadmapRevisionId,
       requestedAgentCli || agentCli,
       requestedAgentCli || agentCli,
@@ -8285,7 +8238,7 @@ async function handleRoadmapRevision(
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    projectSyncEngine.logAgentExecution(
+    await projectSyncEngine.logAgentExecution(
       roadmapRevisionId,
       agentCli,
       agentCli,
@@ -8308,7 +8261,7 @@ async function handleRoadmapRevision(
     `User supplement:\n${revisionRequest}`,
     attachedFiles.length > 0 ? `Supplement files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
-  const executionLogId = projectSyncEngine.logAgentExecution(
+  const executionLogId = await projectSyncEngine.logAgentExecution(
     roadmapRevisionId,
     agentCli,
     `${agentCli} [preparing isolated run]`,
@@ -8325,7 +8278,7 @@ async function handleRoadmapRevision(
   }
   const promptFilePath = path.join(runDir, 'prompt.txt');
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
-  projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
+  await projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
 
   const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
@@ -8425,7 +8378,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
-    syncEngine.logAgentExecution(
+    await syncEngine.logAgentExecution(
       soloConversationId,
       requestedAgentCli || agentCli,
       requestedAgentCli || agentCli,
@@ -8438,7 +8391,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    syncEngine.logAgentExecution(
+    await syncEngine.logAgentExecution(
       soloConversationId,
       agentCli,
       agentCli,
@@ -8468,7 +8421,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
   let launchSummary = buildLaunchSummary();
-  const executionLogId = syncEngine.logAgentExecution(
+  const executionLogId = await syncEngine.logAgentExecution(
     soloConversationId,
     agentCli,
     `${agentCli} [preparing isolated run]`,
@@ -8489,7 +8442,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const agentCommand = interactiveConversation
     ? buildInteractiveAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode, selectedModel)
     : buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), activeProjectRoot, settings.taskPermissionMode, selectedModel);
-  syncEngine.updateAgentExecution(
+  await syncEngine.updateAgentExecution(
     executionLogId,
     agentCli,
     agentCommand,
@@ -8576,7 +8529,7 @@ async function startFlowRoleRun(
     `Run started at: ${new Date().toISOString()}`,
     `Goal:\n${input.flow.goal}`
   ].join('\n\n');
-  const executionLogId = syncEngine.logAgentExecution(
+  const executionLogId = await syncEngine.logAgentExecution(
     nodeId,
     agentCli,
     `${agentCli} [flow ${input.role}]`,
@@ -8587,7 +8540,7 @@ async function startFlowRoleRun(
   const statusFilePath = getAgentStatusFilePath(input.projectPath, executionLogId);
   const effectiveModel = input.selectedModel || input.flow.source.selectedModel || '';
   const agentCommand = buildAgentCommandForPromptFile(agentCli, path.join(runDir, 'prompt.txt'), input.projectPath, settings.taskPermissionMode, effectiveModel);
-  syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
+  await syncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
   updateFlowTrace(input.projectPath, input.flow.flowId, (trace) => {
     const nextTrace = { ...trace, status: 'running' as const };
     nextTrace.loops = trace.loops.map((candidate) => {
@@ -8699,7 +8652,7 @@ async function handleRunFlow(
   });
 }
 
-function linkSoloConversationToNode(conversationId: number, nodeId: string): void {
+async function linkSoloConversationToNode(conversationId: number, nodeId: string): Promise<void> {
   if (!syncEngine || !conversationId || !nodeId) {
     return;
   }
@@ -8725,7 +8678,7 @@ function linkSoloConversationToNode(conversationId: number, nodeId: string): voi
     '',
     conversation.output
   ].join('\n');
-  const linkedLogId = syncEngine.logAgentExecution(
+  const linkedLogId = await syncEngine.logAgentExecution(
     nodeId,
     conversation.agentCli,
     conversation.command,
@@ -8951,7 +8904,7 @@ async function handleRunAgent(
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
     projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
-    projectSyncEngine.logAgentExecution(
+    await projectSyncEngine.logAgentExecution(
       nodeId,
       requestedAgentCli || agentCli,
       requestedAgentCli || agentCli,
@@ -8970,7 +8923,7 @@ async function handleRunAgent(
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
     projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
-    projectSyncEngine.logAgentExecution(
+    await projectSyncEngine.logAgentExecution(
       nodeId,
       agentCli,
       agentCli,
@@ -9007,7 +8960,7 @@ async function handleRunAgent(
     attachedFiles.length ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
   let launchSummary = buildLaunchSummary();
-  const executionLogId = projectSyncEngine.logAgentExecution(
+  const executionLogId = await projectSyncEngine.logAgentExecution(
     nodeId,
     agentCli,
     `${agentCli} [preparing isolated run]`,
@@ -9047,7 +9000,7 @@ async function handleRunAgent(
   const agentCommand = interactiveConversation
     ? buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel)
     : buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
-  projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
+  await projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
 
   const runKind = interactiveConversation ? 'step' : 'step_background';
   const { finalCommand } = await buildPreparedAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', runKind, '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
@@ -9686,7 +9639,7 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
       outputTail ? `Agent output tail:\n${outputTail}` : ''
     ].filter(Boolean).join('\n\n');
 
-    syncEngine.updateAgentExecution(
+    await syncEngine.updateAgentExecution(
       executionLogId,
       String(statusData.agentCli || ''),
       resolvedCommand,
@@ -9744,7 +9697,7 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
     `Touched project files:\n${touchedFilesSummary || '无'}`,
     outputTail ? `Agent output tail:\n${outputTail}` : ''
   ].filter(Boolean).join('\n\n');
-  syncEngine.updateAgentExecution(
+  await syncEngine.updateAgentExecution(
     executionLogId,
     String(statusData.agentCli || ''),
     resolvedCommand,
@@ -9956,12 +9909,12 @@ async function processFlowStatusFile(statusFilePath: string, statusData: any): P
   return true;
 }
 
-function ensureInteractiveTurnExecution(
+async function ensureInteractiveTurnExecution(
   statusSyncEngine: SyncEngine,
   statusData: Record<string, any>,
   workspaceRoot: string,
   forceNew = false
-): { executionLogId: number; userMessage: string; startedAt: string } {
+): Promise<{ executionLogId: number; userMessage: string; startedAt: string }> {
   const nodeId = String(statusData.nodeId || '');
   const rootExecutionLogId = Number(statusData.rootExecutionLogId || statusData.executionLogId || 0);
   const currentExecutionLogId = Number(statusData.executionLogId || rootExecutionLogId || 0);
@@ -9973,7 +9926,7 @@ function ensureInteractiveTurnExecution(
   const currentConversation = currentLogs.find((entry) => Number(entry.id || 0) === currentExecutionLogId);
   const executionLogId = !forceNew && currentConversation?.status === 'Running'
     ? Number(currentConversation.id)
-    : statusSyncEngine.logAgentExecution(
+    : await statusSyncEngine.logAgentExecution(
       nodeId,
       String(statusData.agentCli || statusData.commandPreview || statusData.command || 'Unknown CLI'),
       String(statusData.commandPreview || statusData.command || `${statusData.agentCli || 'Agent'} [interactive turn]`),
@@ -10287,7 +10240,8 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       transientStatusSyncEngine = new SyncEngine(
         path.join(solopreneurDir, 'roadmap.csv'),
         path.join(solopreneurDir, 'project_journal.db'),
-        extensionContextRef.extensionPath
+        extensionContextRef.extensionPath,
+        normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath)
       );
       statusSyncEngine = transientStatusSyncEngine;
       await statusSyncEngine.initAndSync();
@@ -10298,7 +10252,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     }
 
     if (statusData.interactiveSession === true && statusData.checkpointImplicitTurn === true && statusData.checkpointOutcome) {
-      const recoveredTurn = ensureInteractiveTurnExecution(statusSyncEngine, statusData, workspaceRoot, true);
+      const recoveredTurn = await ensureInteractiveTurnExecution(statusSyncEngine, statusData, workspaceRoot, true);
       executionLogId = recoveredTurn.executionLogId;
       userMessage = recoveredTurn.userMessage;
       startedAt = recoveredTurn.startedAt;
@@ -10357,7 +10311,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           /Interactive session state:\s*(?:Open|Waiting|Running|Closed)/gi,
           'Interactive session state: Closed'
         );
-        statusSyncEngine.updateAgentExecution(
+        await statusSyncEngine.updateAgentExecution(
           Number(currentConversation.id),
           currentConversation.agentCli,
           currentConversation.command,
@@ -10389,7 +10343,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
 
     if (status === 'Turn Started' && statusData.interactiveSession === true) {
       const rootExecutionLogId = Number(statusData.rootExecutionLogId || executionLogId || 0);
-      const registeredTurn = ensureInteractiveTurnExecution(statusSyncEngine, statusData, workspaceRoot);
+      const registeredTurn = await ensureInteractiveTurnExecution(statusSyncEngine, statusData, workspaceRoot);
       let plannedNativeSessionId = String(statusData.plannedNativeSessionId || '').trim();
       const sessionProvider = String(statusData.sessionProvider || '');
       const providerReportedSessionId = String(statusData.providerReportedSessionId || '').trim();
@@ -10827,7 +10781,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           .map((value) => ({ type: 'verification', value }));
         const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus)
           .map((value) => ({ type: 'failure', value }));
-        statusSyncEngine.upsertRunIndex({
+        await statusSyncEngine.upsertRunIndex({
           executionLogId: Number(executionLogId),
           nodeId,
           runKind: String(runKind || (isSoloConversation ? 'solo' : 'step')),
@@ -10850,8 +10804,21 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           touchedFilesPath: toRuntimePath(touchedFilesPath),
           updatedAt: finishedAt
         }, [...changedFiles, ...touchedFiles], [...verificationSignals, ...failureSignals]);
+        const runsRoot = path.join(workspaceRoot, '.solopreneur', 'agent-runs');
+        const artifactPaths = [outputFilePath, commandFilePath, promptFilePath, changesFilePath, touchedFilesPath, runDigestPath, statusData.taskReportPath]
+          .map(value => String(value || '')).filter((value, index, values) => value && values.indexOf(value) === index && fs.existsSync(value));
+        for (const artifactPath of artifactPaths) {
+          const relativePath = path.relative(runsRoot, artifactPath);
+          if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) continue;
+          const bytes = await fs.promises.readFile(artifactPath);
+          await sendRuntimeDataRequest(globalDataPath, { operation: 'write_run_artifact', input: {
+            root: workspaceRoot, executionLogId: Number(executionLogId), relativePath, sourceKey: relativePath,
+            mimeType: artifactPath.endsWith('.json') ? 'application/json' : 'text/plain', bytes: bytes.toString('base64'),
+            hash: crypto.createHash('sha256').update(bytes).digest('hex')
+          } });
+        }
         clearProjectInvestmentCache(workspaceRoot);
-        runIndexSummary = 'Run index saved to project_journal.db.';
+        runIndexSummary = 'Run history and artifacts saved to the global database.';
       } catch (error) {
         runIndexSummary = `Run index not saved: ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -10989,7 +10956,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       outputTail ? `Agent output tail:\n${outputTail}` : 'Agent output tail: No captured output.'
     ].filter(Boolean).join('\n\n');
     const updatedExistingConversation = executionLogId
-      ? statusSyncEngine.updateAgentExecution(
+      ? await statusSyncEngine.updateAgentExecution(
         Number(executionLogId),
         agentCli || commandPreview || command || 'Unknown CLI',
         resolvedCommand,
@@ -10998,7 +10965,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
       )
       : false;
     if (!updatedExistingConversation) {
-      statusSyncEngine.logAgentExecution(
+      await statusSyncEngine.logAgentExecution(
         nodeId,
         agentCli || commandPreview || command || 'Unknown CLI',
         resolvedCommand,
@@ -11091,7 +11058,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
           collaborationReviewMode: String(collaborationReviewMode || 'high_risk')
         });
       } else {
-        statusSyncEngine.logAgentExecution(
+        await statusSyncEngine.logAgentExecution(
           nodeId,
           requestedReviewerCli || reviewerCli,
           requestedReviewerCli || reviewerCli,

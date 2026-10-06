@@ -82,9 +82,11 @@ SoloMap creates a `.solopreneur/` folder inside your project root to keep it com
 ```text
 .solopreneur/
   ├── roadmap.csv          <- The single source of truth for your roadmap (Git-friendly)
-  ├── project_journal.db   <- Local SQLite DB for high-frequency agent execution logs
   ├── step-memory/         <- Context & completion criteria for each roadmap node
-  └── agent-runs/          <- Bounded prompt inputs and output digests
+  └── agent-runs/          <- Minimal live task recovery and report files
+
+.solomap-global/
+  └── solomap.db           <- Shared conversations, run indexes, artifacts, growth data, and memory
 ```
 
 ---

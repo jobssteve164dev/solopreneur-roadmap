@@ -10,6 +10,7 @@ import * as path from 'path';
 import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath } from './agentDatabaseConfig';
 import { readIntelligenceConversation, listIntelligenceConversations } from './intelligenceConversationData';
 import { MigrationRecycling } from './migrationRecycling';
+import { isRetirableRunArtifact } from './projectDataMigration';
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
@@ -50,6 +51,37 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const project = await store.registerProject({ root: String(input.root || '') });
         return store.readProjectGrowth(project.projectId, Number(input.historyLimit || 12));
       }
+      case 'append_project_journal': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        return store.appendProjectJournal(project.projectId, String(input.idempotencyKey || ''), input.entry as any, Number(input.executionLogId || 0), Number(input.minimumExecutionLogId || 1));
+      }
+      case 'update_project_journal': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        return store.updateProjectJournal(project.projectId, Number(input.executionLogId || 0), input as any);
+      }
+      case 'read_project_journal': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        return store.readProjectJournal(project.projectId, input as any);
+      }
+      case 'upsert_project_run_index': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        store.upsertProjectRunIndex(project.projectId, input.record as any, input.files as any, input.signals as any); return { written: true };
+      }
+      case 'read_project_run_indexes': {
+        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectRunIndexes(project.projectId);
+      }
+      case 'write_run_artifact': {
+        const root = String(input.root || ''); const project = await store.registerProject({ root }); store.writeRunArtifact(project.projectId, input as any);
+        if (typeof input.sourceKey === 'string') {
+          const bytes = Buffer.from(String(input.bytes || ''), 'base64'); const identity = `agent-runs:${root}`;
+          store.captureMigrationSource({ identity, key: input.sourceKey, hash: String(input.hash || '') }, bytes, { mimeType: String(input.mimeType || 'application/octet-stream'), encoding: 'binary' });
+          if (isRetirableRunArtifact(input.sourceKey)) store.markMigrationSourceImported(identity, input.sourceKey);
+        }
+        return { written: true };
+      }
+      case 'read_run_artifact': {
+        const project = await store.registerProject({ root: String(input.root || '') }); return store.readRunArtifact(project.projectId, Number(input.executionLogId || 0), String(input.relativePath || ''));
+      }
       case 'read_growth_report_projection': {
         const project = await store.registerProject({ root: String(input.root || '') });
         return store.readGrowthReportProjection(project.projectId, String(input.prefix || ''));
@@ -70,6 +102,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       }
       case 'import_memory': return migrations.enqueue(input);
       case 'import_intelligence': return migrations.enqueue({ ...input, collection: 'intelligence' });
+      case 'import_project_data': return migrations.enqueue(input);
       case 'read_intelligence_conversation': return readIntelligenceConversation(store, String(input.id || ''));
       case 'list_intelligence_conversations': return listIntelligenceConversations(store);
       case 'write_intelligence_conversation': return store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);

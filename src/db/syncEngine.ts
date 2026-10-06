@@ -1,20 +1,28 @@
 import * as fs from 'fs';
+import * as path from 'path';
+import * as crypto from 'crypto';
 import { CsvStore } from './csvStore';
 import { SqliteStore } from './sqliteStore';
 import { AgentConversation, GrowthSnapshotData, GrowthSnapshotRecord, RoadmapNode, RoadmapEdge, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal } from './types';
+import { sendRuntimeDataRequest } from '../autonomousRuntimeControl';
 
 export class SyncEngine {
   private csvStore: CsvStore;
-  private sqliteStore: SqliteStore;
+  private sqliteStore: SqliteStore | undefined;
   private nodeCache: RoadmapNode[] = [];
+  private conversationCache: AgentConversation[] = [];
+  private runIndexCache: RunIndexEntry[] = [];
+  private readonly projectRoot: string;
 
   constructor(
     private csvPath: string,
     private dbPath: string,
-    private extensionPath: string
+    private extensionPath: string,
+    private globalDataPath = ''
   ) {
     this.csvStore = new CsvStore(csvPath);
-    this.sqliteStore = new SqliteStore(dbPath, extensionPath);
+    this.projectRoot = path.dirname(path.dirname(dbPath));
+    if (!globalDataPath) this.sqliteStore = new SqliteStore(dbPath, extensionPath);
     this.nodeCache = this.csvStore.readNodes();
   }
 
@@ -23,7 +31,36 @@ export class SyncEngine {
    */
   public async initAndSync(): Promise<void> {
     // 1. Init SQLite database
-    await this.sqliteStore.init();
+    if (this.globalDataPath) {
+      const indexesPromise = sendRuntimeDataRequest<RunIndexEntry[]>(this.globalDataPath, { operation: 'read_project_run_indexes', input: { root: this.projectRoot } });
+      const logs: AgentConversation[] = [];
+      let offset = 0;
+      while (true) {
+        const page = await sendRuntimeDataRequest<{ logs: AgentConversation[]; hasMore: boolean }>(this.globalDataPath, { operation: 'read_project_journal', input: { root: this.projectRoot, limit: 500, offset } });
+        logs.push(...page.logs);
+        if (!page.hasMore) break;
+        offset += page.logs.length;
+      }
+      const indexes = await indexesPromise;
+      let legacyLogs: AgentConversation[] = [];
+      let legacyIndexes: RunIndexEntry[] = [];
+      if (fs.existsSync(this.dbPath)) {
+        const legacy = new SqliteStore(this.dbPath, this.extensionPath);
+        try {
+          await legacy.initJournalReadOnly();
+          legacyLogs = legacy.getAllExecutionLogs();
+          legacyIndexes = legacy.getRunIndexEntries();
+        } catch (error) {
+          console.warn('SoloMap could not read the legacy project journal during background migration:', error);
+        } finally { legacy.close(); }
+      }
+      const databaseLogIds = new Set(logs.map(entry => entry.id));
+      this.conversationCache = [...logs, ...legacyLogs.filter(entry => !databaseLogIds.has(entry.id))]
+        .sort((a, b) => b.id - a.id);
+      const databaseIndexIds = new Set(indexes.map(entry => entry.executionLogId));
+      this.runIndexCache = [...indexes, ...legacyIndexes.filter(entry => !databaseIndexIds.has(entry.executionLogId))]
+        .sort((a, b) => b.executionLogId - a.executionLogId);
+    } else await this.sqliteStore!.init();
 
     // 2. Read nodes from CSV (Git source of truth)
     const csvNodes = this.csvStore.readNodes();
@@ -31,11 +68,11 @@ export class SyncEngine {
 
     if (csvNodes.length > 0) {
       // 3. Hydrate SQLite from the CSV
-      this.sqliteStore.syncNodesFromList(csvNodes);
+      this.sqliteStore?.syncNodesFromList(csvNodes);
       this.nodeCache = csvNodes;
     } else {
       // If CSV is empty, check if SQLite has any existing nodes (to prevent data loss)
-      const sqliteNodes = this.sqliteStore.getAllNodes();
+      const sqliteNodes = this.sqliteStore?.getAllNodes() || [];
       if (sqliteNodes.length > 0) {
         // Sync back to CSV
         this.csvStore.writeNodes(sqliteNodes);
@@ -44,21 +81,21 @@ export class SyncEngine {
         // Both are empty! Seed a default roadmap for a new solopreneur project
         const defaultNodes = this.createDefaultRoadmap();
         this.csvStore.writeNodes(defaultNodes);
-        this.sqliteStore.syncNodesFromList(defaultNodes);
+        this.sqliteStore?.syncNodesFromList(defaultNodes);
         this.nodeCache = defaultNodes;
       }
     }
   }
 
   public close(): void {
-    this.sqliteStore.close();
+    this.sqliteStore?.close();
   }
 
   /**
    * Retrieves nodes. Reads from SQLite (very fast).
    */
   public getNodes(): RoadmapNode[] {
-    if (!this.sqliteStore.isInitialized()) {
+    if (!this.sqliteStore?.isInitialized()) {
       return this.nodeCache;
     }
     return this.sqliteStore.getAllNodes();
@@ -83,7 +120,7 @@ export class SyncEngine {
     nodes[targetIdx] = updatedNode;
 
     // Save to SQLite & CSV
-    this.sqliteStore.syncNodesFromList(nodes);
+    this.sqliteStore?.syncNodesFromList(nodes);
     this.csvStore.writeNodes(nodes);
     this.nodeCache = nodes;
   }
@@ -92,7 +129,7 @@ export class SyncEngine {
    * Adds a list of newly generated nodes (e.g. from AI) into the roadmap.
    */
   public setNodes(nodes: RoadmapNode[]): void {
-    this.sqliteStore.syncNodesFromList(nodes);
+    this.sqliteStore?.syncNodesFromList(nodes);
     this.csvStore.writeNodes(nodes);
     this.nodeCache = nodes;
   }
@@ -106,8 +143,15 @@ export class SyncEngine {
     command: string,
     output: string,
     status: string
-  ): number {
-    return this.sqliteStore.logExecution(nodeId, agentCli, command, output, status);
+  ): number | Promise<number> {
+    if (!this.globalDataPath) return this.sqliteStore!.logExecution(nodeId, agentCli, command, output, status);
+    const timestamp = new Date().toISOString();
+    const idempotencyKey = crypto.randomUUID();
+    const minimumExecutionLogId = this.conversationCache.reduce((maximum, entry) => Math.max(maximum, Number(entry.id || 0)), 0) + 1;
+    return sendRuntimeDataRequest<{ executionLogId: number }>(this.globalDataPath, { operation: 'append_project_journal', input: { root: this.projectRoot, minimumExecutionLogId, idempotencyKey, entry: { nodeId, timestamp, agentCli, command, output, status } } }).then(result => {
+      this.conversationCache.unshift({ id: result.executionLogId, nodeId, timestamp, agentCli, command, output, status });
+      return result.executionLogId;
+    });
   }
 
   /**
@@ -119,54 +163,66 @@ export class SyncEngine {
     command: string,
     output: string,
     status: string
-  ): boolean {
-    return this.sqliteStore.updateExecution(id, agentCli, command, output, status);
+  ): boolean | Promise<boolean> {
+    if (!this.globalDataPath) return this.sqliteStore!.updateExecution(id, agentCli, command, output, status);
+    return sendRuntimeDataRequest<{ updated: boolean }>(this.globalDataPath, { operation: 'update_project_journal', input: { root: this.projectRoot, executionLogId: id, agentCli, command, output, status } }).then(result => {
+      if (result.updated) {
+        const current = this.conversationCache.find(item => item.id === id);
+        if (current) Object.assign(current, { agentCli, command, output, status });
+      }
+      return result.updated;
+    });
   }
 
   /**
    * Reads the agent conversation history for a single roadmap node.
    */
   public getAgentExecutions(nodeId: string): AgentConversation[] {
-    return this.sqliteStore.getExecutionLogs(nodeId);
+    return this.globalDataPath ? this.conversationCache.filter(item => item.nodeId === nodeId) : this.sqliteStore!.getExecutionLogs(nodeId);
   }
 
   public getAgentExecutionPage(nodeId: string, limit = 20, offset = 0): { logs: AgentConversation[]; hasMore: boolean } {
-    return this.sqliteStore.getExecutionLogPage(nodeId, limit, offset);
+    if (!this.globalDataPath) return this.sqliteStore!.getExecutionLogPage(nodeId, limit, offset);
+    const matches = this.conversationCache.filter(item => item.nodeId === nodeId);
+    return { logs: matches.slice(offset, offset + limit), hasMore: matches.length > offset + limit };
   }
 
   /**
    * Reads agent conversation history across the whole project.
    */
   public getProjectAgentExecutions(): AgentConversation[] {
-    return this.sqliteStore.getAllExecutionLogs();
+    return this.globalDataPath ? [...this.conversationCache] : this.sqliteStore!.getAllExecutionLogs();
   }
 
   public getRecentProjectAgentExecutions(limit = 200): AgentConversation[] {
-    return this.sqliteStore.getRecentExecutionLogs(limit);
+    return this.globalDataPath ? this.conversationCache.slice(0, limit) : this.sqliteStore!.getRecentExecutionLogs(limit);
   }
 
-  public upsertRunIndex(record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
-    this.sqliteStore.upsertRunIndex(record, files, signals);
+  public upsertRunIndex(record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void | Promise<void> {
+    if (!this.globalDataPath) { this.sqliteStore!.upsertRunIndex(record, files, signals); return; }
+    return sendRuntimeDataRequest(this.globalDataPath, { operation: 'upsert_project_run_index', input: { root: this.projectRoot, record, files, signals } }).then(() => {
+      this.runIndexCache = [{ ...record, files, signals }, ...this.runIndexCache.filter(item => item.executionLogId !== record.executionLogId)];
+    });
   }
 
   public getRunIndexEntries(): RunIndexEntry[] {
-    return this.sqliteStore.getRunIndexEntries();
+    return this.globalDataPath ? [...this.runIndexCache] : this.sqliteStore!.getRunIndexEntries();
   }
 
   public writeGrowthSnapshot(data: GrowthSnapshotData): void {
-    this.sqliteStore.writeGrowthSnapshot(data);
+    this.sqliteStore!.writeGrowthSnapshot(data);
   }
 
   public getLatestGrowthSnapshot(): GrowthSnapshotData | null {
-    return this.sqliteStore.getLatestGrowthSnapshot();
+    return this.sqliteStore!.getLatestGrowthSnapshot();
   }
 
   public getGrowthSnapshotById(snapshotId: string): GrowthSnapshotData | null {
-    return this.sqliteStore.getGrowthSnapshotById(snapshotId);
+    return this.sqliteStore!.getGrowthSnapshotById(snapshotId);
   }
 
   public getGrowthSnapshotHistory(limit = 12): GrowthSnapshotRecord[] {
-    return this.sqliteStore.getGrowthSnapshotHistory(limit);
+    return this.sqliteStore!.getGrowthSnapshotHistory(limit);
   }
 
   /**

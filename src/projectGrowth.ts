@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
+import { CsvStore } from './db/csvStore';
 import { SqliteStore } from './db/sqliteStore';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
@@ -26,6 +27,15 @@ export interface ProjectGrowthScanOptions {
   forceRefresh?: boolean;
   historyLimit?: number;
   globalDataPath?: string;
+}
+
+async function readProjectRunEntriesDuringMigration(projectPath: string, extensionPath: string, globalDataPath: string): Promise<RunIndexEntry[]> {
+  const entries = await sendRuntimeDataRequest<RunIndexEntry[]>(globalDataPath, { operation: 'read_project_run_indexes', input: { root: projectPath } });
+  if (entries.length) return entries;
+  const legacyPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
+  if (!fs.existsSync(legacyPath)) return entries;
+  const legacy = new SqliteStore(legacyPath, extensionPath);
+  try { await legacy.initJournalReadOnly(); return legacy.getRunIndexEntries(); } finally { legacy.close(); }
 }
 
 export interface ProjectGrowthSummaryNode {
@@ -2300,16 +2310,13 @@ export async function refreshProjectGrowthSnapshot(
   extensionPath: string,
   options: ProjectGrowthScanOptions = {}
 ): Promise<ProjectGrowthViewModel> {
-  const journalDbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  const journalStore = new SqliteStore(journalDbPath, extensionPath);
-  try {
-    await journalStore.init();
+  {
     const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
     await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
     const before = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } });
     const previous = before.latest;
-    const roadmapNodes = journalStore.getAllNodes();
-    const runEntries = journalStore.getRunIndexEntries();
+    const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
+    const runEntries = await readProjectRunEntriesDuringMigration(projectPath, extensionPath, globalDataPath);
     const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
     await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
     await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: projectPath, data: snapshot, idempotencyKey: `growth:${snapshot.snapshot.id}` } });
@@ -2318,8 +2325,6 @@ export async function refreshProjectGrowthSnapshot(
     const view = buildProjectGrowthViewModel(stored.latest, { previous, history: stored.history });
     projectGrowthViewCache.set(projectPath, view);
     return view;
-  } finally {
-    journalStore.close();
   }
 }
 
@@ -2333,20 +2338,14 @@ export async function getProjectGrowthView(
     const coverage = loadProjectCoverageSnapshot(projectPath);
     return { ...cached, coverage: { ...cached.coverage, versionState: coverage ? coverageVersionState(projectPath, coverage) : 'unknown' } };
   }
-  const journalDbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
-  let journalStore: SqliteStore | null = null;
-  try {
+  {
     const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
     if (options.forceRefresh || (options.refreshIfMissing !== false && !stored.latest)) {
-      if (!journalStore) {
-        journalStore = new SqliteStore(journalDbPath, extensionPath);
-        await journalStore.init();
-      }
       const previous = stored.latest;
-      const roadmapNodes = journalStore.getAllNodes();
-      const runEntries = journalStore.getRunIndexEntries();
+      const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
+      const runEntries = await readProjectRunEntriesDuringMigration(projectPath, extensionPath, globalDataPath);
       const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, {
         ...options,
         scanReason: options.scanReason || 'query_refresh'
@@ -2371,8 +2370,6 @@ export async function getProjectGrowthView(
     const view = buildProjectGrowthViewModel(latest, { previous, history });
     projectGrowthViewCache.set(projectPath, view);
     return view;
-  } finally {
-    journalStore?.close();
   }
 }
 

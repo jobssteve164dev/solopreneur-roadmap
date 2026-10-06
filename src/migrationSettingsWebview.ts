@@ -1,5 +1,5 @@
 export function getMigrationSettingsCardHtml(): string {
-  return `<section class="settings-card" id="migration-settings-card" aria-labelledby="migration-card-title">
+  return `<section class="settings-card" id="migration-settings-card" aria-labelledby="migration-card-title" hidden>
     <style>
       #migration-settings-card { color: var(--text-main, #e2e8f0); }
       #migration-settings-card .migration-detail { font-size: 12px; line-height: 1.5; margin: 8px 0; overflow-wrap: anywhere; }
@@ -72,6 +72,8 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     const jobs = overview?.jobs || [];
     const active = jobs.some((job: any) => ['queued', 'running', 'interrupted'].includes(job.status));
     const needsAttention = jobs.filter((job: any) => ['failed', 'completed_with_conflicts'].includes(job.status));
+    const history = overview?.recycling || [];
+    card!.hidden = !plan && !active && !needsAttention.length && !Number(overview?.recyclableFiles || 0) && !history.length;
     const migrated = Number(overview?.migratedFiles || 0);
     const count = Number(overview?.capturedFiles || 0);
     element('[data-migration-status]').textContent = !overview ? text('尚未读取进度', 'Progress not loaded')
@@ -86,7 +88,12 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
       '已保存 ' + count + ' 个旧文件 · 已迁移 ' + migrated + ' 项 · 可回收 ' + overview.recyclableFiles + ' 个文件（' + (overview.recyclableBytes / 1024).toFixed(1) + ' KB）',
       count + ' old files saved · ' + migrated + ' items migrated · ' + overview.recyclableFiles + ' recyclable files (' + (overview.recyclableBytes / 1024).toFixed(1) + ' KB)') : '';
     element('[data-migration-jobs]').innerHTML = jobs.map((job: any) => {
-      const name = job.args.collection === 'intelligence' ? text('聊天记录', 'Chat history') : text('长期记忆', 'Long-term memory');
+      const name = ({
+        intelligence: text('聊天记录', 'Chat history'),
+        'project-growth': text('项目生长图', 'Project growth'),
+        'project-journal': text('项目日志', 'Project journal'),
+        'agent-runs': text('Agent 运行记录', 'Agent runs')
+      } as Record<string, string>)[job.args.collection] || text('长期记忆', 'Long-term memory');
       const errors = Array.isArray(job.progress.conflicts) ? job.progress.conflicts : [];
       return '<div class="migration-detail">' + name + ' · ' + escape(text(({ queued: '等待迁移', running: '迁移中', interrupted: '等待继续', completed: '已完成', completed_with_conflicts: '需要查看', failed: '迁移未完成' } as any)[job.status] || '', ({ queued: 'Queued', running: 'Migrating', interrupted: 'Waiting to resume', completed: 'Complete', completed_with_conflicts: 'Needs attention', failed: 'Incomplete' } as any)[job.status] || ''))
         + (['failed', 'completed_with_conflicts', 'interrupted'].includes(job.status) ? ' <button type="button" class="settings-action-btn test-btn" data-migration-retry="' + escape(job.jobId) + '">' + text('重试迁移', 'Retry migration') + '</button>' : '')
@@ -99,7 +106,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
         : text('暂无可回收文件，仍在使用或已变化的文件会保留。', 'No files are ready to recycle. Files in use or changed are kept.');
       element('[data-migration-files]').innerHTML = plan.files.map((file: any) => '<li>' + escape(file.path) + '</li>').join('');
     }
-    element('[data-migration-history]').innerHTML = (overview?.recycling || []).map((item: any) => '<div class="migration-detail">' + escape(item.path) + ' · ' + (item.status === 'trashed' ? text('已回收', 'Recycled') : text('已保留，等待处理', 'Kept, awaiting action'))
+    element('[data-migration-history]').innerHTML = history.map((item: any) => '<div class="migration-detail">' + escape(item.path) + ' · ' + (item.status === 'trashed' ? text('已回收', 'Recycled') : text('已保留，等待处理', 'Kept, awaiting action'))
       + (item.status !== 'approved' ? ' <button type="button" class="settings-action-btn test-btn" data-migration-restore="' + escape(item.itemId) + '">' + text('恢复文件', 'Restore file') + '</button>' : '')
       + (['approved', 'moving', 'held'].includes(item.status) ? ' <button type="button" class="settings-action-btn test-btn" data-migration-retry-recycling="' + escape(item.itemId) + '">' + text('继续回收', 'Continue recycling') + '</button>' : '') + '</div>').join('');
     card!.querySelectorAll('button').forEach(control => { control.disabled = busy; });
@@ -128,7 +135,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
       savedLocation = location;
       if (changed) { plan = undefined; overview = undefined; dataRoot = ''; latest = ''; busy = false; }
       render();
-      if (changed && visible()) request('dataMigration.get');
+      if ((changed || !overview) && visible()) request('dataMigration.get');
       return;
     }
     if (message?.command !== 'dataMigrationLoaded' || message.requestId !== latest) return;

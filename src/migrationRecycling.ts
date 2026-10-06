@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { RecyclingItem, UnifiedDataStore } from './db/unifiedDataStore';
+import { isRetirableRunArtifact } from './projectDataMigration';
 
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 const conversationKey = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i;
@@ -13,6 +14,25 @@ export class MigrationRecycling {
   private fileChecks = new Map<string, { hash: string; inode: number; size: number; mtime: number; ctime: number }>();
   constructor(private readonly store: UnifiedDataStore) {}
 
+  private sourcePath(identity: string, key: string): string | null {
+    if (identity.startsWith('intelligence:')) return path.join(identity.slice('intelligence:'.length), key);
+    for (const collection of ['project-journal', 'project-growth']) if (identity.startsWith(collection + ':')) {
+      const root = identity.slice(collection.length + 1); const expected = collection === 'project-journal' ? 'project_journal.db' : 'project_growth.db';
+      return key === expected ? path.join(root, '.solopreneur', key) : null;
+    }
+    if (identity.startsWith('agent-runs:')) {
+      const root = path.join(identity.slice('agent-runs:'.length), '.solopreneur', 'agent-runs');
+      const file = path.resolve(root, key); const relative = path.relative(root, file);
+      return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? file : null;
+    }
+    return null;
+  }
+  private allowedPath(file: string): boolean {
+    const resolved = path.resolve(file); const recycleRoot = path.join(path.resolve(this.store.root), '.migration-recycle');
+    if (resolved.startsWith(recycleRoot + path.sep)) return true;
+    return this.store.capturedMigrationSources().some(source => this.sourcePath(source.identity, source.key) === resolved);
+  }
+
   private async safeDirectory(directory: string, create = false): Promise<void> {
     if (create) await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
     const root = await fs.promises.realpath(this.store.root);
@@ -20,7 +40,7 @@ export class MigrationRecycling {
     if ((await fs.promises.lstat(directory)).isSymbolicLink() || await fs.promises.realpath(directory) !== expected) throw new Error('recycling_path_invalid');
   }
   private async verifiedFile(file: string, expectedHash: string): Promise<Buffer> {
-    await this.safeDirectory(path.dirname(file));
+    if (!this.allowedPath(file)) throw new Error('recycling_path_invalid');
     const before = await fs.promises.lstat(file);
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error('recycling_path_invalid');
     const bytes = await fs.promises.readFile(file);
@@ -29,7 +49,7 @@ export class MigrationRecycling {
     return bytes;
   }
   private async candidateSize(file: string, expectedHash: string): Promise<number> {
-    await this.safeDirectory(path.dirname(file));
+    if (!this.allowedPath(file)) throw new Error('recycling_path_invalid');
     const stat = await fs.promises.lstat(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('recycling_path_invalid');
     const previous = this.fileChecks.get(file);
@@ -61,17 +81,17 @@ export class MigrationRecycling {
     return matches;
   }
   private async candidates(): Promise<Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>> {
-    const directory = path.join(this.store.root, 'intelligence-conversations');
-    const identity = `intelligence:${directory}`;
     const active = this.store.recyclingItems().filter(item => ['approved', 'moving', 'held', 'restoring'].includes(item.status));
     const files = [];
     for (const source of this.store.capturedMigrationSources()) {
-      if (source.identity !== identity || !conversationKey.test(source.key) || active.some(item => item.path === path.join(directory, source.key))) continue;
-      if (!this.capturedConversationMatches(source)) continue;
-      const file = path.join(directory, source.key);
+      const file = this.sourcePath(source.identity, source.key);
+      if (!file || active.some(item => item.path === file)) continue;
+      if (source.identity.startsWith('intelligence:')) {
+        if (!conversationKey.test(source.key) || !this.capturedConversationMatches(source)) continue;
+      } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !isRetirableRunArtifact(source.key))) continue;
       try {
         const bytes = await this.candidateSize(file, source.hash);
-        files.push({ identity, key: source.key, hash: source.hash, path: file, bytes });
+        files.push({ identity: source.identity, key: source.key, hash: source.hash, path: file, bytes });
       } catch { /* Changed, missing, or unsafe sources stay outside the recyclable list. */ }
       await new Promise<void>(resolve => setImmediate(resolve));
     }
@@ -115,11 +135,17 @@ export class MigrationRecycling {
   private item(itemId: string): RecyclingItem {
     const item = this.store.recyclingItems().find(value => value.itemId === itemId);
     if (!item) throw new Error('recycling_item_missing');
-    const directory = path.join(this.store.root, 'intelligence-conversations');
-    if (item.identity !== `intelligence:${directory}` || !conversationKey.test(item.key) || item.path !== path.join(directory, item.key)) throw new Error('recycling_path_invalid');
+    if (this.sourcePath(item.identity, item.key) !== item.path) throw new Error('recycling_path_invalid');
     return item;
   }
   private heldPath(item: RecyclingItem): string { return path.join(this.store.root, '.migration-recycle', item.itemId + '.json'); }
+  private async safeRestoreDirectory(item: RecyclingItem): Promise<void> {
+    if (this.sourcePath(item.identity, item.key) !== item.path) throw new Error('recycling_path_invalid');
+    const directory = path.dirname(item.path);
+    await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+    const stat = await fs.promises.lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.promises.realpath(directory) !== path.resolve(directory)) throw new Error('recycling_path_invalid');
+  }
   private async exclusive<T>(itemId: string, work: () => Promise<T>): Promise<T> {
     if (this.busy.has(itemId)) throw new Error('recycling_operation_in_progress');
     this.busy.add(itemId);
@@ -144,7 +170,7 @@ export class MigrationRecycling {
       }
       try {
         const bytes = await this.verifiedFile(item.path, item.hash);
-        if (!this.matchesConversation(item.key, bytes)) throw new Error('recycling_database_mismatch');
+        if (item.identity.startsWith('intelligence:') && !this.matchesConversation(item.key, bytes)) throw new Error('recycling_database_mismatch');
         await this.safeDirectory(path.dirname(target), true);
         try { await fs.promises.lstat(target); throw new Error('recycling_target_exists'); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -215,7 +241,7 @@ export class MigrationRecycling {
           bytes = await fs.promises.readFile(this.heldPath(item));
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }
-      await this.safeDirectory(path.dirname(item.path), true);
+      await this.safeRestoreDirectory(item);
       const staged = path.join(this.store.root, '.migration-recycle', itemId + '.restore');
       await this.safeDirectory(path.dirname(staged), true);
       if (item.status !== 'restoring') {

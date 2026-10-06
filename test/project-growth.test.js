@@ -96,9 +96,9 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   const dbPath = path.join(solopreneurDir, 'project_journal.db');
   const store = new SqliteStore(dbPath, projectRoot);
   await store.init();
-  store.syncNodesFromList([
-    createRoadmapNode('roadmap-data', '补强项目数据链路')
-  ]);
+  const roadmapNodes = [createRoadmapNode('roadmap-data', '补强项目数据链路')];
+  store.syncNodesFromList(roadmapNodes);
+  new (require(path.join(projectRoot, 'out', 'db', 'csvStore.js')).CsvStore)(path.join(solopreneurDir, 'roadmap.csv')).writeNodes(roadmapNodes);
   store.upsertRunIndex({
     executionLogId: 101,
     nodeId: 'roadmap-data',

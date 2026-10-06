@@ -58,4 +58,19 @@ CREATE TABLE growth_report_projection(
  PRIMARY KEY(project_id,key));
 ` }, { version: 8, sql: `
 ALTER TABLE growth_snapshots ADD COLUMN payload_hash TEXT NOT NULL DEFAULT '';
+` }, { version: 9, sql: `
+CREATE TABLE project_journal_entries(
+ execution_log_id INTEGER NOT NULL,project_id TEXT NOT NULL REFERENCES projects(id),
+ idempotency_key TEXT NOT NULL,node_id TEXT NOT NULL,timestamp TEXT NOT NULL,agent_cli TEXT NOT NULL,
+ command TEXT NOT NULL,output TEXT NOT NULL,status TEXT NOT NULL,
+ PRIMARY KEY(project_id,execution_log_id),UNIQUE(project_id,idempotency_key));
+CREATE INDEX project_journal_project_node ON project_journal_entries(project_id,node_id,execution_log_id DESC);
+CREATE TABLE project_run_indexes(
+ project_id TEXT NOT NULL REFERENCES projects(id),execution_log_id INTEGER NOT NULL,
+ record_json TEXT NOT NULL,files_json TEXT NOT NULL,signals_json TEXT NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(project_id,execution_log_id));
+CREATE TABLE project_run_artifacts(
+ project_id TEXT NOT NULL REFERENCES projects(id),execution_log_id INTEGER NOT NULL,relative_path TEXT NOT NULL,
+ content_id TEXT NOT NULL REFERENCES contents(id),sha256 TEXT NOT NULL,mime_type TEXT NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(project_id,execution_log_id,relative_path));
 ` }];

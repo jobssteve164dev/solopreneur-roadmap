@@ -4331,8 +4331,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
-    ${getMigrationSettingsCardHtml()}
-
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-globe"></span><span id="settings-section-basic">Basics</span></div>
     <div class="settings-field">
@@ -4724,6 +4722,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         <button class="settings-action-btn rating-btn" id="btn-rate-extension" type="button"><span class="codicon codicon-heart-filled"></span><span id="text-rate-btn">去评五星好评</span></button>
       </div>
     </div>
+
+    ${getMigrationSettingsCardHtml()}
 
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>

@@ -10,6 +10,7 @@ import { indexTokens, queryTokens } from './searchIndex';
 import { unifiedSchemaMigrations, runtimeEntityDefinitions as entityDefinitions } from './unifiedSchemaMigrations';
 import type { IntelligenceConversation } from '../intelligenceChat';
 import type { GrowthSnapshotData, GrowthSnapshotRecord } from './types';
+import type { AgentConversation, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal } from './types';
 
 export interface MigrationJob {
   jobId: string;
@@ -181,6 +182,9 @@ export class UnifiedDataStore {
   public capturedMigrationSources(): Array<{ identity: string; key: string; hash: string; stage: string }> {
     return this.rows('SELECT source_identity,source_key,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id ORDER BY source_identity,source_key')
       .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage) }));
+  }
+  public markMigrationSourceImported(identity: string, key: string): void {
+    this.db.run("UPDATE migration_items SET stage='imported',error=NULL WHERE source_identity=? AND source_key=?", [identity, key]);
   }
   public recyclingItems(): RecyclingItem[] {
     return this.rows('SELECT * FROM migration_recycling ORDER BY created_at,id').map(row => ({ itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.original_path), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) }));
@@ -870,6 +874,53 @@ export class UnifiedDataStore {
       }
       return this.current(value.id);
     });
+  }
+  public appendProjectJournal(projectId: string, idempotencyKey: string, entry: Omit<AgentConversation, 'id'>, requestedExecutionLogId = 0, minimumExecutionLogId = 1): { executionLogId: number } {
+    if (!idempotencyKey || !entry || !entry.nodeId || !entry.timestamp) throw new Error('invalid_project_journal_entry');
+    return this.transaction(() => {
+      const existing = this.rows('SELECT execution_log_id FROM project_journal_entries WHERE project_id=? AND idempotency_key=?', [projectId, idempotencyKey])[0];
+      if (existing) return { executionLogId: Number(existing.execution_log_id) };
+      const nextDatabaseId = Number(this.rows('SELECT COALESCE(MAX(execution_log_id),0)+1 AS id FROM project_journal_entries WHERE project_id=?', [projectId])[0].id);
+      const executionLogId = requestedExecutionLogId || Math.max(nextDatabaseId, Math.max(1, Number(minimumExecutionLogId || 1)));
+      this.db.run('INSERT INTO project_journal_entries(execution_log_id,project_id,idempotency_key,node_id,timestamp,agent_cli,command,output,status) VALUES(?,?,?,?,?,?,?,?,?)', [executionLogId, projectId, idempotencyKey, entry.nodeId, entry.timestamp, entry.agentCli || '', entry.command || '', entry.output || '', entry.status || 'Running']);
+      return { executionLogId };
+    });
+  }
+  public importProjectJournal(projectId: string, entry: AgentConversation): { executionLogId: number } {
+    const executionLogId = Number(entry.id || 0);
+    if (!executionLogId) throw new Error('invalid_project_journal_entry');
+    this.db.run('INSERT INTO project_journal_entries(execution_log_id,project_id,idempotency_key,node_id,timestamp,agent_cli,command,output,status) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id) DO NOTHING', [executionLogId, projectId, `legacy:${executionLogId}`, entry.nodeId || '', entry.timestamp || '', entry.agentCli || '', entry.command || '', entry.output || '', entry.status || 'Processed']);
+    return { executionLogId };
+  }
+  public updateProjectJournal(projectId: string, executionLogId: number, input: Pick<AgentConversation, 'agentCli' | 'command' | 'output' | 'status'>): { updated: boolean } {
+    this.db.run('UPDATE project_journal_entries SET agent_cli=?,command=?,output=?,status=? WHERE project_id=? AND execution_log_id=?', [input.agentCli || '', input.command || '', input.output || '', input.status || '', projectId, executionLogId]);
+    return { updated: this.db.getRowsModified() > 0 };
+  }
+  public readProjectJournal(projectId: string, input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number } = {}): { logs: AgentConversation[]; hasMore: boolean } {
+    const limit = Math.max(1, Math.min(500, Number(input.limit || 200)));
+    const offset = Math.max(0, Number(input.offset || 0));
+    const clauses = ['project_id=?']; const values: SqlValue[] = [projectId];
+    if (input.nodeId) { clauses.push('node_id=?'); values.push(input.nodeId); }
+    if (input.executionLogId) { clauses.push('execution_log_id=?'); values.push(input.executionLogId); }
+    const rows = this.rows(`SELECT * FROM project_journal_entries WHERE ${clauses.join(' AND ')} ORDER BY execution_log_id DESC LIMIT ? OFFSET ?`, [...values, limit + 1, offset]);
+    return { logs: rows.slice(0, limit).map(row => ({ id: Number(row.execution_log_id), nodeId: String(row.node_id), timestamp: String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: String(row.status) })), hasMore: rows.length > limit };
+  }
+  public upsertProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
+    this.db.run('INSERT INTO project_run_indexes VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id) DO UPDATE SET record_json=excluded.record_json,files_json=excluded.files_json,signals_json=excluded.signals_json,updated_at=excluded.updated_at', [projectId, Number(record.executionLogId), canonical(record), canonical(files), canonical(signals), Date.now()]);
+  }
+  public readProjectRunIndexes(projectId: string): RunIndexEntry[] {
+    return this.rows('SELECT record_json,files_json,signals_json FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id DESC', [projectId]).map(row => ({ ...JSON.parse(String(row.record_json)), files: JSON.parse(String(row.files_json)), signals: JSON.parse(String(row.signals_json)) }));
+  }
+  public writeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }): void {
+    if (!Number.isFinite(input.executionLogId) || !input.relativePath || path.isAbsolute(input.relativePath) || input.relativePath.split(/[\\/]/).includes('..')) throw new Error('invalid_run_artifact');
+    const bytes = Buffer.from(input.bytes, 'base64');
+    if (bytes.toString('base64') !== input.bytes || digest(bytes) !== input.hash) throw new Error('run_artifact_hash_mismatch');
+    const contentId = this.putContent(bytes, input.mimeType || 'application/octet-stream', 'binary');
+    this.db.run('INSERT INTO project_run_artifacts VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id,relative_path) DO UPDATE SET content_id=excluded.content_id,sha256=excluded.sha256,mime_type=excluded.mime_type,updated_at=excluded.updated_at', [projectId, input.executionLogId, input.relativePath, contentId, input.hash, input.mimeType || 'application/octet-stream', Date.now()]);
+  }
+  public readRunArtifact(projectId: string, executionLogId: number, relativePath: string): { bytes: string; hash: string; mimeType: string } | null {
+    const row = this.rows('SELECT content_id,sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
+    return row ? { bytes: this.content(String(row.content_id)).toString('base64'), hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
   }
   public async backup(destination: string): Promise<void> {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
