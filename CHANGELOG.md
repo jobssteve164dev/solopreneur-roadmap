@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.508 - 2026-10-06
+
+### Added
+- add Agent CLI migration maintenance (29f5c13)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.507 - 2026-10-06
 
 ### Fixed
