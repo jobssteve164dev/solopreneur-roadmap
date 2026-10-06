@@ -42,7 +42,23 @@ test('settings maintenance tasks launch outside the current project', () => {
   assert.match(extension, /createAgentTerminal\(maintenanceRoot, `skill-/);
   assert.match(extension, /createAgentTerminal\(maintenanceRoot, `mcp-/);
   assert.match(extension, /createAgentTerminal\(maintenanceRoot, `enhance-/);
+  assert.match(extension, /createAgentTerminal\(agentWorkspace, `migration-/);
+  assert.match(extension, /buildAgentCommand\(agentCli, buildMigrationMaintenancePrompt\(kind, targetId\), agentWorkspace, '', 'never'\)/);
+  assert.match(extension, /provider !== 'claude'/);
+  assert.match(extension, /applyNativeMigrationAgentBoundary\([\s\S]*maintenanceMcpConfig/);
+  assert.match(extension, /buildMigrationAgentSandboxCommand/);
   assert.match(sidebarProvider, /cwd: maintenanceRoot/);
+});
+
+test('the final temporary migration card delegates maintenance to Agent and preserves exact confirmation', () => {
+  const webview = fs.readFileSync(path.join(projectRoot, 'src/migrationSettingsWebview.ts'), 'utf8');
+  const sidebar = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  assert.match(webview, /data-migration-agent/);
+  assert.match(webview, /dataMigration\.agent/);
+  assert.match(webview, /dataMigration\.recycle/);
+  assert.match(webview, /reviewAgentActive/);
+  assert.match(webview, /activeRecyclingPlans\.has\(item\.planId\)/);
+  assert.ok(sidebar.indexOf('${getMigrationSettingsCardHtml()}') > sidebar.indexOf('feedback-rating-card'));
 });
 
 test('extension activation refreshes bundled global memory tools', () => {

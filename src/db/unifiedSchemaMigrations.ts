@@ -73,4 +73,15 @@ CREATE TABLE project_run_artifacts(
  project_id TEXT NOT NULL REFERENCES projects(id),execution_log_id INTEGER NOT NULL,relative_path TEXT NOT NULL,
  content_id TEXT NOT NULL REFERENCES contents(id),sha256 TEXT NOT NULL,mime_type TEXT NOT NULL,updated_at INTEGER NOT NULL,
  PRIMARY KEY(project_id,execution_log_id,relative_path));
+` }, { version: 10, sql: `
+CREATE TABLE maintenance_tasks(
+ id TEXT PRIMARY KEY,
+ kind TEXT NOT NULL CHECK(kind IN ('migration_review','recycling_apply')),
+ target_id TEXT,
+ status TEXT NOT NULL CHECK(status IN ('ready','running','completed','failed','revoked')),
+ error TEXT,
+ created_at INTEGER NOT NULL,
+ updated_at INTEGER NOT NULL,
+ valid_until INTEGER NOT NULL);
+CREATE INDEX maintenance_tasks_status ON maintenance_tasks(status,updated_at);
 ` }];

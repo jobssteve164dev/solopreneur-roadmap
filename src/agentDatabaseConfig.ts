@@ -9,6 +9,7 @@ const { parseTOML } = require('toml-eslint-parser');
 
 export const databaseAgentProviders = ['codex', 'claude', 'cursor', 'copilot', 'opencode', 'grok', 'antigravity'] as const;
 export type DatabaseAgentProvider = typeof databaseAgentProviders[number];
+const databaseToolNames = ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
 const start = '# SoloMap managed database MCP begin';
 const end = '# SoloMap managed database MCP end';
 
@@ -35,7 +36,7 @@ export function isAgentDatabaseConfigPath(provider: DatabaseAgentProvider, file:
 }
 
 export function databaseBridgeLauncher(): string {
-  return 'const fs=require("node:fs"),path=require("node:path");const root=process.argv[1];try{const endpoint=JSON.parse(fs.readFileSync(path.join(root,"runtime","control.json"),"utf8"));if(endpoint.schemaVersion!==1||!endpoint.entryPath||!path.isAbsolute(endpoint.entryPath)||path.basename(endpoint.entryPath)!=="autonomousRuntimeProcess.js")throw new Error("solomap_runtime_discovery_invalid");const entry=path.join(path.dirname(endpoint.entryPath),"databaseMcpProcess.js");process.argv=[process.execPath,entry,"--global-data-path",root];require(entry);}catch(error){process.stderr.write(String(error.message||error)+"\\n");process.exitCode=1;}';
+  return 'const fs=require("node:fs"),path=require("node:path");const root=process.argv[1];try{const isolated=process.env.SOLOMAP_MAINTENANCE_ENTRY_PATH;let entry;if(isolated){entry=isolated;process.argv=[process.execPath,entry];}else{const endpoint=JSON.parse(fs.readFileSync(path.join(root,"runtime","control.json"),"utf8"));if(endpoint.schemaVersion!==1||!endpoint.entryPath||!path.isAbsolute(endpoint.entryPath)||path.basename(endpoint.entryPath)!=="autonomousRuntimeProcess.js")throw new Error("solomap_runtime_discovery_invalid");entry=path.join(path.dirname(endpoint.entryPath),"databaseMcpProcess.js");process.argv=[process.execPath,entry,"--global-data-path",root];}require(entry);}catch(error){process.stderr.write(String(error.message||error)+"\\n");process.exitCode=1;}';
 }
 
 /** Runtime serializes these patches; retain the CLI's native permission policy. */
@@ -84,7 +85,7 @@ export function configureAgentDatabase(options: { provider: DatabaseAgentProvide
       const env = { ...existing?.[environment], ELECTRON_RUN_AS_NODE: '1', SOLOMAP_MANAGED_BRIDGE: '1' };
       const server = options.provider === 'opencode'
         ? { ...existing, type: 'local', command: [options.command, ...args], environment: env, enabled: existing?.enabled ?? true }
-        : { ...existing, ...(options.provider === 'antigravity' ? {} : { type: options.provider === 'copilot' ? 'local' : 'stdio' }), command: options.command, args, env, ...(options.provider === 'copilot' ? { tools: existing?.tools ?? ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export'] } : {}) };
+        : { ...existing, ...(options.provider === 'antigravity' ? {} : { type: options.provider === 'copilot' ? 'local' : 'stdio' }), command: options.command, args, env, ...(options.provider === 'copilot' ? { tools: [...new Set([...(Array.isArray(existing?.tools) ? existing.tools : []), ...databaseToolNames])] } : {}) };
       next = JSON.stringify(existing) === JSON.stringify(server) ? original : applyEdits(original || '{}\n', modify(original || '{}\n', [key, 'solomap_data'], server, { formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' } }));
     }
     if (next !== original) {

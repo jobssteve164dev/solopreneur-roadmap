@@ -117,7 +117,7 @@ export class MigrationRecycling {
       recyclableFiles: 0, recyclableBytes: 0,
       recycledFiles: recycling.filter(item => item.status === 'trashed').length,
       heldFiles: recycling.filter(item => ['moving', 'held'].includes(item.status)).length,
-      recycling: recycling.map(({ identity, key, hash: _hash, planId, ...item }) => item) };
+      recycling: recycling.map(({ identity, key, hash: _hash, ...item }) => item) };
   }
   public async prepare() { return this.store.createRecyclingPlan(await this.candidates()); }
   public readPlan(planId: string) {

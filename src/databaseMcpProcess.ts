@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { runtimeMcpSource } from './runtimeDataOperations';
-import { registerUnifiedMcpTools } from './unifiedMcp';
+import { runtimeMaintenanceEndpointMcpSource, runtimeMaintenanceMcpSource, runtimeMcpSource } from './runtimeDataOperations';
+import { registerMaintenanceMcpTools, registerUnifiedMcpTools } from './unifiedMcp';
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -10,9 +10,14 @@ function argument(name: string): string {
 
 async function main(): Promise<void> {
   const globalDataPath = argument('--global-data-path');
+  const maintenanceTaskId = String(process.env.SOLOMAP_MAINTENANCE_TASK_ID || '');
+  const maintenanceProof = String(process.env.SOLOMAP_MAINTENANCE_PROOF || '');
+  const maintenanceLaunchToken = String(process.env.SOLOMAP_MAINTENANCE_LAUNCH_TOKEN || '');
+  const maintenanceRuntimeId = String(process.env.SOLOMAP_MAINTENANCE_RUNTIME_ID || '');
+  const maintenanceRuntimePort = Number(process.env.SOLOMAP_MAINTENANCE_RUNTIME_PORT || 0);
   let projectId = argument('--project-id');
-  if (!globalDataPath) throw new Error('SoloMap MCP requires --global-data-path.');
-  if (!projectId) {
+  if (!globalDataPath && !(maintenanceTaskId && maintenanceRuntimeId && Number.isInteger(maintenanceRuntimePort))) throw new Error('SoloMap MCP requires a Runtime endpoint.');
+  if (!maintenanceTaskId && !projectId) {
     let root = path.resolve(argument('--project-root') || process.env.CLAUDE_PROJECT_DIR || process.cwd());
     let body: string | undefined;
     for (;;) {
@@ -30,12 +35,19 @@ async function main(): Promise<void> {
   core.config({ jitless: true });
   const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js') as typeof import('@modelcontextprotocol/sdk/server/mcp.js');
   const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js') as typeof import('@modelcontextprotocol/sdk/server/stdio.js');
-  const source = runtimeMcpSource(path.resolve(globalDataPath), projectId, true);
+  const source = maintenanceTaskId
+    ? maintenanceRuntimeId && Number.isInteger(maintenanceRuntimePort) && maintenanceRuntimePort > 0
+      ? runtimeMaintenanceEndpointMcpSource({ runtimeId: maintenanceRuntimeId, host: '127.0.0.1', port: maintenanceRuntimePort }, maintenanceTaskId, maintenanceProof, maintenanceLaunchToken)
+      : runtimeMaintenanceMcpSource(path.resolve(globalDataPath), maintenanceTaskId, maintenanceProof, maintenanceLaunchToken)
+    : runtimeMcpSource(path.resolve(globalDataPath), projectId, true);
   // The bridge owns no SQLite connection and starts no second persistence daemon.
-  const project = await source.call('read', { ref: projectId }) as { kind: string };
-  if (project.kind !== 'project') throw new Error('Unknown SoloMap project identity.');
+  if (!maintenanceTaskId) {
+    const project = await source.call('read', { ref: projectId }) as { kind: string };
+    if (project.kind !== 'project') throw new Error('Unknown SoloMap project identity.');
+  }
   const server = new McpServer({ name: 'solomap-data', version: '1.0.0' });
-  registerUnifiedMcpTools(server, source);
+  if (maintenanceTaskId) registerMaintenanceMcpTools(server, source);
+  else registerUnifiedMcpTools(server, source);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   let closing: Promise<void> | undefined;

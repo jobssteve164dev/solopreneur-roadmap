@@ -10,6 +10,22 @@ export interface UnifiedMcpSource {
   call(operation: string, input: Record<string, unknown>): Promise<unknown>;
 }
 export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_export'];
+export const maintenanceToolNames = ['solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
+
+export function registerMaintenanceMcpTools(server: McpServer, source: UnifiedMcpSource): void {
+  const z = require('zod') as typeof import('zod');
+  const register = (name: string, description: string, inputSchema: Record<string, any>, readOnly: boolean, operation: (input: any) => Promise<unknown>): void => {
+    server.registerTool(name, { description, inputSchema, annotations: { readOnlyHint: readOnly, destructiveHint: name === 'solomap_recycling_apply' } }, async input => {
+      try { return { content: [{ type: 'text' as const, text: JSON.stringify(await operation(input)) }] }; }
+      catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
+    });
+  };
+  register('solomap_migration_status', '读取当前迁移进度、待处理项目和回收状态。', {}, true, () => source.call('migration_overview', {}));
+  register('solomap_migration_retry', '重试一个明确失败或中断的迁移任务。', { jobId: z.string().min(1) }, false, input => source.call('retry_migration', input));
+  register('solomap_recycling_preview', '生成并读取可回收文件的精确清单；本工具不会回收文件。', {}, false, () => source.call('prepare_recycling', {}));
+  register('solomap_recycling_apply', '执行插件界面中已由用户逐项确认并绑定到本任务的回收清单。', { planId: z.string().min(1) }, false, input => source.call('execute_recycling_plan', input));
+  register('solomap_maintenance_finish', '结束当前维护任务并保存结果状态。', { error: z.string().optional() }, false, input => source.call('complete_maintenance_task', input));
+}
 
 export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource): void {
   const z = require('zod') as typeof import('zod');

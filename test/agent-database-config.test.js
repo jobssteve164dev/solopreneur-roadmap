@@ -72,11 +72,24 @@ test('all built-in Agent families receive their native MCP format without changi
         assert.equal(server.command, '/native/node');
         if (provider === 'copilot') {
           assert.equal(server.type, 'local');
-          assert.deepEqual(server.tools, ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export']);
+          assert.deepEqual(server.tools, ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish']);
         }
       }
     }
   }
+});
+
+test('managed Copilot configuration gains maintenance tools on upgrade', () => {
+  const { configureAgentDatabase } = require('../out/agentDatabaseConfig.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-copilot-upgrade-'));
+  const file = path.join(root, 'mcp-config.json');
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: { solomap_data: {
+    type: 'local', command: '/old/node', args: [], env: { SOLOMAP_MANAGED_BRIDGE: '1' }, tools: ['solomap_context', 'solomap_search']
+  } } }));
+  configureAgentDatabase({ provider: 'copilot', configPath: file, command: '/new/node', globalDataPath: '/shared/.solomap-global' });
+  const tools = JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers.solomap_data.tools;
+  assert.ok(tools.includes('solomap_recycling_apply'));
+  assert.ok(tools.includes('solomap_maintenance_finish'));
 });
 
 test('native TOML conflicts remain byte-identical and managed server restrictions survive updates', () => {

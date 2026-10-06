@@ -21,6 +21,15 @@ export interface RuntimeDataRequest {
   operation: string;
   input: Record<string, unknown>;
   sessionToken?: string;
+  maintenanceTransport?: boolean;
+  maintenanceTaskId?: string;
+  maintenanceProof?: string;
+}
+
+export interface MaintenanceRuntimeEndpoint {
+  runtimeId: string;
+  host: '127.0.0.1';
+  port: number;
 }
 
 interface RuntimeControlEndpoint {
@@ -89,15 +98,16 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
       if (frameEnd < 0) return;
       handled = true;
       try {
-        const parsed = JSON.parse(request.slice(0, frameEnd)) as { token?: string; command?: RuntimeControlCommand | 'data'; expectedRuntimeId?: string; request?: RuntimeDataRequest };
+        const parsed = JSON.parse(request.slice(0, frameEnd)) as { token?: string; command?: RuntimeControlCommand | 'data' | 'maintenance_data'; expectedRuntimeId?: string; request?: RuntimeDataRequest; taskId?: string; proof?: string };
+        const maintenanceCommand = parsed.command === 'maintenance_data';
         const providedToken = Buffer.from(String(parsed.token || ''));
         const expectedToken = Buffer.from(token);
-        if (providedToken.length !== expectedToken.length || !crypto.timingSafeEqual(providedToken, expectedToken)) {
+        if (!maintenanceCommand && (providedToken.length !== expectedToken.length || !crypto.timingSafeEqual(providedToken, expectedToken))) {
           socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Runtime control authentication failed.' }) + '\n');
           return;
         }
         const command = parsed.command;
-        if (!command || !['health', 'pause', 'resume', 'drain', 'stop', 'data'].includes(command)) {
+        if (!command || !['health', 'pause', 'resume', 'drain', 'stop', 'data', 'maintenance_data'].includes(command)) {
           socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Unknown Runtime control command.' }) + '\n');
           return;
         }
@@ -105,13 +115,16 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'different_runtime' }) + '\n');
           return;
         }
-        if (command === 'data') {
+        if (command === 'data' || command === 'maintenance_data') {
           if (!options.onData || !parsed.request) throw new Error('Runtime data service is unavailable.');
+          if (command === 'maintenance_data' && (!parsed.taskId || !parsed.proof)) throw new Error('maintenance_transport_denied');
           // Accepted work must finish even when a backup or export outlives a control timeout.
           socket.setTimeout(0);
           busy.add(socket);
           let result: unknown;
-          try { result = await options.onData(parsed.request); }
+          try { result = await options.onData(command === 'maintenance_data'
+            ? { ...parsed.request, maintenanceTransport: true, maintenanceTaskId: String(parsed.taskId), maintenanceProof: String(parsed.proof) }
+            : parsed.request); }
           finally { busy.delete(socket); }
           socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, result }) + '\n');
           return;
@@ -174,6 +187,31 @@ export async function sendRuntimeDataRequest<T>(globalDataPath: string, request:
     let response = '';
     socket.setEncoding('utf8');
     socket.once('connect', () => socket.write(JSON.stringify({ token: endpoint.token, command: 'data', expectedRuntimeId: endpoint.runtimeId, request }) + '\n'));
+    socket.on('data', chunk => { response += chunk; });
+    socket.once('error', reject);
+    socket.once('end', () => {
+      try {
+        const parsed = JSON.parse(response) as { ok: boolean; runtimeId: string; result: T; error?: string };
+        if (!parsed.ok || parsed.runtimeId !== endpoint.runtimeId) throw new Error(parsed.error || 'different_runtime');
+        resolve(parsed.result);
+      } catch (error) { reject(error); }
+    });
+  });
+}
+
+export async function readMaintenanceRuntimeEndpoint(globalDataPath: string): Promise<MaintenanceRuntimeEndpoint> {
+  const endpoint = JSON.parse(await fs.promises.readFile(endpointPath(globalDataPath), 'utf8')) as RuntimeControlEndpoint;
+  if (endpoint.schemaVersion !== 1 || endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || !endpoint.runtimeId) throw new Error('Invalid Runtime endpoint.');
+  return { runtimeId: endpoint.runtimeId, host: endpoint.host, port: endpoint.port };
+}
+
+export function sendRuntimeMaintenanceRequest<T>(endpoint: MaintenanceRuntimeEndpoint, taskId: string, proof: string, request: RuntimeDataRequest): Promise<T> {
+  if (endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || !endpoint.runtimeId || !taskId || !proof) return Promise.reject(new Error('Invalid maintenance endpoint.'));
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
+    let response = '';
+    socket.setEncoding('utf8');
+    socket.once('connect', () => socket.write(JSON.stringify({ command: 'maintenance_data', expectedRuntimeId: endpoint.runtimeId, taskId, proof, request }) + '\n'));
     socket.on('data', chunk => { response += chunk; });
     socket.once('error', reject);
     socket.once('end', () => {

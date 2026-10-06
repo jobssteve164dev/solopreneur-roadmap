@@ -161,6 +161,8 @@ import {
 import { buildConversationPresentations, selectLatestConversationRoots } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import { handleMigrationSettingsAction } from './migrationSettingsActions';
+import { applyNativeMigrationAgentBoundary, buildMigrationAgentSandboxCommand, buildMigrationMaintenancePrompt, MigrationMaintenanceKind } from './migrationAgentMaintenance';
+import { LinuxBubblewrapSandbox } from './executionSandbox';
 import {
   buildAgentModelsLoadedMessage,
   mergeAgentModelPreferences,
@@ -200,10 +202,10 @@ import {
   withLocalDiagnosticTrace
 } from './localDiagnostics';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
-import { agentDatabaseConfigPath, buildAgentDatabaseInstructions, databaseAgentProviders, DatabaseAgentProvider } from './agentDatabaseConfig';
+import { agentDatabaseConfigPath, buildAgentDatabaseInstructions, databaseAgentProviders, databaseBridgeLauncher, DatabaseAgentProvider } from './agentDatabaseConfig';
 import { runtimeProjectMcpSource } from './runtimeDataOperations';
 import { readRuntimeState } from './autonomousRuntime';
-import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { readMaintenanceRuntimeEndpoint, sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { readTodayReview } from './dailyReview';
@@ -490,6 +492,13 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
   if (typeof vscode.window.onDidCloseTerminal === 'function') {
     context.subscriptions.push(vscode.window.onDidCloseTerminal((terminal) => {
+      const maintenance = maintenanceAgentTerminals.get(terminal.name);
+      if (maintenance) {
+        maintenanceAgentTerminals.delete(terminal.name);
+        void sendRuntimeDataRequest(maintenance.globalDataPath, {
+          operation: 'fail_maintenance_task', input: { taskId: maintenance.taskId, error: 'agent_cli_stopped' }
+        }).catch(() => {});
+      }
       void handleAgentTerminalClosed(terminal.name, terminal.exitStatus?.reason);
     }));
   }
@@ -925,15 +934,11 @@ async function handleSharedWebviewAction(
             confirm
           ) === confirm;
         },
-        trash: async (file, expectedHash) => {
-          const before = await fs.promises.lstat(file);
-          if (!before.isFile() || before.isSymbolicLink() || crypto.createHash('sha256').update(await fs.promises.readFile(file)).digest('hex') !== expectedHash) throw new Error('recycling_source_changed');
-          const after = await fs.promises.lstat(file);
-          if (!after.isFile() || after.isSymbolicLink() || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs || before.size !== after.size) throw new Error('recycling_source_changed');
-          await vscode.workspace.fs.delete(vscode.Uri.file(file), { useTrash: true, recursive: false });
-        }
+        launchAgent: (kind, targetId) => launchMigrationMaintenanceAgent(context, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), kind, targetId)
       });
-      const successMessage = result.cancelled ? undefined : message.command === 'dataMigration.restore'
+      const successMessage = result.cancelled ? undefined : result.agentStarted
+        ? (language === 'en' ? 'Agent started. You can keep using SoloMap.' : 'Agent 已开始处理，可继续使用 SoloMap。')
+        : message.command === 'dataMigration.restore'
         ? (language === 'en' ? 'File restored.' : '文件已恢复。')
         : ['dataMigration.recycle', 'dataMigration.retryRecycling'].includes(String(message.command))
           ? (language === 'en' ? 'Old files recycled. You can restore them here.' : '旧文件已回收，可在此恢复。') : undefined;
@@ -6761,6 +6766,7 @@ const reservedAgentTerminalsByProject = new Map<string, Array<{
   terminal: vscode.Terminal;
   environmentSignature: string;
 }>>();
+const maintenanceAgentTerminals = new Map<string, { globalDataPath: string; taskId: string }>();
 
 async function revealAgentStartupTerminal(
   context: vscode.ExtensionContext,
@@ -7189,6 +7195,96 @@ function postEnhancementInstallResult(context: vscode.ExtensionContext, success:
 function postAgentCliUpgradeResult(success: boolean, message: string, pending = false): void {
   activePanel?.webview.postMessage({ command: 'agentCliUpgradeResult', success, message, pending });
   sidebarProvider?.postAgentCliUpgradeResult(success, message, pending);
+}
+
+async function launchMigrationMaintenanceAgent(
+  context: vscode.ExtensionContext,
+  globalDataPath: string,
+  kind: MigrationMaintenanceKind,
+  targetId?: string
+): Promise<void> {
+  const settings = getPersistedSettings(context);
+  const requestedAgentCli = (settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  if (!commandExists(agentCli)) throw new Error('agent_cli_not_found');
+  const provider = getAgentProvider(agentCli);
+  if (!databaseAgentProviders.includes(provider as DatabaseAgentProvider)) throw new Error('agent_database_provider_unsupported');
+  const sandbox = new LinuxBubblewrapSandbox();
+  const sandboxProbe = await sandbox.probe();
+  if (provider !== 'claude') throw new Error('maintenance_agent_native_boundary_unsupported');
+
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
+  const configFile = agentDatabaseConfigPath(provider as DatabaseAgentProvider);
+  await sendRuntimeDataRequest(globalDataPath, {
+    operation: 'prepare_agent_database',
+    input: { root: getSkillInstallWorkspaceRoot(context), provider, configPath: configFile, command: process.execPath }
+  });
+  const overview = await sendRuntimeDataRequest<{ maintenanceTasks?: Array<{ taskId: string; kind: string; targetId: string | null; status: string; validUntil: number }> }>(globalDataPath, { operation: 'migration_overview', input: {} });
+  const existing = overview.maintenanceTasks?.find(item => item.kind === kind && item.targetId === (targetId || null)
+    && ['ready', 'running'].includes(item.status) && item.validUntil > Date.now());
+  const task = existing
+    ? await sendRuntimeDataRequest<{ taskId: string; proof: string; launchToken: string }>(globalDataPath, { operation: 'claim_maintenance_task', input: { taskId: existing.taskId } })
+    : await sendRuntimeDataRequest<{ taskId: string; proof: string; launchToken: string }>(globalDataPath, {
+      operation: 'create_maintenance_task', input: { kind, ...(targetId ? { targetId } : {}) }
+    });
+  const endpoint = await readMaintenanceRuntimeEndpoint(globalDataPath);
+  const agentWorkspace = path.join(context.globalStorageUri.fsPath, 'maintenance-agent');
+  fs.mkdirSync(agentWorkspace, { recursive: true, mode: 0o700 });
+  const runId = `migration-${kind}-${Date.now()}`;
+  const maintenanceMcpConfig = JSON.stringify({
+    mcpServers: {
+      solomap_data: {
+        type: 'stdio', command: process.execPath, args: ['-e', databaseBridgeLauncher()],
+        env: { ELECTRON_RUN_AS_NODE: '1', SOLOMAP_MANAGED_BRIDGE: '1' }
+      }
+    }
+  });
+  const agentCommand = applyNativeMigrationAgentBoundary(
+    buildAgentCommand(agentCli, buildMigrationMaintenancePrompt(kind, targetId), agentWorkspace, '', 'never'),
+    agentCli,
+    provider,
+    maintenanceMcpConfig
+  );
+  const maintenanceEnvironment: Record<string, string> = {
+    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+    HOME: os.homedir(),
+    SOLOMAP_MAINTENANCE_TASK_ID: task.taskId,
+    SOLOMAP_MAINTENANCE_PROOF: task.proof,
+    SOLOMAP_MAINTENANCE_LAUNCH_TOKEN: task.launchToken,
+    SOLOMAP_MAINTENANCE_RUNTIME_ID: endpoint.runtimeId,
+    SOLOMAP_MAINTENANCE_RUNTIME_PORT: String(endpoint.port),
+    SOLOMAP_MAINTENANCE_ENTRY_PATH: path.join(context.extensionPath, 'out', 'databaseMcpProcess.js'),
+    ELECTRON_RUN_AS_NODE: '1'
+  };
+  for (const key of ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE']) {
+    if (process.env[key]) maintenanceEnvironment[key] = String(process.env[key]);
+  }
+  const home = os.homedir();
+  const configParent = path.dirname(configFile);
+  const configPaths = [configParent === home ? configFile : configParent];
+  for (const candidate of [
+    path.join(home, '.claude'),
+    path.join(home, '.local', 'share', 'keyrings'),
+    process.env.XDG_RUNTIME_DIR || ''
+  ]) if (candidate && fs.existsSync(candidate)) configPaths.push(candidate);
+  if (fs.existsSync(process.execPath)) configPaths.push(process.execPath);
+  const constrainedCommand = sandboxProbe.available
+    ? buildMigrationAgentSandboxCommand({
+      command: agentCommand,
+      workspacePath: agentWorkspace,
+      extensionPath: context.extensionPath,
+      configPaths: [...new Set(configPaths)],
+      environment: maintenanceEnvironment
+    })
+    : agentCommand;
+  const terminal = createAgentTerminal(agentWorkspace, `migration-${runId.slice(-6)}`, 0, maintenanceEnvironment);
+  maintenanceAgentTerminals.set(terminal.name, { globalDataPath, taskId: task.taskId });
+  terminal.show(true);
+  if (!await sendTextWhenTerminalReady(terminal, `${constrainedCommand}; exit`)) {
+    maintenanceAgentTerminals.delete(terminal.name);
+    await sendRuntimeDataRequest(globalDataPath, { operation: 'fail_maintenance_task', input: { taskId: task.taskId, error: 'agent_cli_start_failed' } });
+    throw new Error('agent_cli_start_failed');
+  }
 }
 
 async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Promise<void> {

@@ -20,6 +20,7 @@ export function getMigrationSettingsCardHtml(): string {
     <div class="migration-detail migration-error" data-migration-error role="alert" hidden></div>
     <div class="migration-actions">
       <button type="button" class="settings-action-btn test-btn" data-migration-refresh>刷新进度</button>
+      <button type="button" class="settings-action-btn test-btn" data-migration-agent>交给 Agent 检查</button>
       <button type="button" class="settings-action-btn test-btn" data-migration-preview disabled>查看可回收文件</button>
     </div>
     <div data-migration-plan hidden>
@@ -66,18 +67,30 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
   function render(): void {
     element('#migration-card-title').textContent = text('数据迁移与回收', 'Data migration & recycling');
     button('[data-migration-refresh]').textContent = text('刷新进度', 'Refresh progress');
+    button('[data-migration-agent]').textContent = text('交给 Agent 检查', 'Ask Agent to check');
     button('[data-migration-preview]').textContent = text('查看可回收文件', 'Review recyclable files');
     button('[data-migration-confirm]').textContent = text('确认回收', 'Confirm recycling');
     button('[data-migration-cancel]').textContent = text('取消', 'Cancel');
     const jobs = overview?.jobs || [];
-    const active = jobs.some((job: any) => ['queued', 'running', 'interrupted'].includes(job.status));
+    const maintenanceTasks = overview?.maintenanceTasks || [];
+    const busyMaintenanceTaskIds = new Set([...(overview?.activeMaintenanceTaskIds || []), ...(overview?.launchingMaintenanceTaskIds || [])]);
+    const isActiveMaintenance = (task: any) => ['ready', 'running'].includes(task.status) && Number(task.validUntil || 0) > Date.now();
+    const activeMaintenance = maintenanceTasks.some(isActiveMaintenance);
+    const maintenanceAgentBusy = maintenanceTasks.some((task: any) => isActiveMaintenance(task) && busyMaintenanceTaskIds.has(task.taskId));
+    const reviewAgentActive = maintenanceTasks.some((task: any) => isActiveMaintenance(task) && task.kind === 'migration_review' && busyMaintenanceTaskIds.has(task.taskId));
+    const activeRecyclingPlans = new Set(maintenanceTasks.filter((task: any) => isActiveMaintenance(task) && task.kind === 'recycling_apply' && busyMaintenanceTaskIds.has(task.taskId)).map((task: any) => task.targetId));
+    const failedMaintenance = maintenanceTasks.some((task: any) => task.status === 'failed');
+    const active = jobs.some((job: any) => ['queued', 'running', 'interrupted'].includes(job.status)) || activeMaintenance;
     const needsAttention = jobs.filter((job: any) => ['failed', 'completed_with_conflicts'].includes(job.status));
     const history = overview?.recycling || [];
-    card!.hidden = !plan && !active && !needsAttention.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
+    card!.hidden = !plan && !active && !failedMaintenance && !needsAttention.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
     const migrated = Number(overview?.migratedFiles || 0);
     const count = Number(overview?.capturedFiles || 0);
     element('[data-migration-status]').textContent = !overview ? text('尚未读取进度', 'Progress not loaded')
+      : maintenanceAgentBusy ? text('Agent 正在后台处理，可继续使用 SoloMap。', 'Agent is working in the background. You can keep using SoloMap.')
+      : activeMaintenance ? text('上次 Agent 已中断，可从这里继续。', 'The previous Agent stopped. You can continue here.')
       : active ? text('正在后台迁移，可继续使用 SoloMap。', 'Migrating in the background. You can keep using SoloMap.')
+      : failedMaintenance ? text('Agent 处理未完成，可再次交给 Agent 检查。', 'Agent did not finish. You can ask Agent to check again.')
       : needsAttention.length ? text('部分旧文件需要查看，已迁移的数据可正常使用。', 'Some old files need attention. Migrated data is ready to use.')
       : jobs.length ? text('本次迁移已完成', 'Migration complete') : text('暂无待迁移数据', 'No migration pending');
     const progress = element('[data-migration-progress]') as HTMLProgressElement;
@@ -108,9 +121,10 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     }
     element('[data-migration-history]').innerHTML = history.map((item: any) => '<div class="migration-detail">' + escape(item.path) + ' · ' + (item.status === 'trashed' ? text('已回收', 'Recycled') : text('已保留，等待处理', 'Kept, awaiting action'))
       + (item.status !== 'approved' ? ' <button type="button" class="settings-action-btn test-btn" data-migration-restore="' + escape(item.itemId) + '">' + text('恢复文件', 'Restore file') + '</button>' : '')
-      + (['approved', 'moving', 'held'].includes(item.status) ? ' <button type="button" class="settings-action-btn test-btn" data-migration-retry-recycling="' + escape(item.itemId) + '">' + text('继续回收', 'Continue recycling') + '</button>' : '') + '</div>').join('');
+      + (['approved', 'moving', 'held'].includes(item.status) ? ' <button type="button" class="settings-action-btn test-btn" data-migration-retry-recycling="' + escape(item.planId) + '"' + (activeRecyclingPlans.has(item.planId) ? ' disabled' : '') + '>' + text('交给 Agent 继续', 'Ask Agent to continue') + '</button>' : '') + '</div>').join('');
     card!.querySelectorAll('button').forEach(control => { control.disabled = busy; });
     button('[data-migration-preview]').disabled = busy || !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0);
+    button('[data-migration-agent]').disabled = busy || reviewAgentActive;
     button('[data-migration-confirm]').disabled = busy || !plan?.files.length;
     card!.setAttribute('aria-busy', busy ? 'true' : 'false');
     if (timer) clearTimeout(timer);
@@ -121,10 +135,11 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     if (!target || target.disabled || busy) return;
     if (target.hasAttribute('data-migration-cancel')) { plan = undefined; render(); }
     else if (target.hasAttribute('data-migration-refresh')) request('dataMigration.get');
+    else if (target.hasAttribute('data-migration-agent')) request('dataMigration.agent');
     else if (target.hasAttribute('data-migration-preview')) request('dataMigration.preview');
     else if (target.hasAttribute('data-migration-confirm')) request('dataMigration.recycle', { planId: plan?.planId });
     else if (target.hasAttribute('data-migration-restore')) request('dataMigration.restore', { itemId: target.getAttribute('data-migration-restore') });
-    else if (target.hasAttribute('data-migration-retry-recycling')) request('dataMigration.retryRecycling', { itemId: target.getAttribute('data-migration-retry-recycling') });
+    else if (target.hasAttribute('data-migration-retry-recycling')) request('dataMigration.retryRecycling', { planId: target.getAttribute('data-migration-retry-recycling') });
     else if (target.hasAttribute('data-migration-retry')) request('dataMigration.retry', { jobId: target.getAttribute('data-migration-retry') });
   });
   window.addEventListener('message', event => {

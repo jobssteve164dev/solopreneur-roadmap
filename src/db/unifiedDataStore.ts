@@ -25,6 +25,17 @@ export interface RecyclingItem {
   bytes: number; status: 'prepared' | 'approved' | 'moving' | 'held' | 'trashed' | 'restoring' | 'restored' | 'changed'; error: string | null;
 }
 
+export interface MaintenanceTask {
+  taskId: string;
+  kind: 'migration_review' | 'recycling_apply';
+  targetId: string | null;
+  status: 'ready' | 'running' | 'completed' | 'failed' | 'revoked';
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  validUntil: number;
+}
+
 export interface DataWrite {
   kind: string;
   action: 'create' | 'patch' | 'archive';
@@ -144,6 +155,9 @@ export class UnifiedDataStore {
         this.columns.set(definition.table, new Set(this.rows(`PRAGMA table_info(${definition.table})`).map(row => String(row.name)).filter(name => !['id', 'object_kind', 'project_id'].includes(name))));
       }
       const environment = canonical({ schemaVersion: 1, platform: process.platform, hostname: os.hostname(), user: os.userInfo().username });
+      if (!this.rows("SELECT value FROM database_meta WHERE key='maintenance_secret'").length) {
+        this.db.run('INSERT INTO database_meta VALUES(?,?)', ['maintenance_secret', crypto.randomBytes(32).toString('hex')]);
+      }
       const device = this.rows('SELECT id FROM devices WHERE environment=?', [environment])[0];
       this.deviceId = device ? String(device.id) : crypto.randomUUID();
       if (!device) this.db.run('INSERT INTO devices VALUES(?,?,?,NULL,?)', [this.deviceId, os.hostname(), environment, Date.now()]);
@@ -277,6 +291,75 @@ export class UnifiedDataStore {
     const proof = crypto.randomBytes(32).toString('hex');
     this.db.run('INSERT INTO actors(id,kind,provider,identity_ref,authority_id) VALUES(?,?,?,?,?)', [actorId, 'mcp', 'solomap-stdio', digest(proof), authorityActorId]);
     return { actorId, proof, authorityActorId };
+  }
+
+  private maintenanceProof(taskId: string): string {
+    const secret = String(this.rows("SELECT value FROM database_meta WHERE key='maintenance_secret'")[0]?.value || '');
+    if (!secret) throw new Error('maintenance_authority_missing');
+    return crypto.createHmac('sha256', secret).update(taskId).digest('hex');
+  }
+  public readMaintenanceTask(taskId: string): MaintenanceTask {
+    const row = this.rows('SELECT * FROM maintenance_tasks WHERE id=?', [taskId])[0];
+    if (!row) throw new Error('maintenance_task_missing');
+    return {
+      taskId: String(row.id), kind: row.kind as MaintenanceTask['kind'], targetId: row.target_id === null ? null : String(row.target_id),
+      status: row.status as MaintenanceTask['status'], error: row.error === null ? null : String(row.error),
+      createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), validUntil: Number(row.valid_until)
+    };
+  }
+  public maintenanceTasks(limit = 10): MaintenanceTask[] {
+    this.db.run("UPDATE maintenance_tasks SET status='failed',error='maintenance_task_expired',updated_at=? WHERE status IN ('ready','running') AND valid_until<=?", [Date.now(), Date.now()]);
+    const historyLimit = Math.max(1, Math.min(100, limit));
+    const active = this.rows("SELECT id FROM maintenance_tasks WHERE status IN ('ready','running') ORDER BY created_at DESC,id DESC");
+    const history = this.rows("SELECT id FROM maintenance_tasks WHERE status NOT IN ('ready','running') ORDER BY created_at DESC,id DESC LIMIT ?", [historyLimit]);
+    return [...active, ...history]
+      .map(row => this.readMaintenanceTask(String(row.id)));
+  }
+  public createMaintenanceTask(kind: MaintenanceTask['kind'], targetId?: string): MaintenanceTask & { proof: string } {
+    if (!['migration_review', 'recycling_apply'].includes(kind) || (kind === 'recycling_apply' && !targetId)) throw new Error('invalid_maintenance_task');
+    const now = Date.now();
+    this.db.run("UPDATE maintenance_tasks SET status='failed',error='maintenance_task_expired',updated_at=? WHERE status IN ('ready','running') AND valid_until<=?", [now, now]);
+    const active = this.rows("SELECT id FROM maintenance_tasks WHERE kind=? AND COALESCE(target_id,'')=? AND status IN ('ready','running') LIMIT 1", [kind, targetId || '']);
+    if (active.length) throw new Error('maintenance_task_in_use');
+    if (kind === 'recycling_apply') {
+      const rows = this.rows('SELECT status FROM migration_recycling WHERE plan_id=?', [String(targetId)]);
+      if (!rows.length || rows.some(row => row.status === 'prepared')) throw new Error('maintenance_target_unconfirmed');
+    }
+    const taskId = crypto.randomUUID();
+    this.db.run('INSERT INTO maintenance_tasks VALUES(?,?,?,?,?,?,?,?)', [taskId, kind, targetId || null, 'ready', null, now, now, now + 7 * 24 * 60 * 60 * 1000]);
+    return { ...this.readMaintenanceTask(taskId), proof: this.maintenanceProof(taskId) };
+  }
+  public resumeMaintenanceTask(taskId: string): MaintenanceTask & { proof: string } {
+    const task = this.readMaintenanceTask(taskId);
+    if (!['ready', 'running'].includes(task.status) || task.validUntil <= Date.now()) throw new Error('maintenance_task_expired');
+    return { ...task, proof: this.maintenanceProof(taskId) };
+  }
+  public establishMaintenanceTask(taskId: string, proof: string): MaintenanceTask {
+    const task = this.verifyMaintenanceTaskProof(taskId, proof);
+    this.db.run("UPDATE maintenance_tasks SET status='running',updated_at=? WHERE id=?", [Date.now(), taskId]);
+    return this.readMaintenanceTask(taskId);
+  }
+  public verifyMaintenanceTaskIdentity(taskId: string, proof: string): MaintenanceTask {
+    const task = this.readMaintenanceTask(taskId);
+    const expected = this.maintenanceProof(taskId);
+    if (!proof || proof.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(proof), Buffer.from(expected))) throw new Error('maintenance_resume_denied');
+    return task;
+  }
+  public verifyMaintenanceTaskProof(taskId: string, proof: string): MaintenanceTask {
+    const task = this.verifyMaintenanceTaskIdentity(taskId, proof);
+    if (!['ready', 'running'].includes(task.status) || task.validUntil <= Date.now()) throw new Error('maintenance_task_expired');
+    return task;
+  }
+  public authorizeMaintenanceTask(taskId: string, kind: MaintenanceTask['kind'], targetId: string | null): MaintenanceTask {
+    const task = this.readMaintenanceTask(taskId);
+    if (task.status !== 'running' || task.validUntil <= Date.now() || task.kind !== kind || task.targetId !== targetId) throw new Error('maintenance_task_inactive');
+    return task;
+  }
+  public completeMaintenanceTask(taskId: string, error: string | null = null): MaintenanceTask {
+    const task = this.readMaintenanceTask(taskId);
+    if (!['ready', 'running'].includes(task.status)) throw new Error('maintenance_task_not_active');
+    this.db.run('UPDATE maintenance_tasks SET status=?,error=?,updated_at=? WHERE id=?', [error ? 'failed' : 'completed', error, Date.now(), taskId]);
+    return this.readMaintenanceTask(taskId);
   }
 
   private rows(sql: string, values: SqlValue[] = []): Record<string, SqlValue>[] {
