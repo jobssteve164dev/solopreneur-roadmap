@@ -98,15 +98,14 @@ export class MigrationRecycling {
     return files;
   }
   public async overview() {
-    const files = await this.candidates();
     const latestJobs = new Map<string, ReturnType<UnifiedDataStore['readMigrationJob']>>();
     for (const job of this.store.migrationJobs()) latestJobs.set(String(job.args.collection || 'memory') + ':' + String(job.args.sourceRoot), job);
     const jobs = [...latestJobs.values()];
-    const sources = this.store.capturedMigrationSources();
+    const allRecycling = this.store.recyclingItems();
     const intelligenceIdentity = `intelligence:${path.join(this.store.root, 'intelligence-conversations')}`;
-    const migratedFiles = sources.filter(source => source.stage === 'imported' || (source.identity === intelligenceIdentity && conversationKey.test(source.key) && this.capturedConversationMatches(source))).length;
+    const sourceOverview = this.store.migrationSourceOverview(intelligenceIdentity);
     const recycling: RecyclingItem[] = [];
-    for (const item of this.store.recyclingItems()) {
+    for (const item of allRecycling) {
       if (item.status === 'prepared') continue;
       if (item.status === 'restored') {
         try { await fs.promises.lstat(path.join(this.store.root, '.migration-recycle', item.itemId + '.restore')); }
@@ -114,8 +113,8 @@ export class MigrationRecycling {
       }
       recycling.push(item);
     }
-    return { jobs, capturedFiles: sources.length, migratedFiles,
-      recyclableFiles: files.length, recyclableBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+    return { jobs, ...sourceOverview,
+      recyclableFiles: 0, recyclableBytes: 0,
       recycledFiles: recycling.filter(item => item.status === 'trashed').length,
       heldFiles: recycling.filter(item => ['moving', 'held'].includes(item.status)).length,
       recycling: recycling.map(({ identity, key, hash: _hash, planId, ...item }) => item) };

@@ -73,7 +73,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     const active = jobs.some((job: any) => ['queued', 'running', 'interrupted'].includes(job.status));
     const needsAttention = jobs.filter((job: any) => ['failed', 'completed_with_conflicts'].includes(job.status));
     const history = overview?.recycling || [];
-    card!.hidden = !plan && !active && !needsAttention.length && !Number(overview?.recyclableFiles || 0) && !history.length;
+    card!.hidden = !plan && !active && !needsAttention.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
     const migrated = Number(overview?.migratedFiles || 0);
     const count = Number(overview?.capturedFiles || 0);
     element('[data-migration-status]').textContent = !overview ? text('尚未读取进度', 'Progress not loaded')
@@ -85,8 +85,8 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     progress.removeAttribute('value');
     progress.setAttribute('aria-label', text('后台迁移进行中', 'Background migration in progress'));
     element('[data-migration-summary]').textContent = overview ? text(
-      '已保存 ' + count + ' 个旧文件 · 已迁移 ' + migrated + ' 项 · 可回收 ' + overview.recyclableFiles + ' 个文件（' + (overview.recyclableBytes / 1024).toFixed(1) + ' KB）',
-      count + ' old files saved · ' + migrated + ' items migrated · ' + overview.recyclableFiles + ' recyclable files (' + (overview.recyclableBytes / 1024).toFixed(1) + ' KB)') : '';
+      '已保存 ' + count + ' 个旧文件 · 已迁移 ' + migrated + ' 项 · 待检查 ' + Number(overview.reviewableFiles || 0) + ' 个文件',
+      count + ' old files saved · ' + migrated + ' items migrated · ' + Number(overview.reviewableFiles || 0) + ' files ready to review') : '';
     element('[data-migration-jobs]').innerHTML = jobs.map((job: any) => {
       const name = ({
         intelligence: text('聊天记录', 'Chat history'),
@@ -110,7 +110,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
       + (item.status !== 'approved' ? ' <button type="button" class="settings-action-btn test-btn" data-migration-restore="' + escape(item.itemId) + '">' + text('恢复文件', 'Restore file') + '</button>' : '')
       + (['approved', 'moving', 'held'].includes(item.status) ? ' <button type="button" class="settings-action-btn test-btn" data-migration-retry-recycling="' + escape(item.itemId) + '">' + text('继续回收', 'Continue recycling') + '</button>' : '') + '</div>').join('');
     card!.querySelectorAll('button').forEach(control => { control.disabled = busy; });
-    button('[data-migration-preview]').disabled = busy || !overview?.recyclableFiles;
+    button('[data-migration-preview]').disabled = busy || !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0);
     button('[data-migration-confirm]').disabled = busy || !plan?.files.length;
     card!.setAttribute('aria-busy', busy ? 'true' : 'false');
     if (timer) clearTimeout(timer);

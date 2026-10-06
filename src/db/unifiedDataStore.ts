@@ -183,6 +183,27 @@ export class UnifiedDataStore {
     return this.rows('SELECT source_identity,source_key,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id ORDER BY source_identity,source_key')
       .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage) }));
   }
+  public migrationSourceOverview(intelligenceIdentity: string): { capturedFiles: number; migratedFiles: number; reviewableFiles: number } {
+    const row = this.rows(`SELECT
+      COUNT(*) AS captured_files,
+      COALESCE(SUM(CASE WHEN stage='imported' OR (
+        source_identity=? AND substr(source_key,-5)='.json' AND EXISTS(
+          SELECT 1 FROM objects WHERE objects.id=substr(migration_items.source_key,1,length(migration_items.source_key)-5)
+        )
+      ) THEN 1 ELSE 0 END),0) AS migrated_files,
+      COALESCE(SUM(CASE WHEN (
+        (stage='imported' AND (source_identity LIKE 'project-journal:%' OR source_identity LIKE 'project-growth:%')) OR
+        (source_identity=? AND substr(source_key,-5)='.json' AND EXISTS(
+          SELECT 1 FROM objects WHERE objects.id=substr(migration_items.source_key,1,length(migration_items.source_key)-5)
+        ))
+      ) AND NOT EXISTS(
+        SELECT 1 FROM migration_recycling WHERE migration_recycling.source_identity=migration_items.source_identity
+          AND migration_recycling.source_key=migration_items.source_key
+          AND migration_recycling.status IN ('prepared','approved','moving','held','restoring','trashed','changed')
+      ) THEN 1 ELSE 0 END),0) AS reviewable_files
+      FROM migration_items`, [intelligenceIdentity, intelligenceIdentity])[0];
+    return { capturedFiles: Number(row.captured_files), migratedFiles: Number(row.migrated_files), reviewableFiles: Number(row.reviewable_files) };
+  }
   public markMigrationSourceImported(identity: string, key: string): void {
     this.db.run("UPDATE migration_items SET stage='imported',error=NULL WHERE source_identity=? AND source_key=?", [identity, key]);
   }
@@ -463,17 +484,16 @@ export class UnifiedDataStore {
   public write(input: DataWrite): WriteReceipt {
     return this.writeMutation(input);
   }
-  public captureMigrationSource(source: ImportedSource, bytes: Uint8Array, options: { mimeType?: string; encoding?: string; error?: string } = {}): { unchanged: boolean; requestId: string; committedSequence: number } {
+  public captureMigrationSource(source: ImportedSource, bytes: Uint8Array, options: { mimeType?: string; encoding?: string; error?: string } = {}): { unchanged: boolean; requestId: string; committedSequence: number; stage: string } {
     if (!source.identity || !source.key || source.hash !== digest(bytes)) throw new Error('migration_source_invalid');
     return this.transaction(() => {
       const previous = this.rows('SELECT migration_items.*,contents.sha256 AS captured_hash FROM migration_items LEFT JOIN contents ON contents.id=migration_items.source_content_id WHERE source_identity=? AND source_key=?', [source.identity, source.key])[0];
       const revision = Number(previous?.source_capture_revision || 0);
       const classificationChanged = options.error ? previous?.stage !== 'unmapped' || previous.error !== options.error : previous?.stage === 'unmapped';
       if (previous?.captured_hash === source.hash && !classificationChanged) {
-        this.content(String(previous.source_content_id));
         const request = this.rows('SELECT id,committed_sequence FROM requests WHERE id=?', [previous.source_capture_request_id])[0];
         if (!request) throw new Error('migration_capture_receipt_missing');
-        return { unchanged: true, requestId: String(request.id), committedSequence: Number(request.committed_sequence) };
+        return { unchanged: true, requestId: String(request.id), committedSequence: Number(request.committed_sequence), stage: String(previous.stage) };
       }
       const contentId = this.putContent(bytes, options.mimeType || 'application/octet-stream', options.encoding || 'binary');
       const stage = options.error ? 'unmapped' : 'captured';
@@ -487,7 +507,7 @@ export class UnifiedDataStore {
       this.db.run('INSERT INTO events VALUES(?,?,NULL,?,?,?,?,?)', [crypto.randomUUID(), sequence, this.actorId, 'migration.source_captured', eventContent, Date.now(), requestId]);
       const resultContent = this.putContent(canonical({ requestId, committedSequence: sequence }), 'application/json');
       this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE id=?", [resultContent, sequence, requestId]);
-      return { unchanged: false, requestId, committedSequence: sequence };
+      return { unchanged: false, requestId, committedSequence: sequence, stage };
     });
   }
   public readMigrationSource(identity: string, key: string): { bytes: Buffer; hash: string; sourceRevision: number; stage: string } {
@@ -639,15 +659,22 @@ export class UnifiedDataStore {
       if (replay) return receipt;
       const storedSnapshotId = receipt.objectId;
       this.db.run('DELETE FROM growth_items WHERE snapshot_id=?', [storedSnapshotId]);
-      const pendingNodes = [...data.nodes];
-      const insertedNodes = new Set<string>();
       try {
-        while (pendingNodes.length) {
-          const index = pendingNodes.findIndex(node => !node.parentId || insertedNodes.has(node.parentId));
-          if (index < 0) throw new Error('growth_parent_cycle');
-          const [node] = pendingNodes.splice(index, 1);
+        const children = new Map<string, typeof data.nodes>();
+        const ordered = data.nodes.filter(node => !node.parentId);
+        for (const node of data.nodes) {
+          if (!node.parentId) continue;
+          const siblings = children.get(node.parentId) || [];
+          siblings.push(node);
+          children.set(node.parentId, siblings);
+        }
+        for (let index = 0; index < ordered.length; index++) {
+          const node = ordered[index];
+          ordered.push(...(children.get(node.nodeId) || []));
+        }
+        if (ordered.length !== data.nodes.length) throw new Error('growth_parent_cycle');
+        for (const node of ordered) {
           this.db.run('INSERT INTO growth_items VALUES(?,?,?,?,?,?,?,?,?,?,?)', [storedSnapshotId, node.nodeId, node.parentId || null, node.kind, node.path, node.label, canonical({ ...node, snapshotId: storedSnapshotId }), node.fileCount - node.testFileCount, node.testFileCount, null, node.bytes]);
-          insertedNodes.add(node.nodeId);
         }
       }
       catch (error) { throw new Error(`growth_items_write:${String(error)}`); }
@@ -660,8 +687,6 @@ export class UnifiedDataStore {
       this.db.run('DELETE FROM growth_module_labels WHERE snapshot_id=?', [storedSnapshotId]);
       try { for (const label of data.labels) this.db.run('INSERT INTO growth_module_labels VALUES(?,?,?,?,?,?,?)', [storedSnapshotId, label.nodeId, label.label, label.role, label.source, label.confidence, Date.parse(label.updatedAt)]); }
       catch (error) { throw new Error(`growth_labels_write:${String(error)}`); }
-      const violations = this.rows('PRAGMA foreign_key_check');
-      if (violations.length) throw new Error(`growth_foreign_key_violation:${canonical(violations)}`);
       return receipt;
     });
   }

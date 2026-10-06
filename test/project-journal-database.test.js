@@ -3,11 +3,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { SyncEngine } = require('../out/db/syncEngine.js');
-const { importProjectGrowth } = require('../out/projectDataMigration.js');
+const { importAgentRuns, importProjectGrowth } = require('../out/projectDataMigration.js');
 
 test('project journal writes are immediate and concurrent through the single Runtime owner', async () => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-db-')), '.solomap-global');
@@ -129,7 +130,8 @@ test('legacy project data migrates in the background while live-consumer run fil
     assert.equal(Buffer.from(archived.bytes, 'base64').toString(), '{"summary":"done"}');
     const overview = await operations({ operation: 'migration_overview', input: {} });
     assert.equal(overview.jobs.filter(job => ['project-journal', 'agent-runs'].includes(job.args.collection)).every(job => job.status === 'completed'), true);
-    assert.equal(overview.recyclableFiles, 1);
+    assert.equal(overview.reviewableFiles, 1);
+    assert.equal(overview.recyclableFiles, 0);
     assert.equal(fs.existsSync(journalPath), true); assert.equal(fs.existsSync(artifact), true);
     const plan = await operations({ operation: 'prepare_recycling', input: {} });
     assert.deepEqual(plan.files.map(file => path.basename(file.path)), ['project_journal.db']);
@@ -169,5 +171,103 @@ test('legacy growth migration yields between snapshots so Runtime control remain
   try {
     await importProjectGrowth(store, source, { projectRoot: project });
     assert.deepEqual(observations, [true]);
+  } finally { store.close(); }
+});
+
+test('captured growth source resumes after restart until it is fully imported', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-resume-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init();
+  legacy.writeGrowthSnapshot({ snapshot: { id: 'resume-growth', createdAt: new Date().toISOString(), projectPath: project, gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' }, nodes: [], edges: [], signals: [], labels: [] });
+  legacy.close();
+  const store = new UnifiedDataStore(root); const bytes = fs.readFileSync(source);
+  store.captureMigrationSource({ identity: `project-growth:${project}`, key: path.basename(source), hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
+  try {
+    const result = await importProjectGrowth(store, source, { projectRoot: project });
+    assert.equal(result.imported, 1);
+    assert.equal(store.readMigrationSource(`project-growth:${project}`, path.basename(source)).stage, 'imported');
+  } finally { store.close(); }
+});
+
+test('growth writes do not scan the remaining node list for every inserted parent', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/db/unifiedDataStore.ts'), 'utf8');
+  assert.doesNotMatch(source, /pendingNodes\.findIndex/);
+});
+
+test('each growth snapshot relies on transaction constraints instead of rescanning the whole database', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/db/unifiedDataStore.ts'), 'utf8');
+  const body = source.slice(source.indexOf('public writeProjectGrowth('), source.indexOf('public readProjectGrowth('));
+  assert.doesNotMatch(body, /PRAGMA foreign_key_check/);
+});
+
+test('unchanged migration capture reuses its committed hash without rereading the archived source', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/db/unifiedDataStore.ts'), 'utf8');
+  const body = source.slice(source.indexOf('public captureMigrationSource('), source.indexOf('public readMigrationSource('));
+  const unchanged = body.slice(body.indexOf('if (previous?.captured_hash'), body.indexOf('const contentId'));
+  assert.doesNotMatch(unchanged, /this\.content\(/);
+});
+
+test('project journal migration uses a read-only history path without lifecycle reconciliation writes', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/projectDataMigration.ts'), 'utf8');
+  const body = source.slice(source.indexOf('export async function importProjectJournal'), source.indexOf('async function filesUnder'));
+  assert.match(body, /getAllExecutionLogsRaw/);
+  assert.doesNotMatch(body, /getAllExecutionLogs\(\)/);
+});
+
+test('agent-run migration records changing files and unreadable directories without stopping the queue', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agent-run-conflicts-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project'); const runs = path.join(project, '.solopreneur', 'agent-runs');
+  const changing = path.join(runs, 'changing.log'); const denied = path.join(runs, 'denied');
+  fs.mkdirSync(denied, { recursive: true }); fs.mkdirSync(root); fs.writeFileSync(changing, 'active');
+  const store = new UnifiedDataStore(root); const lstat = fs.promises.lstat; const readdir = fs.promises.readdir; let stats = 0;
+  fs.promises.lstat = async file => {
+    const value = await lstat(file);
+    if (file === changing && ++stats > 1) return Object.assign(Object.create(Object.getPrototypeOf(value)), value, { mtimeMs: value.mtimeMs + 1 });
+    return value;
+  };
+  fs.promises.readdir = async (directory, options) => {
+    if (directory === denied) throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    return readdir(directory, options);
+  };
+  try {
+    const result = await importAgentRuns(store, runs, { projectRoot: project });
+    assert.equal(result.imported, 0);
+    assert.deepEqual(result.conflicts.map(item => path.basename(item.source)).sort(), ['changing.log', 'denied']);
+  } finally { fs.promises.lstat = lstat; fs.promises.readdir = readdir; store.close(); }
+});
+
+test('captured agent-run source resumes after restart until its artifact is written', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agent-run-resume-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project'); const runs = path.join(project, '.solopreneur', 'agent-runs');
+  const relativePath = path.join('3', 'output.log'); const source = path.join(runs, relativePath); const bytes = Buffer.from('captured-before-interruption');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root); fs.writeFileSync(source, bytes);
+  const store = new UnifiedDataStore(root);
+  store.captureMigrationSource({ identity: `agent-runs:${project}`, key: relativePath, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  try {
+    const result = await importAgentRuns(store, runs, { projectRoot: project });
+    const registered = await store.registerProject({ root: project });
+    assert.equal(result.imported, 1);
+    assert.equal(Buffer.from(store.readRunArtifact(registered.projectId, 3, relativePath).bytes, 'base64').toString(), bytes.toString());
+  } finally { store.close(); }
+});
+
+test('agent-run resume preserves a newer database artifact and records the conflict', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agent-run-newer-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project'); const runs = path.join(project, '.solopreneur', 'agent-runs');
+  const relativePath = path.join('4', 'output.log'); const source = path.join(runs, relativePath); const legacy = Buffer.from('legacy'); const current = Buffer.from('new live write');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root); fs.writeFileSync(source, legacy);
+  const store = new UnifiedDataStore(root); const registered = await store.registerProject({ root: project });
+  const legacyHash = crypto.createHash('sha256').update(legacy).digest('hex'); const currentHash = crypto.createHash('sha256').update(current).digest('hex');
+  store.captureMigrationSource({ identity: `agent-runs:${project}`, key: relativePath, hash: legacyHash }, legacy, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  store.writeRunArtifact(registered.projectId, { executionLogId: 4, relativePath, bytes: current.toString('base64'), hash: currentHash });
+  try {
+    const result = await importAgentRuns(store, runs, { projectRoot: project });
+    const artifact = store.readRunArtifact(registered.projectId, 4, relativePath);
+    assert.equal(result.imported, 0);
+    assert.deepEqual(result.conflicts.map(item => path.basename(item.source)), ['output.log']);
+    assert.equal(Buffer.from(artifact.bytes, 'base64').toString(), current.toString());
   } finally { store.close(); }
 });

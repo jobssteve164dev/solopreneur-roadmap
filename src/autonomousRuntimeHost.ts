@@ -27,6 +27,7 @@ interface RuntimeHostOptions {
   buildId?: string;
   verifyRuntimeProcess?: (pid: number, runtimeId: string, globalDataPath: string) => boolean;
   terminateProcess?: (pid: number) => Promise<void>;
+  drainTimeoutMs?: number;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -171,12 +172,12 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
   if (current && isProcessAlive(current.pid)) {
     let health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
     if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
-    if (health.reason === 'control_unavailable') {
+    if (health.reason === 'control_unavailable' || health.reason === 'stale_heartbeat') {
       await new Promise(resolve => setTimeout(resolve, 250));
       health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
       if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
       const verify = options.verifyRuntimeProcess || verifiedRuntimeProcess;
-      if (health.reason !== 'control_unavailable' || !verify(current.pid, current.runtimeId, globalDataPath)) throw new Error(health.reason);
+      if (!['control_unavailable', 'stale_heartbeat'].includes(health.reason) || !verify(current.pid, current.runtimeId, globalDataPath)) throw new Error(health.reason);
       await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
       if (isProcessAlive(current.pid)) throw new Error('runtime_termination_failed');
     } else {
@@ -187,13 +188,18 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
         if (error instanceof Error && error.message === 'different_runtime') throw error;
         throw new Error('control_unavailable');
       }
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + (options.drainTimeoutMs ?? 30_000);
       while (Date.now() < deadline) {
         const state = readRuntimeState(globalDataPath);
         if ((!state || state.runtimeId !== current.runtimeId || state.status === 'stopped') && !isProcessAlive(current.pid)) break;
         await new Promise(resolve => setTimeout(resolve, 50));
       }
-      if (isProcessAlive(current.pid)) throw new Error('runtime_drain_timeout');
+      if (isProcessAlive(current.pid)) {
+        const verify = options.verifyRuntimeProcess || verifiedRuntimeProcess;
+        if (!verify(current.pid, current.runtimeId, globalDataPath)) throw new Error('runtime_drain_timeout');
+        await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
+        if (isProcessAlive(current.pid)) throw new Error('runtime_termination_failed');
+      }
     }
   }
   const result = ensureAutonomousRuntime(options);

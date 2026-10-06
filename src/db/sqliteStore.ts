@@ -1350,6 +1350,16 @@ export class SqliteStore {
    * Retrieves execution history across all roadmap nodes, newest first.
    */
   public getAllExecutionLogs(): AgentConversation[] {
+    return this.filterSupersededRunningLogs(
+      this.getAllExecutionLogsRaw().map((log) => this.normalizeConversationStatus(log))
+    );
+  }
+
+  /**
+   * Retrieves stored execution history without reconciling lifecycle state.
+   * Legacy database migration uses this path because its source is read-only.
+   */
+  public getAllExecutionLogsRaw(): AgentConversation[] {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -1367,7 +1377,7 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
-    return this.filterSupersededRunningLogs(logs.map((log) => this.normalizeConversationStatus(log)));
+    return logs;
   }
 
   /**

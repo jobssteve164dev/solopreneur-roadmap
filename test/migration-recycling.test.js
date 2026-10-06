@@ -25,8 +25,8 @@ test('only fully migrated unchanged files enter an exact approved recycling plan
   try {
     await importLegacyIntelligenceConversation(f.store, f.file);
     const status = await f.call('migration_overview');
-    assert.equal(status.recyclableFiles, 1);
-    assert.equal(status.recyclableBytes, Buffer.byteLength(f.original));
+    assert.equal(status.reviewableFiles, 1);
+    assert.equal(status.recyclableFiles, 0);
     const plan = await f.call('prepare_recycling');
     assert.deepEqual(plan.files.map(file => file.path), [f.file]);
     await assert.rejects(f.call('hold_recycling_file', { itemId: plan.files[0].itemId }), /recycling_confirmation_required/);
@@ -38,13 +38,34 @@ test('only fully migrated unchanged files enter an exact approved recycling plan
     const trash = path.join(f.root, 'fixture-system-trash.json');
     fs.renameSync(held.path, trash); // A test-owned stand-in for the native system trash.
     await f.call('finish_recycling_file', { itemId: plan.files[0].itemId });
-    assert.equal((await f.call('migration_overview')).recycledFiles, 1);
+    const recycled = await f.call('migration_overview');
+    assert.equal(recycled.recycledFiles, 1);
+    assert.equal(recycled.reviewableFiles, 0);
     await f.call('restore_recycling_file', { itemId: plan.files[0].itemId });
     assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
     fs.writeFileSync(f.file, 'Newer user content');
     await assert.rejects(f.call('restore_recycling_file', { itemId: plan.files[0].itemId }), /restore_target_exists/);
     assert.equal(fs.readFileSync(f.file, 'utf8'), 'Newer user content');
   } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('migration overview is immediate and leaves byte validation to explicit review', async () => {
+  const f = fixture();
+  const readFile = fs.promises.readFile;
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    fs.promises.readFile = async () => { throw new Error('overview_must_not_read_source_bytes'); };
+    const status = await f.call('migration_overview');
+    assert.equal(status.reviewableFiles, 1);
+    assert.equal(status.recyclableFiles, 0);
+  } finally { fs.promises.readFile = readFile; await f.operations.close(); f.store.close(); }
+});
+
+test('migration overview aggregates source counts without materializing every captured file', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/migrationRecycling.ts'), 'utf8');
+  const body = source.slice(source.indexOf('public async overview()'), source.indexOf('public async prepare()'));
+  assert.doesNotMatch(body, /capturedMigrationSources/);
+  assert.match(body, /migrationSourceOverview/);
 });
 
 test('confirmation cannot recycle changed, mismatched, symlinked, or still used memory sources', async () => {
@@ -56,7 +77,9 @@ test('confirmation cannot recycle changed, mismatched, symlinked, or still used 
     fs.writeFileSync(f.file, f.original + '\n');
     await assert.rejects(f.call('hold_recycling_file', { itemId: plan.files[0].itemId }), /recycling_source_changed/);
     assert.equal(fs.readFileSync(f.file, 'utf8'), f.original + '\n');
-    assert.equal((await f.call('migration_overview')).recyclableFiles, 0);
+    const changed = await f.call('migration_overview');
+    assert.equal(changed.recyclableFiles, 0);
+    assert.equal(changed.reviewableFiles, 0);
     fs.renameSync(f.file, f.file + '.retained');
     fs.symlinkSync(f.file + '.retained', f.file);
     assert.equal((await f.call('migration_overview')).recyclableFiles, 0);
