@@ -7,6 +7,7 @@ const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { SyncEngine } = require('../out/db/syncEngine.js');
+const { importProjectGrowth } = require('../out/projectDataMigration.js');
 
 test('project journal writes are immediate and concurrent through the single Runtime owner', async () => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-db-')), '.solomap-global');
@@ -141,4 +142,32 @@ test('legacy project data migrates in the background while live-consumer run fil
     await operations({ operation: 'restore_recycling_file', input: { itemId: journalItem.itemId } });
     assert.equal(fs.existsSync(journalPath), true);
   } finally { await operations.close(); store.close(); }
+});
+
+test('legacy growth migration yields between snapshots so Runtime control remains responsive', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-yield-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init();
+  for (const id of ['growth-one', 'growth-two']) legacy.writeGrowthSnapshot({
+    snapshot: { id, createdAt: new Date().toISOString(), projectPath: project, gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' },
+    nodes: [], edges: [], signals: [], labels: []
+  });
+  legacy.close();
+  const store = new UnifiedDataStore(root);
+  const originalWrite = store.writeProjectGrowth.bind(store);
+  let yieldedAfterFirst = false; let writes = 0; const observations = [];
+  store.writeProjectGrowth = (...args) => {
+    writes += 1;
+    if (writes === 2) observations.push(yieldedAfterFirst);
+    const result = originalWrite(...args);
+    if (writes === 1) setImmediate(() => { yieldedAfterFirst = true; });
+    return result;
+  };
+  try {
+    await importProjectGrowth(store, source, { projectRoot: project });
+    assert.deepEqual(observations, [true]);
+  } finally { store.close(); }
 });

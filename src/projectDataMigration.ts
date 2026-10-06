@@ -75,7 +75,9 @@ export async function importProjectGrowth(store: UnifiedDataStore, source: strin
       if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
       const snapshot = legacy.getGrowthSnapshotById(row.id);
       if (snapshot) { store.writeProjectGrowth(project.projectId, snapshot, `legacy-growth:${project.projectId}:${row.id}`); result.imported++; }
-      if (result.imported % 32 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+      // A legacy snapshot can contain tens of thousands of rows. Let control,
+      // task-start, and live database requests run between every snapshot.
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
   } finally { legacy.close(); }
   store.markMigrationSourceImported(identity, path.basename(source));

@@ -7246,9 +7246,11 @@ test('agent launch path uses one terminal-first startup component', () => {
   ]) {
     const body = source.slice(source.indexOf(startMarker), source.indexOf(endMarker, source.indexOf(startMarker)));
     const ledgerOwner = name === 'step' ? 'projectSyncEngine' : 'syncEngine';
+    const runtimeReady = body.indexOf('await ensureTaskRuntimeReady(context)');
     const ledgerWrite = body.indexOf(`const executionLogId = await ${ledgerOwner}.logAgentExecution(`);
     const ledgerPublish = body.indexOf(refreshCall, ledgerWrite);
     const preSessionGit = body.indexOf('await createPreSessionGitCommit(', ledgerWrite);
+    assert.ok(runtimeReady >= 0 && runtimeReady < ledgerWrite, `${name} launch must recover the database Runtime before its first ledger write`);
     assert.ok(ledgerWrite >= 0, `${name} launch must create its first ledger row`);
     assert.ok(ledgerPublish > ledgerWrite, `${name} launch must publish its first ledger row immediately`);
     assert.ok(preSessionGit > ledgerPublish, `${name} launch must not delay its first ledger row behind pre-session work`);

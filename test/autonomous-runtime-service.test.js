@@ -89,6 +89,43 @@ test('a live runtime without control cannot be adopted or replaced', async t => 
   assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).runtimeId, 'legacy');
 });
 
+test('a verified SoloMap runtime without control is terminated before fallback recovery', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const runtime = require('../out/autonomousRuntime.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-recover-hung-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'state.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'hung', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  let spawnedChild;
+  t.after(() => {
+    if (spawnedChild) spawnedChild.kill('SIGKILL');
+    fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
+  });
+  let oldAlive = true;
+  let terminated = 0;
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-new', globalDataPath: globalRoot, buildId: 'new',
+    isProcessAlive: pid => pid === process.pid ? oldAlive : true,
+    sendHealth: async () => {
+      const state = runtime.readRuntimeState(globalRoot);
+      if (state.runtimeId === 'hung') throw new Error('control endpoint timed out');
+      return { ok: true, runtimeId: state.runtimeId, status: state.status, entryPath: '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: 'new' };
+    },
+    verifyRuntimeProcess: (pid, runtimeId) => pid === process.pid && runtimeId === 'hung',
+    async terminateProcess(pid) { terminated = pid; oldAlive = false; },
+    spawnProcess(command, args) {
+      assert.equal(args[0], '/opt/solomap-new/out/autonomousRuntimeProcess.js');
+      spawnedChild = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      return { pid: spawnedChild.pid, unref() {} };
+    }
+  });
+  assert.equal(terminated, process.pid);
+  assert.equal(result.started, true);
+  assert.equal(runtime.readRuntimeState(globalRoot).pid, spawnedChild.pid);
+});
+
 test('a healthy runtime is reused only after its control identity matches the lease', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-reuse-'));

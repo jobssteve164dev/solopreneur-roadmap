@@ -48,6 +48,7 @@ export class DiskStatement {
 export class DiskDatabase {
   private native: NativeDatabase;
   private changes = 0;
+  private readonly runStatements = new Map<string, NativeStatement>();
   constructor(public readonly filePath: string, options: { foreignKeys?: boolean; journalMode?: 'WAL' | 'DELETE'; readOnly?: boolean } = {}) {
     if (!options.readOnly) fs.mkdirSync(path.dirname(filePath), { recursive: true });
     // Node's bundled driver avoids platform-specific extension ABI binaries.
@@ -66,7 +67,14 @@ export class DiskDatabase {
     return new DiskStatement(this.native.prepare(sql), changes => { this.changes = changes; });
   }
   run(sql: string, values?: SqlValue[]): void {
-    if (values) this.changes = Number(this.native.prepare(sql).run(...values).changes);
+    if (values) {
+      let statement = this.runStatements.get(sql);
+      if (!statement) {
+        statement = this.native.prepare(sql);
+        this.runStatements.set(sql, statement);
+      }
+      this.changes = Number(statement.run(...values).changes);
+    }
     else this.native.exec(sql);
   }
   exec(sql: string): { columns: string[]; values: SqlValue[][] }[] {
@@ -80,5 +88,5 @@ export class DiskDatabase {
     const { backup } = require('node:sqlite') as { backup(source: NativeDatabase, target: string): Promise<void> };
     await backup(this.native, destination);
   }
-  close(): void { this.native.close(); }
+  close(): void { this.runStatements.clear(); this.native.close(); }
 }

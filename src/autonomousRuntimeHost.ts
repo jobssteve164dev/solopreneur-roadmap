@@ -25,6 +25,8 @@ interface RuntimeHostOptions {
   sendHealth?: (dataPath: string) => Promise<RuntimeControlResponse>;
   sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string) => Promise<unknown>;
   buildId?: string;
+  verifyRuntimeProcess?: (pid: number, runtimeId: string, globalDataPath: string) => boolean;
+  terminateProcess?: (pid: number) => Promise<void>;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -35,6 +37,42 @@ function defaultIsProcessAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function verifiedRuntimeProcess(pid: number, runtimeId: string, globalDataPath: string): boolean {
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  const state = readRuntimeState(globalDataPath);
+  if (!state || state.pid !== pid || state.runtimeId !== runtimeId) return false;
+  try {
+    const endpoint = JSON.parse(fs.readFileSync(path.join(globalDataPath, 'runtime', 'control.json'), 'utf8')) as { runtimeId?: string; entryPath?: string };
+    const entryPath = path.resolve(String(endpoint.entryPath || ''));
+    if (endpoint.runtimeId !== runtimeId || path.basename(entryPath) !== 'autonomousRuntimeProcess.js' || path.basename(path.dirname(entryPath)) !== 'out') return false;
+    if (process.platform === 'linux') {
+      const command = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+      const entryMatches = command.some(value => path.resolve(value) === entryPath);
+      const dataIndex = command.indexOf('--global-data-path');
+      const runtimeIndex = command.indexOf('--runtime-id');
+      return entryMatches
+        && dataIndex >= 0
+        && path.resolve(command[dataIndex + 1] || '') === path.resolve(globalDataPath)
+        && runtimeIndex >= 0
+        && command[runtimeIndex + 1] === runtimeId;
+    }
+    const heartbeatAt = Date.parse(state.heartbeatAt);
+    return Number.isFinite(heartbeatAt) && Date.now() - heartbeatAt <= 90_000;
+  } catch {
+    return false;
+  }
+}
+
+async function terminateVerifiedRuntimeProcess(pid: number): Promise<void> {
+  process.kill(pid, 'SIGTERM');
+  const gracefulDeadline = Date.now() + 2_000;
+  while (Date.now() < gracefulDeadline && defaultIsProcessAlive(pid)) await new Promise(resolve => setTimeout(resolve, 50));
+  if (defaultIsProcessAlive(pid)) process.kill(pid, 'SIGKILL');
+  const forcedDeadline = Date.now() + 3_000;
+  while (Date.now() < forcedDeadline && defaultIsProcessAlive(pid)) await new Promise(resolve => setTimeout(resolve, 50));
+  if (defaultIsProcessAlive(pid)) throw new Error('runtime_termination_failed');
 }
 
 export async function inspectAutonomousRuntimeHealth(
@@ -131,22 +169,32 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
   const current = readRuntimeState(globalDataPath);
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
   if (current && isProcessAlive(current.pid)) {
-    const health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
+    let health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
     if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
-    if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
-    try {
-      await (options.sendControl || ((command, expectedRuntimeId) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId })))('drain', current.runtimeId);
-    } catch (error) {
-      if (error instanceof Error && error.message === 'different_runtime') throw error;
-      throw new Error('control_unavailable');
+    if (health.reason === 'control_unavailable') {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
+      if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+      const verify = options.verifyRuntimeProcess || verifiedRuntimeProcess;
+      if (health.reason !== 'control_unavailable' || !verify(current.pid, current.runtimeId, globalDataPath)) throw new Error(health.reason);
+      await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
+      if (isProcessAlive(current.pid)) throw new Error('runtime_termination_failed');
+    } else {
+      if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
+      try {
+        await (options.sendControl || ((command, expectedRuntimeId) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId })))('drain', current.runtimeId);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'different_runtime') throw error;
+        throw new Error('control_unavailable');
+      }
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        const state = readRuntimeState(globalDataPath);
+        if ((!state || state.runtimeId !== current.runtimeId || state.status === 'stopped') && !isProcessAlive(current.pid)) break;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (isProcessAlive(current.pid)) throw new Error('runtime_drain_timeout');
     }
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      const state = readRuntimeState(globalDataPath);
-      if ((!state || state.runtimeId !== current.runtimeId || state.status === 'stopped') && !isProcessAlive(current.pid)) break;
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    if (isProcessAlive(current.pid)) throw new Error('runtime_drain_timeout');
   }
   const result = ensureAutonomousRuntime(options);
   await waitForAutonomousRuntimeHealth(globalDataPath, 30_000, options.sendHealth, entryPath, buildId, undefined, result.runtimeId, result.pid, false, undefined, true);

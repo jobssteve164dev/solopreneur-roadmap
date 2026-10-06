@@ -820,6 +820,13 @@ async function activateObservedBackgroundRuntime(extensionPath: string, globalDa
   });
 }
 
+async function ensureTaskRuntimeReady(context: vscode.ExtensionContext): Promise<void> {
+  const extensionPath = String(context?.extensionPath || '');
+  if (!extensionPath) return;
+  const globalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
+}
+
 let projectActionLaunchQueue: Promise<void> = Promise.resolve();
 
 async function enqueueProjectActionLaunch<T>(action: (registered: () => void) => Promise<T>): Promise<T> {
@@ -8209,6 +8216,7 @@ async function handleRoadmapRevision(
   supplementFiles: string[] = [],
   onExecutionRegistered: () => void = () => {}
 ): Promise<void> {
+  await ensureTaskRuntimeReady(context);
   if (!syncEngine || !activeProjectRoot) {
     return;
   }
@@ -8354,6 +8362,7 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
 }
 
 async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = '', interactiveConversation = true): Promise<number> {
+  await ensureTaskRuntimeReady(context);
   if (!syncEngine || !activeProjectRoot) {
     return 0;
   }
@@ -8870,6 +8879,7 @@ async function handleRunAgent(
   interactiveConversation = true,
   onExecutionRegistered: () => void = () => {}
 ) {
+  await ensureTaskRuntimeReady(context);
   if (!syncEngine) {
     return;
   }
