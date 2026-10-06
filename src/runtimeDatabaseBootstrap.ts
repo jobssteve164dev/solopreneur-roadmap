@@ -5,7 +5,8 @@ import { UnifiedDataStore } from './db/unifiedDataStore';
 import { RuntimeDataOperations } from './runtimeDataOperations';
 
 export async function enqueueStartupDataMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
-  await enqueueStartupMemoryMigration(store, operations, shouldContinue);
+  try { await enqueueStartupMemoryMigration(store, operations, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
   if (!shouldContinue()) return;
   const sourceRoot = path.join(store.root, 'intelligence-conversations');
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
@@ -17,7 +18,11 @@ export async function enqueueStartupDataMigrations(store: UnifiedDataStore, oper
 export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
   const sourceRoot = path.join(store.root, 'memory');
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    // Queue the source so the durable migration job exposes its failure and retry.
+    process.stderr.write(`SoloMap memory source inspection: ${String(error)}\n`);
+  }
   const mappings = new Map<string, string | null>();
   let projects: Array<{ path: string; name?: string }> = [];
   try {

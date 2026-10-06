@@ -552,6 +552,11 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './intelligenceMcp') {
           return require(path.join(projectRoot, 'out/intelligenceMcp.js'));
         }
+        if (id === './autonomousRuntimeHost') {
+          // These UI/identity fixtures isolate process creation; database startup
+          // and the generated task consumer have separate real-owner acceptance.
+          return { ensureHealthyAutonomousRuntime: async () => ({ started: false, pid: process.pid, runtimeId: 'isolated-ui-host' }) };
+        }
         if (id === './agentDatabaseConfig' || id === './runtimeDataOperations') {
           return require(path.join(projectRoot, 'out', id + '.js'));
         }
@@ -14570,6 +14575,60 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
   } finally {
     await server.close(); await dispatch.close(); store.close();
     if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prior;
+  }
+});
+
+test('a first task prepares the database and native config before its CLI can read and write', async () => {
+  const extensionModule = loadCompiledModule('out/extension.js', [
+    `Object.assign(autonomousRuntimeHost_1, require(${JSON.stringify(path.join(projectRoot, 'out/autonomousRuntimeHost.js'))}));`,
+    'module.exports.buildReady = typeof buildPreparedAgentShellScript === "function" ? buildPreparedAgentShellScript : async (...args) => buildAgentShellScript(...args);'
+  ].join('\n'));
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-first-task-'));
+  const root = path.join(fixture, '.solomap-global');
+  const workspace = path.join(fixture, 'workspace');
+  const config = path.join(fixture, 'cli-config');
+  fs.mkdirSync(workspace); fs.mkdirSync(config);
+  fs.mkdirSync(path.join(root, 'runtime'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'runtime/service-disabled'), 'disabled\n');
+  const prior = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = config;
+  const cli = path.join(fixture, 'claude');
+  fs.writeFileSync(cli, `#!/usr/bin/env node
+if(process.argv.includes('--version')){console.log('2.0.0');process.exit(0);}
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {Client}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/index.js'))});
+const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/stdio.js'))});
+(async()=>{
+ const config=JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR,'.claude.json'),'utf8')).mcpServers.solomap_data;
+ assert.ok(config);
+ const client=new Client({name:'first-task',version:'1'});
+ const transport=new StdioClientTransport({...config,cwd:process.cwd(),stderr:'pipe'});
+ try {
+  await client.connect(transport);
+  const response=await client.callTool({name:'solomap_write',arguments:{kind:'memory',action:'create',idempotencyKey:'first-task-cli',data:{category:'inbox',title:'First task',status:'captured',content:'first-task-committed'}}});
+  assert.ok(!response.isError,JSON.stringify(response));
+  const receipt=JSON.parse(response.content[0].text);
+  const read=await client.callTool({name:'solomap_read',arguments:{ref:receipt.objectId}});
+  assert.equal(JSON.parse(read.content[0].text).data.content,'first-task-committed');
+  console.log('first-task-config-ready');
+ } finally {await client.close();await transport.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});
+`, { mode: 0o755 });
+  const control = require('../out/autonomousRuntimeControl.js');
+  try {
+    assert.equal(fs.existsSync(path.join(root, 'solomap.db')), false);
+    const built = await extensionModule.buildReady(cli, '', 'Read and write project data.', workspace, 'task', 2, '', undefined, '', '', 'maintenance', '', root);
+    assert.match(fs.readFileSync(built.promptFilePath, 'utf8'), /SoloMap 数据库工具/);
+    assert.equal(fs.existsSync(path.join(root, 'solomap.db')), true);
+    childProcess.execFileSync('bash', ['-n', built.runScriptPath]);
+    await new Promise((resolve,reject) => childProcess.execFile('bash',[built.runScriptPath],{env:{...process.env,CLAUDE_CONFIG_DIR:config}},(error,stdout,stderr)=>error?reject(new Error(String(stderr||error))):resolve(stdout)));
+    assert.match(fs.readFileSync(built.outputFilePath,'utf8'),/first-task-config-ready/);
+    const identity = JSON.parse(fs.readFileSync(path.join(workspace,'.solopreneur/project.json'),'utf8'));
+    const receipt = await control.sendRuntimeDataRequest(root,{operation:'write',input:{kind:'memory',action:'create',scope:identity.projectId,idempotencyKey:'first-task',data:{category:'project',title:'First task',status:'active',content:'Immediate first task data'}}});
+    assert.equal((await control.sendRuntimeDataRequest(root,{operation:'read',input:{ref:receipt.objectId}})).data.content,'Immediate first task data');
+  } finally {
+    if(fs.existsSync(path.join(root,'runtime/control.json')))await control.sendRuntimeControlCommand(root,'stop');
+    if(prior===undefined)delete process.env.CLAUDE_CONFIG_DIR;else process.env.CLAUDE_CONFIG_DIR=prior;
   }
 });
 

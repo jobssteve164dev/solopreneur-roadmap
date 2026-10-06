@@ -163,3 +163,88 @@ test('a disconnected project with the same legacy slug prevents assigning ambigu
     assert.equal(source.stage, 'unmapped');
   } finally { await operations.close(); store.close(); }
 });
+
+test('an unreadable memory source does not prevent queuing independent chat migration', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { enqueueStartupDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-independent-')), '.solomap-global');
+  fs.mkdirSync(path.join(root, 'intelligence-conversations'), { recursive: true });
+  const store = new UnifiedDataStore(root);
+  const ops = createRuntimeDataOperations(store);
+  const stat = fs.promises.stat;
+  fs.promises.stat = async file => { if (file === path.join(root, 'memory')) throw Object.assign(new Error('fixture_memory_denied'), { code: 'EACCES' }); return stat(file); };
+  try {
+    await enqueueStartupDataMigrations(store, ops, () => true);
+    assert.equal(store.migrationJobs().filter(job => job.args.collection === 'intelligence').length, 1);
+  } finally { fs.promises.stat = stat; await ops.close(); store.close(); }
+});
+
+test('the extension chat readiness gate reconnects after owner exit and preserves immediate reads', async () => {
+  const vm = require('node:vm');
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-reconnect-')), '.solomap-global');
+  fs.mkdirSync(path.join(root, 'runtime'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'runtime/service-disabled'), 'disabled\n');
+  const compiled = fs.readFileSync(path.resolve(__dirname, '../out/extension.js'), 'utf8');
+  const start = compiled.indexOf('const dataReadiness =');
+  const end = compiled.indexOf('const reconcileIntelligenceServiceOnce =', start);
+  assert.ok(start >= 0 && end > start);
+  const options = { extensionPath: path.resolve(__dirname, '..'), globalDataPath: root };
+  const gate = vm.runInNewContext(compiled.slice(start, end) + '\nensureDataReady;', {
+    context: { extensionPath: options.extensionPath },
+    getPersistedSettings: () => ({ globalDataPath: root }),
+    normalizeGlobalDataPathForExtension: require('../out/projectRegistry.js').normalizeGlobalDataPathForExtension,
+    autonomousRuntimeHost_1: host,
+    reconcileBackgroundIntelligenceService: () => host.ensureHealthyAutonomousRuntime(options).then(() => undefined)
+  });
+  let pid;
+  const shutDown = async () => {
+    if (!pid) return;
+    try { process.kill(pid, 0); } catch { pid = undefined; return; }
+    await sendRuntimeControlCommand(root, 'stop');
+    while (true) { try { process.kill(pid, 0); } catch { break; } await new Promise(resolve => setTimeout(resolve, 10)); }
+    pid = undefined;
+  };
+  try {
+    await Promise.all(Array.from({ length: 8 }, () => gate()));
+    pid = require('../out/autonomousRuntime.js').readRuntimeState(root).pid;
+    const receipt = await sendRuntimeDataRequest(root, { operation: 'write', input: { kind: 'memory', action: 'create', scope: null, idempotencyKey: 'reconnect-content', data: { category: 'profile', title: 'Reconnect', status: 'active', content: 'Keep committed bytes' } } });
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
+    const counts = () => JSON.stringify(db.prepare('SELECT (SELECT count(*) FROM events) AS events, (SELECT count(*) FROM requests) AS requests, (SELECT count(*) FROM migration_jobs) AS jobs').get());
+    const before = counts();
+    const timings = [];
+    for (let i = 0; i < 20; i++) {
+      const started = performance.now();
+      await gate();
+      timings.push(performance.now() - started);
+    }
+    assert.equal(counts(), before, 'unchanged readiness checks do not append database events, requests or migration jobs');
+    db.close();
+    console.log(JSON.stringify({ readinessChecks: 20, averageMs: timings.reduce((sum,value)=>sum+value,0)/20, maxMs: Math.max(...timings), unchangedDatabaseCounts: true, backgroundPollingAdded: false, paidOperations: 0 }));
+    await shutDown();
+    await Promise.all(Array.from({ length: 8 }, () => gate()));
+    pid = require('../out/autonomousRuntime.js').readRuntimeState(root).pid;
+    const current = await sendRuntimeDataRequest(root, { operation: 'read', input: { ref: receipt.objectId } });
+    assert.equal(current.data.content, 'Keep committed bytes');
+    assert.equal((await sendRuntimeControlCommand(root, 'health')).status, 'paused');
+  } finally { await shutDown(); }
+});
+
+test('parallel first tasks wait for the same owner rather than failing while its endpoint starts', async () => {
+  const { ensureHealthyAutonomousRuntime } = require('../out/autonomousRuntimeHost.js');
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-parallel-first-')), '.solomap-global');
+  fs.mkdirSync(path.join(root, 'runtime'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'runtime/service-disabled'), 'disabled\n');
+  const options = { extensionPath: path.resolve(__dirname, '..'), globalDataPath: root };
+  try {
+    const outcomes = await Promise.allSettled(Array.from({ length: 8 }, () => ensureHealthyAutonomousRuntime(options)));
+    assert.ok(outcomes.every(outcome => outcome.status === 'fulfilled'), JSON.stringify(outcomes.map(outcome => outcome.status === 'rejected' ? String(outcome.reason) : outcome.value)));
+    assert.equal(new Set(outcomes.map(outcome => outcome.value.runtimeId)).size, 1);
+    assert.equal(new Set(outcomes.map(outcome => outcome.value.pid)).size, 1);
+    assert.equal((await sendRuntimeControlCommand(root, 'health')).status, 'paused');
+  } finally {
+    if (fs.existsSync(path.join(root, 'runtime/control.json'))) await sendRuntimeControlCommand(root, 'stop');
+  }
+});

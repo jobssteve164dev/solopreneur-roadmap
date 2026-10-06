@@ -109,7 +109,22 @@ export async function waitForAutonomousRuntimeHealth(
   throw new Error(reason);
 }
 
-export async function ensureHealthyAutonomousRuntime(options: RuntimeHostOptions): Promise<{ started: boolean; pid: number; runtimeId: string }> {
+const runtimeHealthRequests = new Map<string, Promise<{ started: boolean; pid: number; runtimeId: string }>>();
+
+export function ensureHealthyAutonomousRuntime(options: RuntimeHostOptions): Promise<{ started: boolean; pid: number; runtimeId: string }> {
+  const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
+  const buildId = options.buildId || runtimeBuildId(options.extensionPath);
+  const key = JSON.stringify([globalDataPath, path.resolve(options.extensionPath), buildId]);
+  let pending = runtimeHealthRequests.get(key);
+  if (!pending) {
+    pending = ensureHealthyAutonomousRuntimeOnce({ ...options, globalDataPath, buildId })
+      .finally(() => { runtimeHealthRequests.delete(key); });
+    runtimeHealthRequests.set(key, pending);
+  }
+  return pending;
+}
+
+async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): Promise<{ started: boolean; pid: number; runtimeId: string }> {
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
   const entryPath = path.join(options.extensionPath, 'out', 'autonomousRuntimeProcess.js');
   const buildId = options.buildId || runtimeBuildId(options.extensionPath);

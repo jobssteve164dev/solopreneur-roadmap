@@ -614,11 +614,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
   let intelligenceServiceReconciled = false;
   const dataReadiness = new Map<string, Promise<void>>();
+  const dataInitialized = new Set<string>();
   const ensureDataReady = () => {
     const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
     let pending = dataReadiness.get(root);
     if (!pending) {
-      pending = reconcileBackgroundIntelligenceService(context).catch(error => { dataReadiness.delete(root); throw error; });
+      pending = (dataInitialized.has(root)
+        ? ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root }).then(() => undefined)
+        : reconcileBackgroundIntelligenceService(context).then(() => { dataInitialized.add(root); }))
+        .finally(() => { dataReadiness.delete(root); });
       dataReadiness.set(root, pending);
     }
     return pending;
@@ -5433,6 +5437,15 @@ function deriveFlowLoopScoring(verifier: Record<string, any> | null, changedFile
   };
 }
 
+async function buildPreparedAgentShellScript(...args: Parameters<typeof buildAgentShellScript>): Promise<ReturnType<typeof buildAgentShellScript>> {
+  const provider = getAgentProvider(args[0]);
+  if (databaseAgentProviders.includes(provider as DatabaseAgentProvider)) {
+    const globalDataPath = normalizeSolomapGlobalPath(args[3], args[12] || '');
+    await ensureHealthyAutonomousRuntime({ extensionPath: path.resolve(__dirname, '..'), globalDataPath });
+  }
+  return buildAgentShellScript(...args);
+}
+
 function buildAgentShellScript(
   agentCli: string,
   selectedModel: string,
@@ -6401,7 +6414,7 @@ async function startAgentReviewRevisionRun(input: {
       input.taskPermissionMode
     );
   }
-  const { finalCommand } = buildAgentShellScript(
+  const { finalCommand } = await buildPreparedAgentShellScript(
     input.mainAgentCli,
     '',
     request,
@@ -7865,7 +7878,7 @@ async function handleContinueConversationTurn(
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, activeProjectRoot, sessionId);
   syncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
 
-  const { finalCommand } = buildAgentShellScript(
+  const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
     selectedModel,
     continuationPrompt,
@@ -8030,7 +8043,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, workspaceRoot);
   const displayCommand = buildSdkSentinelCommandLabel(agentCli, workspaceRoot, sessionId);
   projectSyncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
-  const { finalCommand } = buildAgentShellScript(
+  const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
     '',
     'SoloMap tracked continuation terminal',
@@ -8308,7 +8321,7 @@ async function handleRoadmapRevision(
   const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, settings.taskPermissionMode, selectedModel);
   projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
 
-  const { finalCommand } = buildAgentShellScript(
+  const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
     selectedModel,
     conversationPrompt,
@@ -8478,7 +8491,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     'Running'
   );
 
-  const { finalCommand } = buildAgentShellScript(
+  const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
     selectedModel,
     conversationPrompt,
@@ -8593,7 +8606,7 @@ async function startFlowRoleRun(
     return nextTrace;
   });
   await postFlowStateToWebview(context);
-  const { finalCommand } = buildAgentShellScript(
+  const { finalCommand } = await buildPreparedAgentShellScript(
     agentCli,
     effectiveModel,
     input.prompt,
@@ -9031,7 +9044,7 @@ async function handleRunAgent(
   projectSyncEngine.updateAgentExecution(executionLogId, agentCli, agentCommand, launchSummary, 'Running');
 
   const runKind = interactiveConversation ? 'step' : 'step_background';
-  const { finalCommand } = buildAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', runKind, '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
+  const { finalCommand } = await buildPreparedAgentShellScript(agentCli, selectedModel, conversationPrompt, workspaceRoot, nodeId, executionLogId, userMessage.trim(), completionDecisionFilePath, nativeSessionId, '', runKind, '', settings.globalDataPath, settings.taskPermissionMode, settings.reviewerCliPath, settings.collaborationReviewMode, settings.enabledEnhancements, runDir, statusFilePath);
 
   await launchAgentConversationTerminal({
     workspaceRoot,
