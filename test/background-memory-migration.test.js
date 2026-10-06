@@ -29,6 +29,11 @@ test('database-backed initialization stops generating memory and example Markdow
     scan(root);
     assert.deepEqual(markdown, ['memory/profile.md']);
     assert.equal(fs.readFileSync(original, 'utf8'), 'existing user-owned preferences');
+    assert.equal(fs.existsSync(path.join(root, 'learning')), false);
+    assert.equal(fs.existsSync(path.join(root, 'metrics')), false);
+    for (const legacyFile of ['portfolio.csv', 'dependencies.csv', 'capability-registry.csv', 'decision-conflicts.csv']) {
+      assert.equal(fs.existsSync(path.join(root, legacyFile)), false, `${legacyFile} must not be regenerated in database mode`);
+    }
   } finally { store.close(); }
 });
 

@@ -10,9 +10,16 @@ const { build } = wranglerRequire('esbuild');
 
 test('final bundled projection uses bounded SQLite writes in actual workerd', async () => {
   const bundle = await build({ entryPoints: [fileURLToPath(new URL('./fixtures/blog-projection-cost.worker.js', import.meta.url))], bundle: true, write: false, format: 'esm', platform: 'browser' });
-  const mf = new Miniflare({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2026-08-01', durableObjects: { STORE: { className: 'CostProjection', useSQLite: true } } });
+  const workerName = 'cost-projection';
+  const mf = new Miniflare({ workers: [{ config: {
+    name: workerName,
+    compatibilityDate: '2026-08-01',
+    manifest: { mainModule: 'worker.js', modules: { 'worker.js': { type: 'esm', contents: bundle.outputFiles[0].text } } },
+    exports: { CostProjection: { type: 'durable-object', storage: 'sqlite' } },
+    env: { STORE: { type: 'durable-object', worker: workerName, exportName: 'CostProjection' } }
+  } }] });
   try {
-    const namespace = await mf.getDurableObjectNamespace('STORE');
+    const namespace = await mf.getDurableObjectNamespace('STORE', workerName);
     const response = await namespace.get(namespace.idFromName('local-cost')).fetch('https://cost/check');
     assert.equal(response.status, 200);
     const result = await response.json();
