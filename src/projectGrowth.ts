@@ -3,6 +3,9 @@ import * as path from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { SqliteStore } from './db/sqliteStore';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { loadProjectCoverageSnapshot, ProjectCoverageMetric, coverageVersionState } from './projectCoverage';
 import {
   GrowthEdgeRecord,
@@ -22,6 +25,7 @@ export interface ProjectGrowthScanOptions {
   refreshIfMissing?: boolean;
   forceRefresh?: boolean;
   historyLimit?: number;
+  globalDataPath?: string;
 }
 
 export interface ProjectGrowthSummaryNode {
@@ -2296,30 +2300,26 @@ export async function refreshProjectGrowthSnapshot(
   extensionPath: string,
   options: ProjectGrowthScanOptions = {}
 ): Promise<ProjectGrowthViewModel> {
-  const growthDbPath = path.join(projectPath, '.solopreneur', 'project_growth.db');
   const journalDbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  fs.mkdirSync(path.dirname(growthDbPath), { recursive: true });
-  const growthStore = new SqliteStore(growthDbPath, extensionPath);
   const journalStore = new SqliteStore(journalDbPath, extensionPath);
   try {
-    await Promise.all([growthStore.init(), journalStore.init()]);
-    migrateLegacyGrowthHistory(journalStore, growthStore);
-    const previousHistory = growthStore.getGrowthSnapshotHistory(1);
-    const previous = previousHistory[0] ? growthStore.getGrowthSnapshotById(previousHistory[0].id) : null;
+    await journalStore.init();
+    const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
+    await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
+    const before = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } });
+    const previous = before.latest;
     const roadmapNodes = journalStore.getAllNodes();
     const runEntries = journalStore.getRunIndexEntries();
     const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
     await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
-    growthStore.writeGrowthSnapshot(snapshot);
-    const history = growthStore.getGrowthSnapshotHistory(options.historyLimit || 12)
-      .map((item) => growthStore.getGrowthSnapshotById(item.id))
-      .filter(Boolean) as GrowthSnapshotData[];
-    const view = buildProjectGrowthViewModel(snapshot, { previous, history });
+    await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: projectPath, data: snapshot, idempotencyKey: `growth:${snapshot.snapshot.id}` } });
+    const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
+    if (!stored.latest) throw new Error('growth_snapshot_commit_missing');
+    const view = buildProjectGrowthViewModel(stored.latest, { previous, history: stored.history });
     projectGrowthViewCache.set(projectPath, view);
     return view;
   } finally {
     journalStore.close();
-    growthStore.close();
   }
 }
 
@@ -2333,25 +2333,18 @@ export async function getProjectGrowthView(
     const coverage = loadProjectCoverageSnapshot(projectPath);
     return { ...cached, coverage: { ...cached.coverage, versionState: coverage ? coverageVersionState(projectPath, coverage) : 'unknown' } };
   }
-  const growthDbPath = path.join(projectPath, '.solopreneur', 'project_growth.db');
   const journalDbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  fs.mkdirSync(path.dirname(growthDbPath), { recursive: true });
-  const store = new SqliteStore(growthDbPath, extensionPath);
+  const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
   let journalStore: SqliteStore | null = null;
   try {
-    await store.init();
-    if (!store.getLatestGrowthSnapshot() && fs.existsSync(journalDbPath)) {
-      journalStore = new SqliteStore(journalDbPath, extensionPath);
-      await journalStore.init();
-      migrateLegacyGrowthHistory(journalStore, store);
-    }
-    if (options.forceRefresh || (options.refreshIfMissing !== false && !store.getLatestGrowthSnapshot())) {
+    const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
+    if (options.forceRefresh || (options.refreshIfMissing !== false && !stored.latest)) {
       if (!journalStore) {
         journalStore = new SqliteStore(journalDbPath, extensionPath);
         await journalStore.init();
       }
-      const previousHistory = store.getGrowthSnapshotHistory(1);
-      const previous = previousHistory[0] ? store.getGrowthSnapshotById(previousHistory[0].id) : null;
+      const previous = stored.latest;
       const roadmapNodes = journalStore.getAllNodes();
       const runEntries = journalStore.getRunIndexEntries();
       const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, {
@@ -2359,42 +2352,27 @@ export async function getProjectGrowthView(
         scanReason: options.scanReason || 'query_refresh'
       });
       await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
-      store.writeGrowthSnapshot(snapshot);
-      const history = store.getGrowthSnapshotHistory(options.historyLimit || 12)
-        .map((item) => store.getGrowthSnapshotById(item.id))
-        .filter(Boolean) as GrowthSnapshotData[];
-      const view = buildProjectGrowthViewModel(snapshot, { previous, history });
+      await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: projectPath, data: snapshot, idempotencyKey: `growth:${snapshot.snapshot.id}` } });
+      const committed = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
+      if (!committed.latest) throw new Error('growth_snapshot_commit_missing');
+      const view = buildProjectGrowthViewModel(committed.latest, { previous, history: committed.history });
       projectGrowthViewCache.set(projectPath, view);
       return view;
     }
-    const latest = store.getLatestGrowthSnapshot();
+    const latest = stored.latest;
     if (!latest) {
       const view = emptyProjectGrowthViewModel();
       view.projectPath = projectPath;
       projectGrowthViewCache.set(projectPath, view);
       return view;
     }
-    const historyRows = store.getGrowthSnapshotHistory(options.historyLimit || 12);
-    const previousRow = historyRows.find((item) => item.id !== latest.snapshot.id);
-    const previous = previousRow ? store.getGrowthSnapshotById(previousRow.id) : null;
-    const history = historyRows
-      .map((item) => store.getGrowthSnapshotById(item.id))
-      .filter(Boolean) as GrowthSnapshotData[];
+    const history = stored.history;
+    const previous = history.find(item => item.snapshot.id !== latest.snapshot.id) || null;
     const view = buildProjectGrowthViewModel(latest, { previous, history });
     projectGrowthViewCache.set(projectPath, view);
     return view;
   } finally {
     journalStore?.close();
-    store.close();
-  }
-}
-
-function migrateLegacyGrowthHistory(legacyStore: SqliteStore, growthStore: SqliteStore): void {
-  if (growthStore.getLatestGrowthSnapshot()) return;
-  const legacyRows = legacyStore.getGrowthSnapshotHistory(50).reverse();
-  for (const row of legacyRows) {
-    const snapshot = legacyStore.getGrowthSnapshotById(row.id);
-    if (snapshot) growthStore.writeGrowthSnapshot(snapshot);
   }
 }
 

@@ -48,13 +48,15 @@ export class DiskStatement {
 export class DiskDatabase {
   private native: NativeDatabase;
   private changes = 0;
-  constructor(public readonly filePath: string, options: { foreignKeys?: boolean; journalMode?: 'WAL' | 'DELETE' } = {}) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  constructor(public readonly filePath: string, options: { foreignKeys?: boolean; journalMode?: 'WAL' | 'DELETE'; readOnly?: boolean } = {}) {
+    if (!options.readOnly) fs.mkdirSync(path.dirname(filePath), { recursive: true });
     // Node's bundled driver avoids platform-specific extension ABI binaries.
-    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (file: string) => NativeDatabase };
-    this.native = new DatabaseSync(filePath);
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => NativeDatabase };
+    this.native = new DatabaseSync(filePath, options.readOnly ? { readOnly: true } : {});
     try {
-      this.native.exec(`PRAGMA busy_timeout=10000; PRAGMA journal_mode=${options.journalMode || 'WAL'}; PRAGMA synchronous=FULL; PRAGMA foreign_keys=${options.foreignKeys === false ? 'OFF' : 'ON'};`);
+      this.native.exec(options.readOnly
+        ? `PRAGMA busy_timeout=10000; PRAGMA query_only=ON; PRAGMA foreign_keys=${options.foreignKeys === false ? 'OFF' : 'ON'};`
+        : `PRAGMA busy_timeout=10000; PRAGMA journal_mode=${options.journalMode || 'WAL'}; PRAGMA synchronous=FULL; PRAGMA foreign_keys=${options.foreignKeys === false ? 'OFF' : 'ON'};`);
     } catch (error) {
       this.native.close();
       throw error;

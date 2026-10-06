@@ -462,6 +462,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       try {
         const growthView = await refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+          globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
           scanReason: 'manual_command',
           maxFiles: 5000
         });
@@ -1426,6 +1427,7 @@ async function handleSharedWebviewAction(
         return;
       }
       const growth = await getProjectGrowthView(projectPath, context.extensionPath, {
+        globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
         refreshIfMissing: true,
         historyLimit: Number(request.historyLimit || 12),
         maxFiles: 5000
@@ -1439,6 +1441,7 @@ async function handleSharedWebviewAction(
         return;
       }
       const growth = await refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+        globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
         scanReason: String(request.scanReason || 'manual_refresh'),
         historyLimit: Number(request.historyLimit || 12),
         maxFiles: 5000
@@ -1701,6 +1704,7 @@ async function handleSharedWebviewAction(
           return null;
         }),
         refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+          globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
           scanReason: 'project_refresh',
           maxFiles: 5000
         }).catch((error) => {
@@ -2797,7 +2801,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会把这些会话 ID 作为可选参考交给 Agent，而不是强制续接。',
     '- `documentation.json`：项目解释性文档的索引与审计状态。它由 SoloMap 维护，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
     '- `project_journal.db`：本地 SQLite 执行日志，保存更完整的 Agent 对话和历史记录。',
-    '- `project_growth.db`：项目生长快照与生长分析轨迹的独立本地数据库，避免路线图同步覆盖历史。',
+    '- 项目生长快照与生长分析轨迹保存在全局 SoloMap 数据库中，项目目录不再生成独立生长数据库。',
     '- `agent-runs/`：每次 Agent 调用的输出、文件变更摘要和完成判断。',
     '- `run-digests/`：每次 Agent 调用结束后的结构化执行摘要和跨 Agent 交接信号。下一轮相关任务会读取少量摘要来减少重复探索。',
     '- `execution-graph.json`：由 run digest 自动生成的轻量索引，按环节、Agent、文件、状态、失败和命令组织最近执行信号。',
@@ -3795,7 +3799,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           if (message.command !== 'growth.reportAction') {
             try {
               const turns = message.command === 'growth.reportTurns';
-              const page = await queryGrowthReports(target, context.extensionPath, turns ? { taskId: String(message.taskId || ''), offset: Number(message.offset || 0) } : (message.query || {}));
+              const page = await queryGrowthReports(target, context.extensionPath, turns ? { taskId: String(message.taskId || ''), offset: Number(message.offset || 0) } : (message.query || {}), normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
               respond({ command: turns ? 'growth.reportTurnsLoaded' : 'growth.reportsLoaded', requestId: message.requestId, taskId: message.taskId, offset: Number(message.offset || 0), page });
             } catch { respond({ command: 'growth.reportsLoadFailed', requestId: message.requestId, taskId: message.taskId, error: isSoloMapLanguageZh(context) ? '汇报暂不可读取，请稍后刷新。' : 'Reports are unavailable. Please refresh later.' }); }
             break;
@@ -3811,7 +3815,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
               const evidence = await collectGithubEvidence({ projectPath: target, repository: await projectGithubRepository(target), tasks: [task], reports: sources.reports.filter(item => item.taskId === task.taskId) });
               if (evidence.gaps.length || evidence.commits.some(commit => commit.gaps?.length)) throw new Error(isSoloMapLanguageZh(context) ? '部分验证结果未能更新，已保留上次证据。' : 'Some verification results could not be updated. Previous evidence is retained.');
             } else if (message.kind === 'check') {
-              const page = await queryGrowthReports(target, context.extensionPath, { taskId: task.taskId });
+              const page = await queryGrowthReports(target, context.extensionPath, { taskId: task.taskId }, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
               const commit = page.tasks.find(item => item.taskId === task.taskId)?.evidence.find((item: any) => item.sha === message.sha);
               const check = [...(commit?.checks || []), ...(commit?.statuses || [])].find((item: any) => (item.html_url || item.target_url) === message.url);
               if (!check || !/^https:\/\/github\.com\//.test(message.url)) throw new Error('Check source unavailable.');
@@ -3883,6 +3887,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           );
           try {
             await refreshProjectGrowthSnapshot(projectPathToRefresh, context.extensionPath, {
+              globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
               scanReason: 'webview_refresh',
               maxFiles: 5000
             });
@@ -3941,7 +3946,7 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
   const copy = getProjectGrowthPanelCopy(context);
 
   await postLocalDataLoad(
-    () => getProjectGrowthView(projectPath, context.extensionPath, { refreshIfMissing: false }),
+    () => getProjectGrowthView(projectPath, context.extensionPath, { globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), refreshIfMissing: false }),
     (growthView) => {
       if (!activeProjectGrowthPanel || activeProjectGrowthPanel !== panel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
       activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
@@ -3956,6 +3961,7 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
         setTimeout(() => {
           if (!activeProjectGrowthPanel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
           void refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
+            globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
             scanReason: 'panel_open',
             maxFiles: 4000
           }).then((refreshedView) => {
@@ -10854,6 +10860,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     if (workspaceRoot && !isReviewRun && extensionContextRef) {
       try {
         const growthView = await refreshProjectGrowthSnapshot(workspaceRoot, extensionContextRef.extensionPath, {
+          globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath),
           scanReason: isContinuationRun ? 'agent_continuation' : isSoloConversation ? 'solo' : String(runKind || 'agent_run'),
           maxFiles: 5000
         });

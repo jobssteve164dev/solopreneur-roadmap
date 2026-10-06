@@ -145,7 +145,7 @@ test('V1 databases upgrade in place with their original schema checksum and data
     assert.equal(audit.prepare('SELECT checksum FROM schema_migrations WHERE version=1').get().checksum, checksum);
     assert.equal(audit.prepare("SELECT value FROM database_meta WHERE key='database_id'").get().value, 'preserved-identity');
     assert.equal(audit.prepare("SELECT kind FROM actors WHERE id='old-owner'").get().kind, 'runtime');
-    assert.deepEqual(audit.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4, 5, 6]);
+    assert.deepEqual(audit.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4, 5, 6, 7, 8]);
     assert.ok(store.enqueueMemoryMigration({ sourceRoot: 'old-memory' }, 'upgrade').jobId);
     assert.equal(audit.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   } finally { audit.close(); store.close(); }

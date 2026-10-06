@@ -9,6 +9,7 @@ import { unifiedSchemaSql } from './unifiedSchema';
 import { indexTokens, queryTokens } from './searchIndex';
 import { unifiedSchemaMigrations, runtimeEntityDefinitions as entityDefinitions } from './unifiedSchemaMigrations';
 import type { IntelligenceConversation } from '../intelligenceChat';
+import type { GrowthSnapshotData, GrowthSnapshotRecord } from './types';
 
 export interface MigrationJob {
   jobId: string;
@@ -617,6 +618,74 @@ export class UnifiedDataStore {
     this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1 WHERE event_id IN (SELECT id FROM events WHERE request_id=?)", [receipt.requestId]);
     const saved = this.rows("SELECT id FROM project_locations WHERE project_id=? AND device_id=? AND root_path=? AND status='active'", [projectId, this.deviceId, root])[0];
     return { projectId, locationId: String(saved.id), identityPath };
+  }
+  public writeProjectGrowth(projectId: string, data: GrowthSnapshotData, idempotencyKey: string): WriteReceipt {
+    if (!data?.snapshot?.id || data.snapshot.projectPath === '') throw new Error('invalid_growth_snapshot');
+    const nodeIds = new Set(data.nodes.map(node => node.nodeId));
+    for (const node of data.nodes) if (node.parentId && !nodeIds.has(node.parentId)) throw new Error(`growth_parent_missing:${node.parentId}`);
+    for (const edge of data.edges) if (!nodeIds.has(edge.sourceId) || !nodeIds.has(edge.targetId)) throw new Error(`growth_edge_node_missing:${edge.sourceId}:${edge.targetId}`);
+    for (const signal of data.signals) if (!nodeIds.has(signal.nodeId)) throw new Error(`growth_signal_node_missing:${signal.nodeId}`);
+    return this.transaction(() => {
+      const snapshot = data.snapshot;
+      const replay = this.rows('SELECT id FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, idempotencyKey]).length > 0;
+      const receipt = this.write({
+        kind: 'growth_snapshot', action: 'create', scope: projectId, idempotencyKey,
+        data: { git_head: snapshot.gitHead || null, reason: snapshot.scanReason, status: snapshot.status, duration_ms: snapshot.durationMs, created_at: Date.parse(snapshot.createdAt), project_path: snapshot.projectPath, error: snapshot.error || '', payload_hash: digest(canonical(data)) }
+      });
+      if (replay) return receipt;
+      const storedSnapshotId = receipt.objectId;
+      this.db.run('DELETE FROM growth_items WHERE snapshot_id=?', [storedSnapshotId]);
+      const pendingNodes = [...data.nodes];
+      const insertedNodes = new Set<string>();
+      try {
+        while (pendingNodes.length) {
+          const index = pendingNodes.findIndex(node => !node.parentId || insertedNodes.has(node.parentId));
+          if (index < 0) throw new Error('growth_parent_cycle');
+          const [node] = pendingNodes.splice(index, 1);
+          this.db.run('INSERT INTO growth_items VALUES(?,?,?,?,?,?,?,?,?,?,?)', [storedSnapshotId, node.nodeId, node.parentId || null, node.kind, node.path, node.label, canonical({ ...node, snapshotId: storedSnapshotId }), node.fileCount - node.testFileCount, node.testFileCount, null, node.bytes]);
+          insertedNodes.add(node.nodeId);
+        }
+      }
+      catch (error) { throw new Error(`growth_items_write:${String(error)}`); }
+      this.db.run('DELETE FROM growth_edges WHERE snapshot_id=?', [storedSnapshotId]);
+      try { for (const edge of data.edges) this.db.run('INSERT INTO growth_edges(snapshot_id,source_item_id,target_item_id,kind,weight,evidence_id,evidence) VALUES(?,?,?,?,?,NULL,?)', [storedSnapshotId, edge.sourceId, edge.targetId, edge.kind, edge.weight, edge.evidence || '']); }
+      catch (error) { throw new Error(`growth_edges_write:${String(error)}`); }
+      this.db.run('DELETE FROM growth_signals WHERE snapshot_id=?', [storedSnapshotId]);
+      try { data.signals.forEach((signal, index) => this.db.run('INSERT INTO growth_signals(snapshot_id,signal_key,item_id,type,level,value,evidence_id,source,source_ref,created_at) VALUES(?,?,?,?,?,?,NULL,?,?,?)', [storedSnapshotId, `${signal.nodeId}:${signal.type}:${index}`, signal.nodeId, signal.type, signal.level, signal.value, signal.source, signal.sourceRef, Date.parse(signal.createdAt)])); }
+      catch (error) { throw new Error(`growth_signals_write:${String(error)}`); }
+      this.db.run('DELETE FROM growth_module_labels WHERE snapshot_id=?', [storedSnapshotId]);
+      try { for (const label of data.labels) this.db.run('INSERT INTO growth_module_labels VALUES(?,?,?,?,?,?,?)', [storedSnapshotId, label.nodeId, label.label, label.role, label.source, label.confidence, Date.parse(label.updatedAt)]); }
+      catch (error) { throw new Error(`growth_labels_write:${String(error)}`); }
+      const violations = this.rows('PRAGMA foreign_key_check');
+      if (violations.length) throw new Error(`growth_foreign_key_violation:${canonical(violations)}`);
+      return receipt;
+    });
+  }
+  public readProjectGrowth(projectId: string, historyLimit = 12): { latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] } {
+    const ids = this.rows('SELECT id FROM growth_snapshots WHERE project_id=? ORDER BY created_at DESC,id DESC LIMIT ?', [projectId, Math.max(1, Math.min(50, historyLimit))]).map(row => String(row.id));
+    const read = (id: string): GrowthSnapshotData => {
+      const row = this.rows('SELECT * FROM growth_snapshots WHERE id=? AND project_id=?', [id, projectId])[0];
+      if (!row) throw new Error('growth_snapshot_missing');
+      const snapshot: GrowthSnapshotRecord = { id, createdAt: new Date(Number(row.created_at)).toISOString(), projectPath: String(row.project_path), gitHead: String(row.git_head || ''), scanReason: String(row.reason), status: String(row.status), durationMs: Number(row.duration_ms || 0), error: String(row.error || '') };
+      const nodes = this.rows('SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY rowid', [id]).map(item => JSON.parse(String(item.metrics_json)));
+      const edges = this.rows('SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges WHERE snapshot_id=? ORDER BY rowid', [id]).map(edge => ({ snapshotId: id, sourceId: String(edge.source_item_id), targetId: String(edge.target_item_id), kind: String(edge.kind), weight: Number(edge.weight || 0), evidence: String(edge.evidence || '') }));
+      const signals = this.rows('SELECT item_id,type,level,value,source,source_ref,created_at FROM growth_signals WHERE snapshot_id=? ORDER BY rowid', [id]).map(signal => ({ snapshotId: id, nodeId: String(signal.item_id), type: String(signal.type), level: String(signal.level), value: String(signal.value || ''), source: String(signal.source), sourceRef: String(signal.source_ref), createdAt: new Date(Number(signal.created_at)).toISOString() }));
+      const labels = this.rows('SELECT node_id,label,role,source,confidence,updated_at FROM growth_module_labels WHERE snapshot_id=? ORDER BY rowid', [id]).map(label => ({ snapshotId: id, nodeId: String(label.node_id), label: String(label.label), role: String(label.role), source: String(label.source), confidence: Number(label.confidence), updatedAt: new Date(Number(label.updated_at)).toISOString() }));
+      return { snapshot, nodes, edges, signals, labels } as GrowthSnapshotData;
+    };
+    const history = ids.map(read);
+    return { latest: history[0] || null, history };
+  }
+  public readGrowthReportProjection(projectId: string, prefix = ''): Array<{ key: string; value: unknown }> {
+    return this.rows('SELECT key,value_json FROM growth_report_projection WHERE project_id=? AND key LIKE ? ORDER BY key', [projectId, `${prefix}%`]).map(row => ({ key: String(row.key), value: JSON.parse(String(row.value_json)) }));
+  }
+  public writeGrowthReportProjection(projectId: string, updates: Array<{ key: string; value: unknown }>): void {
+    this.transaction(() => {
+      for (const update of updates) {
+        if (!update.key) throw new Error('growth_projection_key_required');
+        this.db.run('INSERT INTO growth_report_projection VALUES(?,?,?,?) ON CONFLICT(project_id,key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at', [projectId, update.key, canonical(update.value), Date.now()]);
+      }
+    });
   }
   public link(input: { source: string; relation: string; target: string; expectedRevision: number; idempotencyKey: string }): WriteReceipt {
     const allowed = ['parent', 'source', 'evidence', 'depends_on', 'adopts', 'supersedes', 'feedback'];

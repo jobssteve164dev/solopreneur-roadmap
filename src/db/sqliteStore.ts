@@ -57,6 +57,21 @@ export class SqliteStore {
     }
   }
 
+  /** Opens a legacy source without schema creation or any other source mutation. */
+  public async initReadOnly(): Promise<void> {
+    if (this.db) return;
+    try {
+      this.db = new DiskDatabase(this.dbFilePath, { foreignKeys: false, readOnly: true });
+      for (const table of ['growth_snapshots', 'growth_nodes', 'growth_edges', 'growth_signals', 'growth_module_labels']) {
+        if (!this.sqliteObjectExists('table', table)) throw new Error(`legacy_growth_table_missing:${table}`);
+      }
+    } catch (error) {
+      this.db?.close();
+      this.db = null;
+      throw error;
+    }
+  }
+
   /**
    * Creates the schema tables for storing node history, logs, and state.
    */
@@ -1077,6 +1092,27 @@ export class SqliteStore {
     } finally {
       stmt.free();
     }
+    return rows;
+  }
+
+  public getAllGrowthSnapshotHistory(): GrowthSnapshotRecord[] {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare(`
+      SELECT id, createdAt, projectPath, gitHead, scanReason, status, durationMs, error
+      FROM growth_snapshots
+      ORDER BY createdAt DESC, id DESC
+    `);
+    const rows: GrowthSnapshotRecord[] = [];
+    try {
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as any;
+        rows.push({
+          id: String(row.id || ''), createdAt: String(row.createdAt || ''), projectPath: String(row.projectPath || ''),
+          gitHead: String(row.gitHead || ''), scanReason: String(row.scanReason || ''), status: String(row.status || ''),
+          durationMs: Math.max(0, Number(row.durationMs || 0)), error: String(row.error || '')
+        });
+      }
+    } finally { stmt.free(); }
     return rows;
   }
 

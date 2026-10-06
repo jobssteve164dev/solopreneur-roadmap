@@ -76,6 +76,76 @@ test('normal Runtime startup creates the database and automatically imports lega
   } finally { await stop(run, root); }
 });
 
+test('Runtime imports legacy project growth history in the background without removing its source', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-import-'));
+  const root = path.join(fixture, '.solomap-global');
+  const workspace = path.join(fixture, 'project');
+  const legacyPath = path.join(workspace, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ schemaVersion: 1, projects: [{ name: 'Project', path: workspace }], hiddenProjects: [] }));
+  const { SqliteStore } = require('../out/db/sqliteStore.js');
+  const legacy = new SqliteStore(legacyPath, path.resolve(__dirname, '..'));
+  await legacy.init();
+  for (let index = 0; index < 51; index++) legacy.writeGrowthSnapshot({ snapshot: { id: `legacy-growth-${index}`, createdAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), projectPath: workspace, gitHead: 'abc', scanReason: 'legacy', status: 'completed', durationMs: 3, error: '' }, nodes: [{ snapshotId: `legacy-growth-${index}`, nodeId: 'directory:.', parentId: '', kind: 'directory', path: '.', label: 'Project', language: '', bytes: 1, loc: 1, fileCount: 1, testFileCount: 0, generated: false, excluded: false, primaryRole: 'root', confidence: 1 }], edges: [], signals: [], labels: [] });
+  legacy.close();
+  const { DatabaseSync } = require('node:sqlite');
+  const oldDatabase = new DatabaseSync(legacyPath);
+  oldDatabase.exec('DROP TABLE growth_report_projection');
+  oldDatabase.close();
+  const sourceHash = require('node:crypto').createHash('sha256').update(fs.readFileSync(legacyPath)).digest('hex');
+  let run = launch(root);
+  try {
+    await ready(run, root);
+    const deadline = Date.now() + 30000;
+    let state;
+    do {
+      state = await sendRuntimeDataRequest(root, { operation: 'read_project_growth', input: { root: workspace, historyLimit: 5 } });
+      if (state.latest) break;
+      assert.ok(Date.now() < deadline, 'legacy growth history must be imported by background startup');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
+    assert.equal(state.latest.snapshot.scanReason, 'legacy');
+    assert.equal(state.latest.nodes[0].nodeId, 'directory:.');
+    assert.equal(fs.existsSync(legacyPath), true);
+    const migrationDeadline = Date.now() + 30000;
+    while (true) {
+      const audit = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
+      const importedCount = audit.prepare('SELECT count(*) AS total FROM growth_snapshots').get().total;
+      audit.close();
+      if (importedCount === 51) break;
+      assert.ok(Date.now() < migrationDeadline, `legacy growth import stopped at ${importedCount} snapshots`);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(require('node:crypto').createHash('sha256').update(fs.readFileSync(legacyPath)).digest('hex'), sourceHash, 'legacy source bytes must stay unchanged');
+    await stop(run, root);
+    let db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
+    const before = {
+      snapshots: db.prepare('SELECT count(*) AS total FROM growth_snapshots').get().total,
+      items: db.prepare('SELECT count(*) AS total FROM growth_items').get().total,
+      events: db.prepare('SELECT count(*) AS total FROM events').get().total
+    };
+    assert.equal(before.snapshots, 51, 'all legacy growth history must migrate');
+    db.close();
+    run = launch(root); await ready(run, root);
+    const replayDeadline = Date.now() + 10000;
+    do {
+      state = await sendRuntimeDataRequest(root, { operation: 'read_project_growth', input: { root: workspace, historyLimit: 5 } });
+      if (state.latest) break;
+      assert.ok(Date.now() < replayDeadline);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
+    await stop(run, root);
+    db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
+    assert.deepEqual({
+      snapshots: db.prepare('SELECT count(*) AS total FROM growth_snapshots').get().total,
+      items: db.prepare('SELECT count(*) AS total FROM growth_items').get().total,
+      events: db.prepare('SELECT count(*) AS total FROM events').get().total
+    }, before, 'unchanged legacy growth must not be rewritten on restart');
+    db.close();
+  } finally { await stop(run, root); }
+});
+
 test('a previously initialized Runtime refuses to silently replace a missing authority with an empty database', async () => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-loss-')), '.solomap-global');
   fs.mkdirSync(root);

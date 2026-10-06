@@ -3,15 +3,50 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { RuntimeDataOperations } from './runtimeDataOperations';
+import { SqliteStore } from './db/sqliteStore';
 
 export async function enqueueStartupDataMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
   try { await enqueueStartupMemoryMigration(store, operations, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
+  try { await importLegacyProjectGrowth(store, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap project growth migration startup: ${String(error)}\n`); }
   if (!shouldContinue()) return;
   const sourceRoot = path.join(store.root, 'intelligence-conversations');
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   await operations({ operation: 'import_intelligence', input: { sourceRoot, idempotencyKey: `startup-intelligence-v1:${sourceRoot}` } });
+}
+
+async function importLegacyProjectGrowth(store: UnifiedDataStore, shouldContinue: () => boolean): Promise<void> {
+  let projects: Array<{ path: string }> = [];
+  try {
+    const registry = JSON.parse(await fs.promises.readFile(path.join(store.root, 'projects.json'), 'utf8'));
+    if (!Array.isArray(registry.projects)) throw new Error('project_registry_invalid');
+    projects = registry.projects;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap growth project registry: ${String(error)}\n`);
+    return;
+  }
+  for (const project of projects) {
+    if (!shouldContinue()) return;
+    const projectRoot = String(project?.path || '');
+    const source = path.join(projectRoot, '.solopreneur', 'project_growth.db');
+    if (!path.isAbsolute(projectRoot) || !fs.existsSync(source)) continue;
+    let legacy: SqliteStore | undefined;
+    try {
+      const registered = await store.registerProject({ root: projectRoot });
+      legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+      await legacy.initReadOnly();
+      for (const row of legacy.getAllGrowthSnapshotHistory().reverse()) {
+        if (!shouldContinue()) return;
+        await new Promise<void>(resolve => setImmediate(resolve));
+        const snapshot = legacy.getGrowthSnapshotById(row.id);
+        if (snapshot) store.writeProjectGrowth(registered.projectId, snapshot, `legacy-growth:${registered.projectId}:${row.id}`);
+      }
+    } catch (error) {
+      process.stderr.write(`SoloMap project growth migration: ${projectRoot}: ${String(error)}\n`);
+    } finally { legacy?.close(); }
+  }
 }
 
 /** Runs after the owner's control endpoint is ready; sources stay untouched. */

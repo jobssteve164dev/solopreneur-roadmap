@@ -3,7 +3,32 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { spawn } = require('node:child_process');
+const { once } = require('node:events');
 const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
+
+function launchRuntime(root) {
+  const child = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
+  let stderr = '';
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  child.stdout.resume();
+  return { child, errors: () => stderr };
+}
+async function readyRuntime(run, root) {
+  const deadline = Date.now() + 10000;
+  while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+    assert.equal(run.child.exitCode, null, run.errors());
+    assert.ok(Date.now() < deadline, run.errors() || 'Runtime did not publish readiness');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+async function stopRuntime(run, root) {
+  if (run.child.exitCode !== null) return;
+  const exited = once(run.child, 'exit');
+  try { await sendRuntimeControlCommand(root, 'stop'); } catch { run.child.kill(); }
+  await exited;
+}
 
 function fixture() {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'growth-reports-'));
@@ -95,9 +120,11 @@ test('static test references cannot establish feature acceptance', () => {
   assert.ok(view.focusAreas.every(area => area.status !== 'formed'));
 });
 
-test('coverage source identity detects same-size edits, including reopened cached views', async () => {
+test('coverage source identity detects same-size edits, including reopened cached views', async (t) => {
   const { captureCoverageVersion, coverageVersionState } = require('../out/projectCoverage.js');
   const f = fixture(); fs.mkdirSync(path.join(f.project, 'src'));
+  const globalDataPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'growth-coverage-global-')), '.solomap-global');
+  const runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath); t.after(() => stopRuntime(runtime, globalDataPath));
   fs.writeFileSync(path.join(f.project, 'src/a.js'), 'one');
   const sourceVersion = captureCoverageVersion(f.project);
   assert.equal(coverageVersionState(f.project, { sourceVersion }), 'current');
@@ -105,11 +132,11 @@ test('coverage source identity detects same-size edits, including reopened cache
   fs.mkdirSync(path.dirname(coverageFile), { recursive: true });
   fs.writeFileSync(coverageFile, JSON.stringify({ version: 1, provider: 'c8-istanbul', files: [], sourceVersion }));
   const { getProjectGrowthView } = require('../out/projectGrowth.js');
-  await getProjectGrowthView(f.project, path.resolve(__dirname, '..'), { refreshIfMissing: false });
+  await getProjectGrowthView(f.project, path.resolve(__dirname, '..'), { refreshIfMissing: false, globalDataPath });
   fs.writeFileSync(path.join(f.project, 'src/a.js'), 'two');
   assert.equal(coverageVersionState(f.project, { sourceVersion }), 'stale');
   assert.equal(coverageVersionState(f.project, {}), 'unknown');
-  const reopened = await getProjectGrowthView(f.project, path.resolve(__dirname, '..'), { refreshIfMissing: false });
+  const reopened = await getProjectGrowthView(f.project, path.resolve(__dirname, '..'), { refreshIfMissing: false, globalDataPath });
   assert.equal(reopened.coverage.versionState, 'stale');
 });
 
@@ -143,15 +170,11 @@ test('separately refreshed shared tasks retain scopes and never inherit the enti
 
 test('source changed while loading converges to the new turn and a snapshot writer preserves reports', async () => {
   const { queryGrowthReports } = require('../out/growthReports.js');
-  const { SqliteStore } = require('../out/db/sqliteStore.js');
   const f = fixture(); f.report(1, { summary: '旧结果', unmetRequirements: ['待办'] });
   const extension = path.resolve(__dirname, '..');
-  const store = new SqliteStore(path.join(f.project, '.solopreneur/project_growth.db'), extension); await store.init();
   const pending = queryGrowthReports(f.project, extension, {});
   setImmediate(() => f.report(2, { summary: '新结果', unmetRequirements: [] }));
   assert.equal((await pending).tasks[0].latestSummary, '新结果');
-  store.writeGrowthSnapshot({ snapshot: { id: 'snapshot-1', projectPath: f.project, createdAt: new Date().toISOString(), gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' }, nodes: [], edges: [], signals: [], labels: [] });
-  store.close();
   const page = await queryGrowthReports(f.project, extension, { taskId: f.taskId });
   assert.equal(page.turns.length, 2);
 });
@@ -175,28 +198,29 @@ test('missing and invalid report receipts remain distinct without blocking check
   assert.deepEqual(page.turns.map(turn => turn.availability), ['invalid', 'missing']);
 });
 
-test('non-code reports paginate and module changes do not silently reassign historical work', async () => {
+test('non-code reports paginate and module changes do not silently reassign historical work', async (t) => {
   const { queryGrowthReports } = require('../out/growthReports.js');
-  const { SqliteStore } = require('../out/db/sqliteStore.js');
   const f = fixture(); fs.mkdirSync(path.join(f.project, 'src')); fs.writeFileSync(path.join(f.project, 'src/a.js'), 'a');
   f.report(1, { summary: '首轮', outputs: ['src/a.js'], unmetRequirements: ['待验收'] });
   const extension = path.resolve(__dirname, '..');
-  const store = new SqliteStore(path.join(f.project, '.solopreneur/project_growth.db'), extension); await store.init();
+  const globalDataPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'growth-reports-global-')), '.solomap-global');
+  const runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath); t.after(() => stopRuntime(runtime, globalDataPath));
   const snapshot = { snapshot: { id: 'mapping', projectPath: f.project, createdAt: new Date().toISOString(), gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' },
-    nodes: [{ nodeId: 'file:src/a.js', kind: 'file', path: 'src/a.js', label: 'a', parentId: '', primaryRole: 'feature' }, { nodeId: 'module:a', kind: 'module', path: 'src', label: '模块 A', parentId: '', primaryRole: 'feature' }, { nodeId: 'capability:a', kind: 'capability', path: '', label: '导出', parentId: '', primaryRole: 'feature' }],
+    nodes: [{ nodeId: 'file:src/a.js', kind: 'file', path: 'src/a.js', label: 'a', parentId: '', primaryRole: 'feature', fileCount: 1, testFileCount: 0, bytes: 1 }, { nodeId: 'module:a', kind: 'module', path: 'src', label: '模块 A', parentId: '', primaryRole: 'feature', fileCount: 1, testFileCount: 0, bytes: 1 }, { nodeId: 'capability:a', kind: 'capability', path: '', label: '导出', parentId: '', primaryRole: 'feature', fileCount: 0, testFileCount: 0, bytes: 0 }],
     edges: [{ sourceId: 'module:a', targetId: 'file:src/a.js', kind: 'contains', weight: 1, evidence: 'module-scan' }, { sourceId: 'module:a', targetId: 'capability:a', kind: 'implements', weight: 1, evidence: 'run_index:nodeId' }], signals: [], labels: [] };
-  store.writeGrowthSnapshot(snapshot);
-  assert.equal((await queryGrowthReports(f.project, extension, { moduleId: 'module:a' })).tasks.length, 1);
-  assert.equal((await queryGrowthReports(f.project, extension, { capabilityId: 'capability:a' })).tasks.length, 1);
+  await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: f.project, data: snapshot, idempotencyKey: 'mapping-a' } });
+  assert.equal((await queryGrowthReports(f.project, extension, { moduleId: 'module:a' }, globalDataPath)).tasks.length, 1);
+  assert.equal((await queryGrowthReports(f.project, extension, { capabilityId: 'capability:a' }, globalDataPath)).tasks.length, 1);
+  snapshot.snapshot.id = 'mapping-b'; snapshot.snapshot.createdAt = new Date(Date.now() + 1).toISOString();
   snapshot.nodes[1].nodeId = 'module:b'; snapshot.edges[0].sourceId = 'module:b'; snapshot.edges[1].sourceId = 'module:b';
-  store.writeGrowthSnapshot(snapshot); store.close();
-  assert.equal((await queryGrowthReports(f.project, extension, { moduleId: 'module:b' })).tasks.length, 0);
+  await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: f.project, data: snapshot, idempotencyKey: 'mapping-b' } });
+  assert.equal((await queryGrowthReports(f.project, extension, { moduleId: 'module:b' }, globalDataPath)).tasks.length, 0);
   for (let id = 2; id <= 23; id++) {
     const runDir = path.join(f.project, '.solopreneur/agent-runs/__solo__', String(id)); fs.mkdirSync(runDir, { recursive: true });
     registerLearningTask(f.project, { executionLogId: id, runDir, userMessage: `讨论 ${id}`, startedAt: '2026-09-01' });
   }
-  const first = await queryGrowthReports(f.project, extension, {});
-  const second = await queryGrowthReports(f.project, extension, { offset: 20 });
+  const first = await queryGrowthReports(f.project, extension, {}, globalDataPath);
+  const second = await queryGrowthReports(f.project, extension, { offset: 20 }, globalDataPath);
   assert.equal(first.tasks.length, 20); assert.equal(second.tasks.length, 3);
   assert.equal(new Set([...first.tasks, ...second.tasks].map(task => task.taskId)).size, 23);
   assert.equal(first.total, 23);

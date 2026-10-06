@@ -3,6 +3,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import { SqliteStore } from './db/sqliteStore.js';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl.js';
+import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost.js';
 import { learningTasksRoot, readLearningJson } from './taskReport.js';
 import { extractContinuationParentConversationId } from './continuation.js';
 
@@ -142,20 +144,26 @@ function sourceStamp(projectPath: string, taskId?: string): string {
   return hash(parts.join('\n'));
 }
 
-export function queryGrowthReports(projectPath: string, extensionPath: string, query: GrowthReportQuery): Promise<GrowthReportPage> {
-  const key = `${projectPath}:${JSON.stringify(query)}:${sourceStamp(projectPath, query.taskId)}`;
+export function queryGrowthReports(projectPath: string, extensionPath: string, query: GrowthReportQuery, globalDataPath = ''): Promise<GrowthReportPage> {
+  const key = `${globalDataPath}:${projectPath}:${JSON.stringify(query)}:${sourceStamp(projectPath, query.taskId)}`;
   const existing = queries.get(key); if (existing) return existing;
-  const promise = readProjection(projectPath, extensionPath, query).finally(() => queries.delete(key));
+  const promise = readProjection(projectPath, extensionPath, query, globalDataPath).finally(() => queries.delete(key));
   queries.set(key, promise); return promise;
 }
 
-async function readProjection(projectPath: string, extensionPath: string, query: GrowthReportQuery): Promise<GrowthReportPage> {
+const volatileProjection = new Map<string, Map<string, any>>();
+async function readProjection(projectPath: string, extensionPath: string, query: GrowthReportQuery, globalDataPath: string): Promise<GrowthReportPage> {
+  if (globalDataPath) await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
   const context = await runContext(projectPath, extensionPath); const runs = context.files;
-  const store = new SqliteStore(path.join(projectPath, '.solopreneur', 'project_growth.db'), extensionPath);
-  fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
-  await store.init();
-  try {
-    store.reloadGrowthDatabase();
+  const memory = volatileProjection.get(projectPath) || new Map<string, any>(); volatileProjection.set(projectPath, memory);
+  const readRows = async (prefix: string) => globalDataPath
+    ? sendRuntimeDataRequest<Array<{ key: string; value: any }>>(globalDataPath, { operation: 'read_growth_report_projection', input: { root: projectPath, prefix } })
+    : [...memory].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value }));
+  const writeRows = async (updates: { key: string; value: any }[]) => {
+    updates.forEach(update => memory.set(update.key, update.value));
+    if (globalDataPath && updates.length) await sendRuntimeDataRequest(globalDataPath, { operation: 'write_growth_report_projection', input: { root: projectPath, updates } });
+  };
+  {
     const sourceVersion = sourceStamp(projectPath, query.taskId);
     const source = { tasks: [] as any[], reports: [] as any[], observations: [] as any[] };
     for (const name of names(learningTasksRoot(projectPath)).filter(name => /^task-[A-Za-z0-9-]+\.json$/.test(name) && (!query.taskId || name === `${query.taskId}.json`))) {
@@ -164,9 +172,8 @@ async function readProjection(projectPath: string, extensionPath: string, query:
       // Incremental indexing yields to the host between tasks; ordinary reads reuse unchanged bodies.
       await new Promise<void>(resolve => setImmediate(resolve));
     }
-    if (sourceStamp(projectPath, query.taskId) !== sourceVersion) return readProjection(projectPath, extensionPath, query);
-    store.reloadGrowthDatabase();
-    const previous = new Map(store.getGrowthReportProjection(query.taskId ? `turn:${query.taskId}:` : 'turn:').map(row => [row.key, row.value]));
+    if (sourceStamp(projectPath, query.taskId) !== sourceVersion) return readProjection(projectPath, extensionPath, query, globalDataPath);
+    const previous = new Map((await readRows(query.taskId ? `turn:${query.taskId}:` : 'turn:')).map(row => [row.key, row.value]));
     const updates: { key: string; value: any }[] = [];
     const seen = new Set<string>();
     const metadata: any[] = [];
@@ -192,16 +199,16 @@ async function readProjection(projectPath: string, extensionPath: string, query:
       if (!seen.has(key) && source.tasks.some(task => task.taskId === value.taskId)
         && !source.observations.some(item => item.file === value.file && item.availability === 'recorded')) metadata.push({ ...value, availability: containedRegularPath(projectPath, value.file) ? 'invalid' : 'missing' });
     }
-    store.putGrowthReportProjection(updates);
-    const snapshot = store.getLatestGrowthSnapshot();
-    const nodes = new Map((snapshot?.nodes || []).map(node => [node.nodeId, node]));
+    await writeRows(updates);
+    const snapshot = globalDataPath ? (await sendRuntimeDataRequest<{ latest: any }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } })).latest : null;
+    const nodes = new Map<string, any>(array(snapshot?.nodes).map((node: any) => [String(node.nodeId), node]));
     const moduleByPath = new Map<string, string>();
     for (const edge of snapshot?.edges || []) if (edge.kind === 'contains' && edge.sourceId.startsWith('module:')) {
       const file = nodes.get(edge.targetId); if (file) moduleByPath.set(file.path, edge.sourceId);
     }
     const evidenceRoot = path.join(projectPath, '.solopreneur/agent-runs/learning-evidence');
     const evidence = names(evidenceRoot).filter(name => name.endsWith('.summary.json')).flatMap(name => array(cachedSource(path.join(evidenceRoot, name)).value?.commits));
-    const associations = new Map(store.getGrowthReportProjection('association:').map(row => [row.key, row.value]));
+    const associations = new Map((await readRows('association:')).map(row => [row.key, row.value]));
     const associationUpdates: { key: string; value: any }[] = [];
     const rows = source.tasks.filter(task => !query.taskId || task.taskId === query.taskId).map(task => {
       const turns = metadata.filter(turn => turn.taskId === task.taskId).sort((a, b) => b.executionLogId - a.executionLogId || b.sequence - a.sequence);
@@ -244,16 +251,17 @@ async function readProjection(projectPath: string, extensionPath: string, query:
       && (!query.capabilityId || task.capabilities.some(capability => capability.id === query.capabilityId)))
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || b.taskId.localeCompare(a.taskId));
     const offset = Math.max(0, Number(query.offset) || 0); const limit = Math.max(1, Math.min(50, Number(query.limit) || 20));
-    store.putGrowthReportProjection(associationUpdates);
+    await writeRows(associationUpdates);
+    const bodies = new Map((await readRows('body:')).map(row => [row.key, row.value]));
     const taskTurns = metadata.filter(turn => turn.taskId === query.taskId).sort((a, b) => b.executionLogId - a.executionLogId || b.sequence - a.sequence);
     const turns = query.taskId && source.tasks.some(task => task.taskId === query.taskId)
       ? taskTurns.slice(offset, offset + limit).map((turn, index) => ({
-        ...turn, roundNumber: taskTurns.length - offset - index, report: turn.bodyKey ? presentReport(store.getGrowthReportProjection(turn.bodyKey).find(row => row.key === turn.bodyKey)?.value) : null,
-        history: (turn.versions || []).map((version: string) => ({ version, report: presentReport(store.getGrowthReportProjection(`body:${turn.taskId}:${turn.executionLogId}:${turn.turnId}:${version}`)[0]?.value) }))
+        ...turn, roundNumber: taskTurns.length - offset - index, report: turn.bodyKey ? presentReport(bodies.get(turn.bodyKey)) : null,
+        history: (turn.versions || []).map((version: string) => ({ version, report: presentReport(bodies.get(`body:${turn.taskId}:${turn.executionLogId}:${turn.turnId}:${version}`)) }))
       })) : [];
     const total = query.taskId ? taskTurns.length : rows.length;
     return { projectPath, tasks: (query.taskId ? rows : rows.slice(offset, offset + limit)).map(task => ({ ...task, evidence: task.evidence.map(({ files, ...commit }) => ({ ...commit, versionState: commitVersionState(projectPath, commit.sha, array(files).map(file => file.filename)) })) })), turns, total, nextOffset: offset + limit < total ? offset + limit : null };
-  } finally { store.close(); }
+  }
 }
 
 export function reportFiles(report: any): string[] {

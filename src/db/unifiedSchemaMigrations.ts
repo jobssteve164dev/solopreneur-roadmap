@@ -42,4 +42,20 @@ CREATE TABLE migration_recycling(
  status TEXT NOT NULL CHECK(status IN ('prepared','approved','moving','held','trashed','restoring','restored','changed')),
  error TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX migration_recycling_plan ON migration_recycling(plan_id);
+` }, { version: 7, sql: `
+ALTER TABLE growth_snapshots ADD COLUMN project_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE growth_snapshots ADD COLUMN error TEXT NOT NULL DEFAULT '';
+ALTER TABLE growth_edges ADD COLUMN evidence TEXT NOT NULL DEFAULT '';
+ALTER TABLE growth_signals ADD COLUMN source TEXT NOT NULL DEFAULT '';
+ALTER TABLE growth_signals ADD COLUMN source_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE growth_signals ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE growth_module_labels(
+ snapshot_id TEXT NOT NULL REFERENCES growth_snapshots(id),node_id TEXT NOT NULL,label TEXT NOT NULL,
+ role TEXT NOT NULL,source TEXT NOT NULL,confidence REAL NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(snapshot_id,node_id));
+CREATE TABLE growth_report_projection(
+ project_id TEXT NOT NULL REFERENCES projects(id),key TEXT NOT NULL,value_json TEXT NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(project_id,key));
+` }, { version: 8, sql: `
+ALTER TABLE growth_snapshots ADD COLUMN payload_hash TEXT NOT NULL DEFAULT '';
 ` }];

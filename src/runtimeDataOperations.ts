@@ -42,6 +42,23 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return { closed: true };
       }
       case 'register_project': return store.registerProject(input as unknown as Parameters<UnifiedDataStore['registerProject']>[0]);
+      case 'write_project_growth': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        return store.writeProjectGrowth(project.projectId, input.data as any, String(input.idempotencyKey || ''));
+      }
+      case 'read_project_growth': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        return store.readProjectGrowth(project.projectId, Number(input.historyLimit || 12));
+      }
+      case 'read_growth_report_projection': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        return store.readGrowthReportProjection(project.projectId, String(input.prefix || ''));
+      }
+      case 'write_growth_report_projection': {
+        const project = await store.registerProject({ root: String(input.root || '') });
+        store.writeGrowthReportProjection(project.projectId, input.updates as Array<{ key: string; value: unknown }>);
+        return { written: Array.isArray(input.updates) ? input.updates.length : 0 };
+      }
       case 'prepare_agent_database': {
         const provider = String(input.provider);
         if (!databaseAgentProviders.includes(provider as DatabaseAgentProvider) || typeof input.command !== 'string' || !path.isAbsolute(input.command)) throw new Error('invalid_agent_database_configuration');
