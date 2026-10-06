@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.504 - 2026-10-06
+
+### Added
+- move project growth data to global database (de67d59)
+- migrate chat history and add recoverable file recycling (08bd172)
+- add shared database operations and MCP bridge (0edb902)
+
+### Fixed
+- stop legacy global files and clear release audit (aaa3ab8)
+- prepare database before task launch and reconnect runtime (c8c7761)
+
+### Docs
+- define unified local database and MCP blueprint (b0c1364)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.503 - 2026-10-05
 
 ### Fixed
