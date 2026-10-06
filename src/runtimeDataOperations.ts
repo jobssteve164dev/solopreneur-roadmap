@@ -4,9 +4,23 @@ import type { UnifiedMcpSource } from './unifiedMcp';
 import * as crypto from 'crypto';
 import type { DataObject } from './db/unifiedDataStore';
 import { validateAgentLink, validateAgentWrite } from './dataAuthorization';
-import { importMemoryDirectory } from './memoryDatabaseMigration';
+import { DatabaseMigrationCoordinator } from './databaseMigrationCoordinator';
+import * as fs from 'fs';
+import * as path from 'path';
+import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath } from './agentDatabaseConfig';
+import { readIntelligenceConversation, listIntelligenceConversations } from './intelligenceConversationData';
+import { MigrationRecycling } from './migrationRecycling';
 
-export function createRuntimeDataOperations(store: UnifiedDataStore): (request: RuntimeDataRequest) => Promise<unknown> {
+export interface RuntimeDataOperations {
+  (request: RuntimeDataRequest): Promise<unknown>;
+  recoverMigrations(): void;
+  waitForMigrations(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDataOperations {
+  const migrations = new DatabaseMigrationCoordinator(store);
+  const recycling = new MigrationRecycling(store);
   const sessions = new Map<string, { actorId: string; scope: string }>();
   const allowedRead = (object: DataObject, scope: string): boolean => object.projectId === scope || object.objectId === scope || (object.projectId === null && ['memory', 'lesson', 'policy'].includes(object.kind) && ['verified', 'approved', 'active'].includes(String(object.data.status)));
   const dispatch = async (request: RuntimeDataRequest): Promise<unknown> => {
@@ -28,7 +42,30 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): (request: 
         return { closed: true };
       }
       case 'register_project': return store.registerProject(input as unknown as Parameters<UnifiedDataStore['registerProject']>[0]);
-      case 'import_memory': return importMemoryDirectory(store, String(input.sourceRoot || ''), { projectScopes: input.projectScopes as Record<string, string> | undefined, sourceIdentity: input.sourceIdentity as string | undefined });
+      case 'prepare_agent_database': {
+        const provider = String(input.provider);
+        if (!databaseAgentProviders.includes(provider as DatabaseAgentProvider) || typeof input.command !== 'string' || !path.isAbsolute(input.command)) throw new Error('invalid_agent_database_configuration');
+        const configuration = input.configPath;
+        if (configuration !== undefined && !isAgentDatabaseConfigPath(provider as DatabaseAgentProvider, configuration)) throw new Error('invalid_agent_database_configuration');
+        const project = await store.registerProject({ root: String(input.root || '') });
+        const configPath = configureAgentDatabase({ provider: provider as DatabaseAgentProvider, configPath: configuration as string | undefined, command: input.command, globalDataPath: store.root });
+        return { ...project, configPath };
+      }
+      case 'import_memory': return migrations.enqueue(input);
+      case 'import_intelligence': return migrations.enqueue({ ...input, collection: 'intelligence' });
+      case 'read_intelligence_conversation': return readIntelligenceConversation(store, String(input.id || ''));
+      case 'list_intelligence_conversations': return listIntelligenceConversations(store);
+      case 'write_intelligence_conversation': return store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
+      case 'migration_status': return store.readMigrationJob(String(input.jobId || ''));
+      case 'migration_overview': return recycling.overview();
+      case 'prepare_recycling': return recycling.prepare();
+      case 'read_recycling_plan': return recycling.readPlan(String(input.planId || ''));
+      case 'retry_migration': return migrations.retry(String(input.jobId || ''));
+      case 'confirm_recycling': return recycling.confirm(String(input.planId || ''));
+      case 'hold_recycling_file': return recycling.hold(String(input.itemId || ''));
+      case 'finish_recycling_file': return recycling.finish(String(input.itemId || ''));
+      case 'retire_recycling_file': return recycling.retire(String(input.itemId || ''));
+      case 'restore_recycling_file': return recycling.restore(String(input.itemId || ''));
       case 'write': return store.write(input as unknown as DataWrite);
       case 'read': {
         const ref = String(input.ref || '');
@@ -49,7 +86,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): (request: 
       default: throw new Error('unknown_data_operation');
     }
   };
-  return async request => {
+  const operations = async (request: RuntimeDataRequest) => {
     if (!request.sessionToken) return dispatch(request);
     const session = sessions.get(request.sessionToken);
     if (!session) throw new Error('mcp_session_expired');
@@ -83,6 +120,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): (request: 
       return result;
     });
   };
+  return Object.assign(operations, { recoverMigrations: () => migrations.recover(), waitForMigrations: () => migrations.wait(), close: () => migrations.close() });
 }
 
 export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false): UnifiedMcpSource {
@@ -105,4 +143,10 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
       return sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken: session!.sessionToken });
     }
   } };
+}
+
+export async function runtimeProjectMcpSource(globalDataPath: string, projectRoot: string): Promise<UnifiedMcpSource | undefined> {
+  if (!projectRoot || !fs.existsSync(path.join(globalDataPath, 'solomap.db'))) return undefined;
+  const project = await sendRuntimeDataRequest<{ projectId: string }>(globalDataPath, { operation: 'register_project', input: { root: projectRoot } });
+  return runtimeMcpSource(globalDataPath, project.projectId, true);
 }

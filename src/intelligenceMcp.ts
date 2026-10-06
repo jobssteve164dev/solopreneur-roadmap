@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { createIntelligenceReadTools, IntelligenceReadToolName, IntelligenceReadToolSource } from './intelligenceReadTools';
 import type { SolomapMcpRegistryEntry } from './solomapGlobal';
-import { registerUnifiedMcpTools, UnifiedMcpSource } from './unifiedMcp';
+import { registerUnifiedMcpTools, UnifiedMcpSource, unifiedToolNames } from './unifiedMcp';
 
 const toolDescriptions: Array<{ name: IntelligenceReadToolName; description: string }> = [
   { name: 'list_projects', description: '查询 SoloMap 中的项目名称、优先级和简介。' },
@@ -12,7 +12,7 @@ const toolDescriptions: Array<{ name: IntelligenceReadToolName; description: str
   { name: 'get_today_review', description: '查询今天的安排与待办。' }
 ];
 
-export function getIntelligenceMcpConnector(): SolomapMcpRegistryEntry {
+export function getIntelligenceMcpConnector(database = false): SolomapMcpRegistryEntry {
   return {
     id: 'builtin:solomap-intelligence',
     title: 'SoloMap 项目与设置查询',
@@ -20,10 +20,10 @@ export function getIntelligenceMcpConnector(): SolomapMcpRegistryEntry {
     status: 'installed',
     source: { kind: 'builtin' },
     permissions: {
-      tools: toolDescriptions.map(tool => tool.name),
+      tools: [...toolDescriptions.map(tool => tool.name), ...(database ? unifiedToolNames : [])],
       requiresCredentials: false,
       externalAccess: false,
-      writeAccess: false
+      writeAccess: database
     },
     risk: { level: 'low', canWriteExternal: false, requiresExplicitEnable: false }
   };

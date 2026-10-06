@@ -52,7 +52,7 @@ test('extension activation refreshes bundled global memory tools', () => {
   assert.ok(activationStart >= 0 && activationEnd > activationStart);
   const activationBody = extension.slice(activationStart, activationEnd);
   assert.match(activationBody, /const activationProjectRoot = getSelectedProjectPath\(context\) \|\| getWorkspaceRoot\(\)/);
-  assert.match(activationBody, /ensureSolomapMemoryStore\(activationProjectRoot, getPersistedSettings\(context\)\.globalDataPath\)/);
+  assert.match(activationBody, /ensureDataReady\(\)\.then\(\(\) => ensureSolomapMemoryStore\(activationProjectRoot, activationGlobalDataPath\)\)/);
   assert.match(activationBody, /pruneProjectsOutputLogs\(getProjects\(context\)\.map\(\(project\) => project\.path\)\)/);
 });
 
@@ -552,6 +552,9 @@ function loadCompiledModule(relativePath, exportPatch) {
         if (id === './intelligenceMcp') {
           return require(path.join(projectRoot, 'out/intelligenceMcp.js'));
         }
+        if (id === './agentDatabaseConfig' || id === './runtimeDataOperations') {
+          return require(path.join(projectRoot, 'out', id + '.js'));
+        }
         if (id === './globalEngineeringStore') {
           return require(path.join(projectRoot, 'out/globalEngineeringStore.js'));
         }
@@ -649,6 +652,13 @@ function createElement(id) {
 function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
   const elements = Object.fromEntries(ids.map((id) => [id, createElement(id)]));
   const postedMessages = [];
+  if (elements['migration-settings-card']) {
+    const children = new Map();
+    elements['migration-settings-card'].querySelector = selector => {
+      if (!children.has(selector)) children.set(selector, createElement(selector));
+      return children.get(selector);
+    };
+  }
 
   function wireSoloSelect(element, choices) {
     if (!element) return;
@@ -2560,6 +2570,33 @@ test('sidebar routes smart kernel conversation messages without blocking other s
   await listener({ command: 'intelligence.send', requestId: 'request-1', text: '下一步做什么？' });
   assert.ok(posted.some(message => message.command === 'intelligenceConversationsLoaded'));
   assert.ok(posted.some(message => message.command === 'intelligenceReplyLoaded' && message.requestId === 'request-1' && message.conversation.id === 'new'));
+});
+
+test('late database conversation listings cannot overwrite a list refreshed after a committed reply', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let listener;
+  let release;
+  const oldList = new Promise(resolve => { release = resolve; });
+  let calls = 0;
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: '' }),
+    listIntelligenceConversations: () => ++calls === 1 ? oldList : Promise.resolve([{ id: 'new', title: 'Committed reply' }]),
+    sendIntelligenceMessage: async () => ({ id: 'new', title: 'Committed reply', messages: [] })
+  });
+  provider.resolveWebviewView({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage: message => { posted.push(message); return Promise.resolve(true); },
+    onDidReceiveMessage: callback => { listener = callback; }
+  } }, {}, {});
+  const listing = listener({ command: 'intelligence.list' });
+  await listener({ command: 'intelligence.send', requestId: 'reply', text: 'Continue' });
+  release([{ id: 'old', title: 'Before the reply' }]);
+  await listing;
+  const lists = posted.filter(message => message.command === 'intelligenceConversationsLoaded');
+  assert.equal(lists.at(-1).conversations[0].id, 'new');
+  assert.equal(lists.length, 1, 'the stale list must lose submission rights');
 });
 
 test('sidebar does not deliver an old smart kernel reply to a recreated view', async () => {
@@ -14496,6 +14533,44 @@ test('conversation snapshots re-read when the database changes during their read
   const cached = require('../out/sidebarSnapshotCache.js').readCachedConversationSnapshot(path.join(tempRoot, 'global'), projectPath);
   assert.equal(cached.solo[0].status, 'Completed');
   assert.equal(reads, 2);
+});
+
+test('generated task script prepares CLI configuration and uses database tools before running the agent', async () => {
+  const extensionModule = loadCompiledModule('out/extension.js', ['module.exports.__buildAgentShellScript = buildAgentShellScript;']);
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-task-database-'));
+  const root = path.join(fixture, '.solomap-global');
+  const workspace = path.join(fixture, 'workspace');
+  const configDirectory = path.join(fixture, 'cli-config');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(configDirectory);
+  const prior = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = configDirectory;
+  const store = new UnifiedDataStore(root);
+  const dispatch = createRuntimeDataOperations(store);
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'task-config-owner', entryPath: path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), onCommand: () => ({ status: 'running' }), onData: dispatch });
+  const cli = path.join(fixture, 'claude');
+  const source = `#!/usr/bin/env node
+if(process.argv.includes('--version')){console.log('2.0.0');process.exit(0);}
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const {Client}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/index.js'))});
+const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/stdio.js'))});
+(async()=>{const config=JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR,'.claude.json'),'utf8')).mcpServers.solomap_data;assert.ok(config);const client=new Client({name:'generated-task-cli-boundary',version:'1'});const transport=new StdioClientTransport({...config,cwd:process.cwd(),stderr:'pipe'});try{await client.connect(transport);assert.ok((await client.listTools()).tools.some(tool=>tool.name==='solomap_write'));const write=await client.callTool({name:'solomap_write',arguments:{kind:'memory',action:'create',idempotencyKey:'generated-task-write',data:{category:'inbox',title:'Generated task',status:'captured',content:'database-cli-readback'}}});assert.ok(!write.isError,JSON.stringify(write));const receipt=JSON.parse(write.content[0].text);const read=await client.callTool({name:'solomap_read',arguments:{ref:receipt.objectId}});assert.equal(JSON.parse(read.content[0].text).data.content,'database-cli-readback');console.log('database-cli-readback');}finally{await client.close();await transport.close();}})().catch(error=>{console.error(error);process.exitCode=1;});
+`;
+  fs.writeFileSync(cli, source, { mode: 0o755 });
+  try {
+    const built = extensionModule.__buildAgentShellScript(cli, '', 'Save and verify a memory.', workspace, 'task', 1, '', undefined, '', '', 'maintenance', '', root);
+    assert.match(fs.readFileSync(built.promptFilePath, 'utf8'), /solomap_write.*|SoloMap 数据库工具/s);
+    childProcess.execFileSync('bash', ['-n', built.runScriptPath]);
+    await new Promise((resolve, reject) => childProcess.execFile('bash', [built.runScriptPath], { env: { ...process.env, CLAUDE_CONFIG_DIR: configDirectory } }, (error, stdout, stderr) => error ? reject(new Error(String(stderr || error))) : resolve(stdout)));
+    assert.match(fs.readFileSync(built.outputFilePath, 'utf8'), /database-cli-readback/);
+    assert.equal(store.search({ scope: JSON.parse(fs.readFileSync(path.join(workspace, '.solopreneur', 'project.json'), 'utf8')).projectId, kinds: ['memory'] }).items.length, 1);
+  } finally {
+    await server.close(); await dispatch.close(); store.close();
+    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prior;
+  }
 });
 
 test('old project initialization failure cannot replace the newly selected roadmap', async () => {

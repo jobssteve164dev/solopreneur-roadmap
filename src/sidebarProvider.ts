@@ -57,7 +57,7 @@ interface SidebarProviderDependencies {
   dispatchSharedAction?: (message: any, target: vscode.Webview) => Promise<boolean>;
   onInitialDataReady?: () => void;
   listIntelligenceConversations?: () => ReturnType<IntelligenceConversationStore['list']>;
-  getIntelligenceConversation?: (id: string) => IntelligenceConversation | null;
+  getIntelligenceConversation?: (id: string) => ReturnType<IntelligenceConversationStore['get']>;
   sendIntelligenceMessage?: (text: string, id?: string) => Promise<IntelligenceConversation>;
   readAgentAccountStatuses?: typeof readAgentAccountStatuses;
 }
@@ -94,6 +94,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private _refreshAllLocalProjects = false;
   private readonly _pendingLocalProjectPaths = new Set<string>();
   private _agentAccountStatusRequest = 0;
+  private _intelligenceListRequest = 0;
+  private _intelligenceGetRequest = 0;
+  private readonly _intelligenceConversationVersions = new Map<string, number>();
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -189,6 +192,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       webviewView.webview.html = getSidebarFallbackHtml('SoloMap sidebar could not render. Open the command palette and run "Developer: Reload Window".');
     }
 
+    const postIntelligenceList = async () => {
+      const request = ++this._intelligenceListRequest;
+      const conversations = await this._listIntelligenceConversations?.() || [];
+      if (this._view !== webviewView || request !== this._intelligenceListRequest) return;
+      webviewView.webview.postMessage({ command: 'intelligenceConversationsLoaded', conversations });
+    };
     // Listen to messages from the webview
     webviewView.webview.onDidReceiveMessage(async (data) => {
       try {
@@ -197,30 +206,34 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         }
         switch (data.command) {
           case 'intelligence.list':
-            this._view?.webview.postMessage({
-              command: 'intelligenceConversationsLoaded',
-              conversations: this._listIntelligenceConversations?.() || []
-            });
+            await postIntelligenceList();
             break;
-          case 'intelligence.get':
+          case 'intelligence.get': {
+            const id = String(data.conversationId || '');
+            const request = ++this._intelligenceGetRequest;
+            const version = this._intelligenceConversationVersions.get(id) || 0;
             try {
+              const conversation = await this._getIntelligenceConversation?.(id) || null;
+              if (this._view !== webviewView || request !== this._intelligenceGetRequest || version !== (this._intelligenceConversationVersions.get(id) || 0)) break;
               this._view?.webview.postMessage({
                 command: 'intelligenceConversationLoaded',
-                conversation: this._getIntelligenceConversation?.(String(data.conversationId || '')) || null,
-                conversationId: String(data.conversationId || '')
+                conversation,
+                conversationId: id
               });
             } catch (error) {
               this._view?.webview.postMessage({ command: 'intelligenceLoadFailed', message: error instanceof Error ? error.message : String(error) });
             }
             break;
+          }
           case 'intelligence.send': {
             const requestId = String(data.requestId || '');
             try {
               if (!this._sendIntelligenceMessage) throw new Error('Intelligence chat is unavailable.');
               const conversation = await this._sendIntelligenceMessage(String(data.text || ''), String(data.conversationId || ''));
               if (this._view !== webviewView) break;
+              this._intelligenceConversationVersions.set(conversation.id, (this._intelligenceConversationVersions.get(conversation.id) || 0) + 1);
               this._view?.webview.postMessage({ command: 'intelligenceReplyLoaded', requestId, conversation });
-              this._view?.webview.postMessage({ command: 'intelligenceConversationsLoaded', conversations: this._listIntelligenceConversations?.() || [] });
+              await postIntelligenceList();
             } catch (error) {
               if (this._view !== webviewView) break;
               this._view?.webview.postMessage({ command: 'intelligenceReplyFailed', requestId, message: error instanceof Error ? error.message : String(error) });

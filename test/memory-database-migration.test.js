@@ -6,6 +6,62 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 
+test('structured legacy entries retain validity, revocation, provenance and explicit project scope', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-json-'));
+  const sourceRoot = path.join(root, 'memory');
+  fs.mkdirSync(path.join(sourceRoot, 'entries'), { recursive: true });
+  const source = path.join(sourceRoot, 'entries', 'entry.json');
+  const entry = { schemaVersion: 1, objectType: 'memory_entry', entryId: 'legacy-id', scopeId: 'memory_scope:project:original', layer: 'stable', kind: 'project_fact', status: 'invalidated', title: 'Original', content: 'complete original content', tags: ['source-tag'], revision: 2, validity: { validFrom: '2026-01-01T00:00:00Z', validUntil: '2026-09-01T00:00:00Z' }, provenance: { sourceType: 'agent', evidenceRefs: ['original-evidence'] }, metadata: { invalidation: { reason: 'old claim withdrawn' } }, supersedes: ['older-entry'] };
+  const bytes = Buffer.from(JSON.stringify(entry, null, 2) + '\r\n');
+  fs.writeFileSync(source, bytes);
+  const store = new UnifiedDataStore(path.join(root, 'database'));
+  try {
+    const { importMemoryDirectory } = require('../out/memoryDatabaseMigration.js');
+    const first = await importMemoryDirectory(store, sourceRoot);
+    assert.equal(first.conflicts.length, 1, 'unknown project scope must retain raw source without global disclosure');
+    assert.deepEqual(store.readMigrationSource(`memory:${fs.realpathSync(sourceRoot)}`, 'entries/entry.json').bytes, bytes);
+    assert.equal(store.search({ scope: null, kinds: ['memory'] }).items.length, 0);
+    const project = store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'original-project', data: { name: 'Original project' } });
+    const imported = await importMemoryDirectory(store, sourceRoot, { projectScopes: { original: project.objectId } });
+    assert.equal(imported.imported, 1);
+    const object = store.search({ scope: project.objectId, kinds: ['memory'] }).items[0];
+    const data = store.read(object.objectId).data;
+    assert.equal(data.status, 'invalidated');
+    assert.equal(data.content, entry.content);
+    assert.equal(data.legacy_entry_id, 'legacy-id');
+    assert.equal(data.external_entry_revision, 2);
+    assert.equal(data.valid_until, Date.parse(entry.validity.validUntil));
+    assert.deepEqual(JSON.parse(data.provenance_json), entry.provenance);
+    assert.deepEqual(JSON.parse(data.metadata_json), entry.metadata);
+    assert.deepEqual(JSON.parse(data.tags_json), entry.tags);
+    assert.deepEqual(JSON.parse(data.supersedes_json), entry.supersedes);
+    assert.equal(store.context({ project: project.objectId }).items.length, 0, 'withdrawn sources must not enter active context');
+    assert.equal((await importMemoryDirectory(store, sourceRoot, { projectScopes: { original: project.objectId } })).unchanged, 1);
+  } finally { store.close(); }
+});
+
+test('context applies both ends of imported validity and keeps withdrawn records readable as history', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-validity-'));
+  const memory = path.join(root, 'memory');
+  fs.mkdirSync(path.join(memory, 'entries'), { recursive: true });
+  const now = Date.now();
+  const entries = [
+    { title: 'current', status: 'active', validity: { validFrom: new Date(now - 60000).toISOString(), validUntil: new Date(now + 60000).toISOString() } },
+    { title: 'future', status: 'active', validity: { validFrom: new Date(now + 60000).toISOString(), validUntil: null } },
+    { title: 'expired', status: 'active', validity: { validFrom: new Date(now - 120000).toISOString(), validUntil: new Date(now - 60000).toISOString() } },
+    { title: 'withdrawn', status: 'invalidated', validity: { validFrom: null, validUntil: null } }
+  ];
+  for (const entry of entries) fs.writeFileSync(path.join(memory, 'entries', entry.title + '.json'), JSON.stringify({ schemaVersion: 1, objectType: 'memory_entry', entryId: entry.title, scopeId: 'memory_scope:global', kind: 'rules', content: entry.title, revision: 1, ...entry }));
+  const store = new UnifiedDataStore(path.join(root, 'database'));
+  try {
+    const { importMemoryDirectory } = require('../out/memoryDatabaseMigration.js');
+    assert.equal((await importMemoryDirectory(store, memory)).imported, 4);
+    const project = store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'context-project', data: { name: 'Context project' } });
+    assert.deepEqual(store.context({ project: project.objectId }).items.map(item => item.data.title), ['current']);
+    assert.equal(store.search({ scope: null, kinds: ['memory'] }).items.length, 4, 'validity filtering must preserve history');
+  } finally { store.close(); }
+});
+
 test('memory migration preserves full source bytes, repeats without new writes, and retains old revisions', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-import-'));
   const root = path.join(fixture, '.solomap-global');

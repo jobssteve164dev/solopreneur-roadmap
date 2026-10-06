@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import { runtimeMcpSource } from './runtimeDataOperations';
 import { registerUnifiedMcpTools } from './unifiedMcp';
 
@@ -9,8 +10,22 @@ function argument(name: string): string {
 
 async function main(): Promise<void> {
   const globalDataPath = argument('--global-data-path');
-  const projectId = argument('--project-id');
-  if (!globalDataPath || !projectId) throw new Error('SoloMap MCP requires --global-data-path and --project-id.');
+  let projectId = argument('--project-id');
+  if (!globalDataPath) throw new Error('SoloMap MCP requires --global-data-path.');
+  if (!projectId) {
+    let root = path.resolve(argument('--project-root') || process.env.CLAUDE_PROJECT_DIR || process.cwd());
+    let body: string | undefined;
+    for (;;) {
+      try { body = await fs.promises.readFile(path.join(root, '.solopreneur', 'project.json'), 'utf8'); break; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      const parent = path.dirname(root);
+      if (parent === root || fs.existsSync(path.join(root, '.git'))) throw new Error('project_identity_not_found');
+      root = parent;
+    }
+    const identity = JSON.parse(body) as { schemaVersion: number; projectId: string };
+    if (identity.schemaVersion !== 1 || typeof identity.projectId !== 'string') throw new Error('project_identity_invalid');
+    projectId = identity.projectId;
+  }
   const core = require('zod/v4/core') as typeof import('zod/v4/core');
   core.config({ jitless: true });
   const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js') as typeof import('@modelcontextprotocol/sdk/server/mcp.js');

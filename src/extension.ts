@@ -161,6 +161,7 @@ import {
 } from './openCodeAdapter';
 import { buildConversationPresentations, selectLatestConversationRoots } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
+import { handleMigrationSettingsAction } from './migrationSettingsActions';
 import {
   buildAgentModelsLoadedMessage,
   mergeAgentModelPreferences,
@@ -200,8 +201,10 @@ import {
   withLocalDiagnosticTrace
 } from './localDiagnostics';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
+import { agentDatabaseConfigPath, buildAgentDatabaseInstructions, databaseAgentProviders, DatabaseAgentProvider } from './agentDatabaseConfig';
+import { runtimeProjectMcpSource } from './runtimeDataOperations';
 import { readRuntimeState } from './autonomousRuntime';
-import { sendRuntimeControlCommand } from './autonomousRuntimeControl';
+import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { readTodayReview } from './dailyReview';
@@ -610,10 +613,20 @@ export async function activate(context: vscode.ExtensionContext) {
   } as any;
 
   let intelligenceServiceReconciled = false;
+  const dataReadiness = new Map<string, Promise<void>>();
+  const ensureDataReady = () => {
+    const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+    let pending = dataReadiness.get(root);
+    if (!pending) {
+      pending = reconcileBackgroundIntelligenceService(context).catch(error => { dataReadiness.delete(root); throw error; });
+      dataReadiness.set(root, pending);
+    }
+    return pending;
+  };
   const reconcileIntelligenceServiceOnce = () => {
     if (intelligenceServiceReconciled) return;
     intelligenceServiceReconciled = true;
-    void reconcileBackgroundIntelligenceService(context);
+    void ensureDataReady().catch(() => undefined);
   };
   const intelligenceConversationStores = new Map<string, IntelligenceConversationStore>();
   const getIntelligenceConversationStore = () => {
@@ -640,10 +653,12 @@ export async function activate(context: vscode.ExtensionContext) {
           configRevision: config.revision,
           workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work')
         });
+        const selectedProjectPathForChat = getIntelligenceSelectedProjectPath();
+        const dataSource = await runtimeProjectMcpSource(globalDataPath, selectedProjectPathForChat);
         const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession({
           getProjects: getIntelligenceProjects,
-          getSelectedProjectPath: getIntelligenceSelectedProjectPath,
-          getCurrentSteps: () => syncEngine && activeProjectRoot === getIntelligenceSelectedProjectPath()
+          getSelectedProjectPath: () => selectedProjectPathForChat,
+          getCurrentSteps: () => syncEngine && activeProjectRoot === selectedProjectPathForChat
             ? syncEngine.getNodes().map(node => ({ title: node.title, status: node.status }))
             : null,
           getSettings: () => {
@@ -658,7 +673,7 @@ export async function activate(context: vscode.ExtensionContext) {
             const review = readTodayReview(globalDataPath, getProjects(context));
             return review ? { summary: review.summary, items: review.todos.map(item => item.title) } : null;
           }
-        }));
+        }, dataSource));
         try {
           return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, { selectedProject: '', projects: [] }, mcp.client));
         } finally {
@@ -694,9 +709,9 @@ export async function activate(context: vscode.ExtensionContext) {
       getProjectConversationSnapshot: async (projectPath) => getProjectConversationSnapshotForProject(context, projectPath),
       dispatchSharedAction: async (message, target) => handleSharedWebviewAction(context, message, 'sidebar', target),
       onInitialDataReady: reconcileIntelligenceServiceOnce,
-      listIntelligenceConversations: () => getIntelligenceConversationStore().list(),
-      getIntelligenceConversation: (id) => getIntelligenceConversationStore().get(id),
-      sendIntelligenceMessage: (text, id) => getIntelligenceConversationStore().send(text, id)
+      listIntelligenceConversations: async () => { const store = getIntelligenceConversationStore(); await ensureDataReady(); return store.list(); },
+      getIntelligenceConversation: async (id) => { const store = getIntelligenceConversationStore(); await ensureDataReady(); return store.get(id); },
+      sendIntelligenceMessage: async (text, id) => { const store = getIntelligenceConversationStore(); await ensureDataReady(); return store.send(text, id); }
     }
   );
 
@@ -716,9 +731,10 @@ export async function activate(context: vscode.ExtensionContext) {
   setTimeout(() => {
     reconcileIntelligenceServiceOnce();
     const activationProjectRoot = getSelectedProjectPath(context) || getWorkspaceRoot();
+    const activationGlobalDataPath = getPersistedSettings(context).globalDataPath;
     if (activationProjectRoot) {
       try {
-        ensureSolomapMemoryStore(activationProjectRoot, getPersistedSettings(context).globalDataPath);
+        void ensureDataReady().then(() => ensureSolomapMemoryStore(activationProjectRoot, activationGlobalDataPath)).catch(error => console.error('SoloMap database initialization failed:', error));
       } catch (error) {
         console.error('SoloMap global runtime refresh failed during activation:', error);
       }
@@ -757,6 +773,7 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
   } catch (error) {
     recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
     console.error('SoloMap autonomous runtime failed to start:', error);
+    throw error;
   }
 }
 
@@ -768,6 +785,7 @@ async function activateObservedBackgroundRuntime(extensionPath: string, globalDa
       if (isAutonomousRuntimeDisabled(globalDataPath)) {
         if (!resume) {
           trace.record('runtime.disabled', 'ok');
+          await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
           return;
         }
         enableAutonomousRuntime(globalDataPath);
@@ -881,6 +899,45 @@ async function handleSharedWebviewAction(
   target?: vscode.Webview
 ): Promise<boolean> {
   const respond = (payload: Record<string, unknown>) => postWebviewMessage(target, payload);
+  if (String(message.command || '').startsWith('dataMigration.')) {
+    const language = getPersistedSettings(context).language;
+    try {
+      const result = await handleMigrationSettingsAction(message, {
+        getRoot: () => normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
+        ready: async root => { await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root }); },
+        call: (root, operation, input) => sendRuntimeDataRequest(root, { operation, input }),
+        confirm: async files => {
+          const confirm = language === 'en' ? 'Recycle these files' : '确认回收这些文件';
+          return await vscode.window.showWarningMessage(
+            language === 'en' ? `Recycle ${files.length} old files?` : `回收 ${files.length} 个旧文件？`,
+            { modal: true, detail: (language === 'en' ? 'These exact files are saved in the database and can be restored here.\n\n' : '以下文件已完整保存在数据库，可在此恢复。\n\n') + files.map(file => file.path).join('\n') },
+            confirm
+          ) === confirm;
+        },
+        trash: async (file, expectedHash) => {
+          const before = await fs.promises.lstat(file);
+          if (!before.isFile() || before.isSymbolicLink() || crypto.createHash('sha256').update(await fs.promises.readFile(file)).digest('hex') !== expectedHash) throw new Error('recycling_source_changed');
+          const after = await fs.promises.lstat(file);
+          if (!after.isFile() || after.isSymbolicLink() || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs || before.size !== after.size) throw new Error('recycling_source_changed');
+          await vscode.workspace.fs.delete(vscode.Uri.file(file), { useTrash: true, recursive: false });
+        }
+      });
+      const successMessage = result.cancelled ? undefined : message.command === 'dataMigration.restore'
+        ? (language === 'en' ? 'File restored.' : '文件已恢复。')
+        : ['dataMigration.recycle', 'dataMigration.retryRecycling'].includes(String(message.command))
+          ? (language === 'en' ? 'Old files recycled. You can restore them here.' : '旧文件已回收，可在此恢复。') : undefined;
+      await respond({ command: 'dataMigrationLoaded', requestId: String(message.requestId || ''), ...result, successMessage });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      const detail = code === 'restore_target_exists' ? (language === 'en' ? 'A file already exists at the original location. It was kept.' : '原位置已有文件，已保留现有内容。')
+        : code === 'data_location_changed' ? (language === 'en' ? 'The data location changed. Refresh before continuing.' : '数据位置已变更，请刷新后继续。')
+          : code === 'recycling_source_changed' ? (language === 'en' ? 'The file changed. It was kept; refresh to review it.' : '文件内容已变化，已保留。请刷新后重新查看。')
+            : (language === 'en' ? 'This action did not finish. Your data is kept; refresh and retry.' : '本次操作未完成，数据已保留。请刷新后重试。');
+      recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'data.migration.settings', error);
+      await respond({ command: 'dataMigrationLoaded', requestId: String(message.requestId || ''), error: detail });
+    }
+    return true;
+  }
   const refreshConversation = (nodeId: string) => {
     if (nodeId) {
       postNodeConversations(nodeId);
@@ -5050,6 +5107,16 @@ function buildSoloContextIndex(workspaceRoot: string, globalDataPath: string, gl
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const globalToolsRoot = path.join(globalRoot, 'tools');
   ensureDocumentationManifest(workspaceRoot);
+  if (fs.existsSync(path.join(globalRoot, 'solomap.db'))) {
+    return [
+      'SoloMap 按需上下文索引：',
+      `- 项目规则：${path.join(workspaceRoot, 'agent.md')}；非闲聊任务先读取。`,
+      globalPromptPath ? `- 用户全局要求：${globalPromptPath}；本轮开始时读取，与用户本次要求冲突时以本次要求为准。` : '',
+      `- 项目文档目录：${path.join(workspaceRoot, '.solopreneur', 'documentation.json')}；需要正式文档时按需读取。`,
+      `- 技能目录：${getSolomapSkillRegistryPath(workspaceRoot, globalDataPath)}；任务命中相关领域时读取对应 SKILL.md。`,
+      buildAgentDatabaseInstructions()
+    ].filter(Boolean).join('\n');
+  }
   return [
     'SoloMap 按需上下文索引：',
     `- 项目规则：${path.join(workspaceRoot, 'agent.md')}；非闲聊任务先读取。`,
@@ -5445,6 +5512,14 @@ function buildAgentShellScript(
   const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
   const decisionFilePath = effectiveCompletionDecisionFilePath || path.join(runDir, 'completion.json');
   const agentProvider = getAgentProvider(agentCli);
+  const databaseRoot = normalizeSolomapGlobalPath(effectiveWorkspaceRoot, effectiveGlobalDataPath);
+  const databaseEnabled = databaseAgentProviders.includes(agentProvider as DatabaseAgentProvider) && fs.existsSync(path.join(databaseRoot, 'solomap.db'));
+  if (databaseEnabled) {
+    if (!effectiveConversationPrompt.includes('SoloMap 数据库工具：')) effectiveConversationPrompt += '\n\n' + buildAgentDatabaseInstructions();
+  }
+  const databasePreflightCommand = databaseEnabled
+    ? `ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} -e ${shellQuote('const api=require(process.argv[1]);api.sendRuntimeDataRequest(process.argv[2],{operation:"prepare_agent_database",input:{root:process.argv[3],provider:process.argv[4],configPath:process.argv[5],command:process.execPath}}).catch(error=>{process.stderr.write("SoloMap database connection: "+String(error.message||error)+"\\n");process.exitCode=1;});')} ${shellQuote(path.join(__dirname, 'autonomousRuntimeControl.js'))} ${shellQuote(databaseRoot)} ${shellQuote(effectiveWorkspaceRoot)} ${shellQuote(agentProvider)} ${shellQuote(agentDatabaseConfigPath(agentProvider as DatabaseAgentProvider))}`
+    : '';
   const sessionKey = getAgentSessionKey(agentCli);
   const interactiveSession = isInteractiveConversationRunKind(effectiveRunKind);
   const taskCheckpointCommandPath = interactiveSession ? ensureTaskCheckpointRuntime(effectiveWorkspaceRoot) : '';
@@ -5612,7 +5687,7 @@ function buildAgentShellScript(
       `${shellQuote(process.execPath)} -e ${shellQuote('const fs=require("fs");const path=require("path");const identity=require(process.argv[1]);const statusFile=process.argv[2];const sessionFile=process.argv[3];const sessionId=process.argv[4];identity.appendSessionBindingRevision(sessionFile,1,{sessionId,method:"provider_created",contract:"official_stable",state:"planned",evidence:{source:"cursor_create_chat"}});const status=JSON.parse(fs.readFileSync(statusFile,"utf8"));status.plannedNativeSessionId=sessionId;status.sessionBindingHeadRevision=2;const tmp=statusFile+"."+process.pid+".tmp";fs.writeFileSync(tmp,JSON.stringify(status));fs.renameSync(tmp,statusFile);')} ${shellQuote(path.join(__dirname, 'sessionIdentity.js'))} ${shellQuote(statusFilePath)} ${shellQuote(sessionFilePath)} "$solomap_cursor_session_id"`
     ]
     : [];
-  const buildTrackedExecutionCommand = (command: string) => `if [ -r "/proc/$$/stat" ]; then solomap_agent_birth="proc:$(awk '{print \$22}' "/proc/$$/stat")"; else solomap_agent_birth="ps:$(ps -o lstart= -p "$$" 2>/dev/null)"; fi; printf '%s\n%s\n' "$$" "$solomap_agent_birth" > ${shellQuote(agentProcessPidFilePath)}; exec sh -c ${shellQuote(command)}`;
+  const buildTrackedExecutionCommand = (command: string) => `if [ -r "/proc/$$/stat" ]; then solomap_agent_birth="proc:$(awk '{print \$22}' "/proc/$$/stat")"; else solomap_agent_birth="ps:$(ps -o lstart= -p "$$" 2>/dev/null)"; fi; printf '%s\n%s\n' "$$" "$solomap_agent_birth" > ${shellQuote(agentProcessPidFilePath)}; exec sh -c ${shellQuote(databasePreflightCommand ? `${databasePreflightCommand} && ${command}` : command)}`;
   const trackedExecutionCommand = buildTrackedExecutionCommand(executionCommand);
   const trackedCodexDaemonFallbackCommand = codexDaemonFallbackCommand
     ? buildTrackedExecutionCommand(codexDaemonFallbackCommand)

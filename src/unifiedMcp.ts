@@ -28,6 +28,7 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     return object;
   };
   const readView = async (input: { ref: string; revision?: number; view?: string }): Promise<unknown> => {
+    if (input.ref === 'solomap://schema') return schema;
     const result = await source.call('read', input) as DataObject | ContentPage;
     if (!authorized('object' in result ? result.object : result)) throw new Error('scope_denied');
     return result;
@@ -42,7 +43,7 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     if ((input.scope ?? source.scope) !== source.scope) throw new Error('scope_denied');
     return source.call('search', { ...input, scope: source.scope });
   });
-  register('solomap_read', '读取全文、元数据或固定版本的内容分页；分页保留所有原始字节，按 cursor 继续读取。', { ref: z.string(), revision: z.number().int().positive().optional(), view: z.enum(['full', 'metadata', 'content']).optional(), field: z.string().optional(), cursor: z.string().optional(), limit: z.number().int().min(1).max(1048576).optional() }, true, readView);
+  register('solomap_read', '读取全文、元数据或固定版本的内容分页；按 cursor 继续读取。ref="solomap://schema" 返回可写字段合同。', { ref: z.string(), revision: z.number().int().positive().optional(), view: z.enum(['full', 'metadata', 'content']).optional(), field: z.string().optional(), cursor: z.string().optional(), limit: z.number().int().min(1).max(1048576).optional() }, true, readView);
   register('solomap_write', '创建、修改或归档记录，返回已提交版本和回执。', {
     kind: z.enum(kinds), action: z.enum(['create', 'patch', 'archive']), scope,
     objectId: z.string().optional(), expectedRevision: z.number().int().nonnegative().optional(), idempotencyKey: z.string().min(1), data: z.object(dataFields).passthrough().describe('按 kind 使用 solomap://schema 中的字段；创建需提供 required 字段，补丁只提供本次修改的字段。')

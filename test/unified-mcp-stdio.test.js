@@ -31,9 +31,21 @@ for (const separateProjects of [false, true]) test(`external stdio clients concu
     const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
     for (let i = 0; i < 2; i++) {
       const client = new Client({ name: `external-${i}`, version: '1' });
-      const transport = new StdioClientTransport({ command: process.execPath, args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root, '--project-id', i === 0 ? project.objectId : secondProject.objectId], stderr: 'pipe' });
+      const workspace = path.join(root, `workspace-${i}`);
+      fs.mkdirSync(path.join(workspace, '.solopreneur'), { recursive: true });
+      fs.writeFileSync(path.join(workspace, '.solopreneur', 'project.json'), JSON.stringify({ schemaVersion: 1, projectId: i === 0 ? project.objectId : secondProject.objectId }));
+      const { configureAgentDatabase } = require('../out/agentDatabaseConfig.js');
+      const configPath = path.join(workspace, 'cli-mcp.json');
+      configureAgentDatabase({ provider: 'cursor', configPath, command: process.execPath, globalDataPath: i === 0 ? path.dirname(root) : root });
+      const configured = JSON.parse(fs.readFileSync(configPath, 'utf8')).mcpServers.solomap_data;
+      const workingDirectory = i === 0 ? workspace : path.join(workspace, 'src');
+      fs.mkdirSync(workingDirectory, { recursive: true });
+      const transport = new StdioClientTransport({ ...configured, cwd: workingDirectory, stderr: 'pipe' });
       sessions.push({ client, transport });
       await client.connect(transport);
+      const schemaByTool = await client.callTool({ name: 'solomap_read', arguments: { ref: 'solomap://schema' } });
+      assert.ok(!schemaByTool.isError, JSON.stringify(schemaByTool));
+      assert.equal(JSON.parse(schemaByTool.content[0].text).kinds.memory.fields.content.required, true);
     }
     const receipts = await Promise.all(sessions.map(async ({ client }, i) => {
       const result = await client.callTool({ name: 'solomap_write', arguments: { kind: 'memory', action: 'create', idempotencyKey: 'first-write', data: { category: 'inbox', title: `external-${i}`, status: 'captured', content: `即时正文-${i}` } } });

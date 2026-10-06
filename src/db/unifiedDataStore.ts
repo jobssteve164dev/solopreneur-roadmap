@@ -5,8 +5,23 @@ import * as os from 'os';
 import { AsyncLocalStorage } from 'async_hooks';
 import { gzipSync, gunzipSync } from 'zlib';
 import { DiskDatabase, SqlValue } from './diskDatabase';
-import { entityDefinitions, unifiedSchemaSql } from './unifiedSchema';
+import { unifiedSchemaSql } from './unifiedSchema';
 import { indexTokens, queryTokens } from './searchIndex';
+import { unifiedSchemaMigrations, runtimeEntityDefinitions as entityDefinitions } from './unifiedSchemaMigrations';
+import type { IntelligenceConversation } from '../intelligenceChat';
+
+export interface MigrationJob {
+  jobId: string;
+  status: 'queued' | 'running' | 'interrupted' | 'completed' | 'completed_with_conflicts' | 'failed';
+  args: Record<string, unknown>;
+  progress: Record<string, unknown>;
+  error: string | null;
+}
+
+export interface RecyclingItem {
+  itemId: string; planId: string; identity: string; key: string; hash: string; path: string;
+  bytes: number; status: 'prepared' | 'approved' | 'moving' | 'held' | 'trashed' | 'restoring' | 'restored' | 'changed'; error: string | null;
+}
 
 export interface DataWrite {
   kind: string;
@@ -65,6 +80,9 @@ function digest(data: Uint8Array | string): string { return crypto.createHash('s
 
 /** Authoritative domain operations. Only Runtime exposes this owner to other processes. */
 export class UnifiedDataStore {
+  public get databaseId(): string {
+    return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
+  }
   public static open(root: string, expectedDatabaseId?: string): UnifiedDataStore {
     if (!fs.existsSync(path.join(root, 'solomap.db'))) throw new Error('database_restore_required');
     const store = new UnifiedDataStore(root);
@@ -79,6 +97,7 @@ export class UnifiedDataStore {
   private readonly deviceId: string;
   private readonly ownerActorId: string;
   private readonly actorContext = new AsyncLocalStorage<string>();
+  private transactionDepth = 0;
   private get actorId(): string { return this.actorContext.getStore() || this.ownerActorId; }
   public readonly filePath: string;
   constructor(public readonly root: string, actorId = 'local-runtime') {
@@ -89,6 +108,11 @@ export class UnifiedDataStore {
     try {
       if (!existed) fs.chmodSync(this.filePath, 0o600);
       const sql = unifiedSchemaSql();
+      const migrationsExist = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").length;
+      const rebuildTables = !migrationsExist || !this.rows('SELECT version FROM schema_migrations WHERE version=5').length;
+      // SQLite requires FK enforcement outside the transaction to replace a referenced table.
+      // Every reference is checked before committing; normal writes always enforce constraints.
+      if (rebuildTables) this.db.run('PRAGMA foreign_keys=OFF');
       this.transaction(() => {
         const existing = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'");
         if (!existing.length) {
@@ -101,7 +125,19 @@ export class UnifiedDataStore {
           throw new Error('schema_checksum_mismatch');
         }
         this.db.run('INSERT OR IGNORE INTO actors(id,kind,provider) VALUES(?,?,?)', [actorId, 'runtime', 'solomap']);
+        const versions = this.rows('SELECT version,checksum FROM schema_migrations ORDER BY version');
+        if (versions.some(row => Number(row.version) !== 1 && !unifiedSchemaMigrations.some(migration => migration.version === row.version))) throw new Error('unsupported_schema_version');
+        for (const migration of unifiedSchemaMigrations) {
+          const applied = versions.find(row => row.version === migration.version);
+          if (applied && applied.checksum !== digest(migration.sql)) throw new Error('schema_checksum_mismatch');
+          if (!applied) {
+            this.db.run(migration.sql);
+            this.db.run('INSERT INTO schema_migrations VALUES(?,?,?)', [migration.version, digest(migration.sql), Date.now()]);
+          }
+        }
+        if (rebuildTables && this.rows('PRAGMA foreign_key_check').length) throw new Error('migration_foreign_key_violation');
       });
+      if (rebuildTables) this.db.run('PRAGMA foreign_keys=ON');
       for (const definition of Object.values(entityDefinitions)) {
         this.columns.set(definition.table, new Set(this.rows(`PRAGMA table_info(${definition.table})`).map(row => String(row.name)).filter(name => !['id', 'object_kind', 'project_id'].includes(name))));
       }
@@ -114,6 +150,69 @@ export class UnifiedDataStore {
   public withActor<T>(actorId: string, action: () => T): T {
     if (!this.rows('SELECT id FROM actors WHERE id=?', [actorId]).length) throw new Error('actor_missing');
     return this.actorContext.run(actorId, action);
+  }
+  public enqueueMemoryMigration(args: Record<string, unknown>, idempotencyKey: string): MigrationJob {
+    if (!idempotencyKey || typeof args.sourceRoot !== 'string' || !args.sourceRoot) throw new Error('invalid_migration_request');
+    return this.transaction(() => {
+      const hash = digest(canonical(args));
+      const previous = this.rows('SELECT id,input_hash FROM migration_jobs WHERE actor_id=? AND idempotency_key=?', [this.ownerActorId, idempotencyKey])[0];
+      if (previous) {
+        if (previous.input_hash !== hash) throw new Error('idempotency_conflict');
+        return this.readMigrationJob(String(previous.id));
+      }
+      const id = crypto.randomUUID();
+      const now = Date.now();
+      this.db.run('INSERT INTO migration_jobs VALUES(?,?,?,?,?,?,?,?,?,?)', [id, this.ownerActorId, idempotencyKey, hash, canonical(args), 'queued', '{}', null, now, now]);
+      return this.readMigrationJob(id);
+    });
+  }
+  public readMigrationJob(jobId: string): MigrationJob {
+    const row = this.rows('SELECT * FROM migration_jobs WHERE id=?', [jobId])[0];
+    if (!row) throw new Error('migration_job_missing');
+    return { jobId: String(row.id), status: row.status as MigrationJob['status'], args: JSON.parse(String(row.args_json)), progress: JSON.parse(String(row.progress_json)), error: row.error === null ? null : String(row.error) };
+  }
+  public pendingMigrationJobs(): MigrationJob[] {
+    return this.rows("SELECT id FROM migration_jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at,id").map(row => this.readMigrationJob(String(row.id)));
+  }
+  public migrationJobs(): MigrationJob[] {
+    return this.rows('SELECT id FROM migration_jobs ORDER BY created_at,id').map(row => this.readMigrationJob(String(row.id)));
+  }
+  public capturedMigrationSources(): Array<{ identity: string; key: string; hash: string; stage: string }> {
+    return this.rows('SELECT source_identity,source_key,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id ORDER BY source_identity,source_key')
+      .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage) }));
+  }
+  public recyclingItems(): RecyclingItem[] {
+    return this.rows('SELECT * FROM migration_recycling ORDER BY created_at,id').map(row => ({ itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.original_path), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) }));
+  }
+  public createRecyclingPlan(files: Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>): { planId: string; files: RecyclingItem[] } {
+    return this.transaction(() => {
+      const prepared = this.recyclingItems().filter(item => item.status === 'prepared');
+      for (const existing of new Set(prepared.map(item => item.planId))) {
+        const items = prepared.filter(item => item.planId === existing);
+        if (items.length === files.length && items.every(item => files.some(file => file.path === item.path && file.hash === item.hash))) return { planId: existing, files: items };
+      }
+      const planId = crypto.randomUUID();
+      for (const file of files) {
+        const snapshot = this.rows('SELECT source_content_id FROM migration_items JOIN contents ON contents.id=source_content_id WHERE source_identity=? AND source_key=? AND contents.sha256=?', [file.identity, file.key, file.hash])[0];
+        if (!snapshot) throw new Error('recycling_snapshot_missing');
+        this.db.run('INSERT INTO migration_recycling VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [crypto.randomUUID(), planId, file.identity, file.key, file.hash, snapshot.source_content_id, file.path, file.bytes, 'prepared', null, Date.now(), Date.now()]);
+      }
+      return { planId, files: this.recyclingItems().filter(item => item.planId === planId) };
+    });
+  }
+  public recyclingSnapshot(itemId: string): { bytes: Buffer; hash: string } {
+    const item = this.rows('SELECT source_content_id,source_hash FROM migration_recycling WHERE id=?', [itemId])[0];
+    if (!item) throw new Error('recycling_item_missing');
+    const bytes = this.content(String(item.source_content_id));
+    if (digest(bytes) !== item.source_hash) throw new Error('recycling_snapshot_corrupt');
+    return { bytes, hash: String(item.source_hash) };
+  }
+  public setRecyclingStatus(itemId: string, status: RecyclingItem['status'], error: string | null = null): void {
+    if (!this.rows('SELECT id FROM migration_recycling WHERE id=?', [itemId]).length) throw new Error('recycling_item_missing');
+    this.db.run('UPDATE migration_recycling SET status=?,error=?,updated_at=? WHERE id=?', [status, error, Date.now(), itemId]);
+  }
+  public updateMigrationJob(jobId: string, status: MigrationJob['status'], progress: Record<string, unknown>, error: string | null = null): void {
+    this.db.run('UPDATE migration_jobs SET status=?,progress_json=?,error=?,updated_at=? WHERE id=?', [status, canonical(progress), error, Date.now(), jobId]);
   }
   public authorizeMcpAction(actorId: string, projectId: string, action: string): void {
     const actor = this.rows('SELECT COALESCE(authority_id,id) AS authority,identity_ref,kind FROM actors WHERE id=?', [actorId])[0];
@@ -164,12 +263,19 @@ export class UnifiedDataStore {
     return result;
   }
   private transaction<T>(operation: () => T): T {
-    this.db.run('BEGIN IMMEDIATE');
+    const depth = this.transactionDepth;
+    const savepoint = `domain_${depth}`;
+    this.db.run(depth ? `SAVEPOINT ${savepoint}` : 'BEGIN IMMEDIATE');
+    this.transactionDepth++;
     try {
       const result = operation();
-      this.db.run('COMMIT');
+      this.db.run(depth ? `RELEASE ${savepoint}` : 'COMMIT');
       return result;
-    } catch (error) { this.db.run('ROLLBACK'); throw error; }
+    } catch (error) {
+      this.db.run(depth ? `ROLLBACK TO ${savepoint}` : 'ROLLBACK');
+      if (depth) this.db.run(`RELEASE ${savepoint}`);
+      throw error;
+    } finally { this.transactionDepth--; }
   }
   private putContent(data: Uint8Array | string, mimeType = 'text/plain', encoding = 'utf8'): string {
     const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
@@ -532,7 +638,8 @@ export class UnifiedDataStore {
   public context(input: { project: string; query?: string; categories?: string[]; budget?: number }, canRead: (object: DataObject) => boolean = () => true): { items: DataObject[]; sourceSequence: number; remaining: boolean } {
     const budget = input.budget === undefined ? 16000 : input.budget;
     if (!Number.isInteger(budget) || budget < 1) throw new Error('invalid_budget');
-    const eligible = (item: DataObject): boolean => canRead(item) && (!input.categories || input.categories.includes(String(item.data.category))) && item.data.status !== 'rejected' && item.archivedAt === null;
+    const now = Date.now();
+    const eligible = (item: DataObject): boolean => canRead(item) && (!input.categories || input.categories.includes(String(item.data.category))) && !['rejected', 'invalidated', 'superseded', 'expired'].includes(String(item.data.status)) && (item.data.valid_from == null || Number(item.data.valid_from) <= now) && (item.data.valid_until == null || Number(item.data.valid_until) > now) && item.archivedAt === null;
     const result = this.search({ scope: input.project, query: input.query, kinds: ['memory', 'lesson', 'policy'], limit: 500 }, eligible);
     const global = this.search({ scope: null, query: input.query, kinds: ['memory', 'lesson', 'policy'], limit: 500 }, eligible);
     const candidates = [...result.items, ...global.items];
@@ -661,6 +768,39 @@ export class UnifiedDataStore {
     }
     const items = matches.slice(0, limit);
     return { items, cursor: matches.length > limit ? Buffer.from(canonical({ id: items[items.length - 1].objectId, sequence: after?.sequence ?? sequence, fingerprint })).toString('base64url') : null, sourceSequence: sequence, sourceChanged: after !== null && after.sequence !== sequence };
+  }
+  public readIntelligenceConversation(id: string): { conversation: IntelligenceConversation; revision: number } | null {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new Error('Invalid intelligence conversation ID.');
+    const row = this.rows("SELECT o.* FROM objects o JOIN conversations c ON c.id=o.id WHERE o.id=? AND o.project_id IS NULL AND c.mode='intelligence' AND o.archived_at IS NULL", [id])[0];
+    if (!row) return null;
+    const object = this.current(id, false);
+    const messages = this.rows('SELECT role,content_id FROM messages WHERE conversation_id=? ORDER BY sequence', [id]).map(message => ({ role: String(message.role) as 'user' | 'assistant', content: this.decodedContent(String(message.content_id)) as string }));
+    return { revision: Number(row.revision), conversation: { id, title: String(object.data.title), createdAt: new Date(Number(row.created_at)).toISOString(), updatedAt: new Date(Number(row.updated_at)).toISOString(), messages } };
+  }
+  public listIntelligenceConversations(): Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>> {
+    return this.rows("SELECT o.id,c.title,o.updated_at FROM objects o JOIN conversations c ON c.id=o.id WHERE o.project_id IS NULL AND c.mode='intelligence' AND o.archived_at IS NULL ORDER BY o.updated_at DESC,o.id").map(row => ({ id: String(row.id), title: String(row.title), updatedAt: new Date(Number(row.updated_at)).toISOString() }));
+  }
+  public writeIntelligenceConversation(input: { conversation: IntelligenceConversation; expectedRevision: number; idempotencyKey: string }): WriteReceipt {
+    const value = input.conversation;
+    if (!value || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.id) || typeof value.title !== 'string' || !Array.isArray(value.messages) || value.messages.some(message => !message || !['user', 'assistant'].includes(message.role) || typeof message.content !== 'string') || !Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.updatedAt))) throw new Error('Intelligence conversation data is invalid.');
+    return this.recordMutation(input, input.idempotencyKey, 'append_messages', () => {
+      const current = this.readIntelligenceConversation(value.id);
+      if ((current?.revision || 0) !== input.expectedRevision) throw new Error('revision_conflict');
+      const oldMessages = current?.conversation.messages || [];
+      if (value.messages.length < oldMessages.length || canonical(value.messages.slice(0, oldMessages.length)) !== canonical(oldMessages)) throw new Error('conversation_history_conflict');
+      if (current) {
+        if (value.createdAt !== current.conversation.createdAt) throw new Error('conversation_identity_conflict');
+        this.db.run('UPDATE conversations SET title=? WHERE id=?', [value.title, value.id]);
+        this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.parse(value.updatedAt), value.id]);
+      } else {
+        this.db.run("INSERT INTO objects VALUES(?,'conversation',NULL,1,?,?,NULL)", [value.id, Date.parse(value.createdAt), Date.parse(value.updatedAt)]);
+        this.db.run("INSERT INTO conversations(id,project_id,mode,status,title) VALUES(?,NULL,'intelligence','active',?)", [value.id, value.title]);
+      }
+      for (let i = oldMessages.length; i < value.messages.length; i++) {
+        this.write({ kind: 'message', action: 'create', scope: null, idempotencyKey: `${input.idempotencyKey}:message:${i}`, data: { conversation_id: value.id, sequence: i, role: value.messages[i].role, content: value.messages[i].content } });
+      }
+      return this.current(value.id);
+    });
   }
   public async backup(destination: string): Promise<void> {
     fs.mkdirSync(path.dirname(destination), { recursive: true });

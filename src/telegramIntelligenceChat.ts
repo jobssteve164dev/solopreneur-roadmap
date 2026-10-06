@@ -11,7 +11,7 @@ export function createTelegramIntelligenceReply(
     const generation = getBindingGeneration();
     const savedIds = getConversationIds();
     const previousId = savedIds[chatId];
-    const conversation = await store.send(text, previousId && store.get(previousId) ? previousId : '');
+    const conversation = await store.send(text, previousId && await store.get(previousId) ? previousId : '');
     if (generation === getBindingGeneration()) {
       await saveConversationIds({ ...getConversationIds(), [chatId]: conversation.id });
     }

@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { buildAgentDatabaseInstructions } from './agentDatabaseConfig';
 import { buildSystemMaintenancePromptGuard } from './systemMaintenance';
 import * as childProcess from 'child_process';
 import { RoadmapNode } from './db/types';
@@ -759,9 +760,10 @@ export function writeSolomapMemoryExamples(memoryRoot: string, learningCandidate
 
 export function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): { globalRoot: string; memoryRoot: string; projectMemoryFile: string } {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-  ensureSolomapGlobalTools(globalRoot);
   const memoryRoot = path.join(globalRoot, 'memory');
   const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
+  if (fs.existsSync(path.join(globalRoot, 'solomap.db'))) return { globalRoot, memoryRoot, projectMemoryFile };
+  ensureSolomapGlobalTools(globalRoot);
   const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
   const learningApprovedDir = path.join(globalRoot, 'learning', 'approved');
   const learningRejectedDir = path.join(globalRoot, 'learning', 'rejected');
@@ -2492,6 +2494,7 @@ export function uninstallSolomapEnhancement(workspaceRoot: string, globalDataPat
 
 export function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = ''): string {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  if (fs.existsSync(path.join(globalRoot, 'solomap.db'))) return buildAgentDatabaseInstructions();
   const memoryRoot = path.join(globalRoot, 'memory');
   const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
   const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');

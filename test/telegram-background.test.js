@@ -102,8 +102,9 @@ test('standalone runtime receives, queries projects and replies without an edito
   updates.push(update(100, '当前项目下一步是什么？'));
   await waitFor(() => sent.some(m => m.text === 'Alpha 的下一步是 Ship Alpha。'), 'Background TG must deliver an answer with no editor process');
   assert.ok(polls.length > 0);
-  const conversations = fs.readdirSync(path.join(globalRoot, 'intelligence-conversations'));
+  const conversations = await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} });
   assert.equal(conversations.length, 1);
+  assert.equal(fs.existsSync(path.join(globalRoot, 'intelligence-conversations')), false, 'new background history must not create JSON files');
   await control.sendRuntimeControlCommand(globalRoot, 'pause');
   updates.push(update(101, '/status'));
   await waitFor(() => sent.some(m => m.text.includes('Alpha') && m.text.includes('路线图')), 'Pausing autonomous decisions must leave TG available');
@@ -112,8 +113,8 @@ test('standalone runtime receives, queries projects and replies without an edito
   await start();
   updates.push(update(102, '继续刚才的问题'));
   await waitFor(() => sent.length > beforeRestart && sent.at(-1).text === 'Alpha 的下一步是 Ship Alpha。', 'Restart must resume TG conversation');
-  assert.equal(fs.readdirSync(path.join(globalRoot, 'intelligence-conversations')).length, 1);
-  const conversation = JSON.parse(fs.readFileSync(path.join(globalRoot, 'intelligence-conversations', conversations[0])));
+  assert.equal((await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} })).length, 1);
+  const { conversation } = await control.sendRuntimeDataRequest(globalRoot, { operation: 'read_intelligence_conversation', input: { id: conversations[0].id } });
   assert.equal(conversation.messages.length, 4, 'Acknowledged messages must not be replayed after restart');
   assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
   await stop();
@@ -213,7 +214,8 @@ test('quickly disabling and re-enabling invalidates pending replies while preser
   fixture.updates.push(fixture.update(401, '新的消息'));
   await waitFor(() => fixture.sent.some(m => m.text === '迟到的回复'), 'New messages after re-enable must still receive replies');
   assert.equal(fixture.sent.filter(m => m.text === '迟到的回复').length, 1, 'Revoked and newly accepted requests must not both reply');
-  assert.equal(fs.readdirSync(path.join(fixture.globalRoot, 'intelligence-conversations')).length, 1, 'Enable changes must preserve established chat identity');
+  const conversations = await control.sendRuntimeDataRequest(fixture.globalRoot, { operation: 'list_intelligence_conversations', input: {} });
+  assert.deepEqual(conversations.map(value => value.id), [previous.id], 'Enable changes must preserve established chat identity');
   await fixture.stop();
 });
 

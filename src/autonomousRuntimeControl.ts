@@ -29,6 +29,7 @@ interface RuntimeControlEndpoint {
   host: '127.0.0.1';
   port: number;
   token: string;
+  entryPath?: string;
 }
 
 interface RuntimeControlServerOptions {
@@ -141,7 +142,8 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
     runtimeId: options.runtimeId,
     host: '127.0.0.1',
     port: address.port,
-    token
+    token,
+    entryPath: options.entryPath
   }); } catch (error) {
     connections.forEach(socket => socket.destroy());
     await new Promise<void>(resolve => server.close(() => resolve()));

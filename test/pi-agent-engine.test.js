@@ -6,6 +6,34 @@ const path = require('node:path');
 const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
 const { buildStrategyPyramidCognitiveInput } = require('../out/strategyPyramid.js');
 
+test('Pi uses the same database MCP write and immediate read operations without the legacy three-query ceiling', async () => {
+  const os = require('node:os');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const store = new UnifiedDataStore(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-data-')));
+  const operations = createRuntimeDataOperations(store);
+  const project = store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'pi-project', data: { name: 'Pi project' } });
+  const session = await operations({ operation: 'open_mcp_session', input: { projectId: project.objectId } });
+  const mcp = await createIntelligenceMcpSession({ getProjects: () => [], getSelectedProjectPath: () => '', getCurrentSteps: () => null, getSettings: () => ({}), getTodayReview: () => null }, { scope: project.objectId, globalReads: true, call: (operation, input) => operations({ operation, input, sessionToken: session.sessionToken }) });
+  let step = 0;
+  let created;
+  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', model: 'gpt-test', runner: async invocation => {
+    step++;
+    if (step === 1) return JSON.stringify({ toolCall: { name: 'solomap_write', arguments: { kind: 'memory', action: 'create', idempotencyKey: 'pi-memory', data: { category: 'inbox', title: 'User note', status: 'captured', content: 'same database content' } } } });
+    created = store.search({ scope: project.objectId, kinds: ['memory'] }).items[0];
+    assert.ok(created, 'the model must observe a committed write');
+    if (step <= 5) return JSON.stringify({ toolCall: { name: 'solomap_read', arguments: { ref: created.objectId } } });
+    assert.ok(invocation.stdin.includes('same database content'));
+    return '已保存并回读。';
+  } });
+  try {
+    assert.equal(await engine.chat([{ role: 'user', content: '保存这条记忆并核对全文' }], { selectedProject: 'Pi project', projects: [] }, mcp.client), '已保存并回读。');
+    assert.equal(step, 6);
+    assert.equal(store.read(created.objectId).data.content, 'same database content');
+  } finally { await mcp.close(); await operations.close(); store.close(); }
+});
+
 test('Pi runtime is bundled for VSIX delivery instead of shipping its full provider dependency tree', () => {
   const projectRoot = path.resolve(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));

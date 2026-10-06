@@ -2,6 +2,7 @@ import * as path from 'path';
 import type * as vscode from 'vscode';
 import { getDefaultOpenCodeProviderOptions } from './openCodeAdapter';
 import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
+import { getMigrationSettingsCardHtml, getMigrationSettingsScript } from './migrationSettingsWebview';
 
 function joinExtensionUri(extensionUri: vscode.Uri, ...segments: string[]): vscode.Uri {
   const base = extensionUri as any;
@@ -4330,6 +4331,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
+    ${getMigrationSettingsCardHtml()}
+
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-globe"></span><span id="settings-section-basic">Basics</span></div>
     <div class="settings-field">
@@ -4883,6 +4886,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const collaborationCreatedQuickNoteIds = new Set();
     const collaborationExpandedMessageIds = new Set();
     let currentLanguage = 'zh';
+    ${getMigrationSettingsScript()}
     let currentNodes = [];
     let activeProjectPath = '';
     let activePortfolioFilter = 'all';

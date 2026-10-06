@@ -1,6 +1,7 @@
 import * as path from 'path';
 import type * as vscode from 'vscode';
 import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
+import { getMigrationSettingsCardHtml, getMigrationSettingsScript } from './migrationSettingsWebview';
 
 const roadmapHtmlCache = new Map<string, string>();
 
@@ -2094,6 +2095,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       <button class="btn-close-settings" id="btn-close-settings"><span class="codicon codicon-close"></span></button>
     </div>
 
+    ${getMigrationSettingsCardHtml()}
+
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-folder"></span><span id="settings-section-basic">Project Profile</span></div>
       <div class="settings-field">
@@ -2236,6 +2239,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectAutonomyEnabled = document.getElementById('project-autonomy-enabled');
     const projectToolNetworkDisabled = document.getElementById('project-tool-network-disabled');
     let currentLanguage = 'zh';
+    ${getMigrationSettingsScript()}
     let currentNodes = [];
     let expandedNodeId = '';
     let pendingFocusedNodeId = '';

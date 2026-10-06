@@ -80,31 +80,74 @@ test('memory migration runs through the same owner while other projects keep wri
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'import-owner', onCommand: () => ({ status: 'paused' }), onData: dispatch });
   try {
     const project = await request(root, { operation: 'write', input: { kind: 'project', action: 'create', scope: null, idempotencyKey: 'other-project', data: { name: '另一个项目' } } });
-    let importDone = false;
-    const importing = request(root, { operation: 'import_memory', input: { sourceRoot } }).then(result => { importDone = true; return result; });
+    const importing = await request(root, { operation: 'import_memory', input: { sourceRoot, idempotencyKey: 'live-import' } });
+    assert.equal(importing.ok, true, importing.error);
+    assert.ok(importing.result.jobId);
     let first;
     for (let i = 0; i < 100; i++) {
       first = await request(root, { operation: 'search', input: { scope: null, kinds: ['memory'], query: 'source-00', limit: 1 } });
-      if (first.result?.items.length || importDone) break;
+      if (first.result?.items.length) break;
       await new Promise(resolve => setImmediate(resolve));
     }
     if (first.result?.items.length) {
       const write = await request(root, { operation: 'write', input: { kind: 'memory', action: 'create', scope: project.result.objectId, idempotencyKey: 'during-migration', data: { category: 'project', title: '即时写入', status: 'captured', confidence: 0, content: '其他项目即时回读' } } });
       assert.equal(write.ok, true, write.error);
-      assert.equal(importDone, false, 'a write must commit before the directory import finishes');
+      assert.equal(store.readMigrationJob(importing.result.jobId).status, 'running', 'a write must commit before the directory import finishes');
       const read = await request(root, { operation: 'read', input: { ref: write.result.objectId } });
       assert.equal(read.result.data.content, '其他项目即时回读');
     }
-    const migrated = await importing.then(result => result.ok ? result : Promise.reject(new Error(result.error)));
-    assert.equal(migrated.result.imported, 30);
-    assert.equal(migrated.result.conflicts.length, 0);
+    await dispatch.waitForMigrations();
+    const migrated = await request(root, { operation: 'migration_status', input: { jobId: importing.result.jobId } });
+    assert.equal(migrated.result.progress.imported, 30);
+    assert.equal(migrated.result.progress.conflicts.length, 0);
     assert.equal(first.result?.items.length, 1, 'the owner must accept queries between source commits');
-    const repeated = await request(root, { operation: 'import_memory', input: { sourceRoot } });
-    assert.equal(repeated.result.unchanged, 30);
+    const repeated = await request(root, { operation: 'import_memory', input: { sourceRoot, idempotencyKey: 'live-import' } });
+    assert.equal(repeated.result.jobId, importing.result.jobId);
     for (const [name, hash] of originals) assert.equal(crypto.createHash('sha256').update(fs.readFileSync(name)).digest('hex'), hash);
     const mcp = await request(root, { operation: 'open_mcp_session', input: { projectId: project.result.objectId } });
     const denied = await request(root, { operation: 'import_memory', input: { sourceRoot }, sessionToken: mcp.result.sessionToken });
     assert.equal(denied.ok, false);
     assert.equal(denied.error, 'action_denied');
-  } finally { await server.close(); store.close(); }
+  } finally { await server.close(); await dispatch.close(); store.close(); }
+});
+
+test('parallel task launches configure the native CLI through one owner without a persistent config lock', async () => {
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cli-owner-'));
+  const configDirectory = path.join(fixture, 'claude-config');
+  fs.mkdirSync(configDirectory);
+  const file = path.join(configDirectory, '.claude.json');
+  fs.writeFileSync(file, JSON.stringify({ mcpServers: { original: { command: 'preserved' } }, permissions: { allow: ['preserved'] } }));
+  const prior = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = configDirectory;
+  const root = path.join(fixture, '.solomap-global');
+  const store = new UnifiedDataStore(root);
+  const dispatch = createRuntimeDataOperations(store);
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'native-config-owner', onCommand: () => ({ status: 'running' }), onData: dispatch });
+  try {
+    const inputs = Array.from({ length: 12 }, (_, i) => {
+      const workspace = path.join(fixture, 'project-' + i);
+      fs.mkdirSync(workspace);
+      return { operation: 'prepare_agent_database', input: { provider: 'claude', root: workspace, command: process.execPath } };
+    });
+    const results = await Promise.all(inputs.map(input => request(root, input)));
+    assert.ok(results.every(result => result.ok), JSON.stringify(results));
+    assert.equal(new Set(results.map(result => result.result.projectId)).size, 12);
+    const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(config.mcpServers.original.command, 'preserved');
+    assert.deepEqual(config.permissions, { allow: ['preserved'] });
+    assert.equal(config.mcpServers.solomap_data.args[2], root);
+    assert.deepEqual(fs.readdirSync(configDirectory), ['.claude.json']);
+    const taskConfig = path.join(fixture, 'task-bound-config', '.claude.json');
+    const bound = await request(root, { ...inputs[0], input: { ...inputs[0].input, configPath: taskConfig } });
+    assert.equal(bound.ok, true, bound.error);
+    assert.equal(bound.result.configPath, taskConfig, 'the task configuration must not be selected from the long-lived Runtime environment');
+    assert.equal(JSON.parse(fs.readFileSync(taskConfig, 'utf8')).mcpServers.solomap_data.args[2], root);
+    const opened = await request(root, { operation: 'open_mcp_session', input: { projectId: results[0].result.projectId } });
+    const denied = await request(root, { ...inputs[0], sessionToken: opened.result.sessionToken });
+    assert.equal(denied.error, 'action_denied');
+  } finally {
+    await server.close(); await dispatch.close(); store.close();
+    if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = prior;
+  }
 });

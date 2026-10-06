@@ -5,6 +5,7 @@ import { CsvStore } from './db/csvStore';
 import { readTodayReview } from './dailyReview';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { createIntelligenceMcpSession } from './intelligenceMcp';
+import { runtimeProjectMcpSource } from './runtimeDataOperations';
 import { readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { readProjectRegistry } from './projectRegistry';
@@ -88,10 +89,12 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
     const engine = new EmbeddedPiAgentEngine({ agentCli: config.agentCli, model: config.model,
       configRevision: config.revision, workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work') });
     engines.add(engine);
+    const projectForChat = selectedProject();
+    const dataSource = await runtimeProjectMcpSource(globalDataPath, projectForChat?.path || '');
     const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession({
       getProjects: projects,
-      getSelectedProjectPath: () => selectedProject()?.path || '',
-      getCurrentSteps: () => selectedProject() ? nodes().map(node => ({ title: node.title, status: node.status })) : null,
+      getSelectedProjectPath: () => projectForChat?.path || '',
+      getCurrentSteps: () => projectForChat ? new CsvStore(path.join(projectForChat.path, '.solopreneur', 'roadmap.csv')).readNodes().map(node => ({ title: node.title, status: node.status })) : null,
       getSettings: () => {
         const cognitive = readCognitiveRuntimeConfig(globalDataPath);
         return { language: readTelegramRuntimeConfig(globalDataPath).language, cognitiveAgent: cognitive.agentCli, cognitiveModel: cognitive.model };
@@ -100,7 +103,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
         const review = readTodayReview(globalDataPath, projects());
         return review ? { summary: review.summary, items: review.todos.map(todo => todo.title) } : null;
       }
-    }));
+    }, dataSource));
     try { return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, { selectedProject: '', projects: [] }, mcp.client)); }
     finally { engines.delete(engine); await observeLocalDiagnosticStage('mcp.close', () => mcp.close()); }
   });

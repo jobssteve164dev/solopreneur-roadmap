@@ -21,6 +21,8 @@ import { startTelegramBackgroundRuntime } from './telegramRuntime';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { createRuntimeDataOperations } from './runtimeDataOperations';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { enqueueStartupDataMigrations } from './runtimeDatabaseBootstrap';
+import { isAutonomousRuntimeDisabled } from './autonomousRuntimeService';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -55,28 +57,38 @@ async function main(): Promise<void> {
   const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid: process.pid });
   if (!lease.acquired) return;
   const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
-  const databaseId = argumentValue('--database-id');
-  // Existing installations continue their current path until the verified migration creates the authority.
-  const dataStore = databaseId || fs.existsSync(path.join(databaseRoot, 'solomap.db')) ? UnifiedDataStore.open(databaseRoot, databaseId || undefined) : undefined;
-  await dataStore?.recoverOutbox();
+  const databaseId = argumentValue('--database-id') || lease.owner.databaseId;
+  const dataStore = databaseId || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
+    ? UnifiedDataStore.open(databaseRoot, databaseId || undefined)
+    : new UnifiedDataStore(databaseRoot);
+  updateRuntimeState(globalDataPath, runtimeId, { databaseId: dataStore.databaseId });
+  const dataOperations = createRuntimeDataOperations(dataStore);
+  let outboxRecovery: Promise<unknown> | undefined;
+  let startupMigration: Promise<void> | undefined;
 
   let stopping = false;
-  let paused = false;
+  let paused = isAutonomousRuntimeDisabled(globalDataPath);
   let running = false;
   let rerunRequested = false;
   let timer: NodeJS.Timeout | undefined;
   let activeEngine: EmbeddedPiAgentEngine | undefined;
   let controlServer: { close(): Promise<void> } | undefined;
-  const telegram = startTelegramBackgroundRuntime(globalDataPath);
+  let telegram = paused ? undefined : startTelegramBackgroundRuntime(globalDataPath);
+  if (paused) updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
   const stop = () => {
     if (stopping) return;
     stopping = true;
     if (timer) clearInterval(timer);
-    telegram.close();
+    telegram?.close();
     activeEngine?.cancel();
-    updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
-    if (controlServer) void controlServer.close().then(() => dataStore?.close());
-    else dataStore?.close();
+    void (async () => {
+      await controlServer?.close();
+      await startupMigration;
+      await dataOperations.close();
+      await outboxRecovery;
+      dataStore?.close();
+      updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+    })().catch(error => { process.stderr.write(`SoloMap Runtime shutdown: ${String(error)}\n`); process.exitCode = 1; });
     process.exitCode = 0;
   };
   try { controlServer = await startRuntimeControlServer({
@@ -85,7 +97,7 @@ async function main(): Promise<void> {
     entryPath: path.resolve(process.argv[1]),
     buildId: runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1])))),
     owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
-    onData: dataStore ? createRuntimeDataOperations(dataStore) : undefined,
+    onData: dataOperations,
     onCommand(command) {
       if (command === 'pause' || command === 'drain') {
         paused = true;
@@ -96,6 +108,7 @@ async function main(): Promise<void> {
       }
       if (command === 'resume') {
         paused = false;
+        telegram ||= startTelegramBackgroundRuntime(globalDataPath);
         updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
         if (running) rerunRequested = true;
         else runCycleObserved();
@@ -108,11 +121,17 @@ async function main(): Promise<void> {
       return { status: paused ? 'paused' : 'running' };
     }
   }); } catch (error) {
-    telegram.close();
+    telegram?.close();
     dataStore?.close();
     updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
     throw error;
   }
+  dataOperations?.recoverMigrations();
+  outboxRecovery = dataStore?.recoverOutbox().catch(error => process.stderr.write(`SoloMap Runtime outbox recovery: ${String(error)}\n`));
+  startupMigration = (async () => {
+    await outboxRecovery;
+    if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
+  })().catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
   function runCycleObserved(): void {
     void runCycle().catch(error => {
       recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle.fatal', classifyDiagnosticFailure(error));

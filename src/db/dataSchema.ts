@@ -1,4 +1,4 @@
-import { entityDefinitions } from './unifiedSchema';
+import { additionalEntityColumns, unifiedSchemaMigrations, runtimeEntityDefinitions as entityDefinitions } from './unifiedSchemaMigrations';
 
 export interface DataField { type: 'text' | 'number' | 'json' | 'content'; required: boolean; nullable: boolean; reference?: string }
 
@@ -7,7 +7,7 @@ export function dataSchema(): { schemaVersion: number; kinds: Record<string, { p
   for (const [kind, definition] of Object.entries(entityDefinitions)) {
     const fields: Record<string, DataField> = {};
     const column = /(?:^|,)\s*([a-z_]+)\s+(TEXT|REAL|INTEGER)([^,]*)/g;
-    for (const match of definition.columns.matchAll(column)) {
+    for (const match of (definition.columns + (additionalEntityColumns[kind] ? ', ' + additionalEntityColumns[kind] : '')).matchAll(column)) {
       const name = match[1];
       if (name === 'secret_ref') continue;
       const content = name === 'content_id' || name.endsWith('_content_id');
@@ -18,5 +18,5 @@ export function dataSchema(): { schemaVersion: number; kinds: Record<string, { p
     }
     kinds[kind] = { project: definition.project, fields };
   }
-  return { schemaVersion: 1, kinds };
+  return { schemaVersion: unifiedSchemaMigrations.at(-1)?.version || 1, kinds };
 }

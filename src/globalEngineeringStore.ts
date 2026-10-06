@@ -237,6 +237,7 @@ export function createGlobalEngineeringSnapshotPlaceholder(dataPath: string, por
 
 export function ensureGlobalEngineeringStore(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
   const normalizedPath = normalizeGlobalDataPath(dataPath);
+  const databaseMode = fs.existsSync(path.join(normalizedPath, 'solomap.db'));
   const learningDir = path.join(normalizedPath, 'learning', 'candidates');
   const learningApprovedDir = path.join(normalizedPath, 'learning', 'approved');
   const learningRejectedDir = path.join(normalizedPath, 'learning', 'rejected');
@@ -246,7 +247,7 @@ export function ensureGlobalEngineeringStore(dataPath: string, portfolio: Projec
   fs.mkdirSync(learningApprovedDir, { recursive: true });
   fs.mkdirSync(learningRejectedDir, { recursive: true });
   fs.mkdirSync(metricsDir, { recursive: true });
-  ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active'].forEach((dir) => {
+  (databaseMode ? [] : ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active']).forEach((dir) => {
     fs.mkdirSync(path.join(memoryRoot, dir), { recursive: true });
   });
 
@@ -327,10 +328,10 @@ export function ensureGlobalEngineeringStore(dataPath: string, portfolio: Projec
   if (!fs.existsSync(priorityAccuracyPath)) {
     fs.writeFileSync(priorityAccuracyPath, 'project,priority,next_action,outcome,recorded_at\n', 'utf8');
   }
-  if (!fs.existsSync(monthlySummaryPath)) {
+  if (!databaseMode && !fs.existsSync(monthlySummaryPath)) {
     fs.writeFileSync(monthlySummaryPath, '# Monthly Learning Summary\n\nSoloMap uses this file to collect low-frequency cross-project learning signals.\n', 'utf8');
   }
-  if (!fs.existsSync(readmePath)) {
+  if (!databaseMode && !fs.existsSync(readmePath)) {
     fs.writeFileSync(readmePath, [
       '# SoloMap Global Data',
       '',
@@ -350,7 +351,7 @@ export function ensureGlobalEngineeringStore(dataPath: string, portfolio: Projec
       ''
     ].join('\n'), 'utf8');
   }
-  if (!fs.existsSync(memoryReadmePath)) {
+  if (!databaseMode && !fs.existsSync(memoryReadmePath)) {
     fs.writeFileSync(memoryReadmePath, [
       '# SoloMap Memory',
       '',
@@ -369,13 +370,13 @@ export function ensureGlobalEngineeringStore(dataPath: string, portfolio: Projec
       ''
     ].join('\n'), 'utf8');
   }
-  if (!fs.existsSync(profilePath)) {
+  if (!databaseMode && !fs.existsSync(profilePath)) {
     fs.writeFileSync(profilePath, '# Profile\n\nStable user preferences and collaboration style promoted by SoloMap.\n', 'utf8');
   }
-  if (!fs.existsSync(operatingRulesPath)) {
+  if (!databaseMode && !fs.existsSync(operatingRulesPath)) {
     fs.writeFileSync(operatingRulesPath, '# Operating Rules\n\nReusable execution rules promoted by SoloMap.\n', 'utf8');
   }
-  writeSolomapMemoryExamples(memoryRoot, learningDir);
+  if (!databaseMode) writeSolomapMemoryExamples(memoryRoot, learningDir);
   const learningCandidateCount = (() => {
     try {
       return fs.readdirSync(learningDir).filter((name) => name.endsWith('.md') && name !== '_example.md').length;
@@ -385,4 +386,3 @@ export function ensureGlobalEngineeringStore(dataPath: string, portfolio: Projec
   })();
   return { dataPath: normalizedPath, portfolio: records, dependencies, learningCandidateCount };
 }
-

@@ -101,6 +101,7 @@ export interface RuntimeState {
   startedAt: string;
   heartbeatAt: string;
   lastDecisionId?: string;
+  databaseId?: string;
   error?: string;
 }
 
@@ -301,7 +302,8 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
     pid: options.pid,
     status: 'running',
     startedAt: now.toISOString(),
-    heartbeatAt: now.toISOString()
+    heartbeatAt: now.toISOString(),
+    ...(current?.databaseId ? { databaseId: current.databaseId } : {})
   };
   writeJsonAtomic(runtimeStatePath(globalDataPath), owner);
   return { acquired: true, owner };
