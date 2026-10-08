@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.511 - 2026-10-08
+
+### Changed
+- SoloMap pre-session auto-backup [2026-10-08T18:03:42.827Z] (4430c61)
+
+### Fixed
+- unblock conversation startup during legacy migration (3f342eb)
+- patch website image dependency (57b740f)
+
+### Docs
+- hand off unified database closeout (4698a51)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.510 - 2026-10-08
 
 ### Added
