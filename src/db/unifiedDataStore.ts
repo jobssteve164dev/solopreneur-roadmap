@@ -93,6 +93,7 @@ function digest(data: Uint8Array | string): string { return crypto.createHash('s
 
 /** Authoritative domain operations. Only Runtime exposes this owner to other processes. */
 export class UnifiedDataStore {
+  private readonly projectRegistrations = new Map<string, Promise<{ projectId: string; locationId: string; identityPath: string }>>();
   public get databaseId(): string {
     return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
   }
@@ -690,6 +691,15 @@ export class UnifiedDataStore {
   public async registerProject(input: { root: string; name?: string }): Promise<{ projectId: string; locationId: string; identityPath: string }> {
     if (!input.root || !fs.statSync(input.root).isDirectory()) throw new Error('project_root_required');
     const root = fs.realpathSync(input.root);
+    let registration = this.projectRegistrations.get(root);
+    if (!registration) {
+      registration = this.registerProjectOnce({ ...input, root }).finally(() => { this.projectRegistrations.delete(root); });
+      this.projectRegistrations.set(root, registration);
+    }
+    return registration;
+  }
+  private async registerProjectOnce(input: { root: string; name?: string }): Promise<{ projectId: string; locationId: string; identityPath: string }> {
+    const root = input.root;
     const identityPath = path.join(root, '.solopreneur', 'project.json');
     let identityId: string | undefined;
     try {
@@ -1024,8 +1034,13 @@ export class UnifiedDataStore {
   public upsertProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
     this.db.run('INSERT INTO project_run_indexes VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id) DO UPDATE SET record_json=excluded.record_json,files_json=excluded.files_json,signals_json=excluded.signals_json,updated_at=excluded.updated_at', [projectId, Number(record.executionLogId), canonical(record), canonical(files), canonical(signals), Date.now()]);
   }
-  public readProjectRunIndexes(projectId: string): RunIndexEntry[] {
-    return this.rows('SELECT record_json,files_json,signals_json FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id DESC', [projectId]).map(row => ({ ...JSON.parse(String(row.record_json)), files: JSON.parse(String(row.files_json)), signals: JSON.parse(String(row.signals_json)) }));
+  public importProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
+    this.db.run('INSERT INTO project_run_indexes VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id) DO NOTHING', [projectId, Number(record.executionLogId), canonical(record), canonical(files), canonical(signals), Date.now()]);
+  }
+  public readProjectRunIndexes(projectId: string, input: { limit?: number; offset?: number } = {}): RunIndexEntry[] {
+    const values: SqlValue[] = [projectId];
+    if (input.limit !== undefined) values.push(Math.max(1, Math.min(500, Number(input.limit || 200))), Math.max(0, Number(input.offset || 0)));
+    return this.rows(`SELECT record_json,files_json,signals_json FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id DESC ${input.limit === undefined ? '' : 'LIMIT ? OFFSET ?'}`, values).map(row => ({ ...JSON.parse(String(row.record_json)), files: JSON.parse(String(row.files_json)), signals: JSON.parse(String(row.signals_json)) }));
   }
   public writeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }): void {
     if (!Number.isFinite(input.executionLogId) || !input.relativePath || path.isAbsolute(input.relativePath) || input.relativePath.split(/[\\/]/).includes('..')) throw new Error('invalid_run_artifact');

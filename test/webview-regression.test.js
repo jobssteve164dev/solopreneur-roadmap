@@ -8,6 +8,97 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 
+test('recent conversation snapshot bypasses pending full initialization and reads durable pages', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.prepare = (engine, projectPath, gate) => {
+      syncEngine = engine; activeProjectRoot = projectPath; syncEngineReady = false;
+      syncEngineInitPromise = gate; syncEngineInitProjectRoot = projectPath;
+      getProjects = () => [{ path: projectPath }];
+    };
+    module.exports.snapshot = getProjectConversationSnapshotForProject;
+  `);
+  const recent = [{ id: 55, nodeId: '__solo__', timestamp: new Date().toISOString(), status: 'Completed', output: 'Latest persisted conversation' }];
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  extension.prepare({
+    getAgentExecutionPage: () => ({ logs: [], hasMore: false }), getRecentProjectAgentExecutions: () => [],
+    readAgentExecutionPage: async nodeId => ({ logs: nodeId === '__solo__' ? recent : [], hasMore: false }),
+    readRecentProjectAgentExecutions: async () => recent
+  }, '/fixture/recent', gate);
+  try {
+    const result = await Promise.race([extension.snapshot({}, '/fixture/recent'), new Promise(resolve => setTimeout(() => resolve(null), 100))]);
+    assert.equal(result?.solo[0]?.id, 55, 'latest durable row must show without waiting for old initialization');
+  } finally { release(); }
+});
+
+test('project switching during historical reads cannot continue or display the other project conversation', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.prepare = (gate) => {
+      activeProjectRoot = '/fixture/old';
+      syncEngine = { readAgentExecutions: () => gate, readAgentExecutionPage: async () => { await gate; return { logs: [], hasMore: false }; } };
+    };
+    module.exports.switchProject = () => { activeProjectRoot = '/fixture/new'; syncEngine = { getAgentExecutions: () => { throw new Error('wrong project read'); } }; };
+    module.exports.turn = handleContinueConversationTurn; module.exports.native = handleContinueNativeConversation;
+    module.exports.action = handleSharedWebviewAction;
+  `);
+  for (const kind of ['turn', 'native', 'history']) {
+    let release; const gate = new Promise(resolve => { release = resolve; }); const messages = [];
+    extension.prepare(gate);
+    const pending = kind === 'history'
+      ? extension.action({}, { command: 'conversation.getHistory', nodeId: '__solo__', page: 0 }, 'panel', { postMessage: message => { messages.push(message); return Promise.resolve(true); } })
+      : kind === 'turn' ? extension.turn({}, '__solo__', 7, 'Continue') : extension.native({}, '__solo__', 7);
+    extension.switchProject(); release(); await pending;
+    assert.deepEqual(messages, []);
+  }
+});
+
+test('new Solo launch opens its terminal while a full history refresh is pending', async () => {
+  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-launch-no-history-'));
+  const calls = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.prepare = (projectPath, calls) => {
+      activeProjectRoot = projectPath;
+      syncEngine = { initAndSync: () => new Promise(() => {}),
+        logAgentExecution: async () => { calls.push('committed'); return 42; },
+        updateAgentExecution: async () => true, getAgentExecutions: () => [] };
+      getPersistedSettings = () => ({ cliPath: 'codex', globalDataPath: '', globalPrompt: '' });
+      ensureTaskRuntimeReady = async () => {};
+      agentCli_1.resolveAgentCli = () => 'codex'; agentCli_1.commandExists = () => true;
+      agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+      recordLocalUsageEvent = () => {}; solomapGlobal_1.ensureSolomapMemoryStore = () => {};
+      const originalGit = preSessionGit_1.createPreSessionGitCommit;
+      module.exports.restore = () => { preSessionGit_1.createPreSessionGitCommit = originalGit; };
+      preSessionGit_1.createPreSessionGitCommit = async () => '';
+      buildSoloConversationPrompt = () => 'prompt'; buildPreparedAgentShellScript = async () => ({ finalCommand: 'codex' });
+      launchAgentConversationTerminal = async () => { calls.push('terminal'); };
+    };
+    module.exports.launch = handleRunSoloConversation;
+  `);
+  extension.prepare(projectPath, calls);
+  try {
+    const id = await Promise.race([extension.launch({}, 'Start now'), new Promise(resolve => setTimeout(() => resolve(0), 100))]);
+    assert.equal(id, 42);
+    assert.deepEqual(calls, ['committed', 'terminal']);
+  } finally { extension.restore(); }
+});
+
+test('a cached sidebar snapshot is refreshed from the global journal after plugin restart', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-snapshot-'));
+  const projectPath = path.join(fixture, 'project'); const root = path.join(fixture, 'global');
+  fs.mkdirSync(root); fs.writeFileSync(path.join(root, 'solomap.db'), 'global source');
+  const cache = require('../out/sidebarSnapshotCache.js');
+  cache.writeCachedConversationSnapshot(root, projectPath, { solo: [], project: [], flow: [], revision: [] });
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: root }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: projectPath }),
+    getProjectConversationSnapshot: async () => ({ solo: [{ id: 56, status: 'Completed' }], project: [], flow: [], revision: [] })
+  });
+  const messages = [];
+  provider._view = { webview: { postMessage: message => { messages.push(message); return Promise.resolve(true); } } };
+  await provider.sendProjectConversationSnapshot(projectPath);
+  assert.equal(messages.at(-1).soloConversations[0]?.id, 56);
+});
+
 function getProcessBirthMarker(pid) {
   try {
     const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -4982,7 +5073,9 @@ test('local-first loading paints and launches before optional or durable work', 
     selectBody.indexOf('const syncReady = ensureSyncEngine(context)') < selectBody.indexOf('sendProjectConversationSnapshot(projectPath, true)'),
     'the fresh conversation snapshot must reuse the selected project engine instead of opening the journal twice'
   );
-  assert.match(extensionSource, /if \(!syncEngineReady && syncEngineInitPromise[\s\S]*?await syncEngineInitPromise/);
+  const snapshotBody = extensionSource.slice(extensionSource.indexOf('async function getProjectConversationSnapshotForProject'), extensionSource.indexOf('function hydrateProjectConversationContinuations'));
+  assert.doesNotMatch(snapshotBody, /await syncEngineInitPromise/);
+  assert.match(snapshotBody, /engine\.readAgentExecutionPage/);
 
   const sidebarProviderSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
   const coreBatchBody = sidebarProviderSource.slice(
@@ -5002,7 +5095,7 @@ test('local-first loading paints and launches before optional or durable work', 
     'CSV roadmap nodes must paint before database/scaffolding initialization'
   );
   assert.ok(
-    syncBody.indexOf('sendNodesToWebview()') < syncBody.indexOf('await nextSyncEngine.initAndSync()'),
+    syncBody.indexOf('sendNodesToWebview()') < syncBody.indexOf("await nextSyncEngine.initAndSync({ history: 'background' })"),
     'CSV roadmap nodes must paint before SQLite initialization'
   );
 
@@ -11823,11 +11916,13 @@ test('finishing one parallel step conversation keeps the node running without re
   }), 'utf8');
   let nodeUpdate = null;
   let executionUpdate = null;
+  let historyReady = false;
   extensionModule.__setRuntimeForTest({
     getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
     updateNode: (_nodeId, update) => { nodeUpdate = update; },
+    readAgentExecutions: async () => { historyReady = true; },
     getAgentExecutions: () => [
-      { id: 22, nodeId: '2', agentCli: 'codex', command: 'codex exec', output: 'Still running.', status: 'Running' },
+      ...(historyReady ? [{ id: 22, nodeId: '2', agentCli: 'codex', command: 'codex exec', output: 'Still running.', status: 'Running' }] : []),
       { id: 21, nodeId: '2', agentCli: 'codex', command: 'codex exec', output: 'Agent conversation started.', status: 'Running' }
     ],
     updateAgentExecution: (id, agentCli, command, output, status) => {
@@ -11842,6 +11937,32 @@ test('finishing one parallel step conversation keeps the node running without re
   assert.equal(nodeUpdate.status, 'Running');
   assert.equal(executionUpdate.id, 21);
   assert.equal(executionUpdate.status, 'Completed');
+});
+
+test('closing a session loads its older turns even while background hydration is incomplete', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.process = processAgentStatusFile;
+    module.exports.prepare = (engine, projectPath) => { syncEngine = engine; activeProjectRoot = projectPath; };
+  `);
+  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-close-partial-history-'));
+  const statusFile = path.join(projectPath, '.solopreneur/agent-status/10.json');
+  fs.mkdirSync(path.dirname(statusFile), { recursive: true });
+  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot: projectPath, nodeId: '__solo__', runKind: 'solo', status: 'Session Closed', agentCli: 'claude', executionLogId: 10, rootExecutionLogId: 1, interactiveSession: true }));
+  const durable = [
+    { id: 1, nodeId: '__solo__', agentCli: 'claude', command: 'run', output: 'Interactive session state: Waiting', status: 'Completed' },
+    { id: 2, nodeId: '__solo__', agentCli: 'claude', command: 'run', output: 'Interactive session root: 1\n\nInteractive session state: Waiting', status: 'Completed' },
+    { id: 10, nodeId: '__solo__', agentCli: 'claude', command: 'run', output: 'Interactive session root: 1\n\nInteractive session state: Waiting', status: 'Completed' }
+  ];
+  let cached = [durable[2]]; const changed = [];
+  extension.prepare({
+    getNodes: () => [], getAgentExecutions: () => cached, getProjectAgentExecutions: () => cached,
+    readAgentExecutionById: async id => { const row = durable.find(log => log.id === id); if (!cached.includes(row)) cached.push(row); return row; },
+    readAgentExecutions: async () => { cached = [...durable]; return cached; },
+    updateAgentExecution: async (id, agentCli, command, output, status) => { changed.push(id); Object.assign(durable.find(log => log.id === id), { agentCli, command, output, status }); return true; }
+  }, projectPath);
+  await extension.process(statusFile);
+  assert.deepEqual(changed.sort((a,b) => a-b), [1, 2, 10]);
+  assert.match(durable[0].output, /Interactive session state: Closed/);
 });
 
 test('agent status files from another project are not reconciled into the active project', async () => {

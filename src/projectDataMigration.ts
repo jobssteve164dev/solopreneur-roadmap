@@ -23,8 +23,24 @@ export async function importProjectJournal(store: UnifiedDataStore, source: stri
   const project = await store.registerProject({ root: projectRoot }); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
   try {
     await legacy.initJournalReadOnly();
-    for (const entry of legacy.getAllExecutionLogsRaw().reverse()) { if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true }; store.importProjectJournal(project.projectId, entry); result.imported++; if (result.imported % 32 === 0) await new Promise<void>(resolve => setImmediate(resolve)); }
-    for (const entry of legacy.getRunIndexEntries()) store.upsertProjectRunIndex(project.projectId, entry, entry.files, entry.signals);
+    for (let offset = 0; ; offset += 200) {
+      const page = legacy.getExecutionJournalPageRaw({ limit: 200, offset });
+      for (const entry of page.logs) {
+        if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
+        store.importProjectJournal(project.projectId, entry); result.imported++;
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      if (!page.hasMore) break;
+    }
+    for (let offset = 0; ; offset += 200) {
+      const indexes = legacy.getRunIndexEntries(200, offset);
+      for (const entry of indexes) {
+        if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
+        store.importProjectRunIndex(project.projectId, entry, entry.files, entry.signals);
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      if (indexes.length < 200) break;
+    }
   } finally { legacy.close(); }
   store.markMigrationSourceImported(identity, path.basename(source));
   return result;

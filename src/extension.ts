@@ -1252,21 +1252,29 @@ async function handleSharedWebviewAction(
         return;
       }
       if (syncEngine && target && nodeId) {
+        const historyEngine = syncEngine;
+        const historyProject = activeProjectRoot || '';
         const requestedPage = Number.isFinite(Number(request.page)) ? Math.max(0, Math.floor(Number(request.page))) : null;
         const pageSize = Math.max(1, Math.min(50, Math.floor(Number(request.pageSize) || 20)));
         if (nodeId === soloConversationId && requestedPage !== null) {
-          const page = syncEngine.getAgentExecutionPage(nodeId, pageSize, requestedPage * pageSize);
-          const conversations = buildConversationPresentations(activeProjectRoot || '', nodeId, page.logs);
+          const page = typeof historyEngine.readAgentExecutionPage === 'function'
+            ? await historyEngine.readAgentExecutionPage(nodeId, pageSize, requestedPage * pageSize)
+            : historyEngine.getAgentExecutionPage(nodeId, pageSize, requestedPage * pageSize);
+          if (syncEngine !== historyEngine || activeProjectRoot !== historyProject) return;
+          const conversations = buildConversationPresentations(historyProject, nodeId, page.logs);
           await respond({
             command: 'nodeConversationsLoaded',
             nodeId,
             conversations,
-            projectPath: activeProjectRoot || '',
+            projectPath: historyProject,
             pagination: { page: requestedPage, pageSize, hasMore: page.hasMore, append: requestedPage > 0 }
           });
         } else {
-          const conversations = buildConversationPresentations(activeProjectRoot || '', nodeId, syncEngine.getAgentExecutions(nodeId));
-          await respond({ command: 'nodeConversationsLoaded', nodeId, conversations, projectPath: activeProjectRoot || '' });
+          const logs = typeof historyEngine.readAgentExecutions === 'function'
+            ? await historyEngine.readAgentExecutions(nodeId) : historyEngine.getAgentExecutions(nodeId);
+          if (syncEngine !== historyEngine || activeProjectRoot !== historyProject) return;
+          const conversations = buildConversationPresentations(historyProject, nodeId, logs);
+          await respond({ command: 'nodeConversationsLoaded', nodeId, conversations, projectPath: historyProject });
         }
       }
     },
@@ -2691,6 +2699,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   selectedProjectPathInMemory = projectPath;
   synchronizeTelegramChannel(context);
   const persistSelection = context.globalState.update(selectedProjectKey, projectPath);
+  syncEngine?.close?.();
   syncEngine = null;
   activeProjectRoot = null;
   syncEngineReady = false;
@@ -3307,6 +3316,7 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
 
   await context.globalState.update(selectedProjectKey, folder);
   synchronizeTelegramChannel(context);
+  syncEngine?.close?.();
   syncEngine = null;
   activeProjectRoot = null;
   syncEngineReady = false;
@@ -3352,6 +3362,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
   await context.globalState.update(selectedProjectKey, nextSelectedProjectPath);
   synchronizeTelegramChannel(context);
 
+  syncEngine?.close?.();
   syncEngine = null;
   activeProjectRoot = null;
   syncEngineReady = false;
@@ -3396,7 +3407,9 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
     return selectLatestConversationRoots(buildConversationPresentations(
       projectPath,
       soloConversationId,
-      syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs
+      (typeof syncEngine.readAgentExecutionPage === 'function'
+        ? await syncEngine.readAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0)
+        : syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0)).logs
     ), 1);
   }
   const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, nodeId: soloConversationId, limit: sidebarConversationQueryLimit, offset: 0 } });
@@ -3411,7 +3424,9 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
     return selectLatestConversationRoots(buildConversationPresentations(
       projectPath,
       nodeId,
-      syncEngine.getAgentExecutionPage(nodeId, sidebarConversationQueryLimit, 0).logs
+      (typeof syncEngine.readAgentExecutionPage === 'function'
+        ? await syncEngine.readAgentExecutionPage(nodeId, sidebarConversationQueryLimit, 0)
+        : syncEngine.getAgentExecutionPage(nodeId, sidebarConversationQueryLimit, 0)).logs
     ), 1);
   }
   const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, nodeId, limit: sidebarConversationQueryLimit, offset: 0 } });
@@ -3428,7 +3443,10 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
     return !excludeNodeIds.has(nodeId) && !nodeId.startsWith('__flow__::');
   };
   if (syncEngine && activeProjectRoot === projectPath) {
-    return hydrateProjectConversationContinuations(projectPath, syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit))
+    const logs = typeof syncEngine.readRecentProjectAgentExecutions === 'function'
+      ? await syncEngine.readRecentProjectAgentExecutions(sidebarConversationQueryLimit)
+      : syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit);
+    return hydrateProjectConversationContinuations(projectPath, logs)
       .filter(isStepConversation)
       .slice(0, sidebarProjectConversationHistoryLimit);
   }
@@ -3468,16 +3486,20 @@ async function getProjectConversationSnapshotForProject(
     };
   };
   if (syncEngine && activeProjectRoot === projectPath) {
-    if (!syncEngineReady && syncEngineInitPromise && syncEngineInitProjectRoot === projectPath) {
-      await syncEngineInitPromise;
+    const engine = syncEngine;
+    if (typeof engine.readAgentExecutionPage === 'function') {
+      const [solo, project, revision] = await Promise.all([
+        engine.readAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0),
+        engine.readRecentProjectAgentExecutions(sidebarConversationQueryLimit),
+        engine.readAgentExecutionPage(roadmapRevisionId, sidebarConversationQueryLimit, 0)
+      ]);
+      return buildSnapshot(solo.logs, project, revision.logs);
     }
-    if (syncEngine && syncEngineReady && activeProjectRoot === projectPath) {
-      return buildSnapshot(
-        syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
-        syncEngine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit),
-        syncEngine.getAgentExecutionPage(roadmapRevisionId, sidebarConversationQueryLimit, 0).logs
-      );
-    }
+    return buildSnapshot(
+      engine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0).logs,
+      engine.getRecentProjectAgentExecutions(sidebarConversationQueryLimit),
+      engine.getAgentExecutionPage(roadmapRevisionId, sidebarConversationQueryLimit, 0).logs
+    );
   }
   const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
   const [solo, project, revision] = await Promise.all([
@@ -3543,7 +3565,7 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
   syncEngineInitGeneration = initGeneration;
   syncEngineInitPromise = (async () => {
     try {
-      await nextSyncEngine.initAndSync();
+      await nextSyncEngine.initAndSync({ history: 'background' });
       if (getSelectedProjectPath(context) !== projectRoot || projectSelectionGeneration !== initGeneration) {
         nextSyncEngine.close();
         return false;
@@ -7832,6 +7854,10 @@ async function handleContinueConversationTurn(
   if (!syncEngine || !activeProjectRoot || !nodeId || !parentConversationId) {
     return;
   }
+  const continuationEngine = syncEngine;
+  const continuationProject = activeProjectRoot;
+  if (typeof continuationEngine.readAgentExecutions === 'function') await continuationEngine.readAgentExecutions(nodeId);
+  if (syncEngine !== continuationEngine || activeProjectRoot !== continuationProject) return;
   const resolvedNodeId = resolveConversationNodeIdForContinuation(nodeId, parentConversationId);
   if (resolvedNodeId) {
     nodeId = resolvedNodeId;
@@ -8048,6 +8074,8 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   }
   const workspaceRoot = activeProjectRoot;
   const projectSyncEngine = syncEngine;
+  if (typeof projectSyncEngine.readAgentExecutions === 'function') await projectSyncEngine.readAgentExecutions(nodeId);
+  if (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot) return;
   const resolvedNodeId = resolveConversationNodeIdForContinuation(nodeId, conversationId);
   if (resolvedNodeId) {
     nodeId = resolvedNodeId;
@@ -8473,10 +8501,10 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     return 0;
   }
 
-  await syncEngine.initAndSync();
-
   const occurrenceMarker = occurrenceId ? `Scheduled occurrence: ${occurrenceId}` : '';
+  syncEngine.refreshNodes?.();
   if (occurrenceMarker) {
+    await syncEngine.initAndSync();
     const existing = syncEngine.getAgentExecutions(soloConversationId)
       .find((entry) => String(entry.output || '').includes(occurrenceMarker));
     if (existing) return Number(existing.id || 0);
@@ -8734,7 +8762,7 @@ async function handleRunFlow(
     await postFlowStateToWebview(context);
     return;
   }
-  await syncEngine.initAndSync();
+  syncEngine.refreshNodes?.();
   const trace = createFlowTrace(activeProjectRoot, request, {
     supplementFiles,
     selectedAgentCli,
@@ -8992,7 +9020,7 @@ async function handleRunAgent(
   }
   const projectSyncEngine = syncEngine;
 
-  await projectSyncEngine.initAndSync();
+  projectSyncEngine.refreshNodes?.();
   sendNodesToWebview();
 
   const nodes = projectSyncEngine.getNodes();
@@ -9142,6 +9170,10 @@ async function handleRetryConversation(context: vscode.ExtensionContext, nodeId:
   if (!syncEngine || !nodeId || !conversationId) {
     return;
   }
+  const retryEngine = syncEngine;
+  const retryProject = activeProjectRoot;
+  if (typeof retryEngine.readAgentExecutionById === 'function') await retryEngine.readAgentExecutionById(conversationId);
+  if (syncEngine !== retryEngine || activeProjectRoot !== retryProject) return;
 
   const conversation = syncEngine.getAgentExecutions(nodeId).find((item) => Number(item.id) === Number(conversationId));
   if (!conversation) {
@@ -10323,7 +10355,7 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     ledgerWorkspaceRoot = workspaceRoot;
     ledgerGlobalDataPath = String(statusData.globalDataPath || '');
     ledgerExecutionLogId = Number(statusData.rootExecutionLogId || statusData.executionLogId || 0);
-    const isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine);
+    let isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine);
     if (parseFlowExecutionNodeId(String(statusData.nodeId || ''))) {
       if (isActiveProject) {
         processedSuccessfully = await processFlowStatusFile(normalizedStatusFilePath, statusData);
@@ -10361,6 +10393,19 @@ async function processAgentStatusFile(statusFilePath: string): Promise<void> {
     if (!statusSyncEngine) {
       return;
     }
+
+    const settlementNodes = new Set<string>([nodeId]);
+    if (typeof statusSyncEngine.readAgentExecutionById === 'function') {
+      for (const id of new Set([executionLogId, Number(statusData.rootExecutionLogId || 0)])) {
+        if (!id) continue;
+        const row = await statusSyncEngine.readAgentExecutionById(id);
+        if (row?.nodeId) settlementNodes.add(row.nodeId);
+      }
+    }
+    if (typeof statusSyncEngine.readAgentExecutions === 'function') {
+      for (const scope of settlementNodes) await statusSyncEngine.readAgentExecutions(scope);
+    }
+    isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && statusSyncEngine === syncEngine);
 
     if (statusData.interactiveSession === true && statusData.checkpointImplicitTurn === true && statusData.checkpointOutcome) {
       const recoveredTurn = await ensureInteractiveTurnExecution(statusSyncEngine, statusData, workspaceRoot, true);
@@ -11417,6 +11462,7 @@ function setupFileSentinelWatcher(workspaceRoot: string) {
  * Formulates the premium glassmorphic Webview page bundle.
  */
 export function deactivate() {
+  syncEngine?.close?.();
   telegramConnection?.dispose();
   if (watcher) {
     watcher.dispose();

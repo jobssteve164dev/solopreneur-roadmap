@@ -24,6 +24,7 @@ import { extractConversationParentConversationId } from '../continuation';
 export class SqliteStore {
   private db: DiskDatabase | null = null;
   private readonly projectRoot: string;
+  private readOnly = false;
 
   constructor(
     private dbFilePath: string,
@@ -77,6 +78,7 @@ export class SqliteStore {
     if (this.db) return;
     try {
       this.db = new DiskDatabase(this.dbFilePath, { foreignKeys: false, readOnly: true });
+      this.readOnly = true;
       if (!this.sqliteObjectExists('table', 'execution_logs')) throw new Error('legacy_journal_table_missing:execution_logs');
     } catch (error) { this.db?.close(); this.db = null; throw error; }
   }
@@ -444,7 +446,7 @@ export class SqliteStore {
 
   private normalizeConversationStatus(log: AgentConversation): AgentConversation {
     const normalized = normalizeAgentConversationLifecycle(this.projectRoot, log);
-    if (normalized.status !== log.status) {
+    if (!this.readOnly && normalized.status !== log.status) {
       return {
         ...normalized,
         output: this.persistLifecycleStatus(normalized, log.status)
@@ -689,7 +691,7 @@ export class SqliteStore {
     } catch (error) { this.db.run('ROLLBACK'); throw error; }
   }
 
-  public getRunIndexEntries(): RunIndexEntry[] {
+  public getRunIndexEntries(limit?: number, offset = 0): RunIndexEntry[] {
     if (!this.db) {
       throw new Error('Database not initialized');
     }
@@ -719,8 +721,10 @@ export class SqliteStore {
         updatedAt
       FROM run_records
       ORDER BY finishedAt DESC, executionLogId DESC
+      ${limit === undefined ? '' : 'LIMIT ? OFFSET ?'}
     `);
     try {
+      if (limit !== undefined) runStmt.bind([Math.max(1, Math.min(500, limit)), Math.max(0, offset)]);
       while (runStmt.step()) {
         const row = runStmt.getAsObject() as any;
         const executionLogId = Number(row.executionLogId || 0);
@@ -754,8 +758,12 @@ export class SqliteStore {
       runStmt.free();
     }
 
-    const fileStmt = this.db.prepare('SELECT executionLogId, filePath, role FROM run_files ORDER BY executionLogId DESC, filePath ASC');
+    if (!entries.size) return [];
+    const ids = [...entries.keys()];
+    const scope = limit === undefined ? '' : `WHERE executionLogId IN (${ids.map(() => '?').join(',')})`;
+    const fileStmt = this.db.prepare(`SELECT executionLogId, filePath, role FROM run_files ${scope} ORDER BY executionLogId DESC, filePath ASC`);
     try {
+      if (limit !== undefined) fileStmt.bind(ids);
       while (fileStmt.step()) {
         const row = fileStmt.getAsObject() as any;
         const executionLogId = Number(row.executionLogId || 0);
@@ -772,8 +780,9 @@ export class SqliteStore {
       fileStmt.free();
     }
 
-    const signalStmt = this.db.prepare('SELECT executionLogId, type, value FROM run_signals ORDER BY executionLogId DESC, type ASC');
+    const signalStmt = this.db.prepare(`SELECT executionLogId, type, value FROM run_signals ${scope} ORDER BY executionLogId DESC, type ASC`);
     try {
+      if (limit !== undefined) signalStmt.bind(ids);
       while (signalStmt.step()) {
         const row = signalStmt.getAsObject() as any;
         const executionLogId = Number(row.executionLogId || 0);
@@ -1378,6 +1387,27 @@ export class SqliteStore {
       stmt.free();
     }
     return logs;
+  }
+
+  public getExecutionJournalPageRaw(input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number } = {}): { logs: AgentConversation[]; hasMore: boolean } {
+    if (!this.db) throw new Error('Database not initialized');
+    const limit = Math.max(1, Math.min(500, Math.floor(Number(input.limit) || 200)));
+    const clauses: string[] = []; const values: (string | number)[] = [];
+    if (input.nodeId) { clauses.push('nodeId=?'); values.push(input.nodeId); }
+    if (input.executionLogId) { clauses.push('id=?'); values.push(input.executionLogId); }
+    const stmt = this.db.prepare(`SELECT id,nodeId,timestamp,agentCli,command,output,status FROM execution_logs ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ? OFFSET ?`);
+    const logs: AgentConversation[] = [];
+    try {
+      stmt.bind([...values, limit + 1, Math.max(0, Math.floor(Number(input.offset) || 0))]);
+      while (stmt.step()) logs.push(stmt.getAsObject() as unknown as AgentConversation);
+    } finally { stmt.free(); }
+    return { logs: logs.slice(0, limit), hasMore: logs.length > limit };
+  }
+
+  public getLastExecutionLogId(): number {
+    if (!this.db) throw new Error('Database not initialized');
+    const result = this.db.exec('SELECT COALESCE(MAX(id),0) FROM execution_logs');
+    return Number(result[0]?.values[0]?.[0] || 0);
   }
 
   /**

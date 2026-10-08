@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { SolopreneurSettings } from './pluginContracts';
@@ -689,7 +691,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (this._latestConversationSnapshotRequest.get(projectPath) === requestId) {
           this.postProjectConversationSnapshot(projectPath, cached);
         }
-        if (!force) return;
+        // The legacy journal signature cannot validate a snapshot of the
+        // global database. Paint the cache, then refresh durable rows even
+        // when reopening the sidebar without an explicit force flag.
+        if (!force && !fs.existsSync(path.join(globalDataPath, 'solomap.db'))) return;
       }
       let snapshotLoad = this._conversationSnapshotLoads.get(projectPath);
       if (!snapshotLoad || supersedeInFlight) {

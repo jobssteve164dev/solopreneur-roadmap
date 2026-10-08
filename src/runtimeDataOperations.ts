@@ -107,7 +107,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         store.upsertProjectRunIndex(project.projectId, input.record as any, input.files as any, input.signals as any); return { written: true };
       }
       case 'read_project_run_indexes': {
-        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectRunIndexes(project.projectId);
+        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectRunIndexes(project.projectId, input as any);
       }
       case 'write_run_artifact': {
         const root = String(input.root || ''); const project = await store.registerProject({ root }); store.writeRunArtifact(project.projectId, input as any);

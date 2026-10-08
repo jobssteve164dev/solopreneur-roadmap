@@ -10,6 +10,186 @@ const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.j
 const { SyncEngine } = require('../out/db/syncEngine.js');
 const { importAgentRuns, importProjectGrowth } = require('../out/projectDataMigration.js');
 
+test('concurrent first project registration waits for the complete identity file', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-register-race-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  fs.mkdirSync(project);
+  const identity = path.join(project, '.solopreneur/project.json');
+  const store = new UnifiedDataStore(root);
+  const originalWrite = fs.promises.writeFile;
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  let markStarted; const started = new Promise(resolve => { markStarted = resolve; });
+  let writes = 0;
+  fs.promises.writeFile = async (file, bytes, options) => {
+    if (file !== identity) return originalWrite(file, bytes, options);
+    writes++;
+    const handle = await fs.promises.open(file, options.flag, options.mode);
+    try { markStarted(); await gate; await handle.writeFile(bytes); } finally { await handle.close(); }
+  };
+  try {
+    const first = store.registerProject({ root: project });
+    await started;
+    const second = store.registerProject({ root: project }).then(value => ({ value }), error => ({ error: error.message }));
+    await new Promise(resolve => setImmediate(resolve));
+    release();
+    const [registered, concurrent] = await Promise.all([first, second]);
+    assert.equal(concurrent.error, undefined, 'a concurrent request must not parse the pending empty identity');
+    assert.equal(concurrent.value.projectId, registered.projectId);
+    assert.equal(writes, 1);
+    assert.equal(JSON.parse(fs.readFileSync(identity, 'utf8')).projectId, registered.projectId);
+  } finally { release(); fs.promises.writeFile = originalWrite; store.close(); }
+});
+
+test('scoped full history reads each durable page once and accepts an older unpaginated index owner', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-scoped-history-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  const registered = await store.registerProject({ root: project });
+  for (let id = 1; id <= 1001; id++) store.appendProjectJournal(registered.projectId, `seed:${id}`, { nodeId: 'older', timestamp: '2026-01-01T00:00:00.000Z', output: String(id), status: 'Completed' }, id);
+  let scopedReads = 0; let indexReads = 0;
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  let markStarted; const started = new Promise(resolve => { markStarted = resolve; });
+  const indexes = Array.from({ length: 200 }, (_, offset) => ({ executionLogId: offset + 1, nodeId: 'older', files: [], signals: [] }));
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'scoped-history-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    if (request.operation === 'read_project_journal' && request.input.nodeId === 'older') {
+      scopedReads++;
+      if (!request.input.offset) { markStarted(); await gate; }
+    }
+    if (request.operation === 'read_project_run_indexes') { indexReads++; return indexes; }
+    return operations(request);
+  } });
+  const engine = new SyncEngine(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), path.resolve(__dirname, '..'), root);
+  const indexEngine = new SyncEngine(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), path.resolve(__dirname, '..'), root);
+  try {
+    const reading = engine.readAgentExecutions('older');
+    await started; engine.close(); release();
+    assert.equal((await reading).length, 1001, 'switching projects only cancels auxiliary history, not a formal settlement read');
+    assert.equal(scopedReads, 3, 'continuation must not repeatedly reread the prefix of its history');
+    await indexEngine.initAndSync();
+    assert.equal(indexEngine.getRunIndexEntries().length, 200);
+    assert.equal(indexReads, 2, 'an old owner returning exactly one full page must not cause an infinite paging loop');
+  } finally { release(); engine.close(); indexEngine.close(); await server.close(); await operations.close(); store.close(); }
+});
+
+test('recent startup and new writes do not wait for historical journal or index hydration', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-recent-startup-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const csv = path.join(project, '.solopreneur/roadmap.csv');
+  fs.mkdirSync(path.dirname(csv), { recursive: true });
+  fs.writeFileSync(csv, 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Plan,,Stage,,codex,,Pending,,');
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  const registered = await store.registerProject({ root: project });
+  for (let id = 1; id <= 510; id++) store.appendProjectJournal(registered.projectId, `seed:${id}`, { nodeId: '__solo__', timestamp: '2026-01-01T00:00:00.000Z', output: String(id), status: 'Completed' }, id);
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'recent-startup-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    const result = await operations(request);
+    if (request.operation === 'read_project_run_indexes' || (request.operation === 'read_project_journal' && request.input.limit === 500)) await gate;
+    return result;
+  } });
+  const engine = new SyncEngine(csv, path.join(path.dirname(csv), 'project_journal.db'), path.resolve(__dirname, '..'), root);
+  try {
+    const initialized = engine.initAndSync({ history: 'background' });
+    assert.equal(await Promise.race([initialized.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 500))]), true, 'bounded startup must finish while old history remains pending');
+    fs.writeFileSync(csv, fs.readFileSync(csv, 'utf8').replace('1,Plan,', '1,Updated plan,'));
+    engine.refreshNodes();
+    assert.equal(engine.getNodes()[0].title, 'Updated plan', 'launch preparation must still read the current CSV without loading history');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const id = await engine.logAgentExecution('__solo__', 'codex', 'new', 'new during old hydration', 'Running');
+    assert.equal(id, 511);
+    assert.equal((await engine.readAgentExecutionPage('__solo__', 20)).logs[0].id, 511);
+    await engine.updateAgentExecution(10, 'codex', 'updated', 'newer state', 'Processed');
+    release();
+    await engine.initAndSync();
+    assert.equal(engine.getProjectAgentExecutions().length, 511);
+    assert.equal(engine.getAgentExecutions('__solo__').find(log => log.id === 10).output, 'newer state', 'late history must retain an updated row that was outside the recent cache');
+    assert.equal(engine.getAgentExecutions('__solo__')[0].id, 511);
+    assert.equal((await engine.readAgentExecutionPage('__solo__', 20, 500)).logs.length, 11, 'older pages remain accessible');
+  } finally { release(); engine.close(); await server.close(); await operations.close(); store.close(); }
+});
+
+test('background startup reserves unmigrated IDs without reading old outputs', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-legacy-id-reservation-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const journalPath = path.join(project, '.solopreneur/project_journal.db');
+  fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+  const { SqliteStore } = require('../out/db/sqliteStore.js');
+  const legacy = new SqliteStore(journalPath, path.resolve(__dirname, '..'));
+  await legacy.init();
+  legacy.db.run('INSERT INTO execution_logs(id,nodeId,timestamp,output,status) VALUES(700,?,?,?,?)', ['__solo__', '2026-01-01T00:00:00.000Z', 'old source', 'Completed']);
+  legacy.close();
+  const original = fs.readFileSync(journalPath);
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'reservation-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    if (request.operation === 'read_project_journal' && request.input.limit === 500) await gate;
+    return operations(request);
+  } });
+  const engine = new SyncEngine(path.join(path.dirname(journalPath), 'roadmap.csv'), journalPath, path.resolve(__dirname, '..'), root);
+  try {
+    await engine.initAndSync({ history: 'background' });
+    const id = await engine.logAgentExecution('__solo__', 'codex', 'new', 'new before migration', 'Running');
+    assert.equal(id, 701);
+    assert.deepEqual((await engine.readAgentExecutionPage('__solo__', 20)).logs.map(log => log.id), [701, 700]);
+    assert.deepEqual(fs.readFileSync(journalPath), original, 'compatibility reads must retain the legacy source unchanged');
+    release(); await engine.initAndSync();
+  } finally { release(); engine.close(); await server.close(); await operations.close(); store.close(); }
+});
+
+test('legacy read-only lifecycle reconciliation does not write to the migration source', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-readonly-history-'));
+  const journalPath = path.join(fixture, '.solopreneur/project_journal.db');
+  const { SqliteStore } = require('../out/db/sqliteStore.js');
+  const legacy = new SqliteStore(journalPath, path.resolve(__dirname, '..'));
+  await legacy.init();
+  legacy.db.run('INSERT INTO execution_logs(nodeId,timestamp,output,status) VALUES(?,?,?,?)', ['step', '2020-01-01T00:00:00.000Z', 'Agent conversation started', 'Running']);
+  legacy.close(); const original = fs.readFileSync(journalPath);
+  const reader = new SqliteStore(journalPath, path.resolve(__dirname, '..'));
+  try {
+    await reader.initJournalReadOnly();
+    assert.equal(reader.getRecentExecutionLogs(20)[0].status, 'Failed');
+    assert.deepEqual(fs.readFileSync(journalPath), original);
+  } finally { reader.close(); }
+});
+
+test('journal migration yields during both logs and indexes so new data can commit', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-yield-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur/project_journal.db');
+  const { SqliteStore } = require('../out/db/sqliteStore.js');
+  const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
+  for (let index = 0; index < 3; index++) {
+    const id = legacy.logExecution('step', 'codex', 'run', `old ${index}`, 'Completed');
+    legacy.upsertRunIndex({ executionLogId: id, nodeId: 'step', runKind: 'step', agentCli: 'codex', status: 'Completed', startedAt: '', finishedAt: '', durationMs: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, outputPath: '', outputBytes: 0, outputTail: '', commandPath: '', promptPath: '', changesPath: '', touchedFilesPath: '', updatedAt: '' });
+  }
+  legacy.close();
+  const store = new UnifiedDataStore(root); const registered = await store.registerProject({ root: project });
+  let logs = 0; let indexes = 0; const observed = [];
+  const importLog = store.importProjectJournal.bind(store); const importIndex = store.importProjectRunIndex.bind(store);
+  store.importProjectJournal = (...args) => {
+    const result = importLog(...args); logs++;
+    if (logs === 1) setImmediate(() => {
+      observed.push(['logs', logs]);
+      store.appendProjectJournal(registered.projectId, 'live-during-import', { nodeId: '__solo__', timestamp: new Date().toISOString(), output: 'new live data', status: 'Running' });
+    });
+    return result;
+  };
+  store.importProjectRunIndex = (...args) => {
+    importIndex(...args); indexes++;
+    if (indexes === 1) setImmediate(() => {
+      observed.push(['indexes', indexes]);
+      store.upsertProjectRunIndex(registered.projectId, { ...args[1], executionLogId: 2, outputTail: 'fresh live state', status: 'Processed' });
+    });
+  };
+  try {
+    await require('../out/projectDataMigration.js').importProjectJournal(store, source, { projectRoot: project });
+    assert.deepEqual(observed, [['logs', 1], ['indexes', 1]]);
+    assert.equal(store.readProjectJournal(registered.projectId).logs[0].output, 'new live data');
+    assert.equal(store.readProjectRunIndexes(registered.projectId, { limit: 1, offset: 1 }).length, 1);
+    assert.equal(store.readProjectRunIndexes(registered.projectId).find(index => index.executionLogId === 2).outputTail, 'fresh live state', 'legacy imports cannot overwrite a live index committed during a yield');
+  } finally { store.close(); }
+});
+
 test('project journal writes are immediate and concurrent through the single Runtime owner', async () => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-db-')), '.solomap-global');
   const project = path.join(path.dirname(root), 'project');
@@ -213,7 +393,7 @@ test('unchanged migration capture reuses its committed hash without rereading th
 test('project journal migration uses a read-only history path without lifecycle reconciliation writes', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../src/projectDataMigration.ts'), 'utf8');
   const body = source.slice(source.indexOf('export async function importProjectJournal'), source.indexOf('async function filesUnder'));
-  assert.match(body, /getAllExecutionLogsRaw/);
+  assert.match(body, /getExecutionJournalPageRaw/);
   assert.doesNotMatch(body, /getAllExecutionLogs\(\)/);
 });
 
