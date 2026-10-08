@@ -8,13 +8,16 @@ export class DatabaseMigrationCoordinator {
   private stopping = false;
   private work: Promise<void> | undefined;
   constructor(private readonly store: UnifiedDataStore) {}
-  enqueue(input: Record<string, unknown>): MigrationJob {
+  enqueue(input: Record<string, unknown>): MigrationJob & { scheduled: boolean } {
     if (this.stopping) throw new Error('migration_coordinator_stopping');
-    const { idempotencyKey, ...args } = input;
+    const { idempotencyKey, refreshCompleted, ...args } = input;
     if (typeof idempotencyKey !== 'string') throw new Error('migration_idempotency_key_required');
+    const before = this.store.migrationJobs().length;
     const job = this.store.enqueueMemoryMigration(args, idempotencyKey);
+    const scheduled = this.store.migrationJobs().length > before
+      || (refreshCompleted === true && this.store.requeueCompletedMigration(job.jobId));
     this.recover();
-    return job;
+    return { ...this.store.readMigrationJob(job.jobId), scheduled };
   }
   recover(): void {
     if (this.stopping || this.work) return;

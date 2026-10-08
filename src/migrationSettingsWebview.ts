@@ -30,7 +30,7 @@ export function getMigrationSettingsCardHtml(): string {
       #migration-settings-card .migration-secondary { padding-top: 9px; border-top: 1px solid rgba(255, 255, 255, .07); }
       #migration-settings-card .migration-error { margin: 0; padding: 8px 10px; border-radius: 6px; color: #fecaca; background: rgba(239, 68, 68, .09); }
       #migration-settings-card .migration-danger { color: #fecaca; border-color: rgba(248, 113, 113, .35); }
-      @media (max-width: 420px) { #migration-settings-card .migration-actions [data-migration-agent], #migration-settings-card .migration-actions [data-migration-preview] { flex-basis: 100%; } }
+      @media (max-width: 420px) { #migration-settings-card .migration-actions [data-migration-delegate], #migration-settings-card .migration-actions [data-migration-agent], #migration-settings-card .migration-actions [data-migration-preview] { flex-basis: 100%; } }
     </style>
     <div class="migration-heading">
       <span class="migration-heading-icon codicon codicon-archive" aria-hidden="true"></span>
@@ -54,7 +54,8 @@ export function getMigrationSettingsCardHtml(): string {
     </details>
     <div class="migration-error" data-migration-error role="alert" hidden></div>
     <div class="migration-actions">
-      <button type="button" class="settings-action-btn save-btn" data-migration-agent>检查旧数据</button>
+      <button type="button" class="settings-action-btn save-btn" data-migration-delegate>交给 Agent 迁移</button>
+      <button type="button" class="settings-action-btn test-btn" data-migration-agent>检查旧数据</button>
       <button type="button" class="settings-action-btn test-btn" data-migration-preview disabled>查看可清理内容</button>
       <button type="button" class="settings-action-btn test-btn migration-refresh" data-migration-refresh>更新状态</button>
     </div>
@@ -112,6 +113,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     element('[data-migration-file-title]').textContent = text('查看文件', 'Review files');
     element('[data-migration-history-title]').textContent = text('已处理的文件', 'Processed files');
     button('[data-migration-refresh]').textContent = text('更新状态', 'Update status');
+    button('[data-migration-delegate]').textContent = text('交给 Agent 迁移', 'Let Agent migrate');
     button('[data-migration-preview]').textContent = text('查看可清理内容', 'Review cleanup');
     button('[data-migration-confirm]').textContent = text('移到回收站', 'Move to recycle bin');
     button('[data-migration-cancel]').textContent = text('返回', 'Back');
@@ -121,10 +123,12 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     const isActiveMaintenance = (task: any) => ['ready', 'running'].includes(task.status) && Number(task.validUntil || 0) > Date.now();
     const activeMaintenance = maintenanceTasks.some(isActiveMaintenance);
     const activeReview = maintenanceTasks.some((task: any) => isActiveMaintenance(task) && task.kind === 'migration_review');
+    const activeMigration = maintenanceTasks.some((task: any) => isActiveMaintenance(task) && task.kind === 'migration_apply');
     const reviewAgentActive = maintenanceTasks.some((task: any) => isActiveMaintenance(task) && task.kind === 'migration_review' && busyMaintenanceTaskIds.has(task.taskId));
+    const migrationAgentActive = maintenanceTasks.some((task: any) => isActiveMaintenance(task) && task.kind === 'migration_apply' && busyMaintenanceTaskIds.has(task.taskId));
     const recyclingAgentActive = maintenanceTasks.some((task: any) => isActiveMaintenance(task) && task.kind === 'recycling_apply' && busyMaintenanceTaskIds.has(task.taskId));
     const activeRecyclingPlans = new Set(maintenanceTasks.filter((task: any) => isActiveMaintenance(task) && task.kind === 'recycling_apply' && busyMaintenanceTaskIds.has(task.taskId)).map((task: any) => task.targetId));
-    const latestReview = maintenanceTasks.filter((task: any) => task.kind === 'migration_review').sort((left: any, right: any) => Number(right.updatedAt || right.createdAt || 0) - Number(left.updatedAt || left.createdAt || 0))[0];
+    const latestReview = maintenanceTasks.filter((task: any) => ['migration_review', 'migration_apply'].includes(task.kind)).sort((left: any, right: any) => Number(right.updatedAt || right.createdAt || 0) - Number(left.updatedAt || left.createdAt || 0))[0];
     const failedMaintenance = latestReview?.status === 'failed';
     const activeJobs = jobs.some((job: any) => ['queued', 'running', 'interrupted'].includes(job.status));
     const active = activeJobs || activeMaintenance;
@@ -136,7 +140,8 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     const migrated = Number(overview?.migratedFiles || 0);
     const count = Number(overview?.capturedFiles || 0);
     element('[data-migration-status]').textContent = !overview ? text('尚未读取当前状态。', 'Current status has not been loaded yet.')
-      : reviewAgentActive ? text('正在后台整理旧数据，你可以照常使用。', 'Old data is being organized in the background. You can keep working.')
+      : migrationAgentActive ? text('Agent 正在后台迁移旧数据，你可以照常使用。', 'Agent is migrating old data in the background. You can keep working.')
+      : reviewAgentActive ? text('正在后台检查旧数据，你可以照常使用。', 'Old data is being checked in the background. You can keep working.')
       : recyclingAgentActive ? text('正在后台清理旧文件，你可以照常使用。', 'Old files are being cleaned up in the background. You can keep working.')
       : activeReview ? text('整理已暂停，可以从这里继续。', 'Cleanup paused and can be continued here.')
       : activeJobs ? text('正在安全导入旧数据，你可以照常使用。', 'Old data is being imported safely. You can keep working.')
@@ -147,6 +152,8 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     button('[data-migration-agent]').textContent = reviewAgentActive ? text('正在整理…', 'Organizing…')
       : activeReview ? text('继续整理', 'Continue cleanup')
       : (failedMaintenance || needsAttention.length) ? text('重新检查', 'Check again') : text('检查旧数据', 'Check old data');
+    button('[data-migration-delegate]').textContent = migrationAgentActive ? text('正在迁移…', 'Migrating…')
+      : activeMigration ? text('继续迁移', 'Continue migration') : text('交给 Agent 迁移', 'Let Agent migrate');
     const progress = element('[data-migration-progress]') as HTMLProgressElement;
     progress.hidden = !activeJobs;
     if (activeJobs && count > 0) { progress.setAttribute('max', String(count)); progress.setAttribute('value', String(Math.min(count, migrated))); }
@@ -196,6 +203,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     card!.querySelectorAll('button').forEach(control => { control.disabled = busy || control.hasAttribute('data-action-disabled'); });
     button('[data-migration-preview]').disabled = busy || !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0);
     button('[data-migration-agent]').disabled = busy || reviewAgentActive;
+    button('[data-migration-delegate]').disabled = busy || migrationAgentActive;
     button('[data-migration-confirm]').disabled = busy || !plan?.files.length;
     card!.setAttribute('aria-busy', busy ? 'true' : 'false');
     if (timer) clearTimeout(timer);
@@ -206,6 +214,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     if (!target || target.disabled || busy) return;
     if (target.hasAttribute('data-migration-cancel')) { plan = undefined; render(); }
     else if (target.hasAttribute('data-migration-refresh')) request('dataMigration.get');
+    else if (target.hasAttribute('data-migration-delegate')) request('dataMigration.delegate');
     else if (target.hasAttribute('data-migration-agent')) request('dataMigration.agent');
     else if (target.hasAttribute('data-migration-preview')) request('dataMigration.preview');
     else if (target.hasAttribute('data-migration-confirm')) request('dataMigration.recycle', { planId: plan?.planId });

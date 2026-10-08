@@ -72,7 +72,7 @@ test('all built-in Agent families receive their native MCP format without changi
         assert.equal(server.command, '/native/node');
         if (provider === 'copilot') {
           assert.equal(server.type, 'local');
-          assert.deepEqual(server.tools, ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish']);
+          assert.deepEqual(server.tools, ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish']);
         }
       }
     }

@@ -27,7 +27,7 @@ export interface RecyclingItem {
 
 export interface MaintenanceTask {
   taskId: string;
-  kind: 'migration_review' | 'recycling_apply';
+  kind: 'migration_review' | 'migration_apply' | 'recycling_apply';
   targetId: string | null;
   status: 'ready' | 'running' | 'completed' | 'failed' | 'revoked';
   error: string | null;
@@ -254,6 +254,10 @@ export class UnifiedDataStore {
   public updateMigrationJob(jobId: string, status: MigrationJob['status'], progress: Record<string, unknown>, error: string | null = null): void {
     this.db.run('UPDATE migration_jobs SET status=?,progress_json=?,error=?,updated_at=? WHERE id=?', [status, canonical(progress), error, Date.now(), jobId]);
   }
+  public requeueCompletedMigration(jobId: string): boolean {
+    this.db.run("UPDATE migration_jobs SET status='queued',progress_json='{}',error=NULL,updated_at=? WHERE id=? AND status='completed'", [Date.now(), jobId]);
+    return this.db.getRowsModified() === 1;
+  }
   public authorizeMcpAction(actorId: string, projectId: string, action: string): void {
     const actor = this.rows('SELECT COALESCE(authority_id,id) AS authority,identity_ref,kind FROM actors WHERE id=?', [actorId])[0];
     if (!actor || (actor.kind === 'mcp' && !actor.identity_ref)) throw new Error('action_denied');
@@ -316,7 +320,7 @@ export class UnifiedDataStore {
       .map(row => this.readMaintenanceTask(String(row.id)));
   }
   public createMaintenanceTask(kind: MaintenanceTask['kind'], targetId?: string): MaintenanceTask & { proof: string } {
-    if (!['migration_review', 'recycling_apply'].includes(kind) || (kind === 'recycling_apply' && !targetId)) throw new Error('invalid_maintenance_task');
+    if (!['migration_review', 'migration_apply', 'recycling_apply'].includes(kind) || (kind === 'recycling_apply' && !targetId)) throw new Error('invalid_maintenance_task');
     const now = Date.now();
     this.db.run("UPDATE maintenance_tasks SET status='failed',error='maintenance_task_expired',updated_at=? WHERE status IN ('ready','running') AND valid_until<=?", [now, now]);
     const active = this.rows("SELECT id FROM maintenance_tasks WHERE kind=? AND COALESCE(target_id,'')=? AND status IN ('ready','running') LIMIT 1", [kind, targetId || '']);
@@ -725,6 +729,10 @@ export class UnifiedDataStore {
     this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1 WHERE event_id IN (SELECT id FROM events WHERE request_id=?)", [receipt.requestId]);
     const saved = this.rows("SELECT id FROM project_locations WHERE project_id=? AND device_id=? AND root_path=? AND status='active'", [projectId, this.deviceId, root])[0];
     return { projectId, locationId: String(saved.id), identityPath };
+  }
+  public registeredProjectRoots(): string[] {
+    return this.rows("SELECT root_path FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
+      .map(row => String(row.root_path));
   }
   public writeProjectGrowth(projectId: string, data: GrowthSnapshotData, idempotencyKey: string): WriteReceipt {
     if (!data?.snapshot?.id || data.snapshot.projectPath === '') throw new Error('invalid_growth_snapshot');

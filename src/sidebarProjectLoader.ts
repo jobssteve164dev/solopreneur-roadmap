@@ -82,7 +82,7 @@ export class SidebarProjectLoader {
             if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
               continue;
             }
-            const investment = await readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath());
+            const investment = await readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath(), new Date(), globalDataPath);
             if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
             if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
               continue;

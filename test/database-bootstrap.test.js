@@ -250,6 +250,64 @@ test('an unreadable memory source does not prevent queuing independent chat migr
   } finally { fs.promises.stat = stat; await ops.close(); store.close(); }
 });
 
+test('on-demand migration discovery queues every registered legacy source idempotently', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-discover-migrations-'));
+  const root = path.join(base, '.solomap-global');
+  const workspace = path.join(base, 'project');
+  const databaseOnlyWorkspace = path.join(base, 'database-only-project');
+  fs.mkdirSync(path.join(root, 'memory'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'intelligence-conversations'), { recursive: true });
+  fs.mkdirSync(path.join(workspace, '.solopreneur', 'agent-runs'), { recursive: true });
+  fs.mkdirSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects: [{ path: workspace }] }));
+  fs.writeFileSync(path.join(root, 'memory', 'profile.md'), 'profile');
+  fs.writeFileSync(path.join(workspace, '.solopreneur', 'agent-runs', 'prompt.txt'), 'prompt');
+  fs.writeFileSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', 'prompt.txt'), 'prompt');
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  try {
+    await store.registerProject({ root: databaseOnlyWorkspace });
+    const first = await enqueueAvailableDataMigrations(store, operations, () => true);
+    const second = await enqueueAvailableDataMigrations(store, operations, () => true);
+    assert.ok(first.queued >= 3);
+    assert.equal(second.queued, 0);
+    assert.equal(store.migrationJobs().length, first.queued);
+    assert.ok(store.migrationJobs().some(job => job.args.projectRoot === databaseOnlyWorkspace && job.args.collection === 'agent-runs'));
+    await operations.waitForMigrations();
+    fs.writeFileSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', 'second.txt'), 'second');
+    const refreshed = await operations({ operation: 'discover_migrations', input: {} });
+    await operations.waitForMigrations();
+    assert.ok(refreshed.queued > 0);
+    assert.equal(store.readMigrationSource(`agent-runs:${databaseOnlyWorkspace}`, 'second.txt').bytes.toString(), 'second');
+  } finally { await operations.close(); store.close(); }
+});
+
+test('project investment consumer reads run indexes from the global Runtime database without a legacy project database', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-investment-'));
+  const root = path.join(base, '.solomap-global');
+  const workspace = path.join(base, 'project');
+  fs.mkdirSync(workspace, { recursive: true });
+  const run = launch(root);
+  try {
+    await ready(run, root);
+    await sendRuntimeDataRequest(root, { operation: 'upsert_project_run_index', input: {
+      root: workspace,
+      record: { executionLogId: 7, nodeId: '', runKind: 'solo', status: 'Completed', startedAt: '2026-10-08T10:00:00.000Z', finishedAt: '2026-10-08T10:05:00.000Z', durationMs: 300000, agentCli: 'codex', files: [], signals: [] },
+      files: [], signals: []
+    } });
+    const analytics = require('../out/projectAnalytics.js');
+    analytics.clearProjectInvestmentCache(workspace);
+    const stats = await analytics.readProjectInvestmentStatsFromDatabase(workspace, path.resolve(__dirname, '..'), new Date('2026-10-08T10:06:00.000Z'), root);
+    assert.equal(stats.soloConversationCount, 1);
+    assert.equal(stats.completedRunCount, 1);
+    assert.equal(stats.totalDurationMs, 300000);
+    assert.equal(fs.existsSync(path.join(workspace, '.solopreneur', 'project_journal.db')), false);
+  } finally { await stop(run, root); }
+});
+
 test('the extension chat readiness gate reconnects after owner exit and preserves immediate reads', async () => {
   const vm = require('node:vm');
   const host = require('../out/autonomousRuntimeHost.js');

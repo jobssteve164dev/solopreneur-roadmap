@@ -2,8 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { shellQuote } from './agentCli';
 
-export type MigrationMaintenanceKind = 'migration_review' | 'recycling_apply';
-const maintenanceTools = ['solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
+export type MigrationMaintenanceKind = 'migration_review' | 'migration_apply' | 'recycling_apply';
+const maintenanceTools = ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
 
 export function applyNativeMigrationAgentBoundary(command: string, agentCli: string, provider: string, mcpConfig: string): string {
   const executable = shellQuote(agentCli);
@@ -56,7 +56,12 @@ export function buildMigrationMaintenancePrompt(kind: MigrationMaintenanceKind, 
     '你正在执行 SoloMap 数据维护任务。只使用 MCP 服务器 solomap_data 提供的维护工具；不要调用 shell、文件系统或其他工具，不要直接读取或修改任何数据库或旧文件。',
     '先调用 solomap_migration_status，所有迁移与回收写入都由 SoloMap Runtime 串行执行。',
   ];
-  const steps = kind === 'migration_review' ? [
+  const steps = kind === 'migration_apply' ? [
+    '调用 solomap_migration_start 发现当前仍存在的旧数据源并幂等加入后台迁移队列。',
+    '调用 solomap_migration_status；对 failed、interrupted 或 completed_with_conflicts 的任务，逐个调用 solomap_migration_retry。',
+    '调用 solomap_recycling_preview 生成精确回收清单；不要调用 solomap_recycling_apply，回收必须回到插件界面由用户确认。',
+    '再次调用 solomap_migration_status，然后调用 solomap_maintenance_finish。'
+  ] : kind === 'migration_review' ? [
     '对 failed、interrupted 或 completed_with_conflicts 的任务，逐个调用 solomap_migration_retry。',
     '调用 solomap_recycling_preview 生成精确回收清单；不要调用 solomap_recycling_apply，回收必须回到插件界面由用户确认。',
     '再次调用 solomap_migration_status，然后调用 solomap_maintenance_finish。'

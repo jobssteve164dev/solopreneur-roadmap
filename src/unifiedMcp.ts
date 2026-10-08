@@ -10,7 +10,7 @@ export interface UnifiedMcpSource {
   call(operation: string, input: Record<string, unknown>): Promise<unknown>;
 }
 export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_export'];
-export const maintenanceToolNames = ['solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
+export const maintenanceToolNames = ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
 
 export function registerMaintenanceMcpTools(server: McpServer, source: UnifiedMcpSource): void {
   const z = require('zod') as typeof import('zod');
@@ -20,6 +20,7 @@ export function registerMaintenanceMcpTools(server: McpServer, source: UnifiedMc
       catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
     });
   };
+  register('solomap_migration_start', '发现已登记项目中的旧数据并幂等加入后台迁移队列。', {}, false, () => source.call('discover_migrations', {}));
   register('solomap_migration_status', '读取当前迁移进度、待处理项目和回收状态。', {}, true, () => source.call('migration_overview', {}));
   register('solomap_migration_retry', '重试一个明确失败或中断的迁移任务。', { jobId: z.string().min(1) }, false, input => source.call('retry_migration', input));
   register('solomap_recycling_preview', '生成并读取可回收文件的精确清单；本工具不会回收文件。', {}, false, () => source.call('prepare_recycling', {}));

@@ -84,4 +84,18 @@ CREATE TABLE maintenance_tasks(
  updated_at INTEGER NOT NULL,
  valid_until INTEGER NOT NULL);
 CREATE INDEX maintenance_tasks_status ON maintenance_tasks(status,updated_at);
+` }, { version: 11, sql: `
+CREATE TABLE maintenance_tasks_v11(
+ id TEXT PRIMARY KEY,
+ kind TEXT NOT NULL CHECK(kind IN ('migration_review','migration_apply','recycling_apply')),
+ target_id TEXT,
+ status TEXT NOT NULL CHECK(status IN ('ready','running','completed','failed','revoked')),
+ error TEXT,
+ created_at INTEGER NOT NULL,
+ updated_at INTEGER NOT NULL,
+ valid_until INTEGER NOT NULL);
+INSERT INTO maintenance_tasks_v11 SELECT * FROM maintenance_tasks;
+DROP TABLE maintenance_tasks;
+ALTER TABLE maintenance_tasks_v11 RENAME TO maintenance_tasks;
+CREATE INDEX maintenance_tasks_status ON maintenance_tasks(status,updated_at);
 ` }];

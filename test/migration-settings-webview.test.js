@@ -24,12 +24,12 @@ test('the temporary data cleanup card speaks in user actions and keeps advanced 
   const html = getMigrationSettingsCardHtml();
   assert.match(html, /旧数据整理/);
   assert.match(html, /一次性整理/);
-  assert.match(html, /<button(?=[^>]*data-migration-agent)(?=[^>]*save-btn)/);
+  assert.match(html, /<button(?=[^>]*data-migration-delegate)(?=[^>]*save-btn)/);
   assert.match(html, /data-migration-metrics/);
   assert.match(html, /data-migration-details[^>]*hidden/);
   assert.match(html, /data-migration-history-section[^>]*hidden/);
   assert.doesNotMatch(html, />数据迁移与回收</);
-  assert.doesNotMatch(html, />交给 Agent/);
+  assert.match(html, />交给 Agent 迁移</);
   assert.doesNotMatch(html, />查看可回收文件/);
 });
 

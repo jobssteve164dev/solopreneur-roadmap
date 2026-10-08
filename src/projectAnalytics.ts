@@ -3,6 +3,7 @@ import * as path from 'path';
 import { SqliteStore } from './db/sqliteStore';
 import { RunIndexEntry } from './db/types';
 import { buildWorkHabitStats, getTrustedWorkDurationMs, WorkHabitStats } from './workHabits';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 
 export interface ProjectInvestmentStats {
   schemaVersion: number;
@@ -85,13 +86,14 @@ function directoryChildrenSignature(dirPath: string, maxChildren = 80): string {
   }
 }
 
-function getProjectInvestmentSignature(projectPath: string): string {
+function getProjectInvestmentSignature(projectPath: string, globalDataPath = ''): string {
   const solopreneurRoot = path.join(projectPath, '.solopreneur');
   return [
     statSignature(path.join(solopreneurRoot, 'roadmap.csv')),
     statSignature(path.join(solopreneurRoot, 'project_journal.db')),
     directoryChildrenSignature(path.join(solopreneurRoot, 'run-digests')),
-    directoryChildrenSignature(path.join(solopreneurRoot, 'agent-runs'))
+    directoryChildrenSignature(path.join(solopreneurRoot, 'agent-runs')),
+    globalDataPath ? statSignature(path.join(globalDataPath, 'solomap.db')) : ''
   ].join('::');
 }
 
@@ -396,18 +398,25 @@ export function readProjectInvestmentStats(projectPath: string, now = new Date()
   return stats;
 }
 
-export async function readProjectInvestmentStatsFromDatabase(projectPath: string, extensionPath: string, now = new Date()): Promise<ProjectInvestmentStats> {
+export async function readProjectInvestmentStatsFromDatabase(projectPath: string, extensionPath: string, now = new Date(), globalDataPath = ''): Promise<ProjectInvestmentStats> {
   if (!projectPath) {
     return emptyProjectInvestmentStats(now);
   }
   const cacheKey = `db:${projectPath}`;
-  const signature = getProjectInvestmentSignature(projectPath);
+  const signature = getProjectInvestmentSignature(projectPath, globalDataPath);
   const cached = projectInvestmentCache.get(cacheKey);
   const nowMs = now.getTime();
   if (cached && cached.signature === signature && nowMs - cached.generatedAtMs <= cacheTtlMs) {
     return cached.stats;
   }
-  const indexedRuns = await readRunsFromRunIndex(projectPath, extensionPath);
+  let indexedRuns: InvestmentRun[] = [];
+  if (globalDataPath && fs.existsSync(path.join(globalDataPath, 'solomap.db'))) {
+    try {
+      const entries = await sendRuntimeDataRequest<RunIndexEntry[]>(globalDataPath, { operation: 'read_project_run_indexes', input: { root: projectPath } });
+      indexedRuns = readRunsFromRunIndexEntries(entries);
+    } catch {}
+  }
+  if (!indexedRuns.length) indexedRuns = await readRunsFromRunIndex(projectPath, extensionPath);
   const runs = indexedRuns.length > 0
     ? indexedRuns
     : (() => {

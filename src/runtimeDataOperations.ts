@@ -11,6 +11,7 @@ import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, 
 import { readIntelligenceConversation, listIntelligenceConversations } from './intelligenceConversationData';
 import { MigrationRecycling } from './migrationRecycling';
 import { isRetirableRunArtifact } from './projectDataMigration';
+import { enqueueAvailableDataMigrations } from './runtimeDatabaseBootstrap';
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
@@ -23,7 +24,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   const migrations = new DatabaseMigrationCoordinator(store);
   const recycling = new MigrationRecycling(store);
   type ProjectSession = { kind: 'project'; actorId: string; scope: string };
-  type MaintenanceSession = { kind: 'maintenance'; taskId: string; taskKind: 'migration_review' | 'recycling_apply'; targetId: string | null };
+  type MaintenanceSession = { kind: 'maintenance'; taskId: string; taskKind: 'migration_review' | 'migration_apply' | 'recycling_apply'; targetId: string | null };
   const sessions = new Map<string, ProjectSession | MaintenanceSession>();
   const maintenanceLaunchClaims = new Map<string, { token: string; expiresAt: number }>();
   const claimMaintenanceLaunch = (taskId: string) => {
@@ -66,7 +67,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return { closed: true };
       }
       case 'create_maintenance_task': {
-        const task = store.createMaintenanceTask(String(input.kind || '') as 'migration_review' | 'recycling_apply', input.targetId ? String(input.targetId) : undefined);
+        const task = store.createMaintenanceTask(String(input.kind || '') as 'migration_review' | 'migration_apply' | 'recycling_apply', input.targetId ? String(input.targetId) : undefined);
         return { ...task, launchToken: claimMaintenanceLaunch(task.taskId) };
       }
       case 'claim_maintenance_task': {
@@ -145,6 +146,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'list_intelligence_conversations': return listIntelligenceConversations(store);
       case 'write_intelligence_conversation': return store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
       case 'migration_status': return store.readMigrationJob(String(input.jobId || ''));
+      case 'discover_migrations': return enqueueAvailableDataMigrations(store, operations, () => true, true);
       case 'migration_overview': return {
         ...(await recycling.overview()),
         maintenanceTasks: store.maintenanceTasks(),
@@ -222,8 +224,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     if (session.kind === 'maintenance') {
       store.authorizeMaintenanceTask(session.taskId, session.taskKind, session.targetId);
       const reviewActions = ['migration_overview', 'retry_migration', 'prepare_recycling', 'read_recycling_plan', 'complete_maintenance_task'];
+      const migrationActions = ['discover_migrations', ...reviewActions];
       const recyclingActions = ['migration_overview', 'read_recycling_plan', 'execute_recycling_plan', 'complete_maintenance_task'];
-      if (!(session.taskKind === 'migration_review' ? reviewActions : recyclingActions).includes(request.operation)) throw new Error('action_denied');
+      if (!(session.taskKind === 'migration_apply' ? migrationActions : session.taskKind === 'migration_review' ? reviewActions : recyclingActions).includes(request.operation)) throw new Error('action_denied');
       if (session.taskKind === 'recycling_apply' && ['read_recycling_plan', 'execute_recycling_plan'].includes(request.operation) && String(input.planId || '') !== session.targetId) throw new Error('maintenance_target_denied');
       try { return await dispatch(request); }
       catch (error) {

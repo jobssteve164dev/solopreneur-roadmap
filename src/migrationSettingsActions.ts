@@ -3,7 +3,7 @@ export interface MigrationSettingsDependencies {
   ready(root: string): Promise<void>;
   call(root: string, operation: string, input: Record<string, unknown>): Promise<any>;
   confirm(files: Array<{ itemId: string; path: string; bytes: number }>): Promise<boolean>;
-  launchAgent(kind: 'migration_review' | 'recycling_apply', targetId?: string): Promise<void>;
+  launchAgent(kind: 'migration_review' | 'migration_apply' | 'recycling_apply', targetId?: string): Promise<void>;
 }
 
 export async function handleMigrationSettingsAction(request: Record<string, unknown>, dependencies: MigrationSettingsDependencies): Promise<Record<string, unknown>> {
@@ -17,6 +17,10 @@ export async function handleMigrationSettingsAction(request: Record<string, unkn
   };
   if (command === 'dataMigration.agent') {
     await dependencies.launchAgent('migration_review');
+    return { overview: await call('migration_overview'), dataRoot: root, agentStarted: true };
+  }
+  if (command === 'dataMigration.delegate') {
+    await dependencies.launchAgent('migration_apply');
     return { overview: await call('migration_overview'), dataRoot: root, agentStarted: true };
   }
   if (command === 'dataMigration.preview') return { plan: await call('prepare_recycling'), overview: await call('migration_overview'), dataRoot: root };

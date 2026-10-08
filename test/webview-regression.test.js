@@ -59,7 +59,9 @@ test('the final temporary migration card delegates maintenance to Agent and pres
   assert.match(webview, /reviewAgentActive/);
   assert.match(webview, /activeRecyclingPlans\.has\(item\.planId\)/);
   assert.match(webview, /旧数据整理/);
-  assert.doesNotMatch(webview, /交给 Agent/);
+  assert.match(webview, /data-migration-delegate/);
+  assert.match(webview, /dataMigration\.delegate/);
+  assert.match(webview, /交给 Agent 迁移/);
   assert.match(fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8'), /自动整理需要使用 Claude Code/);
   assert.ok(sidebar.indexOf('${getMigrationSettingsCardHtml()}') > sidebar.indexOf('feedback-rating-card'));
 });

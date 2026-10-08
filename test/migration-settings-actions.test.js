@@ -24,3 +24,19 @@ test('an approved batch launches the Agent for the exact plan; changed roots can
   await assert.rejects(handleMigrationSettingsAction({ command: 'dataMigration.recycle', planId: 'plan', dataRoot: '/previous' }, dependencies), /data_location_changed/);
   assert.deepEqual(calls, []);
 });
+
+test('delegating migration launches the Agent migration task instead of only reviewing existing jobs', async () => {
+  const launches = [];
+  const calls = [];
+  const dependencies = {
+    getRoot: () => '/isolated',
+    ready: async () => {},
+    call: async (_root, operation) => { calls.push(operation); return { jobs: [] }; },
+    confirm: async () => false,
+    launchAgent: async (kind, targetId) => launches.push({ kind, targetId })
+  };
+  const result = await handleMigrationSettingsAction({ command: 'dataMigration.delegate', dataRoot: '/isolated' }, dependencies);
+  assert.equal(result.agentStarted, true);
+  assert.deepEqual(launches, [{ kind: 'migration_apply', targetId: undefined }]);
+  assert.deepEqual(calls, ['migration_overview']);
+});

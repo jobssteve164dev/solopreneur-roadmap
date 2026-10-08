@@ -182,6 +182,14 @@ test('Agent migration prompt uses only maintenance MCP tools and keeps its resul
   assert.throws(() => applyNativeMigrationAgentBoundary("'codex' exec 'prompt'", 'codex', 'codex'), /native_boundary_unsupported/);
 });
 
+test('migration Agent can discover and enqueue registered legacy sources before reviewing them', () => {
+  const { buildMigrationMaintenancePrompt } = require('../out/migrationAgentMaintenance.js');
+  const prompt = buildMigrationMaintenancePrompt('migration_apply');
+  assert.match(prompt, /solomap_migration_start/);
+  assert.match(prompt, /solomap_migration_status/);
+  assert.match(prompt, /solomap_recycling_preview/);
+});
+
 test('external Agent CLI discovers only authorized maintenance tools through the managed MCP bridge', async () => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-stdio-')), '.solomap-global');
   fs.mkdirSync(root);
@@ -199,7 +207,7 @@ test('external Agent CLI discovers only authorized maintenance tools through the
       assert.ok(Date.now() < deadline, stderr || 'runtime did not start');
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    const task = await sendRuntimeDataRequest(root, { operation: 'create_maintenance_task', input: { kind: 'migration_review' } });
+    const task = await sendRuntimeDataRequest(root, { operation: 'create_maintenance_task', input: { kind: 'migration_apply' } });
     const endpoint = await readMaintenanceRuntimeEndpoint(root);
     const emptyCredentialResponse = await new Promise((resolve, reject) => {
       const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
@@ -225,10 +233,12 @@ test('external Agent CLI discovers only authorized maintenance tools through the
     });
     await client.connect(transport);
     const names = (await client.listTools()).tools.map(tool => tool.name).sort();
-    assert.deepEqual(names, ['solomap_maintenance_finish', 'solomap_migration_retry', 'solomap_migration_status', 'solomap_recycling_apply', 'solomap_recycling_preview']);
+    assert.deepEqual(names, ['solomap_maintenance_finish', 'solomap_migration_retry', 'solomap_migration_start', 'solomap_migration_status', 'solomap_recycling_apply', 'solomap_recycling_preview']);
     assert.ok(!names.includes('solomap_write'));
     const status = await client.callTool({ name: 'solomap_migration_status', arguments: {} });
     assert.equal(status.isError, undefined, JSON.stringify(status.content));
+    const started = await client.callTool({ name: 'solomap_migration_start', arguments: {} });
+    assert.equal(started.isError, undefined, JSON.stringify(started.content));
     const finish = await client.callTool({ name: 'solomap_maintenance_finish', arguments: {} });
     assert.equal(finish.isError, undefined, JSON.stringify(finish.content));
     const afterFinish = await client.callTool({ name: 'solomap_migration_status', arguments: {} });

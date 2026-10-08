@@ -4,27 +4,46 @@ import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { RuntimeDataOperations } from './runtimeDataOperations';
 
+type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
+type MigrationAcknowledgement = { scheduled?: boolean };
+
 export async function enqueueStartupDataMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
-  try { await enqueueStartupMemoryMigration(store, operations, shouldContinue); }
-  catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupProjectMigrations(store, operations, shouldContinue); }
-  catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
-  if (!shouldContinue()) return;
-  const sourceRoot = path.join(store.root, 'intelligence-conversations');
-  try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-  await operations({ operation: 'import_intelligence', input: { sourceRoot, idempotencyKey: `startup-intelligence-v1:${sourceRoot}` } });
+  await enqueueAvailableDataMigrations(store, operations, shouldContinue);
 }
 
-async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
-  let projects: Array<{ path: string }> = [];
+/** Discovers current legacy sources without blocking the caller on their import. */
+export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false): Promise<{ queued: number }> {
+  let queued = 0;
+  const enqueue = async (request: Parameters<RuntimeDataOperations>[0]): Promise<void> => {
+    const result = await operations(refreshCompleted ? { ...request, input: { ...request.input, refreshCompleted: true } } : request) as MigrationAcknowledgement;
+    if (result.scheduled) queued++;
+  };
+  try { await enqueueStartupMemoryMigration(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
+  try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
+  if (!shouldContinue()) return { queued };
+  const sourceRoot = path.join(store.root, 'intelligence-conversations');
+  try {
+    if ((await fs.promises.stat(sourceRoot)).isDirectory()) await enqueue({ operation: 'import_intelligence', input: { sourceRoot, idempotencyKey: `startup-intelligence-v1:${sourceRoot}` } });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap intelligence migration startup: ${String(error)}\n`);
+  }
+  return { queued };
+}
+
+async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+  let projects: Array<{ path: string }> = store.registeredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
     const registry = JSON.parse(await fs.promises.readFile(path.join(store.root, 'projects.json'), 'utf8'));
     if (!Array.isArray(registry.projects)) throw new Error('project_registry_invalid');
-    projects = registry.projects;
+    const known = new Set(projects.map(project => path.resolve(project.path)));
+    for (const project of registry.projects) {
+      const projectPath = String(project?.path || '');
+      if (path.isAbsolute(projectPath) && !known.has(path.resolve(projectPath))) projects.push({ path: projectPath });
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap growth project registry: ${String(error)}\n`);
-    return;
   }
   for (const project of projects) {
     if (!shouldContinue()) return;
@@ -44,7 +63,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
 }
 
 /** Runs after the owner's control endpoint is ready; sources stay untouched. */
-export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
+export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
   const sourceRoot = path.join(store.root, 'memory');
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
   catch (error) {

@@ -536,7 +536,7 @@ export async function buildProjectPortfolioSummariesFromDatabase(
   await Promise.all(projects.map(async (project) => {
     investmentStatsByProjectPath.set(
       project.path,
-      await readProjectInvestmentStatsFromDatabase(project.path, extensionPath)
+      await readProjectInvestmentStatsFromDatabase(project.path, extensionPath, new Date(), options.globalDataPath || '')
     );
   }));
   return buildProjectPortfolioSummaries(projects, {
