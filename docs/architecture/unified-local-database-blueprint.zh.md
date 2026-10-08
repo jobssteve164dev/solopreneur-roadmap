@@ -448,3 +448,78 @@ actor、权限与已观测来源由连接和宿主确认；请求中的 provenan
 项目日志、项目生长图和运行产物的生产写入、读取与后台历史导入已接入全局数据库；项目日志写入在数据库提交后才返回，按项目分配旧数字 ID，完整分页恢复，多项目并发不串写。插件重连后可恢复已提交日志；任务续接需要的状态与原生会话文件仍作为必要本地文件保留，不进入回收清单。项目卡片与项目组合的投入统计已改从全局 Runtime 读取运行索引，旧项目数据库只保留为过渡回落。设置卡片的“交给 Agent 迁移”会创建独立维护任务；受限 Agent 通过 `solomap_migration_start` 发现旧源、排队并继续检查与回收预览。记忆/经验、报告学习、设置队列等其余消费者切换，RSI 采用与评估，以及对应旧写入入口退役仍需按第 9、10 节继续验收；不得把本轮消费者收口扩大表述为整个蓝图已经完成。
 
 设计依据：用户在本次会话明确的一数据库/少量必要文件/统一 MCP/数据 RSI 目标，以及第 2 节列出的当前源代码。SQLite 和 MCP 的外部协议事实采用上文直接链接的官方文档。
+
+## 12. 新对话完整收口交接（2026-10-08）
+
+### 12.1 当前已成立的基线
+
+以下是代码、测试和正式发布已经证明的事实，新对话不应重新设计或重复实现：
+
+- `.solomap-global/solomap.db` 已由单一 Runtime owner 使用磁盘 SQLite、WAL、版本化 schema、幂等请求、内容分块、权限、在线备份和迁移队列管理。
+- 项目日志、生长快照、运行索引、运行归档及智能聊天已有数据库读写操作；项目卡片和项目组合投入统计优先读取全局 Runtime。
+- 外部 Agent CLI 已有统一 MCP bridge 和六项日常数据工具；迁移维护 Agent 另有六项受限工具。任务提示词会说明分页、revision、幂等和写后回读。
+- 历史记忆、智能聊天、项目 journal/growth 和运行目录可以异步导入；导入不阻塞 Runtime 连接和即时读写，显式发现能重新扫描完成后新增的旧文件，并发发现只调度一次。
+- 设置末尾的数据卡片可把迁移交给 Agent，显示迁移、检查、精确回收和恢复状态；旧文件未经精确清单和用户确认不会回收。
+- 以上能力已随 0.0.510 发布。迁移期兼容读取仍存在，因此这只是可用底座，不是终态。
+
+### 12.2 尚未闭环的八个交付包
+
+下表是达到第 3、9、10 节终态所需的完整剩余范围。任何一项未通过，都不能声称新数据架构完成。
+
+| 交付包 | Observed in code | 必须完成 | 完成证据 |
+| --- | --- | --- | --- |
+| 1. 运行、会话与任务权威入库 | `src/extension.ts` 仍为每轮写 prompt、command、runner、status、session、PID、时间标记、快照、patch、manifest、output；`src/sessionIdentity.ts`、`src/taskCheckpoint.ts`、`src/taskReport.ts`、`src/continuation.ts` 和 `src/activeConversationLedger.ts` 仍消费这些文件 | 把 task/run/turn、原生 session binding、检查点、sentinel、报告、日志块、变更证据和恢复状态接到统一应用操作；共享 runner 从发行包执行，只在外部 CLI 确实要求路径时生成 operation-scoped 临时文件 | 新任务、续聊、停止、插件关闭、Runtime 重启、Agent 不执行检查点、迟到终态均只靠数据库恢复；连续执行不新增永久 `agent-runs` 业务文件 |
+| 2. 摘要、报告与学习消费者入库 | `src/runDigest.ts` 仍写 `run-digests`、`execution-graph.json`、`step-memory`；`src/growthReports.ts`、`src/learningReview.ts` 仍扫描任务报告和运行文件 | 摘要、handoff、执行关系、任务报告、报告回执和学习来源改为数据库对象与关系查询；工作汇报、复核、历史展示和学习收集只走统一数据层 | 报告和学习消费者可从数据库完整回读同一轮次、父子关系、证据和正文；旧报告目录不再被新任务写入或作为成功必需条件 |
+| 3. 记忆、经验与 RSI 闭环 | `resources/tools/solomap-memory.cjs`、`resources/tools/solomap-experience.cjs`、`src/solomapGlobal.ts`、`src/learningLedger.ts`、`src/learningReviewApply.ts`、`src/learningReviewRunner.ts` 仍以 MD、CSV、JSONL、候选/提案/应用文件为权威 | 工具改为调用 Runtime/MCP；记忆、事件、候选、审核、策略版本、采用与评价入库；复盘 Agent 通过数据库提交并应用完整提示词；只为外部 Agent 的一次执行按需注入上下文 | 至少一条真实结果形成经验、经审核应用到后续任务、记录采用的策略/经验版本和后续结果；能显示有效、无效或无法评价；新复盘不新增永久记忆/学习文件 |
+| 4. 项目、设置、UI 与后台队列入库 | `src/projectRegistry.ts` 仍写 `projects.json`；`src/scheduledTaskLedger.ts`、`src/autonomousRuntime.ts`、`src/cognitiveRuntimeConfig.ts`、`src/telegramRuntimeConfig.ts`、`src/activeConversationLedger.ts` 仍写状态、租约、事件、反馈、配置、调度和 outbox 文件；部分 UI 状态仍在 VS Code globalState 或缓存文件 | 项目位置、隐藏/排序、设置、草稿/展开/选中、租约、调度、触发、Runtime 状态、认知/TG 设置、通知 inbox/outbox、日报/战略与必要投影接到数据库；`control.json` 只保留发现和短期连接凭据 | 多窗口并发修改不丢字段；关闭自主任务仍能读写；重启后调度、通知和活动会话不重放；除 `control.json` 外不新增长期控制面文件 |
+| 5. 能力包、文档与附件元数据入库 | `src/solomapGlobal.ts` 仍写 skills/MCP/enhancements registry、source.lock、health、安装 run/result；`src/documentationManifest.ts`、`src/attachments.ts` 和安装/升级入口仍依赖独立文件 | 登记、版本、来源锁、授权、启停、健康和安装操作入库；真正需要执行的包文件继续留在 `packages/`；内部消息附件原件入 BLOB，正式项目资产保持文件；文档索引入库，固定帮助从发行包读取 | 安装、升级、启停、卸载和失败恢复不靠第二份 registry；包仍可执行；内部附件可全文回读；不误迁用户正式文档和产物 |
+| 6. 剩余分析与兼容读取退役 | `src/projectAnalytics.ts`、`src/agentImpact.ts`、`src/growthReports.ts`、`src/runIndexMaintenance.ts`、`src/localUsageStats.ts`、`src/strategyPyramid.ts` 及侧栏缓存仍有旧 DB、运行目录、CSV/JSON 或文件签名回退 | 逐个把贡献/token/投资、工作汇报、学习、战略、日报、远端投影和本地使用统计切到统一操作；数据库成为权威后移除对应旧读回退与文件 watcher，保留只用于尚未迁移存量的显式 importer | 第 9 节十类消费者从真实入口全部通过；移走旧来源后功能仍完整，不能靠测试 fixture 中仍存在的旧文件通过 |
+| 7. CSV、导出、恢复与跨项目边界 | roadmap CSV 必须保留；数据库已有 export/backup，但完整的 CSV 接纳恢复、单项目迁出迁入、clone/move、旧 ID、秘密和大附件闭环尚未形成统一验收 | 完成 CSV hash/revision/pending effect 协议；验证 Git checkout/pull 冲突；实现全库一致性备份、单项目导出/恢复、项目移动/克隆冲突和秘密引用；外部 Agent 的真实 Codex 配置也需完成一次无损接入验证 | DB 已提交但 CSV 未落盘可恢复；导出/恢复逐项对账；项目不串数据；备份不遗漏 WAL；秘密不进入导出或日志；Codex 与其他代表性 CLI 可读写回读 |
+| 8. 生产者退役、迁移对账与回收 | 迁移和回收框架已存在，但运行、学习、设置、队列和能力登记的旧生产者仍在；现有回收清单因此故意保留大量运行文件 | 所有新生产者切库后扩展 importer 和 recycling eligibility；在真实存量上完成源/目标数量、byte/hash、关系、冲突、失败、重启和性能对账；生成精确物理文件清单，只有取得用户对该清单的明确授权后才逐项回收 | 常态文件布局符合第 3 节；连续真实任务的永久文件数不增长；全部 CI/安全/打包通过，正式版本发布并从两个市场读回；迁移卡片没有未解释失败或悬空任务 |
+
+### 12.3 不能迁移或删除的边界
+
+- `.solopreneur/project.json`、有路线图项目的 `.solopreneur/roadmap.csv`、用户已有 `agent.md` / `AGENTS.md`、用户正式文档和项目产物继续保留。
+- `.solomap-global/runtime/control.json`、实际执行所需的 `packages/`、活跃 operation 的 `tmp/`、用户明确导出的 `exports/` 以及 SQLite 的 WAL/SHM 属于允许存在的文件。
+- 外部 Agent、VS Code、OS 服务、密钥存储或第三方包明确要求的配置/可执行文件保持其宿主合同；数据库只保存 SoloMap 的登记与引用。
+- 不得通过缩短日志、丢弃全文、禁用功能、限制任务时长、跳过历史、伪造映射或让用户选择“数据库模式”换取文件数下降。
+- 不得批量删除。历史文件回收前必须展示精确物理文件清单、对账数据库完整性，并取得用户对该清单的明确授权。
+
+### 12.4 新对话执行顺序
+
+1. 先读本文件、项目规则、当前代码和长期项目记忆；以代码、测试、日志和正式运行结果为事实，不把本交接当已实现。
+2. 固定当前 Git 基线和脏树，建立“第 12.2 节八个交付包 → 生产者 → 消费者 → schema/operation → 回归 → 退役条件”的验收账。
+3. 先补统一数据层缺少的领域操作，再依次收口运行任务、报告学习、记忆 RSI、后台队列、能力登记和分析消费者。每切换一类，同轮完成它的生产写入、全部读取者、重启恢复、并发、历史导入和旧写入停止。
+4. 所有消费者切换后再移除兼容回退和 watcher；先证明没有旧来源也能完成用户动作，不能先删文件制造绿色。
+5. 在隔离副本和真实存量上完成迁移对账、并发/即时、恢复、文件计数、写放大和性能验收。任何生产首次暴露的可前置问题都返回本地修复并重跑。
+6. 形成《待删除物理文件清单》并停在用户授权门前；未获授权时保留历史存量，但其生产者必须已经停止。
+7. 通过独立审查、完整测试、最终 VSIX/配置解析与真实用户入口检查后提交并推送 `origin/main`，跟踪 CI、安全、自动发布和双市场可见性。更新本节状态与长期项目记忆，留下干净且与远端一致的工作树。
+
+### 12.5 可直接复制到新 Solo 对话的提示词
+
+```text
+继续完成 SoloMap 单一全局数据库新架构的全部剩余尾项，直到可以正式宣布终态完成并发布生产。项目是 /home/ubuntu/project/solopreneur-roadmap。
+
+先完整读取并严格遵守：
+1. /home/ubuntu/project/solopreneur-roadmap/AGENTS.md 与 agent.md
+2. /home/ubuntu/project/solopreneur-roadmap/docs/architecture/unified-local-database-blueprint.zh.md，尤其第 3、9、10、12 节
+3. /home/ubuntu/project/.solomap-global/memory/projects/solopreneur-roadmap.md 与 active/current-session.md
+
+用户最终目标保持不变：每个数据根只有一个权威 solomap.db；项目常态只保留 project.json、需要 Git 编辑的 roadmap.csv、用户正式规则/文档/产物；Runtime 只保留 control.json，实际包、活跃临时文件和用户导出按明确用途存在。所有内部业务状态、全文、历史、关系、队列、记忆、经验、RSI、设置和索引进入统一数据库，并由插件提供给内部消费者与外部 Agent CLI 的同一应用操作/MCP 入口。必须支持多项目、多窗口和多 Agent 并发，以及提交后即时回读；关闭插件和 Runtime 重启后仍可接续。
+
+不要再只推进一个局部消费者，也不要把已知尾项留到下一轮。以蓝图第 12.2 节八个交付包为完整范围，先建立逐项验收账，然后持续实施到全部关闭：
+- 运行/会话/任务与每轮 agent-runs 文件权威入库；
+- digest、execution graph、step memory、任务报告和工作汇报/学习消费者入库；
+- 记忆、经验、复盘应用及真实 RSI 采用与评价闭环；
+- projects/settings/UI state/租约/调度/Runtime/TG/通知队列入库；
+- skills/MCP/enhancements 登记、安装状态、文档索引和内部附件入库，实际执行包与正式资产按边界保留；
+- 所有剩余分析消费者切库并退役旧 DB/目录/CSV/JSON 回退与 watcher；
+- roadmap CSV 双向一致性、全库备份、单项目导出恢复、移动/克隆、旧 ID、秘密和大附件验收；
+- 所有旧生产者停止、全量异步迁移与源目标对账、真实存量性能/并发/重启验收、精确回收清单和生产发布。
+
+每个交付包必须在同一轮闭合生产者、全部消费者、schema/operation、历史导入、并发与重启恢复、负向测试及旧写入停止，不能靠兼容文件仍存在使测试通过。保留当前已成立的 Runtime 单 owner、异步不阻塞、受限维护 MCP、设置末尾用户向迁移卡片、精确回收授权、任务续聊、路线图 CSV、外部 Agent 宿主配置和全部现有功能。不得修改 roadmap.csv 状态，不得批量删除或清空目录，不得通过缩短/丢弃日志与证据换取整洁。
+
+开始时审计真实代码并区分 Observed 与 Inference；行为变更按 TDD，提交前做无实现历史的独立 review，完成前跑新鲜完整验证和真实最终生成物/用户入口检查。所有新代码完成后提交并推送 origin/main，跟踪 CI、安全、自动发布与双市场版本可见性。历史文件只在数据库完整对账后生成《待删除物理文件清单》；必须停下来取得我对该精确清单的明确授权后才能回收。除这一个毁灭性操作授权门外，不要中途把实现选择或剩余工作交回给我。
+
+最终只在以下条件全部成立时宣称完成：第 9 节十类消费者真实入口全部通过；新任务/续聊/报告/复盘/调度/迁移后永久业务文件数不增长；旧生产者和兼容读取已退役；真实 RSI 循环成立；并发、即时、关闭插件后接续、备份/恢复/导出和秘密边界通过；发布版本在 VS Marketplace 与 Open VSX 可读回；工作树干净并与 origin/main 一致。最终报告必须列出完成证据、允许保留的文件、仍保留但等待我授权回收的精确历史文件，以及任何真正无法在本轮验证的外部边界。留在 Solo 交互会话等待我继续。
+```
