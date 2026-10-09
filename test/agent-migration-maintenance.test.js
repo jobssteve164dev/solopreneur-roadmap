@@ -58,6 +58,24 @@ test('only one active maintenance task can own the same action target', async ()
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('migration maintenance can read every retained source for one job while project sessions stay denied', async () => {
+  const f = fixture();
+  try {
+    const progress = { retainedFiles: ['first.md', 'last.md'], conflicts: [{ source: 'last.md', error: 'project_scope_mapping_required' }] };
+    const job = f.store.enqueueMemoryMigration({ sourceRoot: path.join(f.root, 'memory') }, 'detail');
+    f.store.updateMigrationJob(job.jobId, 'completed_with_conflicts', progress);
+    const created = await f.call('create_maintenance_task', { kind: 'migration_review' });
+    const session = await f.call('open_maintenance_mcp_session', created);
+    const detail = await f.operations({ operation: 'migration_status', input: { jobId: job.jobId }, sessionToken: session.sessionToken });
+    assert.deepEqual(detail.progress, progress);
+    const project = await f.call('register_project', { root: path.dirname(f.root) });
+    const ordinary = await f.call('open_mcp_session', { projectId: project.projectId });
+    await assert.rejects(f.operations({ operation: 'migration_status', input: { jobId: job.jobId }, sessionToken: ordinary.sessionToken }), /action_denied/);
+    await f.operations({ operation: 'complete_maintenance_task', input: {}, sessionToken: session.sessionToken });
+    await assert.rejects(f.operations({ operation: 'migration_status', input: { jobId: job.jobId }, sessionToken: session.sessionToken }), /mcp_session_expired/);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('a maintenance launch can be claimed after Runtime restart but not twice', async () => {
   const f = fixture();
   let reopened;
@@ -193,7 +211,11 @@ test('migration Agent can discover and enqueue registered legacy sources before 
 test('external Agent CLI discovers only authorized maintenance tools through the managed MCP bridge', async () => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-stdio-')), '.solomap-global');
   fs.mkdirSync(root);
-  new UnifiedDataStore(root).close();
+  const seed = new UnifiedDataStore(root);
+  const retainedFiles = Array.from({ length: 500 }, (_, index) => `history/${index}.log`);
+  const detailJob = seed.enqueueMemoryMigration({ sourceRoot: path.join(root, 'memory') }, 'stdio-detail');
+  seed.updateMigrationJob(detailJob.jobId, 'completed', { retainedFiles, conflicts: [], imported: 500 });
+  seed.close();
   const runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root, '--runtime-id', 'maintenance-owner'], { stdio: 'pipe' });
   let stderr = '';
   runtime.stderr.on('data', chunk => { stderr += chunk; });
@@ -237,6 +259,11 @@ test('external Agent CLI discovers only authorized maintenance tools through the
     assert.ok(!names.includes('solomap_write'));
     const status = await client.callTool({ name: 'solomap_migration_status', arguments: {} });
     assert.equal(status.isError, undefined, JSON.stringify(status.content));
+    const overview = JSON.parse(status.content[0].text);
+    assert.equal(overview.jobs.find(job => job.jobId === detailJob.jobId).progress.retainedFileCount, 500);
+    const detail = await client.callTool({ name: 'solomap_migration_status', arguments: { jobId: detailJob.jobId } });
+    assert.equal(detail.isError, undefined, JSON.stringify(detail.content));
+    assert.deepEqual(JSON.parse(detail.content[0].text).progress.retainedFiles, retainedFiles);
     const started = await client.callTool({ name: 'solomap_migration_start', arguments: {} });
     assert.equal(started.isError, undefined, JSON.stringify(started.content));
     const finish = await client.callTool({ name: 'solomap_maintenance_finish', arguments: {} });

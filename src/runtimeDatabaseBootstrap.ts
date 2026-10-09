@@ -72,21 +72,32 @@ export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, ope
     process.stderr.write(`SoloMap memory source inspection: ${String(error)}\n`);
   }
   const mappings = new Map<string, string | null>();
-  let projects: Array<{ path: string; name?: string }> = [];
+  const projects: Array<{ path: string; name?: string }> = store.registeredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
     const registry = JSON.parse(await fs.promises.readFile(path.join(store.root, 'projects.json'), 'utf8'));
     if (!Array.isArray(registry.projects)) throw new Error('project_registry_invalid');
-    projects = registry.projects;
+    const known = new Set(projects.map(project => path.resolve(project.path)));
+    for (const project of registry.projects) {
+      if (!project || typeof project.path !== 'string' || !path.isAbsolute(project.path)) continue;
+      const projectPath = path.resolve(project.path);
+      if (known.has(projectPath)) continue;
+      projects.push(project);
+      known.add(projectPath);
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap memory project registry: ${String(error)}\n`);
   }
   const legacySlugs = new Map<string, Set<string>>();
   const legacySlug = (root: string) => path.basename(path.resolve(root)).toLowerCase().replace(/[^a-z0-9._-]+/g, '-');
   for (const project of projects) {
+    if (!shouldContinue()) return;
     if (!project || typeof project.path !== 'string' || !path.isAbsolute(project.path)) continue;
     const slug = legacySlug(project.path);
     if (!legacySlugs.has(slug)) legacySlugs.set(slug, new Set());
-    legacySlugs.get(slug)!.add(path.resolve(project.path));
+    let physicalRoot = path.resolve(project.path);
+    try { physicalRoot = await fs.promises.realpath(project.path); }
+    catch { /* Unavailable locations still keep their ambiguous ownership claim. */ }
+    legacySlugs.get(slug)!.add(physicalRoot);
   }
   for (const project of projects) {
     if (!shouldContinue()) return;

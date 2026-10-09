@@ -98,9 +98,7 @@ export class MigrationRecycling {
     return files;
   }
   public async overview() {
-    const latestJobs = new Map<string, ReturnType<UnifiedDataStore['readMigrationJob']>>();
-    for (const job of this.store.migrationJobs()) latestJobs.set(String(job.args.collection || 'memory') + ':' + String(job.args.sourceRoot), job);
-    const jobs = [...latestJobs.values()];
+    const jobs = this.store.migrationJobSummaries();
     const allRecycling = this.store.recyclingItems();
     const intelligenceIdentity = `intelligence:${path.join(this.store.root, 'intelligence-conversations')}`;
     const sourceOverview = this.store.migrationSourceOverview(intelligenceIdentity);

@@ -61,6 +61,95 @@ test('migration overview is immediate and leaves byte validation to explicit rev
   } finally { fs.promises.readFile = readFile; await f.operations.close(); f.store.close(); }
 });
 
+test('migration overview stays small with populated history while job detail retains every source and conflict after restart', async () => {
+  const f = fixture();
+  const retainedFiles = Array.from({ length: 25000 }, (_, index) => `project/.solopreneur/agent-runs/step/${index}/output.log`);
+  const conflicts = Array.from({ length: 300 }, (_, index) => ({ source: `projects/${index}.md`, error: 'project_scope_mapping_required' }));
+  const progress = { imported: 24500, unchanged: 200, originalBytes: 987654321, retainedFiles, conflicts, interrupted: false };
+  const job = f.store.enqueueMemoryMigration({ sourceRoot: path.join(f.root, 'memory') }, 'large-history');
+  f.store.updateMigrationJob(job.jobId, 'completed_with_conflicts', progress);
+  let restarted;
+  try {
+    const overview = await f.call('migration_overview');
+    assert.ok(Buffer.byteLength(JSON.stringify(overview)) < 50000, 'routine status must not transport every retained path');
+    assert.equal(overview.jobs[0].progress.retainedFileCount, 25000);
+    assert.equal(overview.jobs[0].progress.conflictCount, 300);
+    assert.equal(overview.jobs[0].progress.imported, 24500);
+    assert.equal(overview.jobs[0].progress.originalBytes, 987654321);
+    assert.equal(overview.jobs[0].progress.retainedFiles, undefined);
+    assert.deepEqual(overview.jobs[0].progress.conflicts, conflicts, 'actionable conflicts remain visible in settings');
+    assert.deepEqual((await f.call('migration_status', { jobId: job.jobId })).progress, progress);
+    await f.operations.close(); f.store.close();
+    restarted = UnifiedDataStore.open(f.root);
+    assert.deepEqual(restarted.readMigrationJob(job.jobId).progress, progress);
+  } finally {
+    if (restarted) restarted.close();
+    else { await f.operations.close(); f.store.close(); }
+  }
+});
+
+test('migration overview shows only the newest job for each exact collection and source', async () => {
+  const f = fixture();
+  try {
+    const sourceRoot = path.join(f.root, 'memory');
+    const old = f.store.enqueueMemoryMigration({ sourceRoot }, 'older');
+    f.store.updateMigrationJob(old.jobId, 'failed', { conflicts: [{ source: 'old.md', error: 'old failure' }] }, 'old failure');
+    const latest = f.store.enqueueMemoryMigration({ sourceRoot, projectScopes: { first: 'mapped' } }, 'latest');
+    f.store.updateMigrationJob(latest.jobId, 'completed', { imported: 10, retainedFiles: ['a.md', 'b.md'], conflicts: [] });
+    const other = f.store.enqueueMemoryMigration({ sourceRoot, collection: 'intelligence' }, 'different-collection');
+    const overview = await f.call('migration_overview');
+    assert.deepEqual(overview.jobs.map(job => job.jobId), [latest.jobId, other.jobId]);
+    assert.equal(overview.jobs[0].progress.conflictCount, 0);
+    assert.equal(overview.jobs[0].progress.retainedFileCount, 2);
+    assert.equal(overview.jobs[1].progress.conflictCount, 0);
+    assert.equal(f.store.readMigrationJob(old.jobId).error, 'old failure');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('enqueueing a new migration does not decode unrelated completed history', async () => {
+  const f = fixture();
+  try {
+    const old = f.store.enqueueMemoryMigration({ sourceRoot: path.join(f.root, 'old-memory') }, 'old-completed');
+    f.store.updateMigrationJob(old.jobId, 'completed', {});
+    f.store.db.run('UPDATE migration_jobs SET progress_json=? WHERE id=?', ['invalid historical progress', old.jobId]);
+    const sourceRoot = path.join(f.root, 'new-memory');
+    fs.mkdirSync(sourceRoot);
+    const queued = await f.call('import_memory', { sourceRoot, idempotencyKey: 'new-source' });
+    assert.equal(queued.scheduled, true);
+    await f.operations.waitForMigrations();
+    assert.equal(f.store.readMigrationJob(queued.jobId).status, 'completed');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('legacy empty collection values share the default memory source status', async () => {
+  const f = fixture();
+  try {
+    const sourceRoot = path.join(f.root, 'memory');
+    f.store.enqueueMemoryMigration({ sourceRoot }, 'implicit-memory');
+    const latest = f.store.enqueueMemoryMigration({ sourceRoot, collection: '' }, 'empty-memory');
+    f.store.updateMigrationJob(latest.jobId, 'completed', { imported: 2 });
+    const overview = await f.call('migration_overview');
+    assert.deepEqual(overview.jobs.map(job => job.jobId), [latest.jobId]);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('jobs created in the same millisecond use commit order rather than UUID sorting for latest status', async () => {
+  const f = fixture();
+  try {
+    const args = { sourceRoot: path.join(f.root, 'memory') };
+    const old = f.store.enqueueMemoryMigration(args, 'old-in-same-millisecond');
+    f.store.updateMigrationJob(old.jobId, 'failed', {}, 'old failure');
+    const latest = f.store.enqueueMemoryMigration(args, 'new-in-same-millisecond');
+    f.store.updateMigrationJob(latest.jobId, 'completed', {});
+    f.store.db.run('UPDATE migration_jobs SET created_at=?,id=? WHERE id=?', [42, 'old-z', old.jobId]);
+    f.store.db.run('UPDATE migration_jobs SET created_at=?,id=? WHERE id=?', [42, 'new-a', latest.jobId]);
+    const overview = await f.call('migration_overview');
+    assert.equal(overview.jobs.length, 1);
+    assert.equal(overview.jobs[0].jobId, 'new-a');
+    assert.equal(overview.jobs[0].status, 'completed');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('migration overview aggregates source counts without materializing every captured file', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../src/migrationRecycling.ts'), 'utf8');
   const body = source.slice(source.indexOf('public async overview()'), source.indexOf('public async prepare()'));

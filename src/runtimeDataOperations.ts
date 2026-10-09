@@ -223,7 +223,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     const input = request.input;
     if (session.kind === 'maintenance') {
       store.authorizeMaintenanceTask(session.taskId, session.taskKind, session.targetId);
-      const reviewActions = ['migration_overview', 'retry_migration', 'prepare_recycling', 'read_recycling_plan', 'complete_maintenance_task'];
+      const reviewActions = ['migration_overview', 'migration_status', 'retry_migration', 'prepare_recycling', 'read_recycling_plan', 'complete_maintenance_task'];
       const migrationActions = ['discover_migrations', ...reviewActions];
       const recyclingActions = ['migration_overview', 'read_recycling_plan', 'execute_recycling_plan', 'complete_maintenance_task'];
       if (!(session.taskKind === 'migration_apply' ? migrationActions : session.taskKind === 'migration_review' ? reviewActions : recyclingActions).includes(request.operation)) throw new Error('action_denied');

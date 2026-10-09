@@ -76,6 +76,89 @@ test('normal Runtime startup creates the database and automatically imports lega
   } finally { await stop(run, root); }
 });
 
+test('memory startup uses database project identities without recreating a legacy registry', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-db-project-'));
+  const root = path.join(fixture, '.solomap-global');
+  const workspace = path.join(fixture, 'alpha');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(path.join(root, 'memory', 'projects'), { recursive: true });
+  const source = path.join(root, 'memory', 'projects', 'alpha.md');
+  fs.writeFileSync(source, 'Original database-only project history');
+  let store = new UnifiedDataStore(root);
+  let operations = createRuntimeDataOperations(store);
+  try {
+    const project = await store.registerProject({ root: workspace });
+    await enqueueStartupMemoryMigration(store, operations, () => true);
+    await operations.waitForMigrations();
+    const imported = store.search({ scope: project.projectId, kinds: ['memory'] });
+    assert.equal(imported.items.length, 1);
+    assert.equal(store.read(imported.items[0].objectId).data.content, fs.readFileSync(source, 'utf8'));
+    assert.equal(store.migrationJobs()[0].progress.conflicts.length, 0);
+    const eventCount = store.search({ scope: project.projectId }).sourceSequence;
+    await operations.close(); store.close();
+    store = UnifiedDataStore.open(root); operations = createRuntimeDataOperations(store);
+    await enqueueStartupMemoryMigration(store, operations, () => true);
+    await operations.waitForMigrations();
+    assert.equal(store.search({ scope: project.projectId }).sourceSequence, eventCount);
+    assert.equal(store.migrationJobCount(), 1);
+    assert.equal(fs.existsSync(path.join(root, 'projects.json')), false);
+    assert.equal(fs.readFileSync(source, 'utf8'), 'Original database-only project history');
+  } finally { await operations.close(); store.close(); }
+});
+
+test('database and legacy projects with the same memory slug stay ambiguous instead of sharing private history', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-db-collision-'));
+  const root = path.join(fixture, '.solomap-global');
+  const first = path.join(fixture, 'database', 'alpha');
+  const second = path.join(fixture, 'legacy', 'alpha');
+  for (const directory of [first, second, path.join(root, 'memory', 'projects')]) fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(root, 'memory', 'projects', 'alpha.md'), 'Unresolved private project history');
+  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ schemaVersion: 1, projects: [{ path: second }], hiddenProjects: [] }));
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  try {
+    const registered = await store.registerProject({ root: first });
+    await enqueueStartupMemoryMigration(store, operations, () => true);
+    await operations.waitForMigrations();
+    const other = await store.registerProject({ root: second });
+    for (const project of [registered, other]) assert.equal(store.search({ scope: project.projectId, kinds: ['memory'] }).items.length, 0);
+    assert.deepEqual(store.migrationJobs()[0].progress.conflicts, [{ source: 'projects/alpha.md', error: 'project_scope_mapping_required' }]);
+    assert.equal(store.readMigrationSource(`memory:${path.join(root, 'memory')}`, 'projects/alpha.md').bytes.toString(), 'Unresolved private project history');
+  } finally { await operations.close(); store.close(); }
+});
+
+test('a legacy alias and database location for the same project do not create a false memory conflict', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-db-alias-'));
+  const root = path.join(fixture, '.solomap-global');
+  const workspace = path.join(fixture, 'physical', 'alpha');
+  const alias = path.join(fixture, 'linked', 'alpha');
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(path.dirname(alias));
+  fs.symlinkSync(workspace, alias, 'junction');
+  fs.mkdirSync(path.join(root, 'memory', 'projects'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'memory', 'projects', 'alpha.md'), 'History through the original project alias');
+  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ schemaVersion: 1, projects: [{ path: alias }], hiddenProjects: [] }));
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  try {
+    const project = await store.registerProject({ root: workspace });
+    await enqueueStartupMemoryMigration(store, operations, () => true);
+    await operations.waitForMigrations();
+    assert.equal(store.search({ scope: project.projectId, kinds: ['memory'] }).items.length, 1);
+    assert.equal(store.migrationJobs()[0].progress.conflicts.length, 0);
+    assert.deepEqual(store.registeredProjectRoots(), [workspace]);
+  } finally { await operations.close(); store.close(); }
+});
+
 test('Runtime imports legacy project growth history in the background without removing its source', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-import-'));
   const root = path.join(fixture, '.solomap-global');

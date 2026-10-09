@@ -1,7 +1,7 @@
 export function getMigrationSettingsCardHtml(): string {
   return `<section class="settings-card" id="migration-settings-card" aria-labelledby="migration-card-title" hidden>
     <style>
-      #migration-settings-card { color: var(--text-main, #e2e8f0); gap: 12px; padding: 14px; overflow: hidden; }
+      #migration-settings-card { color: var(--text-main, #e2e8f0); gap: 12px; padding: 14px; overflow: hidden; flex-shrink: 0; }
       #migration-settings-card .migration-heading { display: flex; align-items: flex-start; gap: 10px; }
       #migration-settings-card .migration-heading-icon { display: grid; flex: 0 0 32px; width: 32px; height: 32px; place-items: center; border-radius: 9px; color: #67e8f9; background: rgba(34, 211, 238, .11); border: 1px solid rgba(103, 232, 249, .2); }
       #migration-settings-card .migration-heading-copy { min-width: 0; flex: 1; }

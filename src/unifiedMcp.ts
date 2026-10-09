@@ -21,7 +21,8 @@ export function registerMaintenanceMcpTools(server: McpServer, source: UnifiedMc
     });
   };
   register('solomap_migration_start', '发现已登记项目中的旧数据并幂等加入后台迁移队列。', {}, false, () => source.call('discover_migrations', {}));
-  register('solomap_migration_status', '读取当前迁移进度、待处理项目和回收状态。', {}, true, () => source.call('migration_overview', {}));
+  register('solomap_migration_status', '读取当前迁移进度、待处理项目和回收状态；提供 jobId 可读取该任务的完整来源和处理记录。', { jobId: z.string().min(1).optional() }, true, input => input.jobId
+    ? source.call('migration_status', { jobId: input.jobId }) : source.call('migration_overview', {}));
   register('solomap_migration_retry', '重试一个明确失败或中断的迁移任务。', { jobId: z.string().min(1) }, false, input => source.call('retry_migration', input));
   register('solomap_recycling_preview', '生成并读取可回收文件的精确清单；本工具不会回收文件。', {}, false, () => source.call('prepare_recycling', {}));
   register('solomap_recycling_apply', '执行插件界面中已由用户逐项确认并绑定到本任务的回收清单。', { planId: z.string().min(1) }, false, input => source.call('execute_recycling_plan', input));

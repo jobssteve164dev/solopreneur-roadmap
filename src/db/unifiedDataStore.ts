@@ -194,6 +194,30 @@ export class UnifiedDataStore {
   public migrationJobs(): MigrationJob[] {
     return this.rows('SELECT id FROM migration_jobs ORDER BY created_at,id').map(row => this.readMigrationJob(String(row.id)));
   }
+  public migrationJobCount(): number {
+    return Number(this.rows('SELECT COUNT(*) AS count FROM migration_jobs')[0].count);
+  }
+  public migrationJobSummaries(): MigrationJob[] {
+    const rows = this.rows(`WITH ranked AS (
+      SELECT rowid AS insertion_order,ROW_NUMBER() OVER (
+        PARTITION BY CASE WHEN json_extract(args_json,'$.collection') IS NULL
+          OR json_extract(args_json,'$.collection') IN ('',0) THEN 'memory'
+          ELSE json_extract(args_json,'$.collection') END,json_extract(args_json,'$.sourceRoot')
+        ORDER BY rowid DESC
+      ) AS source_rank FROM migration_jobs
+    ), latest AS MATERIALIZED (
+      SELECT jobs.id,jobs.args_json,jobs.status,jobs.error,ranked.insertion_order,
+        jsonb(jobs.progress_json) AS progress_json
+      FROM ranked JOIN migration_jobs jobs ON jobs.rowid=ranked.insertion_order WHERE source_rank=1
+    ) SELECT id,args_json,status,error,
+      json_remove(progress_json,'$.retainedFiles') AS progress_json,
+      COALESCE(json_array_length(progress_json,'$.retainedFiles'),0) AS retained_file_count,
+      COALESCE(json_array_length(progress_json,'$.conflicts'),0) AS conflict_count
+      FROM latest ORDER BY insertion_order`);
+    return rows.map(row => ({ jobId: String(row.id), args: JSON.parse(String(row.args_json)), status: row.status as MigrationJob['status'],
+        progress: { ...JSON.parse(String(row.progress_json)), retainedFileCount: Number(row.retained_file_count), conflictCount: Number(row.conflict_count) },
+        error: row.error === null ? null : String(row.error) }));
+  }
   public capturedMigrationSources(): Array<{ identity: string; key: string; hash: string; stage: string }> {
     return this.rows('SELECT source_identity,source_key,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id ORDER BY source_identity,source_key')
       .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage) }));

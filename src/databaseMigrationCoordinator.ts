@@ -12,9 +12,9 @@ export class DatabaseMigrationCoordinator {
     if (this.stopping) throw new Error('migration_coordinator_stopping');
     const { idempotencyKey, refreshCompleted, ...args } = input;
     if (typeof idempotencyKey !== 'string') throw new Error('migration_idempotency_key_required');
-    const before = this.store.migrationJobs().length;
+    const before = this.store.migrationJobCount();
     const job = this.store.enqueueMemoryMigration(args, idempotencyKey);
-    const scheduled = this.store.migrationJobs().length > before
+    const scheduled = this.store.migrationJobCount() > before
       || (refreshCompleted === true && this.store.requeueCompletedMigration(job.jobId));
     this.recover();
     return { ...this.store.readMigrationJob(job.jobId), scheduled };
