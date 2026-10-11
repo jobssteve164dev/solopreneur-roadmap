@@ -172,11 +172,11 @@ export function buildConversationPresentations(
     const failureCategory = (output.match(/Failure category:\s*([^\n]+)/) || [])[1]?.trim() || '';
     const wasStoppedByUser = conversation.status === 'Failed'
       && (failureCategory === 'stopped_by_user' || failureCategory === 'terminal_closed');
-    const recoveredSessionId = wasStoppedByUser && !conversation.resumableNativeSessionId
+    const recoveredSessionId = wasStoppedByUser && !conversation.dataState && !conversation.resumableNativeSessionId
       ? recoverInterruptedNativeSessionId(workspaceRoot, nodeId, conversation)
       : '';
     const resumableNativeSessionId = conversation.resumableNativeSessionId || recoveredSessionId;
-    const hasOpenInteractiveSession = /Interactive session state:\s*(?:Open|Waiting|Running)/i.test(output);
+    const hasOpenInteractiveSession = conversation.dataState ? conversation.dataState.sessionOpen : /Interactive session state:\s*(?:Open|Waiting|Running)/i.test(output);
     const canContinue = conversation.status !== 'Running' && (hasOpenInteractiveSession || Boolean(resumableNativeSessionId));
     return {
       ...conversation,

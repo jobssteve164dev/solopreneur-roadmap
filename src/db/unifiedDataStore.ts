@@ -15,7 +15,8 @@ import type { IntelligenceConversation } from '../intelligenceChat';
 import type { GrowthSnapshotData, GrowthSnapshotRecord } from './types';
 import type { AgentConversation, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal, RunImpactRecord } from './types';
 import type { PrepareRunInput, RunState, RunCheckpointInput, RunOutputFinalizationInput, RunLogInput, RunConsumerInput, RunConsumerLease, RunSettlementInput, RunEffect, RunEffectReference } from '../runLifecycleTypes';
-import { createSessionBindingValue, appendSessionBindingValue, confirmSessionBindingValue, assertVersion2Binding } from '../sessionIdentity';
+import { createSessionBindingValue, appendSessionBindingValue, confirmSessionBindingValue, assertVersion2Binding, getResumableSessionValue } from '../sessionIdentity';
+import { maintenanceRunKinds } from '../runLifecycleTypes';
 import type { NativeSessionBinding, SessionBindingSeed, SessionBindingRevisionInput } from '../sessionIdentity';
 import { normalizeProjectsForStorage, projectName, ProjectRegistryFile, ProjectRegistryPatch, ProjectRegistrySnapshot, ProjectRegistryBootstrap } from '../projectRegistry';
 import { workspaceChanges, workspaceDocumentPurpose, WorkspaceSnapshot, gitEvidenceDocumentPurpose, RunGitEvidence } from '../runWorkspace';
@@ -2520,7 +2521,8 @@ export class UnifiedDataStore {
       metadata.turnLogEndOffsets = Object.fromEntries(['output', 'stdout', 'stderr'].map(stream => [stream, this.readRunLogHead(projectId, input.executionLogId, stream).totalBytes]));
       metadata.hostOutputPending = false; metadata.hostOutputFinalizedAt = new Date(now).toISOString(); metadata.hostOutputSource = input.source;
       let exitCode = row.status === 'Failed' && Number(row.exit_code) !== 0 ? Number(row.exit_code) : input.exitCode;
-      const noDeliverable = exitCode === 0 && metadata.checkpointOutcome === 'partial' && !(row.run_kind === 'agent_review' && metadata.agentLaunch?.readOnly) && !['solo', 'solo_background', 'solo_continue', 'step_continue', 'flow_planner', 'flow_verifier'].includes(String(row.run_kind)) && changes.length === 0 && !(row.run_kind === 'learning_review' && this.hasLearningReviewDeliverable(projectId, metadata));
+      const maintenanceResult = maintenanceRunKinds.includes(String(row.run_kind)) && this.readRunDocument(projectId, input.executionLogId, 'maintenance_result');
+      const noDeliverable = exitCode === 0 && metadata.checkpointOutcome === 'partial' && !maintenanceResult && !(row.run_kind === 'agent_review' && metadata.agentLaunch?.readOnly) && !['solo', 'solo_background', 'solo_continue', 'step_continue', 'flow_planner', 'flow_verifier'].includes(String(row.run_kind)) && changes.length === 0 && !(row.run_kind === 'learning_review' && this.hasLearningReviewDeliverable(projectId, metadata));
       if (noDeliverable) exitCode = 125;
       const status = exitCode === 0 ? String(row.status) : 'Failed';
       if ((input.exitCode !== 0 || noDeliverable) && metadata.checkpointOutcome !== 'failed') {
@@ -4238,7 +4240,14 @@ export class UnifiedDataStore {
     if (input.nodeId) { clauses.push('node_id=?'); values.push(input.nodeId); }
     if (input.executionLogId) { clauses.push('execution_log_id=?'); values.push(input.executionLogId); }
     const rows = this.rows(`SELECT * FROM project_journal_entries WHERE ${clauses.join(' AND ')} ORDER BY execution_log_id DESC LIMIT ? OFFSET ?`, [...values, limit + 1, offset]);
-    return { logs: rows.slice(0, limit).map(row => ({ id: Number(row.execution_log_id), nodeId: String(row.node_id), timestamp: String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: String(row.status) })), hasMore: rows.length > limit };
+    return { logs: rows.slice(0, limit).map(row => {
+      const id = Number(row.execution_log_id);
+      const source = this.resolveRunConversation(projectId, id);
+      const binding = source ? this.readRunBinding(projectId, Number(source.state.status.rootExecutionLogId)) : null;
+      const resumable = binding ? getResumableSessionValue(binding) : null;
+      return { id, nodeId: String(row.node_id), timestamp: String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: String(row.status),
+        dataState: { resumableSessionId: resumable?.sessionId || '', sessionOpen: Boolean(source?.state.status.interactiveSession && !source.state.status.interactiveSessionClosed) } };
+    }), hasMore: rows.length > limit };
   }
   public upsertProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
     this.transaction(() => {

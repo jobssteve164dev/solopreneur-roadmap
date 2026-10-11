@@ -8,6 +8,55 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 
+for (const [handler, kind, value] of [
+  ['handleInstallSolomapSkill', 'skill_install', 'owner/package@skill'],
+  ['handleInstallSolomapMcp', 'mcp_install', '@owner/connector'],
+  ['handleInstallSolomapEnhancement', 'enhancement_install', 'mcp-description-compressor'],
+  ['handleUninstallSolomapEnhancement', 'enhancement_uninstall', 'mcp-description-compressor'],
+  ['handleUpgradeAllAgentClis', 'agent_cli_upgrade', undefined]
+]) test(`the actual ${kind} entry launches one formal task through the shared runner`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-entry-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
+  const commands = [], pollers = [];
+  const call = (resolvedRoot, request) => { assert.equal(path.resolve(resolvedRoot), root); return operations(request); };
+  transport.sendRuntimeDataRequest = call;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = ${handler};
+    module.exports.connect = (project, root, commands, pollers, call) => {
+      activeProjectRoot = project;
+      getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: root, taskPermissionMode: 'auto', enabledEnhancements: {} });
+      agentCli_1.resolveAgentCli = () => 'claude'; agentCli_1.commandExists = () => true;
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = call;
+      createAgentTerminal = () => ({ name: 'isolated-maintenance', processId: Promise.resolve(process.pid), show() {}, sendText: text => commands.push(text) });
+      setInterval = callback => { pollers.push(callback); return pollers.length; }; clearInterval = () => {};
+    };
+  `, { './autonomousRuntimeControl': transport });
+  extension.connect(project, root, commands, pollers, call);
+  try {
+    await extension.run({ extensionPath: projectRoot }, value);
+    await new Promise(resolve => setImmediate(resolve));
+    const states = await operations({ operation: 'list_run_states', input: { root: project } });
+    assert.equal(states.items.length, 1, 'the real entry must persist its task, turn and run before delivery');
+    const run = states.items[0]; assert.equal(run.status.runKind, kind);
+    for (const id of [run.taskId, run.turnId, run.runId]) assert.ok(store.read(id));
+    const plan = await operations({ operation: 'read_run_execution_plan', input: { projectId: run.projectId, executionLogId: run.status.rootExecutionLogId } });
+    assert.ok(plan.prompt.includes(value || 'Upgrade every Agent CLI'));
+    assert.ok(plan.prompt.includes(plan.status.maintenanceResultPath));
+    assert.equal(commands.length, 1); assert.ok(commands[0].includes('runAgentProcess.js'));
+    assert.ok(!commands[0].includes('run.sh')); assert.ok(!commands[0].includes('run-skill-install.sh'));
+    const files = [];
+    const walk = directory => { for (const item of fs.readdirSync(directory, { withFileTypes: true })) { const file = path.join(directory, item.name); if (item.isDirectory()) walk(file); else files.push(file); } };
+    walk(root);
+    assert.ok(!files.some(file => /\/(prompt\.txt|command\.txt|output\.log|run(?:-[^/]*)?\.sh)$/.test(file)), 'maintenance inputs and logs must have a single database authority');
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { transport.sendRuntimeDataRequest = previous; await operations.close(); store.close(); }
+});
+
 test('production extension no longer carries the retired per-run file producer', () => {
   const extension = loadCompiledModule('out/extension.js', 'module.exports.retiredRunProducers = [typeof buildAgentShellScript, typeof buildSessionCaptureScript, typeof buildCodexContinuationRunnerScript];');
   assert.equal(JSON.stringify(extension.retiredRunProducers), JSON.stringify(['undefined', 'undefined', 'undefined']));
@@ -1369,7 +1418,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
           return { ensureHealthyAutonomousRuntime: async () => ({ started: false, pid: process.pid, runtimeId: 'isolated-ui-host' }) };
         }
         if (id === './automationSound.js') return require(path.join(projectRoot, 'out/automationSound.js'));
-        if (id === './agentDatabaseConfig' || id === './runtimeDataOperations') {
+        if (id === './agentDatabaseConfig' || id === './runtimeDataOperations' || id === './maintenanceAgentRun') {
           return require(path.join(projectRoot, 'out', id + '.js'));
         }
         if (id === './globalEngineeringStore') {

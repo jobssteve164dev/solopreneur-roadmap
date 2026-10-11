@@ -580,7 +580,7 @@ export function getSolomapEnhancementsRoot(workspaceRoot: string, globalDataPath
 }
 
 export function ensureSolomapMaintenanceWorkspace(workspaceRoot: string, globalDataPath = ''): { maintenanceRoot: string; runsRoot: string } {
-  const maintenanceRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'maintenance');
+  const maintenanceRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tmp', 'maintenance-workspace');
   const runsRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tmp', 'maintenance-runs');
   fs.mkdirSync(maintenanceRoot, { recursive: true });
   fs.mkdirSync(runsRoot, { recursive: true });

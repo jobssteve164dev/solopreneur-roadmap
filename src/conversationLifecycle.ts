@@ -115,6 +115,7 @@ export function normalizeAgentConversationLifecycle(
   conversation: AgentConversation,
   options: ConversationLifecycleOptions = {}
 ): AgentConversation {
+  if (conversation.dataState) return conversation;
   const status = String(conversation.status || '');
   const outputStatus = statusFromOutput(String(conversation.output || ''));
   if (outputStatus && (status === 'Running' || status === 'In Progress' || status === '')) {

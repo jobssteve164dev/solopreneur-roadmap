@@ -52,6 +52,30 @@ test('the shared packaged runner commits complete output and host completion wit
   }
 });
 
+for (const exitCode of [0, 7]) test(`maintenance execution captures its full result and logs before exit ${exitCode}`, async () => {
+  const resultBytes = Buffer.from(JSON.stringify({ success: exitCode === 0, detail: '完整安装回执🌿'.repeat(10000) }) + '\n');
+  const output = '完整安装输出🌿\n'.repeat(10000);
+  const program = `require('fs').writeFileSync(process.env.FIXTURE_RESULT_FILE, JSON.stringify({success:${exitCode === 0},detail:'完整安装回执🌿'.repeat(10000)})+${JSON.stringify('\n')}); process.stdout.write(${JSON.stringify('完整安装输出🌿\n')}.repeat(10000)); process.exitCode=${exitCode};`;
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`, {}, '', 'skill_install');
+  const directory = path.join(f.root, 'tmp', 'isolated-install'); fs.mkdirSync(directory, { recursive: true });
+  const resultPath = path.join(directory, 'result.json');
+  try {
+    const state = await f.call('read_run_state');
+    await f.call('patch_run_state', { generation: state.generation, expectedRevision: state.revision,
+      patch: { maintenanceResultPath: resultPath, maintenanceWorkspaceRoot: directory }, idempotencyKey: 'owned-install-paths' });
+    const agent = f.startAgent({ ...process.env, FIXTURE_RESULT_FILE: resultPath });
+    const [code] = await once(agent, 'exit'); assert.equal(code, exitCode, f.stderr().toString());
+    const recorded = await f.call('read_run_document', { purpose: 'maintenance_result' });
+    assert.ok(recorded, 'the shared host must capture the exact receipt before settling the run');
+    assert.deepEqual(Buffer.from(recorded.bytes, 'base64'), resultBytes);
+    assert.equal(f.stdout().toString(), output);
+    await f.stopRuntime(); await f.startRuntime();
+    assert.deepEqual(await f.call('read_run_document', { purpose: 'maintenance_result' }), recorded);
+    const final = await f.call('read_run_state'); assert.equal(final.status.exitCode, exitCode);
+    assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
+  } finally { await f.close(); }
+});
+
 async function executionFixture(command, metadata = {}, initialOutput = '', runKind = 'solo') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "solomap-shared-runner-case-'🌿-"));
   const root = path.join(base, '.solomap-global');

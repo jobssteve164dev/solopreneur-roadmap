@@ -682,6 +682,7 @@ export function resolveNativeSessionIdForConversation(workspaceRoot: string, nod
   if (!conversation || !workspaceRoot) {
     return '';
   }
+  if (conversation.dataState) return conversation.dataState.resumableSessionId;
   const conversationId = Number(conversation.id || 0);
   const runSessionFilePath = path.join(getConversationRunDir(workspaceRoot, nodeId, conversationId), 'session.json');
   if (!fs.existsSync(runSessionFilePath)) {

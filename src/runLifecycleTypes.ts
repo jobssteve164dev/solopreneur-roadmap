@@ -3,6 +3,8 @@ import type { WorkspaceSnapshot, RunGitEvidence } from './runWorkspace';
 import type { DocumentationAuditResult } from './documentationManifest';
 import type { FlowTrace } from './flowStore';
 
+export const maintenanceRunKinds = ['skill_install', 'mcp_install', 'enhancement_install', 'enhancement_uninstall', 'agent_cli_upgrade'];
+
 export interface PrepareRunInput {
   root: string;
   executionLogId: number;

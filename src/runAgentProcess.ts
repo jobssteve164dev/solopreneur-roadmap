@@ -13,6 +13,8 @@ import { createPreSessionGitCommit } from './preSessionGit';
 import { buildReadOnlyAgentCommandForPromptFile } from './agentCli';
 import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
+import { maintenanceRunKinds } from './runLifecycleTypes';
+import { captureInstallationFiles } from './capabilityRegistry';
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -87,6 +89,21 @@ async function main(): Promise<void> {
     }
   };
   const interactive = Boolean(plan.status.interactiveSession);
+  const maintenance = maintenanceRunKinds.includes(String(plan.status.runKind));
+  const executionRoot = maintenance ? String(plan.status.maintenanceWorkspaceRoot || projectRoot) : projectRoot;
+  const captureMaintenanceResult = async (): Promise<boolean> => {
+    if (!maintenance || !plan.status.maintenanceResultPath) return false;
+    const file = String(plan.status.maintenanceResultPath);
+    const temporaryRoot = path.join(globalDataPath, 'tmp');
+    const relative = path.relative(temporaryRoot, file);
+    if (!relative || relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) throw new Error('maintenance_result_path_invalid');
+    if (!fs.existsSync(file)) return false;
+    const [content] = captureInstallationFiles(temporaryRoot, { result: file });
+    if (!await request('read_run_document', { ...identity, purpose: 'maintenance_result' })) {
+      await request('write_run_document', { ...identity, generation, turnId: state.turnId, purpose: 'maintenance_result', bytes: content.bytes, mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `run:${plan.runId}:${generation}:maintenance-result` });
+    }
+    return true;
+  };
   let codexHome = '';
   let child: childProcess.ChildProcess | undefined;
   let exited: Promise<[number | null, NodeJS.Signals | null]> | undefined;
@@ -148,7 +165,7 @@ async function main(): Promise<void> {
     // The child cannot execute the Agent before its PID is durably registered.
     // If the wrapper dies before releasing fd 3, EOF exits this gate.
     child = childProcess.spawn('bash', ['-c', `IFS= read -r solomap_launch_gate <&3 || exit 125; [ "$solomap_launch_gate" = launch ] || exit 125; exec 3<&-; ${inner}`], {
-      cwd: projectRoot,
+      cwd: executionRoot,
       stdio: ['inherit', 'pipe', 'pipe', 'pipe'],
       env: { ...process.env, ...(codexHome ? { CODEX_HOME: codexHome } : {}), SOLOMAP_TASK_COMMAND: path.join(__dirname, 'taskCheckpointProcess.js'), SOLOMAP_GLOBAL_DATA_PATH: globalDataPath, SOLOMAP_PROJECT_ID: plan.projectId, SOLOMAP_EXECUTION_LOG_ID: String(executionLogId), SOLOMAP_RUN_GENERATION: String(generation), SOLOMAP_RUN_PROOF: proof, SOLOMAP_TASK_TURN_ID: state.turnId },
       detached: process.platform !== 'win32'
@@ -238,12 +255,13 @@ async function main(): Promise<void> {
       state = await prepareNativeAgentLaunch({ state, workspaceRoot: projectRoot, operation: request, execute: (command, stream) => execute(command, [`preflight:${stream}:stdout`, `preflight:${stream}:stderr`], false, false, true) });
       if (!launch.direct) {
         const sessionId = String(state.status.plannedNativeSessionId || '');
-        command = buildDatabaseAgentCommand({ ...launch, continuation: launch.continuation || (getAgentProvider(launch.agentCli) === 'cursor' && Boolean(sessionId)) }, plan.runId, plan.revision, projectRoot, interactive, sessionId, String(state.status.bindingNonce || ''));
+        command = buildDatabaseAgentCommand({ ...launch, continuation: launch.continuation || (getAgentProvider(launch.agentCli) === 'cursor' && Boolean(sessionId)) }, plan.runId, plan.revision, executionRoot, interactive, sessionId, String(state.status.bindingNonce || ''));
       }
     }
     const initialHeads = await Promise.all(['stdout', 'stderr'].map(stream => request<{ totalBytes: number }>('read_run_log_head', { ...identity, stream })));
     const execution = await execute(command, ['stdout', 'stderr'], interactive, true, Boolean(launch?.readOnly));
     let { code } = execution;
+    if (maintenance && !await captureMaintenanceResult() && code === 0) throw new Error('maintenance_result_missing');
     if (launch?.readOnly) {
       const baseline = await request<{ bytes: string }>('read_run_document', { ...identity, purpose: baselinePurpose });
       const after = await snapshotWorkspace(projectRoot);
@@ -275,7 +293,7 @@ async function main(): Promise<void> {
     state = await request<RunState>('read_run_state', identity);
     if (!state.status.finishedAt && ['Running', 'Waiting', 'Processed', 'Turn Started'].includes(String(state.status.status))) {
       const stopSummary = continuationStopSummary(code);
-      const settled = await checkpoint({ action: 'complete', requireDeliverable: !interactive && !launch?.readOnly && !['flow_planner', 'flow_verifier'].includes(String(plan.status.runKind)), outcome: stopSummary || code === 0 ? 'partial' : 'failed', exitCode: code, summary: stopSummary || (code === 0 ? '本轮执行已结束，完整输出已保存。' : `本轮执行退出，退出码 ${code}，完整输出已保存。`) });
+      const settled = await checkpoint({ action: 'complete', requireDeliverable: !maintenance && !interactive && !launch?.readOnly && !['flow_planner', 'flow_verifier'].includes(String(plan.status.runKind)), outcome: stopSummary || code === 0 ? 'partial' : 'failed', exitCode: code, summary: stopSummary || (code === 0 ? '本轮执行已结束，完整输出已保存。' : `本轮执行退出，退出码 ${code}，完整输出已保存。`) });
       code = Number(settled.status.exitCode ?? code);
       if (settled.status.failureCode === 'no_deliverable_changes') await writeHostOutput(`\n${settled.status.failureReason}\n`);
     }
@@ -286,6 +304,7 @@ async function main(): Promise<void> {
     signalChild('SIGTERM');
     if (exited) await exited.catch(() => undefined);
     await Promise.allSettled(captures);
+    await captureMaintenanceResult();
     state = await request<RunState>('read_run_state', identity);
     const exitCode = Number((error as Error & { exitCode?: number }).exitCode || 1);
     const stopSummary = requestedSignal && [130, 143].includes(exitCode) ? continuationStopSummary(exitCode) : undefined;

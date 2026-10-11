@@ -158,7 +158,7 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
     }
     state = await call('read_run_state', scope) as RunState;
     state = await call('patch_run_state', { ...identity, expectedRevision: state.revision, patch: { sessionBindingHeadRevision: binding?.headRevision || 0, nativeSessionId: nativeSessionIdIsCurrent ? plannedSessionId : '', nativeSessionIdIsCurrent }, idempotencyKey: `${prepareKey}:identity-state:${state.revision}` }) as RunState;
-    const command = input.directExecutionCommand || buildDatabaseAgentCommand(state.status.agentLaunch as DatabaseAgentLaunch, state.runId, state.revision + 1, input.workspaceRoot, interactive, plannedSessionId, provider === 'codex' ? String(state.status.bindingNonce) : '');
+    const command = input.directExecutionCommand || buildDatabaseAgentCommand(state.status.agentLaunch as DatabaseAgentLaunch, state.runId, state.revision + 1, String(state.status.maintenanceWorkspaceRoot || input.workspaceRoot), interactive, plannedSessionId, provider === 'codex' ? String(state.status.bindingNonce) : '');
     const policyRef = state.status.globalPromptPolicyRef as { objectId: string; revision: number } | null;
     let policyInstructions = '';
     if (policyRef) {

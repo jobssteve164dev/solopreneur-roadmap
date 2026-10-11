@@ -61,6 +61,7 @@ import {
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { prepareAgentRun, resumePreparedAgentRun, getAgentRunDeliveryOwner, type AgentRunPreparationInput } from './agentRunPreparation';
+import { prepareMaintenanceAgentRun } from './maintenanceAgentRun';
 import { RunLifecycleClient, parseRunStatusReference, runStatusReference, runDataReference } from './runLifecycleClient';
 import { matchesRunFileEvidence } from './runWorkspace';
 import { createIntelligenceMcpSession, getIntelligenceMcpConnector } from './intelligenceMcp';
@@ -6560,6 +6561,14 @@ async function launchMigrationMaintenanceAgent(
   }
 }
 
+async function launchMaintenanceAgentRun(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, agentCli: string, maintenanceRoot: string, runKind: string, request: string, buildPrompt: (resultPath: string) => string): Promise<string> {
+  const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
+  const prepared = await prepareMaintenanceAgentRun({ workspaceRoot, globalDataPath, agentCli, maintenanceRoot, runKind, request, buildPrompt, taskPermissionMode: settings.taskPermissionMode || 'auto' });
+  await launchAgentConversationTerminal({ workspaceRoot, globalDataPath, label: runKind, conversationId: Number(prepared.status.rootExecutionLogId), nodeId: '__solo__', statusFilePath: runStatusReference(workspaceRoot, Number(prepared.status.rootExecutionLogId)), runKind, context, agentCli, command: prepared.finalCommand });
+  return prepared.resultFilePath;
+}
+
 async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Promise<void> {
   const workspaceRoot = getSkillInstallWorkspaceRoot(context);
   const settings = getPersistedSettings(context);
@@ -6574,26 +6583,7 @@ async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Prom
     return;
   }
 
-  const runId = `agent-cli-upgrade-${Date.now()}`;
-  const runDir = path.join(runsRoot, runId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const outputFilePath = path.join(runDir, 'output.log');
-  const resultFilePath = path.join(runDir, 'result.json');
-  const runScriptPath = path.join(runDir, 'run.sh');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(promptFilePath, buildAgentCliUpgradePrompt(resultFilePath, maintenanceRoot), 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
-  const script = [
-    `cd ${shellQuote(maintenanceRoot)}`,
-    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
-    'export DISABLE_TELEMETRY=1',
-    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`
-  ].join('; ');
-  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
-
-  const terminal = createAgentTerminal(maintenanceRoot, `cli-upgrade-${runId.slice(-6)}`);
-  terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
+  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'agent_cli_upgrade', `检查并升级已安装的 Agent CLI。`, resultPath => buildAgentCliUpgradePrompt(resultPath, maintenanceRoot));
   postAgentCliUpgradeResult(true, 'Agent 已开始检查并升级所有已安装的 Agent CLI，进度可在终端中查看。', true);
 
   const startedAt = Date.now();
@@ -6637,31 +6627,8 @@ async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSk
   }
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   const { skillsRoot, runsRoot } = await ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
-  const runId = `skill-install-${Date.now()}`;
-  const runDir = path.join(runsRoot, runId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const outputFilePath = path.join(runDir, 'output.log');
-  const resultFilePath = path.join(runDir, 'result.json');
-  const commandFilePath = path.join(runDir, 'command.txt');
-  const runScriptPath = path.join(runDir, 'run-skill-install.sh');
-  fs.mkdirSync(runDir, { recursive: true });
-  const prompt = buildSkillInstallPrompt(skillInput, workspaceRoot, settings.globalDataPath, resultFilePath);
-  fs.writeFileSync(promptFilePath, prompt, 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
-  fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
-  const script = [
-    `cd ${shellQuote(maintenanceRoot)}`,
-    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
-    'export DISABLE_TELEMETRY=1',
-    `mkdir -p ${shellQuote(runDir)} ${shellQuote(skillsRoot)}`,
-    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`,
-    `printf '\\nSoloMap skill install run finished. Result expected at: ${resultFilePath}\\n' >> ${shellQuote(outputFilePath)}`
-  ].join('; ');
-  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
-  const terminal = createAgentTerminal(maintenanceRoot, `skill-${runId.slice(-6)}`);
-  terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
-  vscode.window.showInformationMessage('SoloMap skill install started. The Agent terminal will complete the package install.');
+  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'skill_install', `安装技能：${skillInput}`, resultPath => buildSkillInstallPrompt(skillInput, workspaceRoot, settings.globalDataPath, resultPath));
+  vscode.window.showInformationMessage('技能安装已开始，可在 Agent 终端查看进度。');
 
   const startedAt = Date.now();
   const poller = setInterval(async () => {
@@ -6702,31 +6669,8 @@ async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpI
   }
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   const { mcpRoot, runsRoot } = ensureSolomapMcpStore(workspaceRoot, settings.globalDataPath);
-  const runId = `mcp-install-${Date.now()}`;
-  const runDir = path.join(runsRoot, runId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const outputFilePath = path.join(runDir, 'output.log');
-  const resultFilePath = path.join(runDir, 'result.json');
-  const commandFilePath = path.join(runDir, 'command.txt');
-  const runScriptPath = path.join(runDir, 'run-mcp-install.sh');
-  fs.mkdirSync(runDir, { recursive: true });
-  const prompt = buildMcpInstallPrompt(mcpInput, workspaceRoot, settings.globalDataPath, resultFilePath);
-  fs.writeFileSync(promptFilePath, prompt, 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
-  fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
-  const script = [
-    `cd ${shellQuote(maintenanceRoot)}`,
-    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
-    'export DISABLE_TELEMETRY=1',
-    `mkdir -p ${shellQuote(runDir)} ${shellQuote(mcpRoot)}`,
-    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`,
-    `printf '\\nSoloMap MCP install run finished. Result expected at: ${resultFilePath}\\n' >> ${shellQuote(outputFilePath)}`
-  ].join('; ');
-  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
-  const terminal = createAgentTerminal(maintenanceRoot, `mcp-${runId.slice(-6)}`);
-  terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
-  vscode.window.showInformationMessage('SoloMap MCP connector install started. The Agent terminal will complete the controlled install.');
+  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'mcp_install', `安装 MCP：${mcpInput}`, resultPath => buildMcpInstallPrompt(mcpInput, workspaceRoot, settings.globalDataPath, resultPath));
+  vscode.window.showInformationMessage('MCP 安装已开始，可在 Agent 终端查看进度。');
 
   const startedAt = Date.now();
   const poller = setInterval(async () => {
@@ -6833,27 +6777,6 @@ async function handleInstallSolomapEnhancement(context: vscode.ExtensionContext,
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   await ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
   const { enhancementsRoot, runsRoot } = ensureSolomapEnhancementStore(workspaceRoot, settings.globalDataPath);
-  const runId = `enhancement-install-${enhancementId}-${Date.now()}`;
-  const runDir = path.join(runsRoot, runId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const outputFilePath = path.join(runDir, 'output.log');
-  const resultFilePath = path.join(runDir, 'result.json');
-  const commandFilePath = path.join(runDir, 'command.txt');
-  const runScriptPath = path.join(runDir, 'run-enhancement-install.sh');
-  fs.mkdirSync(runDir, { recursive: true });
-  const prompt = buildEnhancementInstallPrompt(enhancementId, workspaceRoot, settings.globalDataPath, resultFilePath);
-  fs.writeFileSync(promptFilePath, prompt, 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
-  fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
-  const script = [
-    `cd ${shellQuote(maintenanceRoot)}`,
-    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
-    'export DISABLE_TELEMETRY=1',
-    `mkdir -p ${shellQuote(runDir)} ${shellQuote(enhancementsRoot)}`,
-    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`,
-    `printf '\\nSoloMap enhancement install run finished. Result expected at: ${resultFilePath}\\n' >> ${shellQuote(outputFilePath)}`
-  ].join('; ');
-  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
   await upsertEnhancementRegistryEntry(workspaceRoot, settings.globalDataPath, {
     ...builtin,
     status: 'installing',
@@ -6862,9 +6785,7 @@ async function handleInstallSolomapEnhancement(context: vscode.ExtensionContext,
     health: { ok: false, message: '安装中' }
   });
   postEnhancementInstallResult(context, true, `正在安装执行增强：${builtin.title}`);
-  const terminal = createAgentTerminal(maintenanceRoot, `enhance-${enhancementId.slice(0, 8)}`);
-  terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
+  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'enhancement_install', `安装执行增强：${builtin.title}`, resultPath => buildEnhancementInstallPrompt(enhancementId, workspaceRoot, settings.globalDataPath, resultPath));
 
   const startedAt = Date.now();
   const poller = setInterval(async () => {
@@ -6932,27 +6853,6 @@ async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContex
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
   await ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
   const { enhancementsRoot, runsRoot } = ensureSolomapEnhancementStore(workspaceRoot, settings.globalDataPath);
-  const runId = `enhancement-uninstall-${enhancementId}-${Date.now()}`;
-  const runDir = path.join(runsRoot, runId);
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  const outputFilePath = path.join(runDir, 'output.log');
-  const resultFilePath = path.join(runDir, 'result.json');
-  const commandFilePath = path.join(runDir, 'command.txt');
-  const runScriptPath = path.join(runDir, 'run-enhancement-uninstall.sh');
-  fs.mkdirSync(runDir, { recursive: true });
-  const prompt = buildEnhancementUninstallPrompt(enhancementId, workspaceRoot, settings.globalDataPath, resultFilePath);
-  fs.writeFileSync(promptFilePath, prompt, 'utf8');
-  const agentCommand = buildAgentCommandForPromptFile(agentCli, promptFilePath, maintenanceRoot, settings.taskPermissionMode);
-  fs.writeFileSync(commandFilePath, agentCommand, 'utf8');
-  const script = [
-    `cd ${shellQuote(maintenanceRoot)}`,
-    'export TERM="${TERM:-xterm-256color}" COLORTERM="${COLORTERM:-truecolor}" FORCE_COLOR="${FORCE_COLOR:-1}"',
-    'export DISABLE_TELEMETRY=1',
-    `mkdir -p ${shellQuote(runDir)} ${shellQuote(enhancementsRoot)}`,
-    `${agentCommand} 2>&1 | tee ${shellQuote(outputFilePath)}`,
-    `printf '\\nSoloMap enhancement uninstall run finished. Result expected at: ${resultFilePath}\\n' >> ${shellQuote(outputFilePath)}`
-  ].join('; ');
-  fs.writeFileSync(runScriptPath, `${script}\n`, { encoding: 'utf8', mode: 0o755 });
   await upsertEnhancementRegistryEntry(workspaceRoot, settings.globalDataPath, {
     ...builtin,
     status: 'uninstalling',
@@ -6961,9 +6861,7 @@ async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContex
     health: { ok: false, message: '卸载中' }
   });
   postEnhancementInstallResult(context, true, `正在卸载执行增强：${builtin.title}`);
-  const terminal = createAgentTerminal(maintenanceRoot, `enhance-uninstall-${enhancementId.slice(0, 6)}`);
-  terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, `bash ${shellQuote(runScriptPath)}`);
+  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'enhancement_uninstall', `卸载执行增强：${builtin.title}`, resultPath => buildEnhancementUninstallPrompt(enhancementId, workspaceRoot, settings.globalDataPath, resultPath));
 
   const startedAt = Date.now();
   const poller = setInterval(async () => {

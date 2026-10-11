@@ -129,26 +129,8 @@ export class SyncEngine {
         await new Promise<void>(resolve => setImmediate(resolve));
       }
       if (this.closed) return;
-      const legacy = await this.readLegacy(async store => {
-        const oldLogs: AgentConversation[] = []; const oldIndexes: RunIndexEntry[] = [];
-        for (let position = 0; !this.closed; position += 200) {
-          const page = store.getExecutionJournalPageRaw({ limit: 200, offset: position });
-          oldLogs.push(...page.logs);
-          if (!page.hasMore) break;
-          await new Promise<void>(resolve => setImmediate(resolve));
-        }
-        for (let position = 0; !this.closed; position += 200) {
-          const page = store.getRunIndexEntries(200, position);
-          oldIndexes.push(...page);
-          if (page.length < 200) break;
-          await new Promise<void>(resolve => setImmediate(resolve));
-        }
-        return { logs: oldLogs, indexes: oldIndexes };
-      }, { logs: [] as AgentConversation[], indexes: [] as RunIndexEntry[] });
-      if (this.closed) return;
-      const ids = new Set(logs.map(log => log.id));
-      this.mergeConversations([...logs, ...legacy.logs.filter(log => !ids.has(log.id))], startedRevision);
-      const merged = new Map([...legacy.indexes, ...indexes].map(index => [index.executionLogId, index]));
+      this.mergeConversations(logs, startedRevision);
+      const merged = new Map(indexes.map(index => [index.executionLogId, index]));
       for (const index of this.runIndexCache) {
         if ((this.indexRevisions.get(index.executionLogId) || 0) > startedRevision) merged.set(index.executionLogId, index);
       }
@@ -183,18 +165,7 @@ export class SyncEngine {
     if (!this.globalDataPath) return this.getAgentExecutions(nodeId);
     const revision = this.cacheRevision;
     const logs = await this.readDatabaseJournal(nodeId);
-    const legacy = await this.readLegacy(async store => {
-      const result: AgentConversation[] = [];
-      while (true) {
-        const page = store.getExecutionJournalPageRaw({ nodeId, limit: 500, offset: result.length });
-        result.push(...page.logs);
-        if (!page.hasMore || !page.logs.length) break;
-        await new Promise<void>(resolve => setImmediate(resolve));
-      }
-      return result;
-    }, [] as AgentConversation[]);
-    const merged = new Map([...legacy, ...logs].map(log => [log.id, log]));
-    this.mergeConversations([...merged.values()], revision);
+    this.mergeConversations(logs, revision);
     return this.getAgentExecutions(nodeId);
   }
 
@@ -202,7 +173,7 @@ export class SyncEngine {
     if (!this.globalDataPath) return this.getProjectAgentExecutions().find(log => log.id === executionLogId) || null;
     const revision = this.cacheRevision;
     const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(this.globalDataPath, { operation: 'read_project_journal', input: { root: this.projectRoot, executionLogId, limit: 1 } });
-    const log = page.logs[0] || await this.readLegacy(store => store.getExecutionJournalPageRaw({ executionLogId, limit: 1 }).logs[0] || null, null);
+    const log = page.logs[0] || null;
     if (log) this.mergeConversations([log], revision);
     return this.conversationCache.find(entry => entry.id === executionLogId) || null;
   }
@@ -219,24 +190,14 @@ export class SyncEngine {
       logs.push(...page.logs); databaseHasMore = page.hasMore;
       if (!databaseHasMore || !page.logs.length) break;
     } while (logs.length < needed);
-    const legacy = await this.readLegacy(async store => {
-      const result: AgentConversation[] = []; let hasMore = false;
-      for (let position = 0; position < needed; position += 200) {
-        const page = store.getExecutionJournalPageRaw({ nodeId, limit: Math.min(200, needed - position), offset: position });
-        result.push(...page.logs); hasMore = page.hasMore;
-        if (!hasMore) break;
-        await new Promise<void>(resolve => setImmediate(resolve));
-      }
-      return { logs: result, hasMore };
-    }, { logs: [], hasMore: false });
-    const merged = new Map([...legacy.logs, ...logs].map(log => [log.id, log]));
+    const merged = new Map(logs.map(log => [log.id, log]));
     // A live commit or a newer read owns its row over this older response.
     for (const log of this.conversationCache) {
       if ((!nodeId || log.nodeId === nodeId) && (this.conversationRevisions.get(log.id) || 0) > startedRevision) merged.set(log.id, log);
     }
     const ordered = [...merged.values()].sort((a, b) => b.id - a.id);
     this.mergeConversations(ordered, startedRevision);
-    return { logs: ordered.slice(safeOffset, safeOffset + safeLimit), hasMore: databaseHasMore || legacy.hasMore || ordered.length > safeOffset + safeLimit };
+    return { logs: ordered.slice(safeOffset, safeOffset + safeLimit), hasMore: databaseHasMore || ordered.length > safeOffset + safeLimit };
   }
 
   /**

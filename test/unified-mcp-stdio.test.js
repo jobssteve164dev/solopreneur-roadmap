@@ -7,6 +7,42 @@ const { once } = require('node:events');
 const test = require('node:test');
 const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
 
+test('a maintenance CLI reads its formal task from an isolated cwd using the verified run identity', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-mcp-'));
+  fs.mkdirSync(path.join(base, '.git'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const projectId = owner.projectIds.get(project);
+  const registered = await owner.store.registerProject({ root: project });
+  const prepared = owner.store.prepareRun(projectId, registered.locationId, {
+    root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'skill_install', prompt: '完整任务🌿'.repeat(10000),
+    command: 'isolated fixture', userMessage: '安装技能', metadata: {}, idempotencyKey: 'formal-install'
+  });
+  const head = owner.store.readRunCheckpointState(projectId, 1);
+  const cwd = path.join(root, 'tmp', 'maintenance-workspace'); fs.mkdirSync(cwd, { recursive: true });
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  for (const proof of [head.proof, 'invalid-proof', '']) {
+    const client = new Client({ name: 'maintenance-fixture', version: '1' });
+    const transport = new StdioClientTransport({ command: process.execPath,
+      args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root], cwd,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, SOLOMAP_MAINTENANCE_TASK_ID: '', SOLOMAP_PROJECT_ID: projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: proof }, stderr: 'pipe' });
+    let errors = ''; transport.stderr?.on('data', chunk => { errors += chunk; });
+    try {
+      if (proof !== head.proof) {
+        await assert.rejects(client.connect(transport));
+        assert.match(errors, proof ? /run_proof_denied/ : /project_identity_not_found/);
+      } else {
+        await client.connect(transport).catch(error => { throw new Error(`${error.message}: ${errors}`); });
+        const response = await client.callTool({ name: 'solomap_read', arguments: { ref: prepared.runId, view: 'full' } });
+        assert.ok(!response.isError, JSON.stringify(response));
+        assert.ok(response.content[0].text.includes('完整任务🌿'.repeat(10000)));
+      }
+    } finally { await client.close(); await transport.close(); }
+  }
+  assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+});
+
 for (const separateProjects of [false, true]) test(`external stdio clients concurrently use one Runtime owner (${separateProjects ? 'separate projects' : 'shared project'})`, async t => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stdio-')), '.solomap-global');
   fs.mkdirSync(root);

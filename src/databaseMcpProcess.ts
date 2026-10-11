@@ -15,7 +15,7 @@ async function main(): Promise<void> {
   const maintenanceLaunchToken = String(process.env.SOLOMAP_MAINTENANCE_LAUNCH_TOKEN || '');
   const maintenanceRuntimeId = String(process.env.SOLOMAP_MAINTENANCE_RUNTIME_ID || '');
   const maintenanceRuntimePort = Number(process.env.SOLOMAP_MAINTENANCE_RUNTIME_PORT || 0);
-  let projectId = argument('--project-id');
+  let projectId = argument('--project-id') || (process.env.SOLOMAP_RUN_PROOF ? String(process.env.SOLOMAP_PROJECT_ID || '') : '');
   if (!globalDataPath && !(maintenanceTaskId && maintenanceRuntimeId && Number.isInteger(maintenanceRuntimePort))) throw new Error('SoloMap MCP requires a Runtime endpoint.');
   if (!maintenanceTaskId && !projectId) {
     let root = path.resolve(argument('--project-root') || process.env.CLAUDE_PROJECT_DIR || process.cwd());

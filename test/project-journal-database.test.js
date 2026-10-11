@@ -10,6 +10,43 @@ const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.j
 const { SyncEngine } = require('../out/db/syncEngine.js');
 const { importAgentRuns, importProjectGrowth } = require('../out/projectDataMigration.js');
 
+test('formal conversation pages remain usable with an unreadable retired journal', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-journal-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const projectId = owner.projectIds.get(project);
+  owner.store.appendProjectJournal(projectId, 'formal-journal', { nodeId: '__solo__', timestamp: new Date().toISOString(), agentCli: 'claude', command: 'formal', output: '完整正文🌿'.repeat(10000), status: 'Completed' }, 1);
+  const oldPath = path.join(project, '.solopreneur', 'project_journal.db'); fs.writeFileSync(oldPath, 'retained unreadable historical source');
+  const retained = fs.readFileSync(oldPath);
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), oldPath, path.resolve(__dirname, '..'), root);
+  t.after(() => engine.close());
+  for (const read of [() => engine.readAgentExecutions('__solo__'), async () => (await engine.readAgentExecutionPage('__solo__')).logs, () => engine.readRecentProjectAgentExecutions(), async () => [await engine.readAgentExecutionById(1)]]) {
+    const logs = await read(); assert.equal(logs.length, 1); assert.equal(logs[0].output, '完整正文🌿'.repeat(10000));
+  }
+  await engine.loadHistory(); assert.equal(engine.getProjectAgentExecutions().length, 1);
+  assert.deepEqual(fs.readFileSync(oldPath), retained);
+});
+
+test('actual presentation keeps formal running and resumable conversations without old status or session files', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-presentation-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const call = (operation, input) => owner.ops({ operation, input });
+  const prepared = await require('../out/agentRunPreparation.js').prepareAgentRun({ workspaceRoot: project, globalDataPath: root, agentCli: 'claude', selectedModel: '', nodeId: '__solo__', executionLogId: 1, runKind: 'solo', userMessage: '保留可继续的会话', prompt: '原始目标', taskPermissionMode: 'auto' }, call);
+  const identity = { projectId: prepared.projectId, executionLogId: 1 };
+  const present = async () => require('../out/conversationPresentation.js').buildConversationPresentations(project, '__solo__', (await call('read_project_journal', { root: project })).logs, Date.now() + 600000)[0];
+  const running = await present(); assert.equal(running.status, 'Running'); assert.equal(running.capabilities.canStop, true); assert.equal(running.capabilities.canOpenTerminal, true);
+  const binding = await call('read_run_binding', identity);
+  await call('write_run_binding', { ...identity, generation: prepared.generation, expectedHeadRevision: binding.headRevision, confirmSessionId: prepared.status.plannedNativeSessionId, evidence: { source: 'official_native_observation' }, idempotencyKey: 'observed-formal-session' });
+  let head = await call('read_run_checkpoint_state', identity);
+  const proof = head.proof;
+  head = await call('checkpoint_run', { ...identity, generation: head.generation, proof: head.proof, expectedRevision: head.revision, expectedTurnId: head.turnId, action: 'complete', outcome: 'partial', summary: '已完成本轮', idempotencyKey: 'formal-presentation-complete' });
+  await call('checkpoint_run', { ...identity, generation: head.generation, proof, expectedRevision: head.revision, action: 'session-close', exitCode: 0, idempotencyKey: 'formal-presentation-close' });
+  const closed = await present(); assert.equal(closed.capabilities.canContinue, true); assert.equal(closed.resumableNativeSessionId, prepared.status.plannedNativeSessionId); assert.equal(closed.capabilities.canStop, false);
+  assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  assert.ok(!JSON.stringify(closed).includes(head.proof), 'presentation cannot expose an execution proof');
+});
+
 test('concurrent first project registration waits for the complete identity file', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-register-race-'));
   const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
