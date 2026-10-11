@@ -167,8 +167,10 @@ test('background startup reserves unmigrated IDs without reading old outputs', a
     await engine.initAndSync({ history: 'background' });
     const id = await engine.logAgentExecution('__solo__', 'codex', 'new', 'new before migration', 'Running');
     assert.equal(id, 701);
+    assert.deepEqual((await engine.readAgentExecutionPage('__solo__', 20)).logs.map(log => log.id), [701]);
+    await require('../out/projectDataMigration.js').importProjectJournal(store, journalPath, { projectRoot: project });
     assert.deepEqual((await engine.readAgentExecutionPage('__solo__', 20)).logs.map(log => log.id), [701, 700]);
-    assert.deepEqual(fs.readFileSync(journalPath), original, 'compatibility reads must retain the legacy source unchanged');
+    assert.deepEqual(fs.readFileSync(journalPath), original, 'explicit migration must retain the legacy source unchanged');
     release(); await engine.initAndSync();
   } finally { release(); engine.close(); await server.close(); await operations.close(); store.close(); }
 });
@@ -291,7 +293,7 @@ test('SyncEngine loads complete journal pages and exposes writes only after dura
   } finally { if (serverOpen) await server.close(); await operations.close(); store.close(); }
 });
 
-test('plugin restart reads legacy history immediately while its database migration is still queued', async () => {
+test('plugin restart reserves legacy IDs and reads imported history only from the authority', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-restart-migration-'));
   const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project'); const solopreneur = path.join(project, '.solopreneur');
   fs.mkdirSync(solopreneur, { recursive: true });
@@ -303,13 +305,15 @@ test('plugin restart reads legacy history immediately while its database migrati
   try {
     const engine = new SyncEngine(path.join(solopreneur, 'roadmap.csv'), path.join(solopreneur, 'project_journal.db'), path.resolve(__dirname, '..'), root);
     await engine.initAndSync();
-    assert.equal(engine.getAgentExecutions('step').find(entry => entry.id === legacyId)?.output, 'legacy running task');
+    assert.equal(engine.getAgentExecutions('step').find(entry => entry.id === legacyId), undefined);
     const newId = await engine.logAgentExecution('step', 'codex', 'new', 'new run during migration', 'Running');
     assert.equal(newId, legacyId + 1);
     await operations({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: path.join(solopreneur, 'project_journal.db'), projectRoot: project, idempotencyKey: 'restart-race' } });
     await operations.waitForMigrations();
     const history = await operations({ operation: 'read_project_journal', input: { root: project, limit: 10 } });
     assert.deepEqual(history.logs.map(entry => entry.output), ['new run during migration', 'legacy running task']);
+    assert.deepEqual((await engine.readAgentExecutions('step')).map(entry => entry.output), ['new run during migration', 'legacy running task']);
+    engine.close();
   } finally { await server.close(); await operations.close(); store.close(); }
 });
 

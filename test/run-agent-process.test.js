@@ -80,6 +80,7 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "solomap-shared-runner-case-'🌿-"));
   const root = path.join(base, '.solomap-global');
   const projectRoot = path.join(base, 'project'); fs.mkdirSync(projectRoot);
+  fs.mkdirSync(path.join(projectRoot, '.git'));
   const seed = new UnifiedDataStore(root);
   const project = await seed.registerProject({ root: projectRoot });
   const prepared = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind, prompt: '任务原文', command, userMessage: '用户目标', metadata, idempotencyKey: 'prepare' });
